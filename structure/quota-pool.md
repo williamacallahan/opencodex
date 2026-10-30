@@ -5,6 +5,11 @@ every account quota this Home already holds. GOAT owns the decoder
 (`packages/contracts/src/quotaPool.ts` in goat-si/goat); OpenCodex is the producer, and
 `tests/helpers/quota-pool-schema.ts` mirrors the contract strictly (strict objects, no `null`).
 
+`src/quota-pool/client.ts` projects the same passive evidence into `GET /v1/usage?include=capacity`
+for a configured inference key. It exposes scoped provider windows, not account references, labels,
+plans or Home identity. Model-restricted keys without explicit provider grants receive unavailable
+capacity. Provider totals remain separate: delegated gateways do not prove independent capacity.
+
 ## Surfaces
 
 - Home: `GET /api/quota-pool` on the management API, under the same management authorization as

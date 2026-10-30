@@ -599,7 +599,7 @@ export const AUTH_MATRIX: readonly ApiAuthMatrixRow[] = [
   // 404s on any host whose runtimeRole is not "hub", so no standalone install gains a surface.
   { endpoint: "/v1/hub-state", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
   // Usage additionally requires a configured key identity; unscoped environment keys are refused.
-  { endpoint: "/v1/usage", bearer: "rejected", dedicated: "accepted", xApiKey: "rejected" },
+  { endpoint: "/v1/usage", bearer: "accepted", dedicated: "accepted", xApiKey: "rejected" },
 ];
 
 /** Whether `token` is the environment-provided management secret. */
