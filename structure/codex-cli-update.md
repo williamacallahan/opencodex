@@ -253,7 +253,8 @@ Staging is a private 0700 same-owner child of a canonical trusted temporary root
 with `staging_path_untrusted`. Canonical temporary aliases (including macOS /var) remain supported.
 Staging identity/ancestry is rechecked before install; npm temp and compile-cache writes stay inside it.
 The policy excludes other-user namespace replacement, not concurrent changes by the same user or root.
-`src/codex/cli-update-artifacts.ts` streams compressed integrity and tar validation with independent
+`src/codex/cli-update-artifacts.ts` shares pack-report normalization across POSIX and Windows apply: legacy arrays and npm 12 package-name maps must contain exactly one safe tarball filename.
+It streams compressed integrity and tar validation with independent
 256 MiB compressed, 512 MiB total unpacked, 384 MiB member and 4,096 member bounds. Only small
 manifest/entrypoint bytes are retained; native and auxiliary members retain size/mode/hash metadata.
 Links, traversal, unsupported tar records, dependency-bearing manifests and missing backing files refuse.

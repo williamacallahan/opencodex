@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { codexCliPackedFilename } from "../../src/codex/cli-update-artifacts";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createNpmConfigIsolation, isolatedNpmTarget } from "../../src/codex/cli-update-plan";
@@ -41,7 +42,7 @@ export function writeFixtureNpmWrapper(fakeBin: string, node: string, realNpm: s
     `const metadata = ${JSON.stringify(metadata)}, packs = ${JSON.stringify(packs)};`,
     'const args = process.argv.slice(2);',
     'if (args[0] === "view") { if (!metadata[args[1]]) process.exit(81); console.log(JSON.stringify(metadata[args[1]])); process.exit(0); }',
-    'if (args[0] === "pack") { const source = packs[args[1]]; if (!source) process.exit(82); const dir = args[args.indexOf("--pack-destination") + 1]; const name = path.basename(source); fs.copyFileSync(source, path.join(dir, name)); console.log(JSON.stringify([{filename:name}])); process.exit(0); }',
+    'if (args[0] === "pack") { const source = packs[args[1]]; if (!source) process.exit(82); const dir = args[args.indexOf("--pack-destination") + 1]; const name = path.basename(source); fs.copyFileSync(source, path.join(dir, name)); console.log(JSON.stringify({[metadata[args[1]].name]:{filename:name}})); process.exit(0); }',
     `if (args[0] !== "install") process.exit(83); fs.appendFileSync(${JSON.stringify(trace)}, JSON.stringify(args) + "\\n");`,
     `const installed = cp.spawnSync(${JSON.stringify(node)}, [${JSON.stringify(realNpm)}, ...args], {env:process.env, stdio:"inherit"}); process.exit(installed.status ?? 84);`,
   ].join("\n") + "\n";
@@ -71,8 +72,9 @@ export function createCodexCliApplyFixture(root: string, platform: NodeJS.Platfo
       }
     }
     const pack = (source: string) => {
-      const info = JSON.parse(privateNpm(root, ["pack", source, "--json", "--pack-destination", source]).stdout);
-      const path = join(source, info[0].filename);
+      const filename = codexCliPackedFilename(privateNpm(root, ["pack", source, "--json", "--pack-destination", source]).stdout);
+      if (!filename) throw new Error("fixture pack report unverified");
+      const path = join(source, filename);
       return { path, bytes: readFileSync(path) };
     };
     const main = pack(mainSource), backing = pack(backingSource);
