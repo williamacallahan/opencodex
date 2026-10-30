@@ -6,6 +6,8 @@ import { getDefaultConfig, saveConfig } from "../../src/config";
 import { startServer } from "../../src/server";
 import { handleHubUsage } from "../../src/server/hub-usage";
 import * as aggregates from "../../src/server/management/usage-aggregate-cache";
+import { ensureQuotaPoolIdentity } from "../../src/quota-pool/identity";
+import { setProviderQuotaReportCache } from "../../src/providers/quota/report-cache";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 
@@ -41,6 +43,7 @@ beforeEach(() => {
 afterEach(async () => {
   await server?.stop(true); server = undefined;
   aggregates.resetUsageAggregateCacheForTests();
+  setProviderQuotaReportCache(null);
   for (const key of envKeys) {
     if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key];
   }
@@ -92,7 +95,7 @@ test("custom bounds and provider/model filters preserve the authenticated scope"
   expect(body).toMatchObject({ customWindow: true, since: 0, until, summary: { requests: 0 }, filter: { matched: false } });
 });
 
-test("a key revoked while aggregation is suspended cannot receive the result", async () => {
+test.each(["revoked", "scope-narrowed"] as const)("a key %s while aggregation is suspended cannot receive the result", async change => {
   const current = config();
   const aggregate = await aggregates.getFilteredUsageAggregate({ apiKeyId: "client-0" });
   let release!: (value: typeof aggregate) => void;
@@ -101,9 +104,10 @@ test("a key revoked while aggregation is suspended cannot receive the result", a
   try {
     const pending = handleHubUsage(new Request("http://127.0.0.1/v1/usage", { headers: { "x-opencodex-api-key": KEYS[0]! } }), current, current);
     expect(scan).toHaveBeenCalledTimes(1);
-    current.apiKeys = current.apiKeys.slice(1);
+    if (change === "revoked") current.apiKeys = current.apiKeys.slice(1);
+    else Object.assign(current.apiKeys[0]!, { allowedProviders: ["restricted"] });
     release(aggregate);
-    expect((await pending).status).toBe(401);
+    expect((await pending).status).toBe(change === "revoked" ? 401 : 403);
   } finally { scan.mockRestore(); }
 });
 
@@ -112,4 +116,60 @@ test("padded authenticated IDs cannot be normalized into another key's filter", 
   current.apiKeys[0]!.id = " client-1 ";
   const response = await handleHubUsage(new Request("http://127.0.0.1/v1/usage", { headers: { "x-opencodex-api-key": KEYS[0]! } }), current, current);
   expect(response.status).toBe(403);
+});
+
+test("a standalone gateway accepts the same bearer key as inference without a loopback bypass", async () => {
+  const current = { ...config(), runtimeRole: "standalone" as const };
+  const response = await handleHubUsage(new Request("http://127.0.0.1/v1/usage?range=all", {
+    headers: { authorization: `Bearer ${KEYS[0]}` },
+  }), current, current);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ scope: "client", summary: { requests: 1, totalTokens: 3 } });
+  const conflict = await handleHubUsage(new Request("http://127.0.0.1/v1/usage", {
+    headers: { "x-opencodex-api-key": "invalid", authorization: `Bearer ${KEYS[0]}` },
+  }), current, current);
+  expect(conflict.status).toBe(401);
+});
+
+test("capacity reads expose only explicitly scoped provider windows without account identities or upstream calls", async () => {
+  ensureQuotaPoolIdentity();
+  const now = Date.now();
+  const current = config();
+  current.providers = {
+    permitted: { adapter: "openai-chat", baseUrl: "https://permitted.example/v1" },
+    private: { adapter: "openai-chat", baseUrl: "https://private.example/v1" },
+  };
+  Object.assign(current.apiKeys[0]!, { allowedProviders: ["permitted"], allowedModels: ["model-a"] });
+  setProviderQuotaReportCache({ key: "fixture", ts: now, response: { generatedAt: now, reports: [
+    { provider: "permitted", label: "Permitted", source: "fixture", updatedAt: now,
+      quota: { weeklyPercent: 37, weeklyResetAt: now + 60_000, updatedAt: now,
+        customWindows: [{ label: "ungranted-family", percent: 99, scope: "model", resetAt: now + 60_000 }] } },
+    { provider: "private", label: "Private", source: "fixture", updatedAt: now,
+      quota: { weeklyPercent: 91, weeklyResetAt: now + 60_000, updatedAt: now } },
+  ] } });
+  const network = spyOn(globalThis, "fetch").mockImplementation(() => { throw new Error("capacity must be passive"); });
+  try {
+    const response = await handleHubUsage(new Request("http://127.0.0.1/v1/usage?include=capacity", {
+      headers: { authorization: `Bearer ${KEYS[0]}` },
+    }), current, current);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.capacity.providers.map((row: { provider: string }) => row.provider)).toEqual(["permitted"]);
+    expect(body.capacity.providers[0].windows[0]).toMatchObject({ usedPercent: 37, kind: "weekly" });
+    expect(body.capacity.providers[0].windows).toHaveLength(1);
+    expect(JSON.stringify(body)).not.toContain("private");
+    expect(JSON.stringify(body)).not.toContain("accountRef");
+    expect(JSON.stringify(body)).not.toContain("homeId");
+    expect(network).not.toHaveBeenCalled();
+  } finally { network.mockRestore(); }
+});
+
+test("a model-only scope cannot reveal unrelated provider capacity", async () => {
+  const current = config();
+  Object.assign(current.apiKeys[0]!, { allowedModels: ["model-a"] });
+  const response = await handleHubUsage(new Request("http://127.0.0.1/v1/usage?include=capacity", {
+    headers: { authorization: `Bearer ${KEYS[0]}` },
+  }), current, current);
+  expect(response.status).toBe(200);
+  expect((await response.json()).capacity).toEqual({ available: false, reason: "provider_scope_required" });
 });
