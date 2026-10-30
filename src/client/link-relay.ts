@@ -171,8 +171,9 @@ function linkFramingHeaders(source: Headers): Array<[string, string]> {
 
 /**
  * The headers sent to the Home: hop-by-hop, Connection-nominated and caller credential headers
- * dropped, then the link key attached. `GET /v1/usage` admits only the dedicated header; every
- * other link route takes the key as a Bearer, the same wire an `env_key` Codex config sent.
+ * dropped, then the link key attached. `GET /v1/usage` accepts the dedicated header or Bearer; the
+ * relay sends the dedicated header. Every other link route takes the key as a Bearer, the same
+ * wire an `env_key` Codex config sent.
  */
 export function forwardLinkRequestHeaders(source: Headers, admissionKey: string, pathname: string): Headers {
   const validation = validateHubRelayRequestHeaders(linkFramingHeaders(source));
