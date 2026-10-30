@@ -10,6 +10,7 @@ import { rotateAnthropicAccountOn429 } from "../helpers/anthropic-shared-quota";
 import { afterEach, beforeEach, describe, expect, test, spyOn, mock } from "bun:test";
 import { mkdirSync, mkdtempSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { brotliCompressSync, deflateSync, gzipSync, zstdCompressSync } from "node:zlib";
 import { join } from "node:path";
 import { deriveAnthropicAccountDeviceId } from "../../src/adapters/anthropic/account-metadata";
 import { configureSharedSpendLedger, DEFAULT_SPEND_RESERVATION_POLICY, spendPolicyFromConfig } from "../../src/lib/spend-reservation-ledger";
@@ -979,7 +980,7 @@ describe("strict Messages OAuth public HTTP transport", () => {
     }
   });
 
-  async function launch(reply: (request: Captured) => Response = request => new Response(
+  async function launch(reply: (request: Captured) => Response | Promise<Response> = request => new Response(
     request.path.endsWith("count_tokens") ? encode('{ "input_tokens":731, "future":-0 }') : answer,
     { headers: { "content-type": "application/json", "request-id": "req_oauth_strict" } }),
   configure: (config: OcxConfig) => void = () => {}) {
@@ -1002,11 +1003,11 @@ describe("strict Messages OAuth public HTTP transport", () => {
     proxy = (await import("../../src/server")).startServer(0);
   }
 
-  function post(path = "/v1/messages", body = raw, signal?: AbortSignal) {
+  function post(path = "/v1/messages", body = raw, signal?: AbortSignal, headers: Record<string, string> = {}) {
     return fetch(new URL(path + "?beta=true&future=a%2Fb&future=a+b", proxy!.url), {
       method: "POST", body: encode(body), signal, decompress: false, headers: {
         "content-type": "application/json", "authorization": "Bearer fixture-caller-token", "x-api-key": "fixture-caller-key",
-        "anthropic-beta": "future-beta-2099", "anthropic-version": "2099-01-01",
+        "anthropic-beta": "future-beta-2099", "anthropic-version": "2099-01-01", ...headers,
       },
     });
   }
@@ -1054,6 +1055,105 @@ describe("strict Messages OAuth public HTTP transport", () => {
       expect(captured).toHaveLength(0);
     });
   }
+
+  for (const path of ["/v1/messages", "/v1/messages/count_tokens"]) {
+    for (const kind of ["revoked", "entitlement", "shared-quota", "transient-rate"] as const) {
+      test(`strict gzip ${kind} settles the sticky account only for the next request on ${path}`, async () => {
+        await seed(2);
+        const status = kind === "revoked" ? 401 : kind === "entitlement" ? 403 : 429;
+        const payload = { type: "error", error: {
+          type: status === 401 ? "authentication_error" : status === 403 ? "permission_error" : "rate_limit_error",
+          message: kind === "revoked" ? "OAuth access token has been revoked."
+            : kind === "entitlement" ? "Your Claude subscription has expired." : "fixture throttle",
+        } };
+        const bytes = gzipSync(JSON.stringify(payload));
+        await launch(() => captured.length === 2 ? new Response(bytes, { status, headers: {
+          "content-type": "application/json", "content-encoding": "gzip", "retry-after": "60",
+          ...(kind === "shared-quota" ? { "anthropic-ratelimit-unified-5h-status": "rejected" } : {}),
+        } }) : new Response(answer, { headers: { "content-type": "application/json" } }));
+        const sticky = { "x-claude-code-session-id": "fixture-strict-sticky", "accept-encoding": "gzip" };
+        const warm = await post(path, raw, undefined, sticky);
+        expect(warm.status).toBe(200); await warm.arrayBuffer();
+        const refused = await post(path, raw, undefined, sticky);
+        expect(refused.status).toBe(status);
+        expect(refused.headers.get("content-encoding")).toBe("gzip");
+        expect(new Uint8Array(await refused.arrayBuffer())).toEqual(new Uint8Array(bytes));
+        expect(captured).toHaveLength(2); // No replay of the refused request.
+        const firstBearer = captured[0]!.headers.get("authorization");
+        expect(captured[1]!.headers.get("authorization")).toBe(firstBearer);
+        const next = await post(path, raw, undefined, sticky);
+        expect(next.status).toBe(200); await next.arrayBuffer();
+        expect(captured).toHaveLength(3);
+        expect(captured[2]!.headers.get("authorization")).not.toBe(firstBearer);
+        for (const entry of captured) expect(entry.bytes).toEqual(encode(raw));
+      });
+    }
+  }
+
+  for (const [encoding, compress] of [
+    ["gzip", gzipSync], ["br", brotliCompressSync], ["deflate", deflateSync], ["zstd", zstdCompressSync],
+  ] as const) test(`strict ${encoding} permanent refusal still observes opt-in auto-pause`, async () => {
+    const [id] = await seed(1);
+    const bytes = compress(encode('{"type":"error","error":{"type":"permission_error","message":"Your Claude subscription has expired."}}'));
+    await launch(() => new Response(bytes, { status: 403,
+      headers: { "content-type": "application/json", "content-encoding": encoding } }), cfg => {
+      cfg.providers.anthropic!.accountAutoPause = { enabled: true, consecutiveFailures: 1 };
+    });
+    const response = await post("/v1/messages", raw, undefined, { "accept-encoding": encoding });
+    expect(response.status).toBe(403);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array(bytes));
+    expect(captured).toHaveLength(1);
+    expect(getAccountSet("anthropic")!.accounts.find(account => account.id === id)?.paused).toBe(true);
+  });
+
+  for (const malformed of [false, true]) test(`strict gzip incomplete/over-limit evidence cannot pause or cool an account (malformed=${malformed})`, async () => {
+    const [id] = await seed(1);
+    const payload = JSON.stringify({ type: "error", error: {
+      type: "permission_error", message: "Your Claude subscription has expired.",
+    }, padding: "x".repeat(70_000) });
+    const bytes = malformed ? encode("not a gzip stream") : gzipSync(payload);
+    await launch(() => new Response(bytes, { status: 403,
+      headers: { "content-type": "application/json", "content-encoding": "gzip" } }), cfg => {
+      cfg.providers.anthropic!.accountAutoPause = { enabled: true, consecutiveFailures: 1 };
+    });
+    const response = await post();
+    expect(response.status).toBe(403);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array(bytes));
+    expect(captured).toHaveLength(1);
+    expect(getAccountSet("anthropic")!.accounts.find(account => account.id === id)?.paused).not.toBe(true);
+    expect(getAnthropicAccountHealthSnapshot(id!)).toBeNull();
+  });
+
+  test("strict compressed refusal cannot mark a replacement credential", async () => {
+    const [id] = await seed(1);
+    const bytes = gzipSync('{"type":"error","error":{"type":"authentication_error","message":"OAuth access token has been revoked."}}');
+    await launch(async () => {
+      await saveAccountCredential("anthropic", id!, { ...credential(0), access: "synthetic-replacement-access" });
+      return new Response(bytes, { status: 401, headers: { "content-encoding": "gzip" } });
+    });
+    const response = await post();
+    expect(response.status).toBe(401);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array(bytes));
+    expect(captured).toHaveLength(1);
+    expect(getAccountSet("anthropic")!.accounts.find(account => account.id === id)?.needsReauth).not.toBe(true);
+    expect(getAnthropicAccountHealthSnapshot(id!)).toBeNull();
+  });
+
+  test("strict ingress removes topology/identity headers but preserves application headers", async () => {
+    await seed(1); await launch();
+    const ingress = { forwarded: 'for=192.0.2.1;host="gateway.invalid"', "x-real-ip": "192.0.2.1",
+      "x-forwarded-for": "192.0.2.1", "x-forwarded-host": "gateway.invalid", "x-forwarded-proto": "https",
+      "x-forwarded-port": "443", "x-forwarded-server": "fixture-ingress", "tailscale-user-login": "user@example.com",
+      "tailscale-user-name": "Fixture", "tailscale-user-profile-pic": "https://example.invalid/avatar",
+      "tailscale-headers-info": "fixture" };
+    const application = { "x-stainless-runtime": "node", "x-caller-future": "preserve-me", "session_id": "fixture-session" };
+    const response = await post("/v1/messages", raw, undefined, { ...ingress, ...application });
+    expect(response.status).toBe(200); await response.arrayBuffer();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.bytes).toEqual(encode(raw));
+    for (const name of Object.keys(ingress)) expect(captured[0]!.headers.has(name)).toBe(false);
+    for (const [name, value] of Object.entries(application)) expect(captured[0]!.headers.get(name)).toBe(value);
+  });
 
   test("strict OAuth revalidates credential generation after a pacing wait", async () => {
     const ids = await seed(1);

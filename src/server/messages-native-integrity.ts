@@ -7,13 +7,17 @@ import { physicalSendIntegrityInit } from "./responses/fetch-helpers";
 
 const HOP_HEADERS = ["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"];
 
-/** Transport framing is owned by Fetch; everything else is retained, including future fields. */
-export function messagesEndToEndHeaders(source: Headers): Headers {
+/** Fetch owns framing; request ingress topology/identity is not an application header. */
+export function messagesEndToEndHeaders(source: Headers, stripIngress = false): Headers {
   const headers = new Headers(source);
   for (const name of source.get("connection")?.split(",") ?? []) headers.delete(name.trim());
   for (const name of HOP_HEADERS) headers.delete(name);
   headers.delete("host");
   headers.delete("content-length");
+  if (stripIngress) for (const name of [...headers.keys()]) {
+    if (name === "forwarded" || name === "x-real-ip" || name.startsWith("x-forwarded-")
+      || name.startsWith("tailscale-user-") || name === "tailscale-headers-info") headers.delete(name);
+  }
   return headers;
 }
 
@@ -35,7 +39,7 @@ export class NativeMessagesIntegrity {
   constructor(req: Request, wire: Uint8Array, parsed: Record<string, unknown>) {
     // The bounded reader hands ownership to this snapshot; only build() exposes a copy.
     this.#wire = Buffer.from(wire.buffer, wire.byteOffset, wire.byteLength);
-    this.#headers = messagesEndToEndHeaders(req.headers);
+    this.#headers = messagesEndToEndHeaders(req.headers, true);
     // Authentication is the one application-level substitution this contract permits.
     for (const name of [...this.#headers.keys()]) {
       if (name === "authorization" || name === "x-api-key" || name === "cookie"

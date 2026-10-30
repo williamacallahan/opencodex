@@ -27,6 +27,9 @@ transformations; it never repairs ids, inserts account metadata, filters unknown
 
 Authentication is replaced with the selected managed credential. Cookies and `x-opencodex-*`
 headers are removed, as are hop-by-hop fields (including Connection nominations), Host and framing.
+The request header filter also excludes ingress topology/identity: `Forwarded`, `X-Real-IP`,
+`X-Forwarded-*`, `Tailscale-User-*` and `Tailscale-Headers-Info`. These reserved ingress fields
+are not application headers; other caller application headers and response end-to-end fields remain intact.
 Fetch owns header casing/order, framing, and connection freshness; gateway CORS/security response
 headers remain gateway policy. These exceptions do not permit request-body changes.
 The final physical-send boundary asserts bytes, method, approved URL, headers, credential currentness,
@@ -36,13 +39,22 @@ executor check. Plugins are trusted process code, not a security sandbox.
 
 Managed admission, model/Advisor scope, pacing, pre-send account selection/refresh, quota attribution,
 spend and cancellation stay with their existing owners. There is one physical send: no reset retry,
-response-triggered rotation, redirect following or translation fallback. A distributed key's terminal
-refusal still records its cooldown for subsequent independent requests. The first response retains
+response-triggered resend, redirect following or translation fallback. A distributed key's terminal
+refusal still records its cooldown for subsequent independent requests. OAuth refusals use the existing
+generation-fenced refusal owner with `canRetry: false`: revoked-token reauthentication, account cooldowns,
+rate admission and affinity settlement affect subsequent requests only. No recovery candidate is selected
+or refreshed by that observation. Optional auto-pause retains its existing policy and incarnation fences. The first response retains
 its status and entity bytes, including malformed SSE tails, unknown fields and errors. Transport
 failure terminates the body without synthetic frames. Bounded usage observation decodes gzip/deflate
 separately from forwarding; unsupported or malformed coding and inspection overflow leave usage
 unresolved rather than inventing it. Counting goes upstream and settles as non-generation work.
 Body/turn leases last through response completion or cancellation for both endpoints.
+Passive refusal inspection opts into the existing bounded-body reader and bounded request-content decoder
+for identity, gzip/x-gzip, deflate, br and zstd. Both compressed input and inflated output are capped;
+malformed, unsupported, oversized or interrupted bodies cannot authorize body-based refusal changes. This clone-only
+inspection never changes the original encoded response bytes or relaxes the separate usage-inspection limits.
+The private wire snapshot and the separate outbound copy each consume the existing 32 MiB retained-turn
+budget; inbound admission is a separate ceiling, not permission to exceed retained-memory limits.
 
 The strict blocks in `tests/claude-integration/messages-native.test.ts` and
 `tests/claude-integration/messages-native-oauth.test.ts` use synthetic credentials and actual loopback

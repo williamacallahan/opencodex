@@ -1,4 +1,5 @@
 import { captureAccountAutoPauseFence, accountAutoPauseFenceIsLocal, accountAutoPauseFenceMatchesDisk } from "../config/account-auto-pause-revisions";
+import type { BoundedBodyOptions } from "../lib/bounded-body";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import type { OAuthAccessSnapshot } from "./index";
 import type { CodexAuthContext } from "../codex/auth-context";
@@ -24,6 +25,8 @@ export interface AccountAutoPauseBinding {
   config: OcxConfig;
   oauth?: OAuthAccessSnapshot;
   codex?: CodexAuthContext;
+  /** Only a raw-entity transport supplies the bounded content decoder. */
+  decodeBody?: BoundedBodyOptions["decodeBody"];
 }
 
 /** Capture before transport. A later response cannot acquire authority over a newer login/resume. */
@@ -149,7 +152,7 @@ export function captureAccountAutoPauseAttempt(name: string, provider: OcxProvid
     if (counted.has(key)) return response;
     countedResponses.set(response, counted.add(key));
     try {
-      const verdict = permanentAccountRefusal(response).then(reason => {
+      const verdict = permanentAccountRefusal(response, undefined, binding.decodeBody).then(reason => {
         if (reason) markPermanentAccountRefusal(response);
         return reason;
       });

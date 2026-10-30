@@ -1,5 +1,5 @@
 import type { AccountPauseReason, AccountAutoPausePolicy } from "../types/account-auto-pause";
-import { readBoundedResponseBody } from "../lib/bounded-body";
+import { readBoundedResponseBody, type BoundedBodyOptions } from "../lib/bounded-body";
 
 /** Only whole, account-scoped messages are authority; model/resource policy errors are not. */
 export function classifyPermanentAccountRefusal(status: number, payload: unknown): AccountPauseReason | undefined {
@@ -30,10 +30,10 @@ const CCA_TOS_ACCOUNT_BAN = new RegExp("^This service has been disabled in this 
   + "(?: If you believe this is an error, contact gemini-code-assist-user-feedback@google\\.com\\."
   + "| Please submit an appeal to continue using this product\\.)?$");
 
-export async function permanentAccountRefusal(response: Response, signal?: AbortSignal): Promise<AccountPauseReason | undefined> {
+export async function permanentAccountRefusal(response: Response, signal?: AbortSignal, decodeBody?: BoundedBodyOptions["decodeBody"]): Promise<AccountPauseReason | undefined> {
   if (response.status !== 401 && response.status !== 403) return;
   try {
-    const body = await readBoundedResponseBody(response.clone(), { signal, fatalUtf8: true,
+    const body = await readBoundedResponseBody(response.clone(), { signal, fatalUtf8: true, decodeBody,
       maxBytes: 16_384, totalTimeoutMs: 250, inactivityTimeoutMs: 250 });
     if (!body.displaySafe || body.truncated) return;
     return classifyPermanentAccountRefusal(response.status, JSON.parse(body.text));

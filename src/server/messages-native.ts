@@ -37,7 +37,7 @@ import {
   buildAnthropicMessagesPassthroughRequest,
 } from "../adapters/anthropic/passthrough";
 import { MessagesIntegrityError, NativeMessagesIntegrity, messagesEndToEndHeaders, type NativeMessagesRequest } from "./messages-native-integrity";
-import { readBoundedJsonRequestBody, resolveInboundBodyLimitBytes, DecompressedBodyTooLargeError } from "./request-decompress";
+import { decodeRequestBody, readBoundedJsonRequestBody, resolveInboundBodyLimitBytes, DecompressedBodyTooLargeError } from "./request-decompress";
 import { effortFromOutputConfig, resolveInboundModel } from "../claude/inbound";
 import { anthropicErrorBody, anthropicErrorResponse, claudeOverflowSsePayload, claudePromptTooLongMessage, collectAnthropicMessage, isContextOverflowText, isThroughputLimitText } from "../claude/outbound";
 import type { AdmissionLease } from "../lib/admission";
@@ -667,7 +667,8 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
             }
             const releaseFamily = snapshot && oauthBinding ? anthropicModelQuotaFor(oauthBinding.instance).claimAnthropicFamilyRevalidation(snapshot.accountId, route.modelId) : () => {};
             if (!releaseFamily) throw new AnthropicAccountCooldownError(1);
-            const observeAutoPause = captureAccountAutoPauseAttempt(route.providerName, activeProvider, { config, oauth: sendingBinding?.snapshot }, headers);
+            const observeAutoPause = captureAccountAutoPauseAttempt(route.providerName, activeProvider, { config, oauth: sendingBinding?.snapshot,
+              decodeBody: options.integrity ? decodeRequestBody : undefined }, headers);
             const selection = activeProvider._apiKeyAttempt;
             let dispatched: Response;
             const spendReport = createPhysicalSendReporter(physicalBudget, () => ({
@@ -768,6 +769,23 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
   let response: Response;
   try {
     response = await send();
+    if (options.integrity && oauthBinding) {
+      // Settle the actual send for future turns only: no refresh, selection or resend.
+      try {
+        const binding = oauthBinding;
+        await rotateAnthropicAccountOnResponseForInstance(binding.instance, response, {
+          config, accountId: binding.snapshot.accountId, model: route.modelId,
+          sessionKey: binding.sessionKey, decision: binding.routeDecision,
+          signal: upstream.signal, canRetry: false, decodeBody: decodeRequestBody,
+          currentDecision: () => {
+            if (!nativeOAuthRouteIsCurrent(binding)) throw new NativeOAuthSelectionChangedError();
+            const resolved = resolveAnthropicModelRouteForInstance(binding.instance, config, route.modelId);
+            if (resolved.error) throw new NativeOAuthModelRouteError(`Invalid Anthropic model routes: ${resolved.error}`);
+            return resolved.decision;
+          },
+        });
+      } catch { /* Passive settlement must preserve the first upstream response. */ }
+    }
     if (!options.integrity) {
     let retryPolicy: ReturnType<typeof rateLimitRetryPolicyFor> | undefined;
     let retries = 0;

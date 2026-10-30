@@ -440,7 +440,10 @@ Regression coverage: `tests/adapters/anthropic/anthropic-model-weekly-admission.
 
 The [strict variant](../transports/strict-messages.md) retains this
 account-selection authority but replaces authentication only, not provider UUID/body metadata.
-It returns the first response without the refusal-recovery ladder below. Quota headers remain
+It returns the first response without replaying the refusal-recovery ladder below. Passive refusal
+settlement uses that same owner with `canRetry: false`, preserving generation/route fences and updating
+reauthentication, cooldown/admission and affinity for subsequent requests only. Compressed refusal evidence
+is decoded under the existing bounded reader's cap without changing the relayed entity. Quota headers remain
 attributed to the credential generation actually sent, and pre-send stale selection is revalidated.
 
 `src/server/messages-native-oauth.ts` binds native Claude Messages through the same session,

@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { deflateRawSync, deflateSync } from "node:zlib";
+import { brotliCompressSync, deflateRawSync, deflateSync } from "node:zlib";
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
 import {
   DecompressedBodyTooLargeError,
@@ -141,6 +141,12 @@ describe("decodeRequestBody", () => {
     expect(new TextDecoder().decode(decodeRequestBody(compressed, "x-gzip"))).toBe(JSON.stringify(PAYLOAD));
   });
 
+  test("round-trips Brotli and bounds inflated output", () => {
+    const compressed = brotliCompressSync(PAYLOAD_BYTES);
+    expect(new TextDecoder().decode(decodeRequestBody(compressed, "br"))).toBe(JSON.stringify(PAYLOAD));
+    expect(() => decodeRequestBody(compressed, "br", PAYLOAD_BYTES.length - 1)).toThrow(DecompressedBodyTooLargeError);
+  });
+
   for (const [label, compress] of [["wrapped", deflateSync], ["raw", deflateRawSync], ["Bun raw", Bun.deflateSync]] as const) {
     test(`round-trips ${label} deflate`, () => {
       expect(new TextDecoder().decode(decodeRequestBody(compress(PAYLOAD_BYTES), "deflate"))).toBe(JSON.stringify(PAYLOAD));
@@ -153,7 +159,7 @@ describe("decodeRequestBody", () => {
   });
 
   test("rejects unknown and multi-codings instead of guessing", () => {
-    expect(() => decodeRequestBody(PAYLOAD_BYTES, "br")).toThrow(UnsupportedContentEncodingError);
+    expect(() => decodeRequestBody(PAYLOAD_BYTES, "unknown-coding")).toThrow(UnsupportedContentEncodingError);
     expect(() => decodeRequestBody(PAYLOAD_BYTES, "zstd, gzip")).toThrow(UnsupportedContentEncodingError);
   });
 
@@ -581,7 +587,7 @@ describe("readJsonRequestBody", () => {
   test("surfaces UnsupportedContentEncodingError for unknown encodings", async () => {
     const req = new Request("http://localhost/v1/responses", {
       method: "POST",
-      headers: { "content-type": "application/json", "content-encoding": "br" },
+      headers: { "content-type": "application/json", "content-encoding": "unknown-coding" },
       body: PAYLOAD_BYTES,
     });
     await expect(readJsonRequestBody(req)).rejects.toBeInstanceOf(UnsupportedContentEncodingError);

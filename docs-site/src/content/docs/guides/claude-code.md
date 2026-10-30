@@ -603,6 +603,8 @@ the selected account's credential. No client needs the pool's individual tokens.
 - Existing account selection, pacing, scope checks and quota observation remain active.
   Selection and credential refresh happen before sending. After sending, the first response
   wins: no automatic retry, redirect following, account failover or translation fallback.
+  Passive OAuth refusal handling can mark a revoked token for reauthentication or record a
+  cooldown/admission pause for later requests; optional account auto-pause still applies.
 - Responses retain their status and body bytes. Broken streams terminate without appended
   error events or repaired SSE delimiters. Token counting calls upstream, not a local estimator.
 - Final send checks refuse changed bodies, destinations or end-to-end headers. This can reject
@@ -611,7 +613,9 @@ the selected account's credential. No client needs the pool's individual tokens.
 
 “Byte-preserving” means HTTP entity bytes received by the gateway, not TLS/TCP framing or header
 ordering/casing. Authentication is replaced; cookies, gateway headers, hop-by-hop fields and
-framing are removed. Gateway CORS/security headers remain gateway-owned. Other end-to-end
+framing are removed. Reserved ingress metadata (`Forwarded`, `X-Real-IP`, `X-Forwarded-*`,
+`Tailscale-User-*`, `Tailscale-Headers-Info`) is not forwarded to the provider. Gateway
+CORS/security headers remain gateway-owned. Other end-to-end
 headers, including Anthropic version/betas and upstream request ids, are preserved.
 Invalid JSON and existing admission/body limits still produce local refusals.
 
@@ -621,7 +625,10 @@ unresolved. Requests with metadata/signatures incompatible with the chosen accou
 through and may be rejected upstream; the gateway does not repair them. This mode does not
 establish permission to pool subscription accounts or bypass provider limits. Confirm applicable
 provider terms before using paid accounts. Use independent gateway OAuth sessions rather than
-copying refresh tokens still managed by another machine.
+copying refresh tokens still managed by another machine. Passive account-refusal inspection is
+separate from usage inspection: bounded plain, gzip, deflate, Brotli and zstd error clones can
+update account state without altering the encoded response delivered to you. Incomplete or
+over-limit bodies cannot authorize body-based refusal changes; 429 admission still uses upstream headers.
 
 To make the ordinary endpoints and enabled intercept listener strict too, set
 `"strictPassthrough": true` inside `claudeCode` in your existing `config.json`, then restart.

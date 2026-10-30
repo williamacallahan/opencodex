@@ -1,7 +1,7 @@
 import { wasAccountAutoPaused } from "./account-auto-pause";
 import { anthropicModelFamily } from "./anthropic-model-quota";
 /** Narrow pre-output account recovery, fenced to the bearer that physically sent the turn. */
-import { readBoundedResponseBody } from "../lib/bounded-body";
+import { readBoundedResponseBody, type BoundedBodyOptions } from "../lib/bounded-body";
 import { classifyAnthropic429, anthropicRetryAfterMs, anthropicRatePolicyFor, ANTHROPIC_SHORT_RETRY_MS, ANTHROPIC_MAX_INLINE_THROTTLE_MS } from "./anthropic-rate-limit-policy";
 import { isNonReplayableResponse, sleepWithAbort } from "../lib/upstream-retry";
 import { credentialGeneration, getAccountCredentialWithStatus, markAccountNeedsReauthIfGeneration } from "./store";
@@ -48,10 +48,10 @@ export function anthropicRefusalCredentialIsCurrent(response: Response, instance
     && (!sent.checkProviderUuid || row.credential.accountId === sent.providerAccountUuid);
 }
 
-async function isRevokedOAuthToken(response: Response, signal?: AbortSignal): Promise<boolean> {
+async function isRevokedOAuthToken(response: Response, signal?: AbortSignal, decodeBody?: BoundedBodyOptions["decodeBody"]): Promise<boolean> {
   if (response.status !== 401) return false;
   try {
-    const body = await readBoundedResponseBody(response.clone(), { signal, fatalUtf8: true });
+    const body = await readBoundedResponseBody(response.clone(), { signal, fatalUtf8: true, decodeBody });
     if (!body.displaySafe || body.truncated) return false;
     const payload: unknown = JSON.parse(body.text);
     if (!payload || typeof payload !== "object" || Array.isArray(payload)
@@ -64,9 +64,9 @@ async function isRevokedOAuthToken(response: Response, signal?: AbortSignal): Pr
   } catch { return false; }
 }
 
-async function isAccountRefusal(response: Response, signal?: AbortSignal): Promise<boolean> {
+async function isAccountRefusal(response: Response, signal?: AbortSignal, decodeBody?: BoundedBodyOptions["decodeBody"]): Promise<boolean> {
   try {
-    const body = await readBoundedResponseBody(response.clone(), { signal });
+    const body = await readBoundedResponseBody(response.clone(), { signal, decodeBody });
     if (!body.displaySafe || body.truncated) return false;
     const payload: unknown = JSON.parse(body.text);
     if (!payload || typeof payload !== "object" || Array.isArray(payload) || !("error" in payload)) return false;
@@ -100,6 +100,8 @@ export async function rotateAnthropicAccountOnResponseForInstance(
     decision?: AnthropicRouteDecision | null;
     signal?: AbortSignal;
     canRetry: boolean;
+    /** Only for an upstream response received with decompression disabled. */
+    decodeBody?: BoundedBodyOptions["decodeBody"];
     /** Shared by main, continuation and sidecar consumers of one logical request. */
     requestKey?: object;
     allow429Recovery?: boolean;
@@ -135,7 +137,7 @@ export async function rotateAnthropicAccountOnResponseForInstance(
   if (response.status === 401) {
     if (options.allowAccountRefusal === false) return null;
     let verdict = verdicts.get(response);
-    if (!verdict) { verdict = isRevokedOAuthToken(response, options.signal); verdicts.set(response, verdict); }
+    if (!verdict) { verdict = isRevokedOAuthToken(response, options.signal, options.decodeBody); verdicts.set(response, verdict); }
     if (!await verdict || options.signal?.aborted || !ownedCurrent()) return null;
     options.currentDecision?.();
     let marked: boolean;
@@ -204,7 +206,7 @@ export async function rotateAnthropicAccountOnResponseForInstance(
     if (response.status !== 403 || options.allowAccountRefusal === false) return null;
     let verdict = verdicts.get(response);
     if (!verdict) {
-      verdict = isAccountRefusal(response, options.signal);
+      verdict = isAccountRefusal(response, options.signal, options.decodeBody);
       verdicts.set(response, verdict);
     }
     if (!await verdict || options.signal?.aborted) return null;

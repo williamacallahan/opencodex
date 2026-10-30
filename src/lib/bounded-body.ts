@@ -23,6 +23,11 @@ export interface BoundedBodyOptions {
 	 * non-streaming upstream JSON completion) pass a larger explicit budget.
 	 */
 	maxBytes?: number;
+	/** Opt-in for raw encoded bodies (decompress:false); never decode Fetch-decoded bodies twice.
+	 * The decoder must enforce maxBytes during inflation, not after allocating the output.
+	 * Both the compressed input and decoded output use this reader's byte ceiling.
+	 */
+	decodeBody?: (bytes: Uint8Array, contentEncoding: string | null, maxBytes: number) => Uint8Array;
 	/** Total wall-clock deadline. Exposed for focused tests. */
 	totalTimeoutMs?: number;
 	/** Deadline between non-empty raw chunks. Exposed for focused tests. */
@@ -349,7 +354,7 @@ export async function readBoundedResponseBody(
 					"TimeoutError",
 				);
 				return {
-					text: decodeUtf8([retained.subarray(0, retainedBytes)], options.fatalUtf8 === true, true),
+					text: options.decodeBody ? "" : decodeUtf8([retained.subarray(0, retainedBytes)], options.fatalUtf8 === true, true),
 					truncated: true,
 					timedOut: true,
 					totalTimedOut: outcome === TOTAL_TIMEOUT,
@@ -361,8 +366,10 @@ export async function readBoundedResponseBody(
 
 			const { value, done } = outcome as ReadableStreamReadResult<Uint8Array>;
 			if (done) {
+				const raw = retained.subarray(0, retainedBytes);
+				const bytes = options.decodeBody
+					? options.decodeBody(raw, response.headers.get("content-encoding"), maxBytes) : raw;
 				if (options.reportUtf8Validity) {
-					const bytes = retained.subarray(0, retainedBytes);
 					// A fatal decode that returned already proved the bytes valid; still
 					// honour the reporting contract instead of dropping utf8Valid.
 					const decoded = options.fatalUtf8 === true
@@ -380,7 +387,7 @@ export async function readBoundedResponseBody(
 					};
 				}
 				return {
-					text: decodeUtf8([retained.subarray(0, retainedBytes)], options.fatalUtf8 === true),
+					text: decodeUtf8([bytes], options.fatalUtf8 === true),
 					truncated: false,
 					timedOut: false,
 					totalTimedOut: false,

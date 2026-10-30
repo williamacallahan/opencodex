@@ -28,7 +28,9 @@ Native Chat/Messages local JSON reads use `stallTimeoutSec` only as an inactivit
 five-second floor or stall-derived total deadline. Client cancellation and enclosing overall
 deadlines remain authoritative. Public JSON reads retain their legacy total/inactivity budget,
 `max(connectTimeoutMs ?? 200000, 5000)`. `src/lib/bounded-body.ts` arms no non-positive body timer;
-byte caps and cancellation remain active. Compact body reads retain their separate 300-second
+byte caps and cancellation remain active. Raw encoded response inspection may supply a bounded decoder
+at EOF; raw reads retain these deadlines and cap compressed input, and the decoder caps inflated output.
+Timed-out encoded prefixes are never decoded into classification evidence. Compact body reads retain their separate 300-second
 default even locally. Unset local header and stall clocks do not create an overall bound before
 headers. `tests/responses/local-upstream-deadlines.test.ts` covers dispatch, compact and native JSON
 policy, public header expiry, client/overall cancellation and explicit local body bounds.

@@ -131,6 +131,11 @@ quota evidence, usage, or classification, and a malformed body keeps the status-
 unless its lenient decode identifies a cyber-policy refusal, which must still stop the combo
 (`tests/providers/cyber-policy-error-fidelity.test.ts`).
 
+For raw encoded bodies only, `readBoundedResponseBody` accepts `decodeBody`: the bounded content
+decoder runs after capped raw EOF and before UTF-8 decoding. It enforces the same byte ceiling during
+inflation. Strict Messages passes `decodeRequestBody` from `src/server/request-decompress.ts` for passive
+refusal clones; other callers keep Fetch's already-decoded body. Timeout prefixes are never inflated.
+
 `src/oauth/orcarouter.ts` applies this reader to a successful `POST /api/v1/auth/keys` response
 with a 65,536-byte (64 KiB) ceiling. One 30-second signal, combined with caller cancellation,
 covers both fetching the response headers and consuming the body; no separate body or inactivity

@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { gunzipSync, inflateRawSync, inflateSync, zstdDecompressSync } from "node:zlib";
+import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync, zstdDecompressSync } from "node:zlib";
 import type { TranslatorBudget } from "../lib/translator-budget";
 import { updateInboundBodyReservation } from "./inbound-body-budget";
 
@@ -275,6 +275,7 @@ export function decodeRequestBody(
     if (encoding === "zstd") decoded = zstdDecompressSync(compressed, opts);
     else if (encoding === "gzip" || encoding === "x-gzip") decoded = gunzipSync(compressed, opts);
     else if (encoding === "deflate") decoded = inflateDeflateBody(compressed, opts);
+    else if (encoding === "br") decoded = brotliDecompressSync(compressed, opts);
     // Multi-codings ("zstd, gzip") and unknown tokens are rejected rather than guessed.
     else throw new UnsupportedContentEncodingError(encoding);
   } catch (err) {

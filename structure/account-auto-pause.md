@@ -51,6 +51,9 @@ or API-key selection and validates outgoing credential headers before observing 
 `src/oauth/account-auto-pause-policy.ts` recognizes whole account-scoped 401/403 messages (for Google, only the whole Cloud Code Assist Terms of Service account-ban messages Google has returned, alone or with its fixed contact or appeal sentence, on a consistent 403 `PERMISSION_DENIED` envelope; project-scoped `CONSUMER_SUSPENDED` and service-enablement errors are excluded),
 serializes response-arrival decisions, resets on accepted HTTP responses, and excludes
 transient/quota/model/request failures. No provider body or account identifier enters its log.
+Strict Messages supplies the existing bounded content decoder only for its raw (`decompress: false`)
+response clones. Inspection bounds both compressed and decoded bytes and retains the same 250 ms read
+deadlines; malformed/oversized/incomplete evidence has no authority. Fetch-decoded transports do not opt in.
 The opt-in counter defaults to two refusals; each process owns its counters. Durable pause
 uses `setAccountPaused`, `setCodexAccountPaused`, or
 `src/providers/api-key-pause.ts`; resume changes an incarnation fence and clears the reason.
