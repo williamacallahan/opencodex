@@ -623,7 +623,7 @@ Labels are read on login/import or refresh, never inferred from quota percentage
 | `GET, POST, DELETE /api/providers/keys` | List masked provider keys, add/activate one, or remove one | 400 invalid input; 404 provider/key missing |
 | `PUT /api/providers/keys/active` | Select a provider's active key | 400 invalid input; 404 provider/key missing |
 | `PUT /api/providers/keys/alias` | Set or clear a provider-key alias | 400 invalid input; 404 provider/key missing |
-| `GET, POST, PATCH, DELETE /api/keys` | List, create, edit, or delete data-plane admission keys | 400 invalid body/id; 404 key missing |
+| `GET, POST, PATCH, DELETE /api/keys` | List, create, edit, or delete data-plane admission keys. GET with `Prefer: return=minimal` returns key metadata and endpoint/auth information without scanning historical usage (`usageIncluded: false`, row `usage` omitted); the default GET retains usage totals. | 400 invalid body/id; 404 key missing |
 
 `POST /api/oauth/login/cancel` can also dismiss the selected settled failed login attempt. It leaves stored credentials and successful login results intact; status then reports the remaining flow or idle. Cancelling an in-progress attempt still records its cancelled outcome.
 
@@ -965,7 +965,7 @@ Direct HTTP is most useful for integrations that need the exact endpoint contrac
 
 ## Remote sessions and data-key rotation
 
-`POST /api/keys/rotate {id}` starts a ten-minute overlap and returns the new data secret once. `POST /api/keys/rotate/commit {id,rotationId}` commits it; `DELETE /api/keys/rotate {id,rotationId}` aborts it. All require management authentication; data keys cannot call them. `POST /api/session/logout` requires the current `gui-session`, matching Origin, and CSRF. An admin token receives 403 and can never mint or exchange into a consent session.
+`POST /api/keys/rotate {id}` starts a ten-minute overlap and returns the new data secret once. An optional `key` supplies an externally issued client credential instead of generating one; it must contain 40–4096 visible ASCII characters and must not be an existing or reserved OpenCodex admission credential. The key identity and provider/model scope stay unchanged. This does not mint or validate an upstream subscription token: obtain that through its official harness first. `POST /api/keys/rotate/commit {id,rotationId}` commits it; `DELETE /api/keys/rotate {id,rotationId}` aborts it. All require management authentication; data keys cannot call them. `POST /api/session/logout` requires the current `gui-session`, matching Origin, and CSRF. An admin token receives 403 and can never mint or exchange into a consent session.
 
 ## Anthropic account usage threshold
 

@@ -69,7 +69,8 @@ import { evidenceFromBody } from "../routing/request-evidence";
 import { resolveWireProtocolOverride } from "./adapter-resolve";
 import type { OcxConfig } from "../types";
 import { readJsonRequestBody, resolveInboundBodyLimitBytes } from "./request-decompress";
-import { addFinalRequestLog, httpStatusForRequestLogTerminal, recordFirstOutput, type RequestLogContext } from "./request-log";
+import { addFinalRequestLog, httpStatusForRequestLogTerminal, nextRequestLogId, recordFirstOutput, type RequestLogContext } from "./request-log";
+import { admissionFields } from "./auth-cors";
 import { createFinalRequestLog } from "./inference/final-log";
 import {
   conversationIdFromClaudeMetadata,
@@ -130,6 +131,8 @@ type Rec = Record<string, unknown>;
 /** Which listener a Claude Messages request arrived on. Only the intercept ingress honours bindings. */
 export interface ClaudeIngressOptions {
   claudeIntercept?: boolean;
+  admission?: DataPlaneAdmission;
+  turnAdmissionLease?: AdmissionLease;
 }
 
 /**
@@ -599,6 +602,12 @@ async function handleClaudeMessagesWithBudget(
   }
   // Model resolution reads this view; every other claudeCode setting keeps reading `config`.
   const cc = claudeCodeForIngress(config.claudeCode, ingress.claudeIntercept === true);
+
+  if (config.claudeCode?.strictPassthrough !== undefined && config.claudeCode.strictPassthrough !== false) {
+    const { handleStrictNativeMessages } = await import("./messages-native");
+    return handleStrictNativeMessages({ req, config, logCtx, logIds, translatorBudget,
+      modelScope: resolveAdmissionModelScope(config, logIds?.admission ?? ingress.admission) });
+  }
 
   let anthropicBody: unknown;
   let internalBody: Rec;
@@ -1437,6 +1446,12 @@ export async function handleClaudeCountTokens(
 ): Promise<Response> {
   const disabled = claudeInboundDisabled(config);
   if (disabled) return disabled;
+  if (config.claudeCode?.strictPassthrough !== undefined && config.claudeCode.strictPassthrough !== false) {
+    const start = Date.now();
+    return handleClaudeMessages(req, config, {
+      model: "unknown", provider: "unknown", ...(ingress.admission ? admissionFields(ingress.admission) : {}),
+    }, { requestId: nextRequestLogId(start), start, turnAdmissionLease: ingress.turnAdmissionLease, admission: ingress.admission }, requestPolicy, ingress);
+  }
   const cc = claudeCodeForIngress(config.claudeCode, ingress.claudeIntercept === true);
 
   let body: unknown;

@@ -65,6 +65,7 @@ export function rewriteUpstream<H extends HeadersInit | undefined>(
   url: string,
   headers: H,
   transport: UpstreamTransport,
+  failClosed = false,
 ): { url: string; headers: H | Headers } {
   if (registrations.length === 0) return { url, headers };
   const target: UpstreamTarget = { url, headers: new Headers(headers), transport };
@@ -77,6 +78,7 @@ export function rewriteUpstream<H extends HeadersInit | undefined>(
     try {
       registration.rewrite(target);
     } catch {
+      if (failClosed) throw new Error("Strict transport refused a failed upstream rewriter");
       target.url = urlBefore;
       target.headers = headersBefore;
       registration.disabled = true;

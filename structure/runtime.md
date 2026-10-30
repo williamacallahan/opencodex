@@ -219,8 +219,8 @@ and the Anthropic and OpenAI chat wires the host's own local clients speak — `
 `/healthz`, `/readyz`, or GUI routes, so local management discovery has to use an authenticated
 surface with a management credential.
 The hub-management socket is enabled only by `runtimeRole: "hub"` plus
-`hub.managementIngress.enabled`, always binds `127.0.0.1`, and default-denies everything except
-GUI, session bootstrap/exchange, and `/api/*`.
+`hub.managementIngress.enabled`, defaults to `127.0.0.1`, and default-denies everything except
+GUI, session bootstrap/exchange, and `/api/*`. Explicit `bind: "container"` binds `0.0.0.0` on an isolated container network, with its port unpublished. It requires an HTTPS management origin and public `hostname: "0.0.0.0"`; Tailscale identity headers never establish trust there. Receiving-listener identity, not forwarded headers, establishes management-origin trust.
 The `hub-link` socket is HTTP-only and default-denies all but the fixed data routes, catalog, hub-state,
 usage, and `GET /readyz`; every `Upgrade` header, management, GUI, session, health, and unknown
 `/v1/*` route is rejected before dispatch. Its `opencodex-link.invalid` policy admits only configured

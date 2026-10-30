@@ -3,11 +3,30 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createScanner, LanguageVariant, SyntaxKind } from "typescript/unstable/ast";
-import { fetchWithHeaderTimeout, providerFetch, sendWithConnectionPolicy, storedPoolReplayDispatchNotifier } from "../../src/server/responses/fetch-helpers";
+import { fetchWithHeaderTimeout, physicalSendCommitInit, physicalSendIntegrityInit, providerFetch, sendWithConnectionPolicy, storedPoolReplayDispatchNotifier } from "../../src/server/responses/fetch-helpers";
 import { repoRoot as resolveRepoRoot } from "../helpers/repo-root";
 
 const repoRoot = resolveRepoRoot();
 const helperPath = resolve(repoRoot, "src/server/responses/fetch-helpers.ts");
+
+test("strict nested dispatch commits only after the final credential check", async () => {
+  for (const stale of [true, false]) {
+    let checks = 0;
+    let commits = 0;
+    let sends = 0;
+    const execute = (async () => { sends++; return new Response("ok"); }) as typeof fetch;
+    const inner = ((input, init) => sendWithConnectionPolicy(execute, input, init)) as typeof fetch;
+    const dispatch = () => sendWithConnectionPolicy(inner, "https://fixture.example/v1/messages", {
+      ...physicalSendIntegrityInit(() => { if (++checks === 2 && stale) throw new Error("stale credential"); }),
+      ...physicalSendCommitInit(() => { commits++; }),
+    }, undefined, true);
+    if (stale) expect(dispatch).toThrow("stale credential");
+    else expect((await dispatch()).status).toBe(200);
+    expect(checks).toBe(2);
+    expect(commits).toBe(stale ? 0 : 1);
+    expect(sends).toBe(stale ? 0 : 1);
+  }
+});
 
 test("an unpaced physical send does not yield after its caller's credential validation", async () => {
   const order: string[] = [];

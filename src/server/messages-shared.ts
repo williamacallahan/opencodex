@@ -89,6 +89,8 @@ export interface PassthroughBodyGuard {
    * message_stop, no stop_reason, nothing cut) stays a completed turn, as it always was.
    */
   eofTolerant?: boolean;
+  /** Strict relay preserves wire bytes; decoding is bounded usage observation only. */
+  verbatim?: { status: number; inspectSse: boolean; contentEncoding?: string | null };
 }
 
 export type PassthroughCloseReason = "terminal" | "client_cancel" | "body_stall" | "body_overflow";
@@ -175,6 +177,17 @@ export function tapAnthropicSseForLog(
   // client has not seen a blank line after, so the caller restores one. tailClean: nothing but
   // comments or a ping is left undelimited, so no message event was cut off.
   const flushTail = (): { terminalInTail: boolean; tailClean: boolean } => {
+    if (guard?.verbatim && !guard.verbatim.inspectSse) {
+      const text = buffer + decoder.decode();
+      buffer = "";
+      if (!inspectionStopped) {
+        try {
+          const message: unknown = JSON.parse(text);
+          if (isRec(message) && isRec(message.usage)) usageAcc = message.usage;
+        } catch { usageAcc = {}; }
+      }
+      return { terminalInTail: false, tailClean: true };
+    }
     // At EOF a held CR is a line ending, so it can complete a frame the client already has.
     let tail = (buffer + decoder.decode()).replace(/\r\n?/g, "\n");
     buffer = "";
@@ -190,6 +203,50 @@ export function tapAnthropicSseForLog(
       tailClean: isHarmlessSseTail(tail),
     };
   };
+  // One write at a time, with a concurrent drain: no tee queue can outlive backpressure.
+  // A decoded-size limit remains finite even when the operator disables the wire-byte cap.
+  const inspectionLimit = guard && Number.isFinite(guard.maxBytes) && guard.maxBytes > 0
+    ? guard.maxBytes : DEFAULT_BODY_MAX_BYTES;
+  let inspectionBytes = 0;
+  let inspectionStopped = false;
+  let inspectionWriter: WritableStreamDefaultWriter<BufferSource> | undefined;
+  let inspectionReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let inspectionDone: Promise<void> | undefined;
+  const stopInspection = () => {
+    if (inspectionStopped) return;
+    inspectionStopped = true;
+    buffer = "";
+    usageAcc = {};
+    void inspectionReader?.cancel().catch(() => {});
+    void inspectionWriter?.abort().catch(() => {});
+  };
+  const inspectDecoded = (chunk: Uint8Array) => {
+    if (inspectionStopped) return;
+    inspectionBytes += chunk.byteLength;
+    if (inspectionBytes > inspectionLimit) { stopInspection(); return; }
+    if (guard?.verbatim?.inspectSse) inspect(chunk);
+    else buffer += decoder.decode(chunk, { stream: true });
+  };
+  const coding = guard?.verbatim?.contentEncoding?.trim().toLowerCase();
+  if (coding && coding !== "identity") {
+    try {
+      if (coding !== "gzip" && coding !== "deflate") throw new Error("Unsupported content coding");
+      const stream = new DecompressionStream(coding);
+      inspectionWriter = stream.writable.getWriter();
+      const reader = stream.readable.getReader();
+      inspectionReader = reader;
+      inspectionDone = (async () => {
+        try {
+          while (!inspectionStopped) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            inspectDecoded(value);
+          }
+        } catch { stopInspection(); }
+        finally { reader.releaseLock(); }
+      })();
+    } catch { stopInspection(); }
+  }
   const reader = upstream.getReader();
   let settled = false;
   let bodyBytes = 0;
@@ -199,6 +256,10 @@ export function tapAnthropicSseForLog(
     logCtx.usage = anthropicUsageToOcx(Object.keys(usageAcc).length > 0 ? usageAcc : undefined);
   };
   const closeWithErrorFrame = (errType: string, message: string) => {
+    if (guard?.verbatim) {
+      try { tapController?.error(new Error(message)); } catch { /* already closed */ }
+      return;
+    }
     const payload = JSON.stringify({ type: "error", error: { type: errType, message } });
     try {
       // Leading blank line terminates any partial SSE block so the frame parses cleanly
@@ -212,9 +273,10 @@ export function tapAnthropicSseForLog(
     settled = true;
     idle.cancel();
     detachAbort();
+    if (guard?.verbatim) stopInspection();
     const { terminalInTail } = flushTail();
     recordUsage();
-    if (terminalSeen) {
+    if (terminalSeen && !guard?.verbatim) {
       // The turn already ended (message_stop or an upstream error event): an upstream that then
       // idles or keeps sending did not cut it short. Same rule as the read-error branch,
       // including the restored blank line for a terminal found only in the tail.
@@ -249,6 +311,7 @@ export function tapAnthropicSseForLog(
     settled = true;
     idle.cancel();
     detachAbort();
+    if (guard?.verbatim) stopInspection();
     finalize(499, { closeReason: "client_cancel" });
     try { tapController?.close(); } catch { /* downstream already torn down */ }
     reader.cancel(guard?.reqSignal?.reason).catch(() => {});
@@ -282,11 +345,21 @@ export function tapAnthropicSseForLog(
             onClientAbort();
             return;
           }
+          if (inspectionWriter && !inspectionStopped) {
+            try { await inspectionWriter.close(); await inspectionDone; }
+            catch { stopInspection(); }
+            if (settled) return;
+          }
           settled = true;
           idle.cancel();
           detachAbort();
           const { terminalInTail, tailClean } = flushTail();
           recordUsage();
+          if (guard?.verbatim) {
+            finalize(guard.verbatim.status, { closeReason: "terminal" });
+            controller.close();
+            return;
+          }
           // A clean EOF ends the turn only when the client already has its terminal, or a
           // complete non-error stop_reason with nothing cut after it (compatible providers may
           // omit message_stop; the translated adapter accepts the same shape). The opt-in
@@ -327,7 +400,17 @@ export function tapAnthropicSseForLog(
             return;
           }
         }
-        inspect(value);
+        if (!guard?.verbatim) inspect(value);
+        else if (!inspectionStopped) {
+          try {
+            if (inspectionWriter) {
+              const chunk = value.buffer instanceof ArrayBuffer
+                ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength) : new Uint8Array(value);
+              await inspectionWriter.write(chunk);
+            } else inspectDecoded(value);
+          } catch { stopInspection(); }
+          if (settled) return;
+        }
         controller.enqueue(value);
       } catch (err) {
         if (settled) return;
@@ -341,6 +424,7 @@ export function tapAnthropicSseForLog(
         settled = true;
         idle.cancel();
         detachAbort();
+        if (guard?.verbatim) stopInspection();
         const { terminalInTail } = flushTail();
         recordUsage();
         if (isTranslatorBudgetExceededError(err)) {
@@ -350,7 +434,7 @@ export function tapAnthropicSseForLog(
           try { controller.error(err); } catch { /* torn down */ }
           return;
         }
-        if (terminalSeen) {
+        if (terminalSeen && !guard?.verbatim) {
           // Only the transport trailer was lost; the client already has the turn's terminal.
           // The Responses relay likewise reports a read error only without a seen terminal.
           finalize(200, { closeReason: "terminal" });
@@ -383,6 +467,7 @@ export function tapAnthropicSseForLog(
         settled = true;
         idle.cancel();
         detachAbort();
+        if (guard?.verbatim) stopInspection();
         finalize(499, { closeReason: "client_cancel" });
       }
       reader.cancel(reason).catch(() => {});

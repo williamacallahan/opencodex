@@ -20,6 +20,15 @@ import type { UsageLedgerRetentionStatus } from "../usage/retention-contract";
 
 let configuredMaxBytes: number | undefined;
 let enforcing = false;
+let scheduledEnforcement: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Appends only schedule the compaction. Copying the retained span (0.9 GB under a 1 GB limit)
+ * inside the append made the request that crossed the line pay for it; one coalesced, unref'd
+ * timer runs it in its own turn instead. The compaction is still fully synchronous, so no
+ * in-process append can interleave with it, and its revision guard covers everything else.
+ */
+const ENFORCEMENT_DELAY_MS = 1_000;
 
 function invalidateLedgerReaders(): void {
   // Ordered cheapest-first, and each guarded on its own: a projection that fails to discard
@@ -40,9 +49,9 @@ function invalidateLedgerReaders(): void {
 }
 
 function enforceNow(): void {
-  // Re-entrancy guard, not a lock. The compaction itself runs inside the append call stack, and
-  // its own publication writes nothing through appendUsageEntry -- this exists so a future
-  // caller on that path cannot start a second pass over a file the first one is replacing.
+  // Re-entrancy guard, not a lock. The compaction's own publication writes nothing through
+  // appendUsageEntry -- this exists so a future caller cannot start a second pass over a file
+  // the first one is replacing.
   if (enforcing) return;
   enforcing = true;
   try {
@@ -59,10 +68,24 @@ function enforceNow(): void {
   }
 }
 
+function scheduleEnforcement(): void {
+  if (scheduledEnforcement !== null || configuredMaxBytes === undefined) return;
+  if ((currentUsageLogRevision()?.size ?? 0) <= configuredMaxBytes) return;
+  scheduledEnforcement = setTimeout(() => {
+    scheduledEnforcement = null;
+    enforceNow();
+  }, ENFORCEMENT_DELAY_MS);
+  scheduledEnforcement.unref?.();
+}
+
 /** Install or update the policy. `undefined` removes the hook entirely. */
 export function setUsageLedgerRetention(maxBytes: number | undefined): void {
   configuredMaxBytes = maxBytes;
-  setUsageLedgerAppendHook(maxBytes === undefined ? null : enforceNow);
+  if (maxBytes === undefined && scheduledEnforcement !== null) {
+    clearTimeout(scheduledEnforcement);
+    scheduledEnforcement = null;
+  }
+  setUsageLedgerAppendHook(maxBytes === undefined ? null : scheduleEnforcement);
 }
 
 export function usageLedgerRetentionStatus(): UsageLedgerRetentionStatus {

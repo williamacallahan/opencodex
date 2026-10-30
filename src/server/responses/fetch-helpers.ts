@@ -53,6 +53,20 @@ const PHYSICAL_DISPATCH = Symbol.for("opencodex.physical-dispatch");
 // Final destination and headers after plugin rewrites and queued rebuilds, for observers that
 // must attribute a response to the credential that actually reached the wire.
 const PHYSICAL_SEND_OBSERVER = Symbol.for("opencodex.physical-send-observer");
+const PHYSICAL_SEND_INTEGRITY = Symbol("physical-send-integrity");
+/** A request-local invariant, checked after rewrites and immediately before the executor. */
+export function physicalSendIntegrityInit(assert: (url: string, init: RequestInit) => void): Record<symbol, unknown> {
+  return { [PHYSICAL_SEND_INTEGRITY]: assert };
+}
+/** Commit accounting once, only after the final local transport checks pass. */
+export function physicalSendCommitInit(commit: () => void): Record<symbol, unknown> {
+  let committed = false;
+  return { [PHYSICAL_DISPATCH]: () => {
+    if (committed) return;
+    commit();
+    committed = true;
+  } };
+}
 export type AccountAutoPauseObserver = ((response: Response) => Promise<Response>) & {
   physical?: (sameDestination: boolean, headers: Headers) => void;
 };
@@ -177,6 +191,7 @@ export function sendWithConnectionPolicy(
   rawInput: Parameters<typeof globalThis.fetch>[0],
   init?: RequestInit,
   egress?: ProviderEgressBinding,
+  deferDispatchReceipt = false,
 ): Promise<Response> {
   let input = rawInput;
   let headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
@@ -189,7 +204,8 @@ export function sendWithConnectionPolicy(
   let redirectedToLoopback = false;
   if (!rewriteDone) {
     const original = input instanceof Request ? input.url : String(input);
-    const target = rewriteUpstream(original, headers, "http");
+    const target = rewriteUpstream(original, headers, "http",
+      (init as Record<symbol, unknown> | undefined)?.[PHYSICAL_SEND_INTEGRITY] !== undefined);
     headers = target.headers as Headers;
     if (target.url !== original) {
       redirectedToLoopback = isLoopbackUrl(target.url);
@@ -229,12 +245,7 @@ export function sendWithConnectionPolicy(
   const largeCodexBody = !compressed && typeof body === "string"
     && isCanonicalCodexResponsesUrl(target)
     && Buffer.byteLength(body, "utf8") >= 1024 * 1024;
-  (init as Record<symbol, (() => void) | undefined> | undefined)?.[PHYSICAL_DISPATCH]?.();
-  (init as Record<symbol, ((destination: string, headers: Headers) => void) | undefined> | undefined)?.[PHYSICAL_SEND_OBSERVER]?.(target, headers);
-  // Final headers, after plugin rewrites: an upstream can only echo what it received here, so the
-  // request log refuses any diagnostic that repeats one of these values (see request-log-terminal-status).
-  outboundCredentials().remember(headers);
-  return physicalFetch(input, {
+  const physicalInit: RequestInit = {
     ...init,
     ...(compressed ? { body: compressed.body } : largeCodexBody ? { body: Buffer.from(body, "utf8") } : {}),
     headers,
@@ -243,7 +254,14 @@ export function sendWithConnectionPolicy(
     ...egressInit,
     ...(decide || redirectedToLoopback ? { [EGRESS_DECIDED]: true } : {}),
     ...{ [UPSTREAM_REWRITTEN]: true },
-  });
+  };
+  (init as Record<symbol, ((url: string, init: RequestInit) => void) | undefined> | undefined)?.[PHYSICAL_SEND_INTEGRITY]?.(target, physicalInit);
+  // A strict override returning to providerFetch's executor still has its final check ahead.
+  if (!deferDispatchReceipt) (init as Record<symbol, (() => void) | undefined> | undefined)?.[PHYSICAL_DISPATCH]?.();
+  (init as Record<symbol, ((destination: string, headers: Headers) => void) | undefined> | undefined)?.[PHYSICAL_SEND_OBSERVER]?.(target, headers);
+  // Remember only credentials that passed the final dispatch invariant.
+  outboundCredentials().remember(headers);
+  return physicalFetch(input, physicalInit);
 }
 
 interface CodexWsExecutor { provider: OcxProviderConfig; http: typeof globalThis.fetch }

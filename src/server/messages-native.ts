@@ -35,8 +35,9 @@ import { formatAnthropicErrorBody, resolveAnthropicMessagesUrl } from "../adapte
 import {
   anthropicMessagesNativeWireBody,
   buildAnthropicMessagesPassthroughRequest,
-  type AnthropicMessagesPassthroughRequest,
 } from "../adapters/anthropic/passthrough";
+import { MessagesIntegrityError, NativeMessagesIntegrity, messagesEndToEndHeaders, type NativeMessagesRequest } from "./messages-native-integrity";
+import { readBoundedJsonRequestBody, resolveInboundBodyLimitBytes, DecompressedBodyTooLargeError } from "./request-decompress";
 import { effortFromOutputConfig, resolveInboundModel } from "../claude/inbound";
 import { anthropicErrorBody, anthropicErrorResponse, claudeOverflowSsePayload, claudePromptTooLongMessage, collectAnthropicMessage, isContextOverflowText, isThroughputLimitText } from "../claude/outbound";
 import type { AdmissionLease } from "../lib/admission";
@@ -121,7 +122,7 @@ import {
   recordKeyWireAttemptUsage,
   type RequestLogContext,
 } from "./request-log";
-import { fetchWithHeaderTimeout, physicalSendObserverInit, providerFetch, safeHostLabel, sendWithConnectionPolicy } from "./responses/fetch-helpers";
+import { fetchWithHeaderTimeout, physicalSendCommitInit, physicalSendObserverInit, providerFetch, safeHostLabel, sendWithConnectionPolicy } from "./responses/fetch-helpers";
 import { isLocalUpstream } from "../lib/local-upstream";
 import { resolveConnectTimeoutMs, resolveJsonBodyReadTimeoutMs } from "../stall-timeout";
 import { anthropicBillingPhysicalFetch } from "../providers/anthropic-billing-ownership";
@@ -130,7 +131,7 @@ import { linkAbortSignal } from "./responses/core-lifetime";
 import { attachRequestSpendTracker } from "./responses/request-spend";
 import { workflowRefusalResponse } from "./workflow-refusal";
 import { sseFieldValue } from "../lib/sse-decoder";
-import { admissionModelDeniedResponse, type AdmissionModelScope } from "./admission-model-scope";
+import { admissionModelDeniedResponse, assertRouteAllowedByScope, AdmissionModelDeniedError, type AdmissionModelScope } from "./admission-model-scope";
 import { nativeMessagesToolScopeDenial } from "./messages-native-scope";
 import { retainUpstreamMessagesRequestId } from "./messages-response-headers";
 
@@ -183,6 +184,47 @@ export interface HandleNativeMessagesOptions {
   clientIdentity?: AnthropicClientIdentity;
   sessionKey?: string | null;
   modelScope?: AdmissionModelScope;
+  integrity?: NativeMessagesIntegrity;
+}
+
+/** Enter the same managed lifecycle before any Messages transformation, for either endpoint. */
+export async function handleStrictNativeMessages(
+  options: Pick<HandleNativeMessagesOptions, "req" | "config" | "logCtx" | "logIds" | "translatorBudget" | "modelScope">,
+): Promise<Response> {
+  const { req, config, translatorBudget } = options;
+  const refuse = (response: Response) => {
+    createFinalRequestLog(options.logIds, options.logCtx).finish(response.status, { closeReason: "non_stream" });
+    return response;
+  };
+  try {
+    if (config.claudeCode?.strictPassthrough !== true) throw new MessagesIntegrityError();
+    let wire: Uint8Array | undefined;
+    const body = await readBoundedJsonRequestBody(req, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes), translatorBudget, {
+      retainWire(bytes) { translatorBudget.chargeRetained(bytes.byteLength, { kind: "request_copies" }); wire = bytes; },
+    });
+    if (!wire || !isRec(body) || typeof body.model !== "string" || !body.model) {
+      return refuse(anthropicErrorResponse(400, "Strict Messages requires a JSON object with a model"));
+    }
+    const route = routeModel(config, body.model);
+    const selector = { strict: true };
+    if (route.modelId !== body.model || nativeMessagesDeclineReason(route, body, config, selector)) throw new MessagesIntegrityError();
+    assertRouteAllowedByScope(options.modelScope, body.model, route);
+    const integrity = new NativeMessagesIntegrity(req, wire, body);
+    if (integrity.countTokens) {
+      // Counting is a physical request, not generated-token usage.
+      options.logCtx.spendInputEstimateTokens = 0;
+      options.logCtx.spendOutputCeilingTokens = 0;
+    }
+    return await handleNativeMessages({ ...options, route, body, requestedModel: body.model, selector, integrity,
+      sessionKey: req.headers.get("session_id") ?? req.headers.get("x-claude-code-session-id") });
+  } catch (error) {
+    if (error instanceof AdmissionModelDeniedError) return refuse(admissionModelDeniedResponse(error));
+    if (req.signal.aborted) return refuse(anthropicErrorResponse(499, "Client cancelled request", "api_error"));
+    const oversized = error instanceof DecompressedBodyTooLargeError || isTranslatorBudgetExceededError(error);
+    return refuse(anthropicErrorResponse(oversized ? 413 : 400,
+      oversized ? "Strict Messages request exceeds the body limit" : "Strict Messages request or route is incompatible; no transformation was sent",
+      "invalid_request_error"));
+  }
 }
 
 type FinishLog = (status: number, message?: string, meta?: FinalRequestLogMeta) => void;
@@ -344,10 +386,10 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
   }
   // Reserve spend the way native Chat does: an input estimate that never enters usage, and the
   // caller's own output ceiling.
-  if (logCtx.usageLogInputTokens === undefined) {
+  if (!options.integrity?.countTokens && logCtx.usageLogInputTokens === undefined) {
     logCtx.spendInputEstimateTokens = estimateClaudeRequestTokens(body, requestedModel);
   }
-  if (typeof body.max_tokens === "number" && body.max_tokens > 0) {
+  if (!options.integrity?.countTokens && typeof body.max_tokens === "number" && body.max_tokens > 0) {
     logCtx.spendOutputCeilingTokens = Math.trunc(body.max_tokens);
   }
 
@@ -363,6 +405,8 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
   const finishLog: FinishLog = (status, message, meta = { closeReason: "non_stream" }) => {
     if (finalLog.finished()) return;
     if (message) logCtx.upstreamError = redactSecretString(message).slice(0, 500);
+    // Counting consumes rate-limit capacity, not billed generation tokens, on every outcome.
+    if (options.integrity?.countTokens) logCtx.spendTracker?.settle({ inputTokens: 0, outputTokens: 0 });
     finalLog.finish(status, meta);
   };
   const bindUsage = (usage: OcxUsage | undefined) => {
@@ -402,7 +446,7 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
   catch { return fail(400, "Invalid Anthropic Messages destination", "invalid_request_error"); }
 
   try {
-    await prepareNativeBody(body, req.signal);
+    if (!options.integrity) await prepareNativeBody(body, req.signal);
   } catch (error) {
     if (req.signal.aborted) return fail(499, "Client cancelled request", "api_error");
     if (isTranslatorBudgetExceededError(error)) {
@@ -465,14 +509,14 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
   const physicalBudget = createInferenceSendBudget(req, logCtx);
   // Observe-only spend is already booked by the tracker; count billing sends without booking again.
   let physicalSendsUsed = 0;
-  let activeRequest: AnthropicMessagesPassthroughRequest;
+  let activeRequest: NativeMessagesRequest;
   let retainedRequestBytes = 0;
   const releaseRetainedRequest = () => {
     if (retainedRequestBytes === 0) return;
     translatorBudget.releaseRetained(retainedRequestBytes, { kind: "request_copies" });
     retainedRequestBytes = 0;
   };
-  const retainRequest = (request: AnthropicMessagesPassthroughRequest) => {
+  const retainRequest = (request: NativeMessagesRequest) => {
     const bytes = Buffer.byteLength(request.body);
     translatorBudget.chargeRetained(bytes, { kind: "request_copies" });
     retainedRequestBytes = bytes;
@@ -483,6 +527,7 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
   const rejectUnrepresentable = resolveProtocolSettings(config).unrepresentable === "reject";
   const buildActiveRequest = () => {
     recordAttemptCredentialSource(attempt, route.providerName, activeProvider, "anthropic");
+    if (options.integrity) return options.integrity.build(activeProvider, route.modelId, body);
     const built = buildAnthropicMessagesPassthroughRequest(activeProvider, route.modelId, body, config, {
       callerAnthropicBeta: options.callerAnthropicBeta,
       providerAccountUuid: oauthBinding?.providerAccountUuid,
@@ -524,7 +569,7 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
   }
 
   // One inbound request owns one transient send allowance, captured before any key rotation.
-  const requestTransientPolicy = transientRetryPolicyFor(activeProvider);
+  const requestTransientPolicy = options.integrity ? undefined : transientRetryPolicyFor(activeProvider);
   let transientSendsUsed = 0;
   const remainingTransientSends = (): number => requestTransientPolicy
     ? Math.max(0, requestTransientPolicy.attempts - transientSendsUsed)
@@ -564,7 +609,7 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
         applyUpstreamRecoveryInit({ method: "POST", headers: request.headers, body: request.body }, transportRecovery),
         upstream.signal,
         0, // Final physical send owns the header clock after queued credential/destination refresh.
-        requestedStream,
+        requestedStream && !options.integrity,
         providerFetch(activeProvider, undefined, {
           providerName: route.providerName,
           modelId: route.modelId,
@@ -609,14 +654,14 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
             const wire = activeRequest;
             const headers = new Headers(wire.headers);
             const encoding = new Headers(init.headers).get("accept-encoding");
-            if (!headers.has("accept-encoding") && encoding) headers.set("accept-encoding", encoding);
+            if (!options.integrity && !headers.has("accept-encoding") && encoding) headers.set("accept-encoding", encoding);
             const sendingBinding = oauthBinding;
             const snapshot = sendingBinding?.snapshot;
             const providerAccountUuid = sendingBinding?.providerAccountUuid;
             const writerGeneration = snapshot ? captureConfigGeneration() : 0;
             const ownsBearer = snapshot && snapshot.provider === nativeInstance
               && headers.get("authorization") === `Bearer ${snapshot.accessToken}` && !headers.has("x-api-key");
-            if (oauthBinding && (!ownsBearer || wire.url !== oauthBinding.routeTarget
+            if (oauthBinding && (!ownsBearer || wire.url !== (options.integrity?.urlFor(oauthBinding.routeTarget) ?? oauthBinding.routeTarget)
               || !nativeOAuthRouteIsCurrent(oauthBinding) || !nativeOAuthBindingIsCurrent(oauthBinding))) {
               throw new NativeOAuthSelectionChangedError();
             }
@@ -629,8 +674,11 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
               poolId: logCtx.spendPoolId ?? route.providerName, identityId: logCtx.accountLogLabel,
             }));
             let sendOwner: AnthropicPhysicalSendOwnership | null = null;
-            try {
+            let sent = false;
+            const commitSend = () => {
               if (init.signal?.aborted) throw init.signal.reason;
+              sendOwner = snapshot ? captureAnthropicPhysicalSendOwnership(snapshot) : null;
+              if (snapshot && !sendOwner) throw new NativeOAuthSelectionChangedError();
               // Capture before either accounting path so this request retains its start policy.
               if (spendReport.beforeSend && !spendReport.beforeSend()) {
                 if (spendTracker.refusals) throw new NativeMessagesSpendRefusal();
@@ -638,27 +686,38 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
               }
               if (!physicalBudget.spendEnforced && !spendTracker.charge()) throw new NativeMessagesSpendRefusal();
               noteProviderAttemptSend(logCtx, route.providerName, activeProvider, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
-              // Last synchronous ownership reservation before the physical fetch. Retain this
-              // exact incarnation across its await; a returned response can never reserve one.
-              sendOwner = snapshot ? captureAnthropicPhysicalSendOwnership(snapshot) : null;
-              if (snapshot && !sendOwner) throw new NativeOAuthSelectionChangedError();
               physicalSendsUsed++;
+              sent = true;
+            };
+            try {
+              if (!options.integrity) commitSend();
               const physicalFetch = ((input, physicalInit) => sendWithConnectionPolicy(
                 distributedKeyPhysicalFetch(
                   anthropicBillingPhysicalFetch((activeProvider as OcxProviderTransport).fetch ?? execute, route.providerName, activeProvider),
                   route.providerName, activeProvider, wire.url, activeProvider.apiKeyTransport === "bearer" ? "authorization" : "x-api-key"),
-                String(input), physicalInit, { providerName: route.providerName, provider: activeProvider },
+                String(input), physicalInit, { providerName: route.providerName, provider: activeProvider }, !!options.integrity,
               )) as typeof fetch;
               localUpstream = isLocalUpstream(wire.url);
               dispatched = await fetchWithHeaderTimeout(
                 wire.url,
-                applyUpstreamRecoveryInit({ ...init, method: "POST", headers, body: wire.body, ...physicalSendObserverInit(observeAutoPause, wire.url) }, transportRecovery),
+                applyUpstreamRecoveryInit({ ...init, method: "POST", headers, body: wire.body,
+                  ...physicalSendObserverInit(observeAutoPause, wire.url),
+                  ...(options.integrity ? physicalSendCommitInit(commitSend) : {}),
+                  ...options.integrity?.sendInit(activeProvider, route.modelId, body, () => {
+                    if (sendingBinding) {
+                      if (!nativeOAuthRouteIsCurrent(sendingBinding) || !nativeOAuthBindingIsCurrent(sendingBinding)) {
+                        throw new NativeOAuthSelectionChangedError();
+                      }
+                    } else if (!providerApiKeySelectionIsCurrent(config, route.providerName, activeProvider)) {
+                      throw new MessagesIntegrityError();
+                    }
+                  }) }, transportRecovery),
                 init.signal ?? upstream.signal,
                 resolveConnectTimeoutMs(config.connectTimeoutMs, { localUpstream }),
-                requestedStream, physicalFetch,
+                requestedStream && !options.integrity, physicalFetch,
               );
             } finally {
-              try { if (physicalBudget.spendEnforced) spendReport(1); }
+              try { if (sent && physicalBudget.spendEnforced) spendReport(1); }
               finally {
                 try { spendReport.close?.(); }
                 finally { releaseFamily(); }
@@ -684,7 +743,7 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
               && !isNonReplayableResponse(dispatched)
               ? () => { recordDistributedResponseFailure(dispatched, config, route.providerName, req.signal); }
               : undefined;
-            if (!dispatched.ok) await recordKeyAttemptFailure(logCtx, dispatched, init.signal ?? upstream.signal);
+            if (!options.integrity && !dispatched.ok) await recordKeyAttemptFailure(logCtx, dispatched, init.signal ?? upstream.signal);
             return observeAutoPause ? observeAutoPause(dispatched) : dispatched;
           },
         }),
@@ -692,6 +751,7 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
       {
         abortSignal: upstream.signal,
         label: safeHostLabel(request.url),
+        ...(options.integrity ? { attempts: 1 } : {}),
         ...(requestTransientPolicy
           ? {
             attempts: remaining,
@@ -708,6 +768,7 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
   let response: Response;
   try {
     response = await send();
+    if (!options.integrity) {
     let retryPolicy: ReturnType<typeof rateLimitRetryPolicyFor> | undefined;
     let retries = 0;
     let billingRecoveryActive = false;
@@ -826,6 +887,7 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
       logCtx.provider = formatAnthropicProviderForLog(route.providerName, oauthBinding.snapshot.accountId, config);
       response = await send(recovery);
     }
+    }
   } catch (error) {
     releaseRetainedRequest();
     cleanupAbort();
@@ -858,6 +920,25 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
     return fail(502, error instanceof Error ? error.message : String(error), "api_error");
   }
   releaseRetainedRequest();
+
+  if (options.integrity) {
+    settleDistributedFailure();
+    const headers = messagesEndToEndHeaders(response.headers);
+    const sse = headers.get("content-type")?.includes("text/event-stream") === true;
+    const guard = resolvePassthroughBodyGuard(config, upstream.signal);
+    transferTurnToStream();
+    const relayed = response.body && tapAnthropicSseForLog(response.body, logCtx, (status, meta) => {
+      try {
+        cleanupAbort();
+        if (options.integrity?.countTokens) delete logCtx.usage;
+        else bindUsage(logCtx.usage);
+        finishLog(status, undefined, meta);
+      }
+      finally { releaseStreamTurn(); }
+    }, { ...guard, verbatim: { status: response.status, inspectSse: sse, contentEncoding: headers.get("content-encoding") } });
+    if (!relayed) { cleanupAbort(); releaseStreamTurn(); finishLog(response.status); }
+    return new Response(relayed, { status: response.status, headers });
+  }
 
   // The last pool account refused on spent quota and rotation found no replacement: answer the
   // usage limit with its reset (#6991), as the bridge lane does, not the upstream "try again later".

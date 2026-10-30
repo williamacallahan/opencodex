@@ -438,6 +438,11 @@ Regression coverage: `tests/adapters/anthropic/anthropic-model-weekly-admission.
 
 ## Native Messages dispatch
 
+The [strict variant](../transports/strict-messages.md) retains this
+account-selection authority but replaces authentication only, not provider UUID/body metadata.
+It returns the first response without the refusal-recovery ladder below. Quota headers remain
+attributed to the credential generation actually sent, and pre-send stale selection is revalidated.
+
 `src/server/messages-native-oauth.ts` binds native Claude Messages through the same session,
 model-route and generation-fenced account authority as Responses. It rechecks current model routes
 across asynchronous preparation and before sending. Concurrent affine sessions retain their own

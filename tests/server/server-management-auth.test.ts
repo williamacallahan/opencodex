@@ -1142,16 +1142,17 @@ describe("management and data-plane credential separation", () => {
     }), httpConfig, state, { trustedTailscaleIngress: true, now })).toBeNull();
   });
 
-  test("the live listener trusts Tailscale identity only on hub management ingress", async () => {
+  test.each(["loopback", "container"] as const)("the %s management listener preserves its authentication boundary", async (bind) => {
     const config = hubConfig();
     config.hub = {
       ...config.hub,
-      managementIngress: { enabled: true, port: 10101 },
+      managementIngress: { enabled: true, port: 10101, bind },
     };
     saveConfig(config);
     const state = initializeManagementAuthState(config);
     if (!state.available) throw new Error("expected management auth state");
-    const { server, managementPort } = await startEphemeralHubServer({ managementAuthState: state });
+    const { server, managementPort } = await startEphemeralHubServer({ managementAuthState: state },
+      ["0.0.0.0", bind === "container" ? "0.0.0.0" : "127.0.0.1"]);
     const headers = { Host: "hub.example.test", "Tailscale-User-Login": "alice@example.test" };
     try {
       const spoofedPublic = await fetch(new URL("/opencodex-session", server.url), { headers });
@@ -1162,7 +1163,26 @@ describe("management and data-plane credential separation", () => {
       });
       expect(wrongUser.status).toBe(401);
 
-      const issued = await fetch(`http://127.0.0.1:${managementPort}/opencodex-session`, { headers });
+      let issued = await fetch(`http://127.0.0.1:${managementPort}/opencodex-session`, { headers });
+      let cookie: string | undefined;
+      if (bind === "container") {
+        expect(issued.status).toBe(401);
+        const rememberHeaders = { Host: "hub.example.test", Origin: "https://hub.example.test", "x-opencodex-api-key": "admin-secret" };
+        const publicRefusal = await fetch(new URL("/api/session/remember", server.url), { method: "POST", headers: rememberHeaders });
+        expect(publicRefusal.status).toBe(403);
+        const wrongOrigin = await fetch(`http://127.0.0.1:${managementPort}/api/session/remember`, {
+          method: "POST", headers: { ...rememberHeaders, Origin: "https://attacker.example.test" },
+        });
+        expect(wrongOrigin.status).toBe(403);
+        const remembered = await fetch(`http://127.0.0.1:${managementPort}/api/session/remember`, { method: "POST", headers: rememberHeaders });
+        expect(remembered.status).toBe(200);
+        cookie = remembered.headers.get("Set-Cookie")!.split(";")[0]!;
+        expect(remembered.headers.get("Set-Cookie")).toContain("; Secure");
+        const body = await remembered.json();
+        issued = await fetch(`http://127.0.0.1:${managementPort}/opencodex-session`, {
+          headers: { Host: "hub.example.test", Cookie: cookie, "X-OpenCodex-Device-Proof": body.device.proof },
+        });
+      }
       expect(issued.status).toBe(200);
       const html = await issued.text();
       const token = /name="opencodex-session-token" content="([^"]+)"/.exec(html)?.[1];
@@ -1172,6 +1192,7 @@ describe("management and data-plane credential separation", () => {
         Origin: "https://hub.example.test",
         "x-opencodex-api-key": token!,
         "x-opencodex-gui-origin": "https://hub.example.test",
+        ...(cookie ? { Cookie: cookie } : {}),
       };
       const management = await fetch(`http://127.0.0.1:${managementPort}/api/config`, {
         headers: sessionHeaders,

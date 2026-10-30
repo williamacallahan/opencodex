@@ -15,9 +15,8 @@ export interface ApiKeyEntry {
   prefix: string;
   createdAt: string;
   pendingRotation?: { id: string; createdAt: string; expiresAt: string };
-  /** Always present from the server; zeroes are a real answer. Whether anything
-   *  is attributable at all is the response-level `attributionSince`. */
-  usage: ApiKeyUsage;
+  /** Omitted by an explicit minimal metadata read; never synthesize zero usage. */
+  usage?: ApiKeyUsage;
 }
 
 /**

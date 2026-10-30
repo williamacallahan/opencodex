@@ -1,7 +1,7 @@
 import { remoteWorkspaceEnabled } from "../remote-control/workspace-activation";
 import { scheduleDesktopCompatibilityStartup } from "./index/desktop-compatibility-startup";
 import { AuxiliaryListenerBindError } from "./ports";
-import { normalizeBindHostname } from "./bind-host";
+import { managementIngressHostname, normalizeBindHostname } from "./bind-host";
 import { configureInboundBodyBudget, runAdmittedBodyWork } from "./inbound-body-admission";
 import {
   buildWarmupCompletionFrames,
@@ -341,10 +341,11 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
     if (companionError) throw new Error(companionError);
   }
   const loopbackListenerPort = effectiveLoopbackListenerPort(config, listenPort);
-  // Hub management ingress is a third, management-only listener. Its address is intentionally
-  // fixed: the kernel loopback bind is the trust boundary that permits Tailscale identity headers.
+  // Only loopback management ingress trusts Tailscale identity; container mode trusts the HTTPS origin.
   const managementIngress = config.runtimeRole === "hub" ? config.hub?.managementIngress : undefined;
   const managementIngressPort = managementIngress?.enabled ? managementIngress.port : null;
+  const managementIngressHost = managementIngressHostname(config);
+  const containerManagement = managementIngressHost === "0.0.0.0";
 
   /**
    * Which listener a request arrived on, expressed as the only thing that differs: the bind
@@ -389,12 +390,12 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
    * adds a wire, not a trust level. `/api/*` is deliberately still absent: local management
    * discovery goes to the authenticated management surface, never to this listener.
    *
-   * `POST /v1/messages/count_tokens` completes that Anthropic wire. It is admitted on a
-   * narrower argument than the other two rather than on symmetry: it spends no provider quota,
-   * reaches no stored credential, and returns a token count computed from the request body the
-   * caller already holds. Withholding it bought no confinement — the same caller may POST the
-   * whole conversation to `/v1/messages` on this socket — and cost Claude Code its server-side
-   * count, which it then silently replaces with a local estimate. `/api/*`, `/healthz`,
+   * `POST /v1/messages/count_tokens` completes that Anthropic wire. Normally it estimates
+   * locally; strict passthrough uses managed credentials, scope checks and turn ownership to
+   * forward the count upstream without treating its result as generation usage. The same
+   * admitted caller can already POST the whole conversation to `/v1/messages` on this socket.
+   * Withholding counting costs Claude Code its server-side count, which it then silently
+   * replaces with a local estimate. `/api/*`, `/healthz`,
    * `/readyz` and the GUI remain 404 here, which is the boundary that actually matters.
    *
    * `GET /v1/models` is on the list for a reason that is easy to miss. When catalog
@@ -634,7 +635,7 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
     const optionalIngress = optionalListeners.ingressOf(requestServer);
     if (optionalIngress !== undefined) return optionalIngress;
     if (requestServer === loopbackServer) return "unauthenticated-loopback";
-    if (requestServer === managementIngressServer) return "hub-management";
+    if (requestServer === managementIngressServer) return containerManagement ? "hub-management-container" : "hub-management";
     return "public";
   }
   const linkPolicy = (): RequestPolicyView => requestPolicyView(config, LINK_INGRESS_HOSTNAME, { allowedKeyIds: optionalListeners.linkAdmissionKeyIds() });
@@ -726,7 +727,7 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
         managementIngressServer = spendLedgerLifecycle.track(Bun.serve<WsData>({
           ...serveOptions,
           port: managementIngressPort,
-          hostname: "127.0.0.1",
+          hostname: managementIngressHost,
         }));
       } catch (error) {
         // Preserve the management bind failure while synchronously initiating rollback of every
@@ -735,7 +736,7 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
           if (!bound) continue;
           try { void bound.stop(true); } catch { /* report the original bind error */ }
         }
-        throw new AuxiliaryListenerBindError("hub.managementIngress", managementIngressPort, "127.0.0.1", error);
+        throw new AuxiliaryListenerBindError("hub.managementIngress", managementIngressPort, managementIngressHost, error);
       }
     }
     configureInboundBodyBudget(config.maxConcurrentInboundBodyBytes);
@@ -830,7 +831,7 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
 
   if (managementIngressServer) {
     const managementPort = managementIngressServer.port ?? managementIngressPort;
-    console.log(`🔒 Hub management ingress active on http://127.0.0.1:${managementPort}`);
+    console.log(`🔒 Hub management ingress active on http://${managementIngressHost}:${managementPort}`);
     console.log(`   GUI and /api/*; opted-in Remote Workspace pairing/agent only; data, health, and readiness are disabled.`);
   }
 

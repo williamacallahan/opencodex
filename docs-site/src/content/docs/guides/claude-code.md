@@ -584,6 +584,50 @@ The one change to the body is tool-call ids. A `tool_use.id` or `tool_result.too
 Disable with `claudeCode.nativePassthrough: false`; point elsewhere with
 `claudeCode.anthropicBaseUrl`.
 
+## Strict managed-account gateway
+
+For a gateway that selects a stored Anthropic account without translating Messages, use
+the hosted gateway origin with `/strict` appended as your base URL. This selects strict
+transport per request while existing clients at the ordinary base URL keep their behavior.
+This is a separate contract from the native passthrough above. Configure a direct
+Anthropic provider with your managed keys or OAuth account pool and use the exact upstream
+model id, not an OpenCodex picker alias or provider-prefixed model.
+
+Point Claude Code's `ANTHROPIC_BASE_URL` at that `/strict` base URL and use a gateway
+data-plane key as `ANTHROPIC_AUTH_TOKEN`. Keep the gateway authenticated and TLS-protected;
+loopback listeners deliberately trust local callers. The gateway replaces that credential with
+the selected account's credential. No client needs the pool's individual tokens.
+
+- Both `/strict/v1/messages` and `/strict/v1/messages/count_tokens` forward the original HTTP body bytes,
+  including compression, whitespace, signatures, tool ids, cache controls and unknown fields.
+- Existing account selection, pacing, scope checks and quota observation remain active.
+  Selection and credential refresh happen before sending. After sending, the first response
+  wins: no automatic retry, redirect following, account failover or translation fallback.
+- Responses retain their status and body bytes. Broken streams terminate without appended
+  error events or repaired SSE delimiters. Token counting calls upstream, not a local estimator.
+- Final send checks refuse changed bodies, destinations or end-to-end headers. This can reject
+  configurations that need model rewriting, provider header overrides, custom fetch transports,
+  TLS profiles or SOCKS. Ordinary Bun HTTP(S) transport is required.
+
+“Byte-preserving” means HTTP entity bytes received by the gateway, not TLS/TCP framing or header
+ordering/casing. Authentication is replaced; cookies, gateway headers, hop-by-hop fields and
+framing are removed. Gateway CORS/security headers remain gateway-owned. Other end-to-end
+headers, including Anthropic version/betas and upstream request ids, are preserved.
+Invalid JSON and existing admission/body limits still produce local refusals.
+
+Usage inspection does not modify delivery. It supports plain, gzip and deflate JSON/SSE;
+unsupported coding (including Brotli), invalid coding or inspection overflow leaves usage
+unresolved. Requests with metadata/signatures incompatible with the chosen account are passed
+through and may be rejected upstream; the gateway does not repair them. This mode does not
+establish permission to pool subscription accounts or bypass provider limits. Confirm applicable
+provider terms before using paid accounts. Use independent gateway OAuth sessions rather than
+copying refresh tokens still managed by another machine.
+
+To make the ordinary endpoints and enabled intercept listener strict too, set
+`"strictPassthrough": true` inside `claudeCode` in your existing `config.json`, then restart.
+Set that flag to false or remove it to restore their existing behavior. The explicit `/strict`
+endpoints remain strict regardless of this flag and are available only on the public listener.
+
 ## Claude Desktop on a connected remote hub
 
 When this machine is connected to a hub, `ocx claude desktop apply` (or `ocx claude desktop`)

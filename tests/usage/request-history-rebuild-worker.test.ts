@@ -4,7 +4,7 @@
  * close or a replaced ledger never leaves a partial index or a stray build file.
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,11 +29,12 @@ import {
   REQUEST_HISTORY_MAX_RECORD_BYTES,
   setRequestHistoryAsyncRefreshBuildsForTests,
   setRequestHistoryRebuildJobFactoryForTests,
+  setRequestHistoryWorkerFailureCooldownMsForTests,
   setRequestHistoryWorkerRebuildMinBytesForTests,
 } from "../../src/routing/history/indexer";
 import { buildFilePath, buildIndexFile } from "../../src/routing/history/build-file";
 import { ingestSourceTail, metaValue, resetAndCreateSchema, RequestHistoryIndexStaleError } from "../../src/routing/history/ingest";
-import { HISTORY_DB_FILENAME, HISTORY_META_KEYS } from "../../src/routing/history/schema";
+import { HISTORY_META_KEYS, historyIndexPath } from "../../src/routing/history/schema";
 import { getConfigDir } from "../../src/config";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import { flushWindowsSecretAclReapsBeforeRemoval } from "../../src/lib/windows-secret-acl";
@@ -71,11 +72,12 @@ function writeLedger(text: string): void {
 }
 
 function indexPath(): string {
-  return join(getConfigDir(), HISTORY_DB_FILENAME);
+  return historyIndexPath(getConfigDir());
 }
 
 function buildFilesLeft(): string[] {
-  return readdirSync(getConfigDir()).filter(name => name.includes(".rebuild-"));
+  const indexDir = dirname(indexPath());
+  return existsSync(indexDir) ? readdirSync(indexDir).filter(name => name.includes(".rebuild-")) : [];
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 8_000): Promise<boolean> {
@@ -115,6 +117,7 @@ afterEach(async () => {
   setRequestHistoryWorkerRebuildMinBytesForTests(undefined);
   setRequestHistoryAsyncRefreshBuildsForTests(undefined);
   setRequestHistoryRebuildJobFactoryForTests(undefined);
+  setRequestHistoryWorkerFailureCooldownMsForTests(undefined);
   // A disposed worker's build files go only after its thread exits.
   await waitFor(() => buildFilesLeft().length === 0);
   await flushConfigDirHardeningForTests();
@@ -193,7 +196,7 @@ describe("request-history worker rebuild (#6990)", () => {
     expect(meta.indexedRows).toBe(200);
   });
 
-  test("after a worker fails, async readers rebuild inline and routing stays busy", async () => {
+  test("after a worker fails, readers and routing report busy instead of rebuilding inline", async () => {
     // A worker that spawns and then fails (a module that will not load, say).
     let builds = 0;
     setRequestHistoryRebuildJobFactoryForTests(() => ({
@@ -207,10 +210,50 @@ describe("request-history worker rebuild (#6990)", () => {
     // During the cooldown routing neither respawns the worker nor rebuilds inline.
     expect(() => openRequestHistoryIndexSync()).toThrow(/rebuild failed recently/);
     expect(builds).toBe(1);
-    const meta = await openRequestHistoryIndex();
-    expect(meta.indexedRows).toBe(250);
+    // An inline rebuild here would stall the event loop for the whole ledger.
+    await expect(openRequestHistoryIndex()).rejects.toBeInstanceOf(RequestHistoryIndexBusyError);
+    const config: OcxConfig = {
+      port: 10100,
+      defaultProvider: "a",
+      providers: { a: { adapter: "openai-chat", baseUrl: "https://a.example/v1", apiKey: "ka", models: ["m1"] } },
+    };
+    for (const path of ["/api/request-history?limit=5", "/api/request-history/req-1", "/api/routing-analytics"]) {
+      const req = new ManagementRequest(`http://localhost${path}`, { method: "GET" });
+      const response = await handleManagementAPI(req, new URL(req.url), config, { refreshCodexCatalog: async () => {} });
+      expect(response!.status).toBe(503);
+      // The remaining cooldown, so a client does not spend ~30 doomed retries on it.
+      const retryAfter = Number(response!.headers.get("Retry-After"));
+      expect(retryAfter).toBeGreaterThan(1);
+      expect(retryAfter).toBeLessThanOrEqual(30);
+      expect((await response!.json() as { error: { code: string } }).error.code).toBe("request_history_index_busy");
+    }
     expect(builds).toBe(1);
-    expect(openRequestHistoryIndexSync().indexedRows).toBe(250);
+  });
+
+  test("a worker that keeps failing hands readers one inline rebuild after three failures; routing stays busy", async () => {
+    let builds = 0;
+    setRequestHistoryRebuildJobFactoryForTests(() => ({
+      build: async () => { builds += 1; throw new Error("rename refused"); },
+      dispose: async () => {},
+      afterExit: async (cleanup: () => void) => { cleanup(); },
+    }));
+    setRequestHistoryWorkerFailureCooldownMsForTests(0);
+    writeLedger(ledgerLines(90));
+    const config: OcxConfig = {
+      port: 10100,
+      defaultProvider: "a",
+      providers: { a: { adapter: "openai-chat", baseUrl: "https://a.example/v1", apiKey: "ka", models: ["m1"] } },
+    };
+    const req = new ManagementRequest("http://localhost/api/request-history?limit=5", { method: "GET" });
+    const response = await handleManagementAPI(req, new URL(req.url), config, { refreshCodexCatalog: async () => {} });
+    expect(response!.status).toBe(200);
+    expect((await response!.json() as { index: { indexedRows: number } }).index.indexedRows).toBe(90);
+    expect(builds).toBe(3);
+    // The inline rebuild cleared the failure count: the next large rebuild goes back to a worker,
+    // and a routing-time read never takes the inline path.
+    writeLedger(ledgerLines(60, "next"));
+    expect(() => openRequestHistoryIndexSync()).toThrow(RequestHistoryIndexBusyError);
+    expect(builds).toBe(4);
   });
 
   test("a manual rebuild falls back inline when its worker fails", async () => {
@@ -275,14 +318,14 @@ describe("request-history worker rebuild (#6990)", () => {
   test("the worker sweeps build files abandoned by a dead process and keeps its own", async () => {
     const child = Bun.spawn([process.execPath, "-e", ""]);
     await child.exited;
-    mkdirSync(getConfigDir(), { recursive: true });
+    mkdirSync(dirname(indexPath()), { recursive: true });
     const dead = buildFilePath(indexPath(), child.pid, 1);
     const own = buildFilePath(indexPath(), process.pid, 999_999);
     for (const path of [dead, `${dead}-wal`, own]) writeFileSync(path, "stale");
     writeLedger(ledgerLines(50));
     await openRequestHistoryIndex();
     const left = buildFilesLeft();
-    expect(left).toEqual([own.slice(getConfigDir().length + 1)]);
+    expect(left).toEqual([own.slice(dirname(indexPath()).length + 1)]);
     // Leave nothing for afterEach to wait on.
     removeTreeWithRetry(own);
   });

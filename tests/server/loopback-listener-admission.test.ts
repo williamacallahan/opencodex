@@ -65,18 +65,18 @@ describe("loopback listener policy view", () => {
     // facade. Reading the facade would leave every indexOf at -1 and the slices empty, so the
     // toContain checks below would pass on empty strings.
     const source = readFileSync(new URL("../../src/server/index/serve-options.ts", import.meta.url), "utf8");
-    const countTokensStart = source.indexOf('url.pathname === "/v1/messages/count_tokens"');
-    const messagesStart = source.indexOf('url.pathname === "/v1/messages"', countTokensStart + 1);
+    const countTokensStart = source.indexOf('messagesPath === "/v1/messages/count_tokens"');
+    const messagesStart = source.indexOf('messagesPath === "/v1/messages"', countTokensStart + 1);
     const chatStart = source.indexOf('url.pathname === "/v1/chat/completions"', messagesStart);
     expect(countTokensStart).toBeGreaterThan(-1);
     expect(messagesStart).toBeGreaterThan(countTokensStart);
     expect(chatStart).toBeGreaterThan(messagesStart);
     expect(source.slice(countTokensStart, messagesStart)).toContain(
       // First-party bindings ride on the same call: only the intercept ingress sets the flag.
-      'await handleClaudeCountTokens(req, config, policy, { claudeIntercept: ingress === "claude-intercept" })',
+      'await handleClaudeCountTokens(req, messagesConfig, policy, { claudeIntercept: ingress === "claude-intercept", admission, turnAdmissionLease })',
     );
     expect(source.slice(messagesStart, chatStart)).toContain(
-      'await handleClaudeMessages(sessionReq, config, logCtx, { requestId, start, turnAdmissionLease, admission }, policy, { claudeIntercept: ingress === "claude-intercept" })',
+      'await handleClaudeMessages(sessionReq, messagesConfig, logCtx, { requestId, start, turnAdmissionLease, admission }, policy, { claudeIntercept: ingress === "claude-intercept" })',
     );
     for (const branch of [
       source.slice(countTokensStart, messagesStart),
@@ -390,6 +390,26 @@ describe("hub management ingress configuration", () => {
     const result = validateConfigCandidate(candidate());
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.config.hub?.managementIngress).toEqual({ enabled: true, port: 10101 });
+  });
+
+  test("container management binding requires an explicit HTTPS public origin", () => {
+    for (const managementPublicOrigin of [undefined, "http://hub.example.test", "https://hub.example.test"]) {
+      const result = validateConfigCandidate(candidate({ hub: {
+        managementPublicOrigin, managementIngress: { enabled: true, port: 10101, bind: "container" },
+      }, hostname: "0.0.0.0" }));
+      expect(result.ok).toBe(managementPublicOrigin === "https://hub.example.test");
+      if (result.ok) expect(result.config.hub?.managementIngress).toMatchObject({ bind: "container" });
+    }
+    expect(validateConfigCandidate(candidate({ hub: { managementIngress: { enabled: true, port: 10101, bind: "public" } } })).ok).toBe(false);
+  });
+
+  test("container ingress cannot inherit a loopback public listener's unauthenticated bootstrap", () => {
+    for (const hostname of [undefined, "127.0.0.1", "localhost", "::1"]) {
+      const result = validateConfigCandidate(candidate({ hostname, hub: {
+        managementPublicOrigin: "https://hub.example.test", managementIngress: { enabled: true, port: 10101, bind: "container" },
+      } }));
+      expect(result.ok).toBe(false);
+    }
   });
 });
 

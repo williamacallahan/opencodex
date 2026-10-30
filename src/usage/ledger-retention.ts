@@ -6,9 +6,8 @@
  * could not promise is that a row appended by another writer between its size snapshot and its
  * rename survived: it captured a size, copied a suffix, and renamed over whatever was there.
  *
- * Two things close that here. The append is synchronous and this runs inside the same call
- * stack, with no await between the append and the publication, so no in-process append can
- * interleave. And `validateBeforeRename` re-opens the target immediately before the rename and
+ * Two things close that here. This runs synchronously in one turn, with no await between the
+ * size snapshot and the publication, so no in-process append can interleave. And `validateBeforeRename` re-opens the target immediately before the rename and
  * refuses unless its identity, size and revision metadata are byte-for-byte what was copied --
  * so an append from anywhere else aborts the replacement instead of losing the row. The original
  * file and that append both survive; the next append retries from a fresh revision.

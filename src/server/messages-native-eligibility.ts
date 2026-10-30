@@ -33,6 +33,8 @@ export type NativeMessagesDeclineReason = Extract<
 
 /** Request facts the body cannot carry. */
 export interface NativeMessagesSelector {
+  /** Strict transport overrides optional transformations, never credential/destination policy. */
+  strict?: boolean;
   /** A synthetic effort row was requested. */
   effortRow?: boolean;
   /** A synthetic fast row was requested. */
@@ -107,7 +109,7 @@ function credentialDeclineReason(
   const provider = route.provider;
   if (provider.authMode === undefined || provider.authMode === "key") return undefined;
   if (provider.authMode !== "oauth") return "auth-mode-not-native";
-  if (!resolveProtocolSettings(config, route.providerName).rollout.managedMessagesNativeOAuth) return "auth-mode-not-native";
+  if (!selector.strict && !resolveProtocolSettings(config, route.providerName).rollout.managedMessagesNativeOAuth) return "auth-mode-not-native";
   if (!configuredAnthropicInstance(config, route.providerName)) return "auth-mode-not-native";
   if (!credentialDomainFor(provider)?.firstPartyAnthropic) return "auth-mode-not-native";
   return undefined;
@@ -133,7 +135,7 @@ export function nativeMessagesDeclineReason(
   config: OcxConfig,
   selector: NativeMessagesSelector = {},
 ): NativeMessagesDeclineReason | undefined {
-  if (!resolveProtocolSettings(config, route.providerName).rollout.managedMessagesNative) return "rollout-disabled";
+  if (!selector.strict && !resolveProtocolSettings(config, route.providerName).rollout.managedMessagesNative) return "rollout-disabled";
   const provider = route.provider;
   if (provider.adapter !== "anthropic") return "cross-wire-ir";
   const credentialDecline = credentialDeclineReason(route, config, selector);
@@ -141,6 +143,7 @@ export function nativeMessagesDeclineReason(
   if (route.combo || route.routeKind === "combo" || route.routeKind === "policy") return "combo-or-policy-route";
   if (selector.effortRow) return "effort-row";
   if (selector.fastRow) return "fast-row";
+  if (selector.strict) return undefined;
   if (featuresFromMessagesBody(body).has("request.images")
     && requiresVisionPreprocessing(config, provider, route.modelId, route.providerName)) {
     return "vision-preprocessing";

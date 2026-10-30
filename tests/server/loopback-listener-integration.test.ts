@@ -950,9 +950,6 @@ describe("seams the runtime cannot defend", () => {
     expect(serverSource).toMatch(/port: loopbackListenerPort,\s*\n\s*hostname: "127\.0\.0\.1",/);
   });
 
-  test("the hub management ingress binds 127.0.0.1 explicitly", () => {
-    expect(serverSource).toMatch(/port: managementIngressPort,\s*\n\s*hostname: "127\.0\.0\.1",/);
-  });
 });
 
 describe("public port selection avoids the loopback port", () => {

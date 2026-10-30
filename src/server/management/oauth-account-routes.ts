@@ -78,7 +78,7 @@ import { drainAndShutdown } from "../lifecycle";
 import { filterRequestLogs, getRequestLogEntries, type RequestLogEntry } from "../request-log";
 import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerSecond } from "../../usage/cost";
 import type { PersistedUsageAttempt } from "../../usage/log";
-import { AUTH_MATRIX, isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "../auth-cors";
+import { AUTH_MATRIX, isAllowedRequestOrigin, isProxyAdmissionSecret, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "../auth-cors";
 import { applySystemEnvToggle } from "../system-env";
 import { buildApiAccessEndpoints } from "./api-access";
 import {
@@ -1193,8 +1193,9 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       requestOrigin: req.headers.get("origin"),
     });
     const { readApiKeyUsageRollup } = await import("./api-key-usage");
-    const { rollup, attributionSince, historyTruncated, usageIncomplete, usageIncompleteReason } = await readApiKeyUsageRollup(keys.map(k => k.id), config.managementUsageMaxReadBytes);
-    return jsonResponse({
+    const includeUsage = !req.headers.get("prefer")?.split(",").some(preference => preference.trim() === "return=minimal");
+    const usage = includeUsage ? await readApiKeyUsageRollup(keys.map(k => k.id), config.managementUsageMaxReadBytes) : undefined;
+    const response = jsonResponse({
       // 8 random hex past the fixed `ocx_data_` literal: enough to tell two keys
       // apart in a list, with 128 bits of the tail still unrevealed. Masking only
       // 8 characters showed `ocx_data...` for every key ever generated.
@@ -1212,15 +1213,19 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
           createdAt: k.pendingRotation.createdAt,
           expiresAt: k.pendingRotation.expiresAt,
         } } : {}),
-        usage: rollup.get(k.id) ?? { requests7d: 0, totalRequests: 0 },
+        ...(usage ? { usage: usage.rollup.get(k.id) ?? { requests7d: 0, totalRequests: 0 } } : {}),
       })),
       // Dataset-level and singular: it describes the usage log, not any one key.
-      ...(attributionSince ? { attributionSince } : {}),
-      ...(historyTruncated ? { historyTruncated: true } : {}),
-      ...(usageIncomplete ? { usageIncomplete: true, usageIncompleteReason } : {}),
+      ...(!includeUsage ? { usageIncluded: false } : {}),
+      ...(usage?.attributionSince ? { attributionSince: usage.attributionSince } : {}),
+      ...(usage?.historyTruncated ? { historyTruncated: true } : {}),
+      ...(usage?.usageIncomplete ? { usageIncomplete: true, usageIncompleteReason: usage.usageIncompleteReason } : {}),
       authMatrix: AUTH_MATRIX,
       ...endpoints,
     }, 200, req, config);
+    if (!includeUsage) response.headers.set("Preference-Applied", "return=minimal");
+    response.headers.append("Vary", "Prefer");
+    return response;
   }
 
   if (url.pathname === "/api/keys/reveal" && req.method === "POST") {
@@ -1246,10 +1251,17 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
 
   if (url.pathname === "/api/keys/rotate" && req.method === "POST") {
     const body = await readJsonBody(req);
-    if (!body || Object.keys(body).length !== 1 || typeof body.id !== "string" || !body.id) {
+    if (!body || Object.keys(body).some(key => key !== "id" && key !== "key") || typeof body.id !== "string" || !body.id) {
       return jsonResponse({ error: "invalid body" }, 400, req, config);
     }
-    const result = startApiKeyRotation(config, body.id);
+    if (Object.hasOwn(body, "key") && (typeof body.key !== "string" || !/^[\x21-\x7e]{40,4096}$/.test(body.key))) {
+      return jsonResponse({ error: "replacement key must contain 40–4096 visible ASCII characters" }, 400, req, config);
+    }
+    const replacementKey = typeof body.key === "string" ? body.key : undefined;
+    if (replacementKey !== undefined && isProxyAdmissionSecret(replacementKey, config)) {
+      return jsonResponse({ error: "replacement key conflicts with an existing or reserved admission credential" }, 409, req, config);
+    }
+    const result = startApiKeyRotation(config, body.id, Date.now(), replacementKey);
     if ("error" in result) {
       return jsonResponse({ error: result.error === "not-found" ? "key not found" : "rotation already pending" }, result.error === "not-found" ? 404 : 409, req, config);
     }

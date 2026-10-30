@@ -24,9 +24,12 @@ import {
 } from "../../src/usage/log";
 import {
   closeRequestHistoryIndex,
+  openRequestHistoryIndexSync,
   queryRequestHistory,
+  ROUTING_TAIL_INGEST_MAX_BYTES,
   rebuildRequestHistoryIndex,
   requestHistoryRowById,
+  setRequestHistoryWorkerRebuildMinBytesForTests,
   sourceIdentityMatches,
   REQUEST_HISTORY_MAX_RECORD_BYTES,
   REQUEST_HISTORY_MAX_PAGE_SIZE,
@@ -34,7 +37,7 @@ import {
 } from "../../src/routing/history/indexer";
 import { InvalidCursorError } from "../../src/routing/history/cursor";
 import { metaValue, recordSourceMeta, resetAndCreateSchema, setMeta } from "../../src/routing/history/ingest";
-import { HISTORY_DB_FILENAME, HISTORY_SCHEMA_VERSION } from "../../src/routing/history/schema";
+import { HISTORY_SCHEMA_VERSION, historyIndexPath, legacyHistoryIndexPath } from "../../src/routing/history/schema";
 import { getConfigDir } from "../../src/config";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import { flushWindowsSecretAclReapsBeforeRemoval } from "../../src/lib/windows-secret-acl";
@@ -135,7 +138,7 @@ describe("request-history index (RI-02)", () => {
     appendUsageEntry(entry("legacy-id", 1234, "a", "m1"));
     await queryRequestHistory({}, undefined, 10);
     closeRequestHistoryIndex();
-    const dbFile = join(getConfigDir(), HISTORY_DB_FILENAME);
+    const dbFile = historyIndexPath(getConfigDir());
     let db = new Database(dbFile);
     try {
       setMeta(db, "source_ino", Number("9007199254740993"));
@@ -171,7 +174,44 @@ describe("request-history index (RI-02)", () => {
     expect(page.hasMore).toBe(false);
     expect(page.meta.indexedRows).toBe(0);
     expect(page.meta.schemaVersion).toBe(HISTORY_SCHEMA_VERSION);
-    expect(existsSync(join(getConfigDir(), HISTORY_DB_FILENAME))).toBe(true);
+    expect(existsSync(historyIndexPath(getConfigDir()))).toBe(true);
+  });
+
+  test("an index left beside canonical state by an older release is removed and rebuilt in its own directory", async () => {
+    for (const row of seedRows(5)) appendUsageEntry(row);
+    const legacy = legacyHistoryIndexPath(getConfigDir());
+    const child = Bun.spawn([process.execPath, "-e", ""]);
+    await child.exited;
+    // A build an older release abandoned in the root is as large as the index it was replacing.
+    const legacyBuild = `${legacy}.rebuild-${child.pid}-1`;
+    const stale = [legacy, `${legacy}-wal`, `${legacy}-shm`, legacyBuild, `${legacyBuild}-wal`];
+    for (const path of stale) writeFileSync(path, "stale index bytes");
+    const page = await queryRequestHistory({}, undefined, 10);
+    expect(page.rows.length).toBe(5);
+    expect(page.meta.dbPath).toBe(historyIndexPath(getConfigDir()));
+    for (const path of stale) expect(existsSync(path)).toBe(false);
+  });
+
+  test("a routing-time refresh indexes a bounded slice of a large tail and readers finish it", async () => {
+    for (const row of seedRows(5)) appendUsageEntry(row);
+    expect((await queryRequestHistory({}, undefined, 10)).meta.indexedRows).toBe(5);
+    const padding = "p".repeat(2_000);
+    const lines: string[] = [];
+    for (let index = 0; index < 10_000; index++) {
+      lines.push(JSON.stringify({ ...entry(`tail-${index}`, 10_000 + index), note: padding }));
+    }
+    appendFileSync(usageLogPath(), `${lines.join("\n")}\n`);
+    const size = statSync(usageLogPath()).size;
+    expect(size).toBeGreaterThan(2 * ROUTING_TAIL_INGEST_MAX_BYTES);
+    const first = openRequestHistoryIndexSync();
+    expect(first.indexedOffset).toBeGreaterThan(0);
+    expect(first.indexedOffset).toBeLessThan(size);
+    const second = openRequestHistoryIndexSync();
+    expect(second.indexedOffset).toBeGreaterThan(first.indexedOffset);
+    expect(second.indexedOffset - first.indexedOffset).toBeLessThanOrEqual(ROUTING_TAIL_INGEST_MAX_BYTES);
+    const page = await queryRequestHistory({}, undefined, 1);
+    expect(page.meta.indexedOffset).toBe(size);
+    expect(page.meta.indexedRows).toBe(10_005);
   });
 
   test("indexes appended rows incrementally", async () => {
@@ -259,18 +299,41 @@ describe("request-history index (RI-02)", () => {
     for (const row of seedRows(8)) appendUsageEntry(row);
     await queryRequestHistory({}, undefined, 10);
     closeRequestHistoryIndex();
-    const dbFile = join(getConfigDir(), HISTORY_DB_FILENAME);
+    const dbFile = historyIndexPath(getConfigDir());
     writeFileSync(dbFile, "this is not a sqlite file at all");
     const page = await queryRequestHistory({}, undefined, 10);
     expect(page.rows.length).toBe(8);
     expect(page.meta.lastError).toContain("rebuilt");
   });
 
+  test("a corrupt page in an index past the open-time check is rebuilt on the next read", async () => {
+    for (const row of seedRows(8)) appendUsageEntry(row);
+    await queryRequestHistory({}, undefined, 10);
+    closeRequestHistoryIndex();
+    const dbFile = historyIndexPath(getConfigDir());
+    const inspect = new Database(dbFile, { readonly: true });
+    const { rootpage } = inspect.query("SELECT rootpage FROM sqlite_master WHERE name = 'requests'").get() as { rootpage: number };
+    const { page_size: pageSize } = inspect.query("PRAGMA page_size").get() as { page_size: number };
+    inspect.close();
+    const bytes = readFileSync(dbFile);
+    bytes.fill(0xa5, (rootpage - 1) * pageSize, rootpage * pageSize);
+    writeFileSync(dbFile, bytes);
+    // Every index is now "large", so opening it skips quick_check and only the read can find the damage.
+    setRequestHistoryWorkerRebuildMinBytesForTests(1);
+    try {
+      const page = await queryRequestHistory({}, undefined, 10);
+      expect(page.rows.length).toBe(8);
+      expect(page.meta.lastError).toContain("rebuilt");
+    } finally {
+      setRequestHistoryWorkerRebuildMinBytesForTests(undefined);
+    }
+  });
+
   test("old schema version triggers a rebuild", async () => {
     for (const row of seedRows(4)) appendUsageEntry(row);
     await queryRequestHistory({}, undefined, 10);
     const { Database } = await import("bun:sqlite");
-    const db = new Database(join(getConfigDir(), HISTORY_DB_FILENAME));
+    const db = new Database(historyIndexPath(getConfigDir()));
     db.query("UPDATE schema_meta SET value = '999' WHERE key = 'schema_version'").run();
     db.close();
     const page = await queryRequestHistory({}, undefined, 10);
@@ -285,7 +348,7 @@ describe("request-history index (RI-02)", () => {
     await queryRequestHistory({}, undefined, 10);
     closeRequestHistoryIndex();
     const { Database } = await import("bun:sqlite");
-    const db = new Database(join(getConfigDir(), HISTORY_DB_FILENAME));
+    const db = new Database(historyIndexPath(getConfigDir()));
     db.query("UPDATE requests SET requested_model = ? WHERE request_id = 'legacy-selector'").run(selector);
     db.query("UPDATE schema_meta SET value = '1' WHERE key = 'schema_version'").run();
     db.close();

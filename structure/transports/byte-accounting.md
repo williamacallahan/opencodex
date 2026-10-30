@@ -15,6 +15,13 @@ the translator budget, which is why so many documents link here rather than rest
 
 ## Request-copy accounting
 
+The [strict Messages variant](strict-messages.md)
+retains the bounded reader's original wire buffer and charges the private snapshot and outbound
+copy to the existing translator budget. Response usage inspection never replaces forwarded bytes:
+gzip/deflate decoding has a finite decoded-byte cap even when the wire cap is disabled, and uses
+one write with a concurrent drain rather than a tee. Unsupported coding or inspection overflow
+discards observations, not upstream bytes. Cancellation releases both decoder and upstream reader.
+
 ### DeepSeek image replay
 
 First-party DeepSeek Responses bodies above 40 MiB can use

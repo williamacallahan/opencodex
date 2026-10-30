@@ -91,6 +91,7 @@ import type { ManagementRequestIngress } from "./management/context";
 export type { ManagementApiDeps } from "./management/context";
 import { fetchAllModels } from "./management/shared";
 import { CatalogGatherBusyError } from "../codex/catalog/provider-fetch";
+import { RequestHistoryIndexBusyError } from "../routing/history/indexer";
 import type { CatalogDisposition, ConvergeCodex } from "../codex/convergence-types";
 import { normalizeCatalogDisposition } from "../codex/catalog-refresh-status";
 import { managementBodyTooLargeResponse } from "./management/body";
@@ -405,10 +406,12 @@ export async function handleManagementAPI(
         headers: { "content-type": "application/json", "Retry-After": "1" },
       });
     }
-    if (!(error instanceof CatalogGatherBusyError)) throw error;
-    return new Response(JSON.stringify({ error: { type: "server_error", code: "catalog_busy", message: error.message } }), {
+    if (!(error instanceof CatalogGatherBusyError || error instanceof RequestHistoryIndexBusyError)) throw error;
+    const busyCode = error instanceof CatalogGatherBusyError ? "catalog_busy" : error.code;
+    const retryAfter = error instanceof RequestHistoryIndexBusyError ? error.retryAfterSeconds : 1;
+    return new Response(JSON.stringify({ error: { type: "server_error", code: busyCode, message: error.message } }), {
       status: 503,
-      headers: { "content-type": "application/json", "Retry-After": "1" },
+      headers: { "content-type": "application/json", "Retry-After": String(retryAfter) },
     });
   }
   if (routed) return routed;

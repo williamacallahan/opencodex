@@ -17,7 +17,7 @@
  */
 
 import type { OcxConfig } from "../types";
-import { openRequestHistoryIndexSync, requestHistoryDb } from "./history/indexer";
+import { discardCorruptRequestHistoryIndex, openRequestHistoryIndexSync, requestHistoryDb } from "./history/indexer";
 import { OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import {
   getCodexAccountCooldownUntil,
@@ -341,8 +341,9 @@ function computeHistoricalHealthEvidence(
       out.recencyWeight = decayWeight(samples[0]!.timestamp, now);
     }
     return out;
-  } catch {
-    /* index unreadable: evidence stays unknown */
+  } catch (error) {
+    // Unreadable index: evidence stays unknown. A corrupt one is discarded so the next refresh rebuilds it.
+    discardCorruptRequestHistoryIndex(error);
     return {};
   }
 }

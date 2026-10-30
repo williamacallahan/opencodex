@@ -645,8 +645,17 @@ function managementIngressConfigError(value: unknown): string | null {
       ? null
       : "schema_invalid: hub.managementIngress: disabled ingress accepts only enabled";
   }
-  if (keys.some(key => key !== "enabled" && key !== "port")) {
+  if (keys.some(key => key !== "enabled" && key !== "port" && key !== "bind")) {
     return "schema_invalid: hub.managementIngress: contains an unsupported field";
+  }
+  if (ingress.bind !== undefined && ingress.bind !== "loopback" && ingress.bind !== "container") {
+    return "schema_invalid: hub.managementIngress.bind: must be loopback or container";
+  }
+  if (ingress.bind === "container" && !(typeof hub.managementPublicOrigin === "string" && hub.managementPublicOrigin.startsWith("https://"))) {
+    return "schema_invalid: hub.managementIngress.bind: container requires HTTPS managementPublicOrigin";
+  }
+  if (ingress.bind === "container" && raw.hostname !== "0.0.0.0") {
+    return "schema_invalid: hub.managementIngress.bind: container requires hostname 0.0.0.0 for authenticated management";
   }
   const ingressPort = ingress.port;
   if (typeof ingressPort !== "number" || !Number.isInteger(ingressPort) || ingressPort < 1 || ingressPort > 65535) {

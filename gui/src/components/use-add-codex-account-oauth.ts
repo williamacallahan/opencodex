@@ -177,10 +177,16 @@ export function useAddCodexAccountOAuth({
       let resp = await requestLogin();
       if (!aliveRef.current) return;
       if (resp.status === 409) {
+        const blocking = await resp.json().catch(() => null) as { flowId?: unknown } | null;
+        const blockingFlowId = typeof blocking?.flowId === "string" ? blocking.flowId : "";
+        if (!blockingFlowId) {
+          dispatch({ type: "set-error", error: t("codexAuth.oauthAlreadyInProgress") });
+          return;
+        }
         await fetch(`${apiBase}/api/codex-auth/login/cancel`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: "{}",
+          body: JSON.stringify({ flowId: blockingFlowId }),
         });
         if (!aliveRef.current || controller.signal.aborted) return;
         resp = await requestLogin();

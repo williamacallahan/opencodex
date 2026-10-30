@@ -8,7 +8,9 @@
 
 // Version 2 rebuilds the derived projection so old raw requested-model selectors
 // are replaced by the bounded encoding already used by canonical JSONL reads.
-export const HISTORY_SCHEMA_VERSION = 2;
+// Version 3 adds the routing-health indexes; the rebuild runs on the worker, so
+// no existing index is ever indexed in place on the event loop.
+export const HISTORY_SCHEMA_VERSION = 3;
 export const HISTORY_DB_FILENAME = "routing-history.sqlite";
 
 export const HISTORY_META_KEYS = {
@@ -67,8 +69,21 @@ CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
 CREATE INDEX IF NOT EXISTS idx_requests_conversation ON requests(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_requests_api_key ON requests(api_key_id);
 CREATE INDEX IF NOT EXISTS idx_requests_profile ON requests(profile_id);
+-- Routing-time health evidence (routing/health.ts): newest rows for one candidate, and the
+-- rare multi-attempt rows. Without them each lookup scanned the whole 14-day window.
+CREATE INDEX IF NOT EXISTS idx_requests_provider_model_ts ON requests(provider, model, timestamp);
+CREATE INDEX IF NOT EXISTS idx_requests_multi_attempt_ts ON requests(timestamp) WHERE attempt_count > 1;
 `;
 
+// The index is a disposable projection, so it lives in its own directory: a deployment can keep
+// it on storage it does not back up, beside canonical state it does.
+export const HISTORY_DIR_NAME = "request-history";
+
 export function historyIndexPath(configDir: string): string {
+  return `${configDir.replace(/[\\/]+$/, "")}/${HISTORY_DIR_NAME}/${HISTORY_DB_FILENAME}`;
+}
+
+/** Where releases before the move kept the index; removed on the next open. */
+export function legacyHistoryIndexPath(configDir: string): string {
   return `${configDir.replace(/[\\/]+$/, "")}/${HISTORY_DB_FILENAME}`;
 }

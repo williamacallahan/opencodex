@@ -519,6 +519,13 @@
       ]
     },
     {
+      "path": "transports/strict-messages.md",
+      "tier": 3,
+      "title": "Strict Messages Transport",
+      "scope": "Opt-in byte-preserving managed Messages transport, final dispatch integrity, and account lifecycle boundaries.",
+      "documents": ["src/server/messages-native.ts", "src/server/messages-native-integrity.ts", "src/types/config.ts"]
+    },
+    {
       "path": "providers/anthropic-progress.md",
       "tier": 4,
       "title": "Anthropic progress updates",

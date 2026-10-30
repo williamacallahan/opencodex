@@ -61,6 +61,11 @@ ACL inspection, so the test-only intent is a convention rather than an enforced 
 `src/plugins/upstream-hooks.ts` is the only core-owned seam plugins attach to. It imports nothing,
 so the request path depends on it without depending on the loader.
 
+The opt-in [strict Messages variant](../transports/strict-messages.md)
+changes failure handling: throwing hooks refuse that send, and the final invariant rejects changed
+URLs or end-to-end headers before accounting commits. The ordinary rollback policy below remains
+unchanged for other requests. These checks do not sandbox arbitrary in-process plugin code.
+
 - It runs synchronously after the transport was chosen: HTTP in `sendWithConnectionPolicy`
   (`src/server/responses/fetch-helpers.ts`), including `Request` inputs, and the Codex WebSocket in
   `codexWsUpstreamFetch` (`src/server/responses/ws-upstream.ts`) once per exchange, before the pool

@@ -247,7 +247,13 @@ export async function handleCodexAuthLoginStart(req: Request, config: OcxConfig,
         const pollAttempts = useDeviceFlow ? 480 : 150;
         for (let i = 0; i < pollAttempts; i++) {
           await new Promise(r => setTimeout(r, 2000));
-          const st = getLoginStatus("chatgpt");
+          // A cancelled or replaced flow stops here: read by its own id, since the
+          // provider's newest flow may be the login that replaced it.
+          if (codexAuthLoginState.get(flowId) !== loginOwner || loginOwner.status !== "pending") {
+            completed = true;
+            break;
+          }
+          const st = getLoginStatus("chatgpt", true, flowId);
           if (st.done && st.loggedIn) {
             const { getCredential } = await import("../../oauth/store");
             const cred = getCredential("chatgpt");
@@ -508,7 +514,11 @@ export async function handleCodexAuthLoginStart(req: Request, config: OcxConfig,
     if (codexAuthLoginState.get(flowId) === loginOwner) codexAuthLoginState.delete(flowId);
     const msg = e instanceof Error ? e.message : String(e);
     if (msg === "A login for chatgpt is already in progress") {
-      return jsonResponse({ error: msg, status: "pending" }, 409);
+      // Name the blocking flow: cancel requires a flowId, and a caller that lost its own
+      // (reloaded tab, closed modal) otherwise has no way to clear an abandoned login.
+      const { latestLoginFlowKey } = await import("../../oauth/login-flow-state");
+      const blockingFlowId = latestLoginFlowKey("chatgpt");
+      return jsonResponse({ error: msg, status: "pending", ...(blockingFlowId ? { flowId: blockingFlowId } : {}) }, 409);
     }
     if (e instanceof CodexCredentialRefreshBusyError || e instanceof CodexCredentialRefreshStaleError) {
       const response = jsonResponse({ error: "server_busy", code: "server_busy" }, 503);

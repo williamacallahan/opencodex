@@ -896,7 +896,7 @@ function canonicalHttpOrigin(value: string): string | null {
 
 export const managementIngressSchema = z.union([
   z.object({ enabled: z.literal(false) }).strict(),
-  z.object({ enabled: z.literal(true), port: z.number().int().min(1).max(65535) }).strict(),
+  z.object({ enabled: z.literal(true), port: z.number().int().min(1).max(65535), bind: z.enum(["loopback", "container"]).optional() }).strict(),
 ]);
 
 export const hubConfigSchema = z.object({

@@ -6,7 +6,7 @@
  * or service is reached.
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../../src/config";
@@ -18,7 +18,10 @@ import type { AdmissionLease } from "../../src/lib/admission";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { startTruncatedSseUpstream } from "../helpers/truncated-sse-upstream";
-import { configureSharedSpendLedger, spendPolicyFromConfig } from "../../src/lib/spend-reservation-ledger";
+import { configureSharedSpendLedger, sharedSpendLedger, spendPolicyFromConfig, waitForSharedSpendReporterDrain } from "../../src/lib/spend-reservation-ledger";
+import { drainAndRemoveFixtureRoots } from "../helpers/fixture-teardown";
+import { registerUpstreamRewriter } from "../../src/plugins/upstream-hooks";
+import { activeRegistryMetrics } from "../../src/server/lifecycle";
 
 interface Seen {
   path: string;
@@ -618,4 +621,464 @@ describe("managed native Messages", () => {
     // Counting sends nothing.
     expect(seen).toHaveLength(1);
   });
+});
+
+describe("strict Messages public HTTP transport", () => {
+  type Captured = { url: URL; method: string; headers: Headers; bytes: Uint8Array };
+  let proxy: ReturnType<typeof import("../../src/server").startServer> | undefined;
+  let physical: ReturnType<typeof Bun.serve> | undefined;
+  let savedFetch: typeof fetch;
+  let savedClaudeHome: string | undefined;
+  let savedCodexHome: string | undefined;
+  let calls: Captured[];
+  let denied: number;
+  let priorLogIds: Set<string>;
+  const allowed = new Set<string>();
+  const encode = (text: string) => new TextEncoder().encode(text);
+  const raw = String.raw`{
+ "model" : "claude-x", "max_tokens":64, "stream":false,
+ "messages":[{"role":"user","content":"café and escaped \u0061"}],
+ "future_731":{"n":9007199254740993,"exp":1e+02,"negativeZero":-0,"dup":1,"dup":2}
+}`;
+  const reply = encode(String.raw`{ "id":"msg_strict", "type":"message", "role":"assistant", "model":"upstream-model", "content":[{"type":"text","text":"reply","opaque":"\u0061"}], "stop_reason":"end_turn", "stop_sequence":null, "usage":{"input_tokens":7,"output_tokens":2,"future":-0} }`);
+  const query = "?beta=true&future=a%2Fb&future=a+b&empty=&flag&x=%252F";
+
+  beforeEach(() => {
+    calls = []; denied = 0; allowed.clear();
+    priorLogIds = new Set(getRequestLogEntries().map(row => row.requestId));
+    savedFetch = globalThis.fetch;
+    savedClaudeHome = process.env.CLAUDE_CONFIG_DIR;
+    savedCodexHome = process.env.CODEX_HOME;
+    process.env.CLAUDE_CONFIG_DIR = join(testDir, "claude");
+    process.env.CODEX_HOME = join(testDir, "codex");
+    mkdirSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true });
+    mkdirSync(process.env.CODEX_HOME, { recursive: true });
+    writeFileSync(join(process.env.CLAUDE_CONFIG_DIR, ".credentials.json"), JSON.stringify({ claudeAiOauth: {
+      accessToken: "synthetic-unused-cli-access", refreshToken: "synthetic-unused-cli-refresh", expiresAt: Date.now() + 3_600_000,
+    } }));
+    const permit = (input: Parameters<typeof fetch>[0]) => {
+      if (allowed.has(new URL(input instanceof Request ? input.url : String(input)).origin)) return;
+      denied++;
+      throw new Error("strict fixture blocked unexpected network");
+    };
+    globalThis.fetch = Object.assign((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      permit(input);
+      return savedFetch(input, init);
+    }, { preconnect: (...args: Parameters<typeof fetch.preconnect>) => { permit(args[0]); } }) as typeof fetch;
+  });
+
+  afterEach(async () => {
+    try {
+      await proxy?.stop(true); proxy = undefined;
+      await physical?.stop(true); physical = undefined;
+      await drainAndRemoveFixtureRoots({ roots: [], restoreEnvironment() {} });
+      expect(denied).toBe(0);
+    } finally {
+      globalThis.fetch = savedFetch;
+      if (savedClaudeHome === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = savedClaudeHome;
+      if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = savedCodexHome;
+    }
+  });
+
+  async function launch(answer: (request: Captured) => Response = () => new Response(reply, {
+    headers: { "content-type": "application/json", "request-id": "req_strict_upstream", "x-future-response": "kept" },
+  }), change: (config: OcxConfig) => void = () => {}) {
+    physical = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+      const captured = { url: new URL(request.url), method: request.method, headers: request.headers,
+        bytes: new Uint8Array(await request.arrayBuffer()) };
+      calls.push(captured);
+      return answer(captured);
+    } });
+    allowed.add(physical.url.origin);
+    const config = {
+      port: 0, hostname: "127.0.0.1", defaultProvider: "anth",
+      providers: { anth: { adapter: "anthropic", baseUrl: physical.url.origin, authMode: "key",
+        apiKey: "fixture-key-alpha", allowPrivateNetwork: true, liveModels: false, models: ["claude-x"] } },
+      protocols: { rollout: { managedMessagesNative: true } },
+      clientIntegrations: { codex: false }, checkForUpdates: false, syncResumeHistory: false,
+      claudeCode: { strictPassthrough: true, intercept: { enabled: false } },
+    } as OcxConfig;
+    change(config);
+    saveConfig(config);
+    proxy = (await import("../../src/server")).startServer(0);
+    allowed.add(proxy.url.origin);
+    allowed.add(`http://127.0.0.1:${proxy.port}`);
+  }
+
+  function post(body: Uint8Array = encode(raw), path = "/v1/messages", headers: Record<string, string> = {}, signal?: AbortSignal) {
+    return fetch(new URL(path + query, `http://127.0.0.1:${proxy!.port}`), { method: "POST", body, signal,
+      decompress: false, redirect: "manual", headers: { "content-type": "application/json", ...headers } });
+  }
+
+  async function logged(response: Response) {
+    const deadline = Date.now() + 2_000;
+    while (!getRequestLogEntries().some(row => !priorLogIds.has(row.requestId)) && Date.now() < deadline) await Bun.sleep(5);
+    await waitForSharedSpendReporterDrain();
+    const rows = getRequestLogEntries().filter(row => !priorLogIds.has(row.requestId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe(response.status);
+    return rows[0]!;
+  }
+
+  test("strict lexical request and response bytes round trip through the public listener", async () => {
+    await launch();
+    const response = await post();
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.bytes).toEqual(encode(raw));
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(reply);
+    expect(response.headers.get("request-id")).toBe("req_strict_upstream");
+    expect(response.headers.get("x-future-response")).toBe("kept");
+  });
+
+  test("strict distributed-key refusals cool down later requests without replaying this request", async () => {
+    const refusal = encode('{ "type":"error", "error":{"type":"rate_limit_error","message":"wait"} }');
+    await launch(() => new Response(refusal, { status: 429, headers: { "retry-after": "30" } }), config => {
+      config.providers.anth!.apiKeyPool = [{ id: "alpha", key: "fixture-key-alpha" }, { id: "beta", key: "fixture-key-beta" }];
+      config.providers.anth!.requestPacing = { enabled: true, keySelection: "round-robin" };
+      forgetApiKeyRotationCursor("anth");
+    });
+    for (let i = 0; i < 2; i++) {
+      const response = await post();
+      expect(response.status).toBe(429);
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(refusal);
+      expect(calls).toHaveLength(i + 1);
+    }
+    expect(new Set(calls.map(call => call.headers.get("x-api-key"))).size).toBe(2);
+    const exhausted = await post();
+    expect(exhausted.status).toBe(429);
+    await exhausted.arrayBuffer();
+    expect(calls).toHaveLength(2);
+  });
+
+  for (const path of ["/v1/messages", "/v1/messages/count_tokens"]) {
+    for (const compressed of [false, true]) test(`${path}: strict entity coding, query and headers (gzip=${compressed})`, async () => {
+      const expected = path.endsWith("count_tokens") ? encode('{ "input_tokens" : 731, "future_count":{"n":1e+02} }') : reply;
+      const requestBytes = compressed ? Bun.gzipSync(encode(raw)) : encode(raw);
+      const responseBytes = compressed ? Bun.gzipSync(expected) : expected;
+      await launch(() => new Response(responseBytes, { headers: {
+        "content-type": "application/json; charset=utf-8", "x-future-response": "unchanged",
+        "request-id": "req_strict_coded", ...(compressed ? { "content-encoding": "gzip" } : {}),
+      } }), config => {
+        config.upstreamRequestCompression = "gzip";
+        config.spend = { pool: { maxTokens: 100_000 } };
+      });
+      const response = await post(requestBytes, path, {
+        "anthropic-version": "2099-01-01", "anthropic-beta": "future-beta-2099,other-beta-2099",
+        "x-future-client": "opaque", "x-api-key": "fixture-caller-key", authorization: "Bearer fixture-caller-token",
+        "connection": "x-fixture-hop", "x-fixture-hop": "must-not-leak",
+        ...(compressed ? { "content-encoding": "gzip" } : {}),
+      });
+      expect(response.status).toBe(200);
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(responseBytes);
+      expect(response.headers.get("content-encoding")).toBe(compressed ? "gzip" : null);
+      expect(response.headers.get("request-id")).toBe("req_strict_coded");
+      expect(response.headers.get("x-future-response")).toBe("unchanged");
+      expect(calls).toHaveLength(1);
+      const captured = calls[0]!;
+      expect(captured.method).toBe("POST");
+      expect(captured.url.pathname).toBe(path);
+      expect(captured.url.search).toBe(query);
+      expect(captured.bytes).toEqual(requestBytes);
+      expect(captured.headers.get("content-encoding")).toBe(compressed ? "gzip" : null);
+      expect(captured.headers.get("anthropic-version")).toBe("2099-01-01");
+      expect(captured.headers.get("anthropic-beta")).toBe("future-beta-2099,other-beta-2099");
+      expect(captured.headers.get("x-future-client")).toBe("opaque");
+      expect(captured.headers.get("x-api-key")).toBe("fixture-key-alpha");
+      expect(captured.headers.has("authorization")).toBe(false);
+      expect(captured.headers.has("x-fixture-hop")).toBe(false);
+      const row = await logged(response);
+      const spend = sharedSpendLedger().snapshot("pool", "anth");
+      if (path.endsWith("count_tokens")) {
+        expect(row.usage?.inputTokens ?? 0).toBe(0);
+        expect(row.usage?.outputTokens ?? 0).toBe(0);
+        expect(spend?.settled ?? 0).toBe(0);
+      } else {
+        expect(row.usage).toMatchObject({ inputTokens: 7, outputTokens: 2 });
+        expect(spend?.settled).toBe(9);
+      }
+      expect(spend?.reserved ?? 0).toBe(0);
+      expect(spend?.unresolved ?? 0).toBe(0);
+    });
+
+    for (const prefix of ["", "/strict"]) test(`${prefix}${path}: strict configured-key scope still gates dispatch and never leaks gateway auth`, async () => {
+      const key = (id: string) => `ocx_data_${id.repeat(40)}`;
+      await launch(undefined, config => {
+        // Authenticated listener policy; clients and the dummy upstream still use loopback only.
+        config.hostname = "0.0.0.0";
+        config.claudeCode!.strictPassthrough = prefix === "";
+        config.apiKeys = [
+          { id: "open", name: "fixture-open", key: key("a"), createdAt: "2026-01-01T00:00:00.000Z" },
+          { id: "model", name: "fixture-model", key: key("b"), createdAt: "2026-01-01T00:00:00.000Z", allowedModels: ["other-model"] },
+          { id: "provider", name: "fixture-provider", key: key("c"), createdAt: "2026-01-01T00:00:00.000Z", allowedProviders: ["other-provider"] },
+        ];
+      });
+      const unauthenticated = await post(encode(raw), prefix + path);
+      expect(unauthenticated.status).toBe(401);
+      await unauthenticated.arrayBuffer();
+      expect(calls).toHaveLength(0);
+      for (const id of ["b", "c"]) {
+        const denied = await post(encode(raw), prefix + path, { "x-opencodex-api-key": key(id) });
+        expect(denied.status).toBe(403);
+        expect(await denied.text()).toContain("model_not_allowed_for_key");
+        expect(calls).toHaveLength(0);
+      }
+      const permitted = await post(encode(raw), prefix + path, { "x-opencodex-api-key": key("a") });
+      expect(permitted.status).toBe(200);
+      await permitted.arrayBuffer();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.headers.has("x-opencodex-api-key")).toBe(false);
+      expect(calls[0]!.headers.get("x-api-key")).toBe("fixture-key-alpha");
+      expect(calls[0]!.bytes).toEqual(encode(raw));
+    });
+
+    test(`${path}: strict unknown fields and opaque tool history have no schema projection`, async () => {
+      await launch(request => new Response(request.bytes, { headers: { "content-type": "application/json" } }));
+      // Each location and spelling varies independently of any production field inventory.
+      for (let i = 0; i < 4; i++) {
+        const key = `future_${731 + i * 19}`;
+        const body = encode(String.raw`{ "model":"claude-x", "max_tokens":64,
+ "${key}":[null,false,0,[],{}], "metadata":{"${key}":1e+02}, "output_config":{"${key}":-0},
+ "tools":[{"name":"custom.tool-${i}","${key}":true,"input_schema":{"type":"object","${key}":{"dup":1,"dup":2}}}],
+ "messages":[{"role":"assistant","${key}":0,"content":[
+ {"type":"thinking","thinking":"opaque","signature":"sig+/==\\\u0061","${key}":null},
+ {"type":"redacted_thinking","data":"opaque==","${key}":false},
+ {"type":"tool_use","id":"tool/id:${i}","name":"custom.tool-${i}","input":{"${key}":9007199254740993}},
+ {"type":"future_block_${i}","${key}":["${String.fromCodePoint(0x1f98a)}", "\u0061"]}]},
+ {"role":"user","content":[{"type":"tool_result","tool_use_id":"tool/id:${i}","content":"done","${key}":[]}]}] }`);
+        expect(() => JSON.parse(new TextDecoder().decode(body))).not.toThrow();
+        const response = await post(body, path);
+        const returned = new Uint8Array(await response.arrayBuffer());
+        expect(response.status, new TextDecoder().decode(returned)).toBe(200);
+        expect(returned).toEqual(body);
+        expect(calls.at(-1)!.bytes).toEqual(body);
+      }
+      expect(calls).toHaveLength(4);
+    });
+  }
+
+  for (const status of [400, 401, 403, 429, 529, 307]) test(`strict preserves ${status} bytes without retry or redirect`, async () => {
+    const bytes = encode(status === 529 ? "not JSON\u0000upstream error" : '{ "type":"error", "future":-0, "error":{"type":"future_error","message":"fixture refusal"} }');
+    await launch(() => new Response(bytes, { status, headers: {
+      "content-type": "application/octet-stream", "retry-after": "13", "request-id": "req_refused",
+      location: `${physical!.url.origin}/redirect-target`,
+    } }), config => {
+      config.providers.anth!.apiKeyPool = [
+        { id: "k1", key: "fixture-key-alpha", addedAt: 1 }, { id: "k2", key: "fixture-key-beta", addedAt: 2 },
+      ];
+    });
+    const response = await post();
+    expect(response.status).toBe(status);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
+    expect(response.headers.get("retry-after")).toBe("13");
+    expect(response.headers.get("request-id")).toBe("req_refused");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url.pathname).toBe("/v1/messages");
+  });
+
+  for (const mutation of ["none", "url", "header", "auth", "connection-nomination", "rewrite-then-throw"] as const) {
+    test(`strict final-send plugin mutation ${mutation} is checked before upstream`, async () => {
+      await launch(undefined, config => { config.spend = { pool: { maxTokens: 100_000 } }; });
+      let injected = 0;
+      const unregister = registerUpstreamRewriter("strict-fixture-mutation", target => {
+        injected++;
+        if (mutation === "url") target.url += "&changed=1";
+        if (mutation === "header") target.headers.set("anthropic-version", "changed");
+        if (mutation === "auth") target.headers.set("x-api-key", "fixture-substituted-key");
+        if (mutation === "connection-nomination") {
+          target.headers.set("x-plugin-injected", "would-leak");
+          target.headers.set("connection", "x-plugin-injected");
+        }
+        if (mutation === "rewrite-then-throw") {
+          target.url += "&changed=1";
+          throw new Error("synthetic plugin failure after rewrite");
+        }
+      });
+      try {
+        const response = await post();
+        await response.arrayBuffer();
+        expect(injected).toBeGreaterThan(0);
+        if (mutation === "none") {
+          expect(response.status).toBe(200);
+          expect(calls).toHaveLength(1);
+          expect(calls[0]!.bytes).toEqual(encode(raw));
+        } else {
+          expect(response.status).toBeGreaterThanOrEqual(400);
+          expect(calls).toHaveLength(0);
+        }
+        await logged(response);
+        const spend = sharedSpendLedger().snapshot("pool", "anth");
+        expect(spend?.settled ?? 0).toBe(mutation === "none" ? 9 : 0);
+        expect(spend?.reserved ?? 0).toBe(0);
+        expect(spend?.unresolved ?? 0).toBe(0);
+        const journal = join(testDir, "spend-ledger.jsonl");
+        const records = existsSync(journal) ? readFileSync(journal, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
+        expect(records.filter(record => record.kind === "dispatch")).toHaveLength(mutation === "none" ? 1 : 0);
+      } finally { unregister(); }
+    });
+  }
+
+  const refusals: Array<[string, (config: OcxConfig) => void, string]> = [
+    ["nonboolean flag", config => { Object.assign(config.claudeCode!, { strictPassthrough: "true" }); }, raw],
+    ["non-Anthropic provider", config => { config.providers.anth!.adapter = "openai-chat"; }, raw],
+    ["provider-prefixed model", () => {}, raw.replace('"claude-x"', '"anth/claude-x"')],
+    ["rewritten alias", config => { config.providers.anth!.modelAliases = { "claude-x": "fixture-alias" }; }, raw.replace('"claude-x"', '"fixture-alias"')],
+    ["provider header override", config => { config.providers.anth!.headers = { "x-extra": "would-transform" }; }, raw],
+    ["closed Messages surface", config => { config.apiSurfaces = { messages: { enabled: false } }; }, raw],
+    ["missing credential", config => { config.providers.anth!.apiKey = ""; }, raw],
+  ];
+  for (const [name, change, body] of refusals) for (const path of ["/v1/messages", "/v1/messages/count_tokens"]) {
+    test(`strict ${name} refuses ${path} before network`, async () => {
+      await launch(undefined, change);
+      const response = await post(encode(body), path);
+      await response.arrayBuffer();
+      expect(response.status).toBeGreaterThanOrEqual(400);
+      expect(calls).toHaveLength(0);
+    });
+  }
+
+  for (const strict of [false, undefined]) test(`strict=${strict} retains managed-native projection`, async () => {
+    await launch(undefined, config => { Object.assign(config.claudeCode!, { strictPassthrough: strict }); });
+    for (const path of ["/strict/v1/messages", "/strict/v1/messages/count_tokens"]) {
+      const preserved = await post(encode(raw), path);
+      expect(preserved.status).toBe(200);
+      expect(new Uint8Array(await preserved.arrayBuffer())).toEqual(reply);
+      expect(calls.at(-1)!.bytes).toEqual(encode(raw));
+      expect(calls.at(-1)!.url.pathname).toBe(path.slice("/strict".length));
+      expect(calls.at(-1)!.url.search).toBe(query);
+      expect(calls.at(-1)!.headers.has("session_id")).toBe(false);
+    }
+    const response = await post();
+    await response.arrayBuffer();
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(3);
+    expect(calls[2]!.bytes).not.toEqual(encode(raw));
+    expect(JSON.parse(new TextDecoder().decode(calls[2]!.bytes))).not.toHaveProperty("future_731");
+  });
+
+  const opaqueSse = encode(': comment\r\nid: future-1\r\nretry: 17\r\nevent: future_event\r\ndata: {"opaque":"🦊"}\r\ndata: not-json\r\n\r\nevent: error\ndata: {"future_error":-0}\n\nevent: unfinished\ndata: {"cut":');
+  test("strict gzip SSE preserves its entity while recording actual usage", async () => {
+    const bytes = Bun.gzipSync(encode(SSE_TEXT));
+    await launch(() => new Response(bytes, { headers: { "content-type": "text/event-stream", "content-encoding": "gzip" } }),
+      config => { config.spend = { pool: { maxTokens: 100_000 } }; });
+    const response = await post(encode(raw.replace('"stream":false', '"stream":true')));
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
+    expect(response.headers.get("content-encoding")).toBe("gzip");
+    expect((await logged(response)).usage).toMatchObject({ inputTokens: 7, outputTokens: 7, cacheReadInputTokens: 2 });
+    expect(sharedSpendLedger().snapshot("pool", "anth")).toMatchObject({ settled: 14, reserved: 0, unresolved: 0 });
+    expect(calls).toHaveLength(1);
+  });
+
+  for (const end of ["eof", "cancel"] as const) test(`strict delayed count body retains its turn until ${end}`, async () => {
+    let held: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const bytes = Bun.gzipSync(encode('{ "input_tokens":731 }'));
+    const split = Math.floor(bytes.length / 2);
+    const abort = new AbortController();
+    await launch(() => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      held = controller; controller.enqueue(bytes.slice(0, split));
+    } }), { headers: { "content-type": "application/json", "content-encoding": "gzip" } }),
+    config => { config.spend = { pool: { maxTokens: 100_000 } }; });
+    const response = await post(encode(raw), "/v1/messages/count_tokens", {}, AbortSignal.any([abort.signal, AbortSignal.timeout(3_000)]));
+    const reader = response.body!.getReader();
+    try {
+      expect(response.status).toBe(200);
+      // Observe actual client bytes before checking the lease, not merely upstream handler entry.
+      const received: number[] = [];
+      while (received.length < split) {
+        const chunk = await reader.read();
+        expect(chunk.done).toBe(false); received.push(...chunk.value!);
+      }
+      expect(Uint8Array.from(received)).toEqual(bytes.slice(0, split));
+      expect(activeRegistryMetrics().activeTurns!.active).toBe(1);
+      if (end === "eof") {
+        held!.enqueue(bytes.slice(split)); held!.close();
+        for (;;) { const chunk = await reader.read(); if (chunk.done) break; received.push(...chunk.value); }
+        expect(Uint8Array.from(received)).toEqual(bytes);
+        await logged(response);
+      } else { abort.abort(); await reader.cancel().catch(() => {}); }
+      const deadline = Date.now() + 2_000;
+      while (activeRegistryMetrics().activeTurns!.active !== 0 && Date.now() < deadline) await Bun.sleep(5);
+      expect(activeRegistryMetrics().activeTurns!.active).toBe(0);
+      await waitForSharedSpendReporterDrain();
+      const spend = sharedSpendLedger().snapshot("pool", "anth");
+      expect(spend?.reserved ?? 0).toBe(0);
+      expect(spend?.unresolved ?? 0).toBe(0);
+      expect(calls).toHaveLength(1);
+    } finally { abort.abort(); await reader.cancel().catch(() => {}); }
+  });
+
+  for (const compressed of [false, true]) test(`strict opaque partial SSE has no repair or parsing (gzip=${compressed})`, async () => {
+    const bytes = compressed ? Bun.gzipSync(opaqueSse) : opaqueSse;
+    await launch(() => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        // One-byte source chunks split UTF-8, CRLF and every SSE field; network coalescing is allowed.
+        for (const byte of bytes) controller.enqueue(Uint8Array.of(byte));
+        controller.close();
+      },
+    }), { headers: { "content-type": "text/event-stream", ...(compressed ? { "content-encoding": "gzip" } : {}) } }));
+    const response = await post(encode(raw.replace('"stream":false', '"stream":true')));
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("strict SSE socket reset after output never replays or appends a replacement event", async () => {
+    const prefix = ': reset after this opaque prefix\nevent: future\ndata: {"partial":';
+    const reset = startTruncatedSseUpstream(prefix);
+    allowed.add(`http://127.0.0.1:${reset.port}`);
+    const abort = new AbortController();
+    try {
+      await launch(undefined, config => { config.providers.anth!.baseUrl = `http://127.0.0.1:${reset.port}`; });
+      const response = await post(encode(raw.replace('"stream":false', '"stream":true')), "/v1/messages", {}, abort.signal);
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      const received: number[] = [];
+      try {
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          received.push(...chunk.value);
+        }
+      } catch { /* A transport reset may be exposed as a body error, never as invented SSE. */ }
+      finally { await reader.cancel().catch(() => {}); }
+      expect(Uint8Array.from(received)).toEqual(encode(prefix));
+      expect(reset.requests()).toBe(1);
+    } finally { abort.abort(); reset.stop(); }
+  });
+
+  test("strict SSE delivers a prefix before EOF and cancellation releases upstream", async () => {
+    const cancelled = Promise.withResolvers<void>();
+    const prefix = encode(": first bytes, not a recognized event\n\n");
+    await launch(() => calls.length === 1 ? new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(prefix); },
+      cancel() { cancelled.resolve(); },
+    }, { highWaterMark: 0 }), { headers: { "content-type": "text/event-stream" } }) : new Response(reply), config => {
+      config.providers.anth!.requestPacing = { enabled: true, maxConcurrentRequests: 1 };
+    });
+    const abort = new AbortController();
+    const response = await post(encode(raw.replace('"stream":false', '"stream":true')), "/v1/messages", {}, abort.signal);
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    try {
+      const received: number[] = [];
+      while (received.length < prefix.length) {
+        const chunk = await reader.read();
+        expect(chunk.done).toBe(false);
+        received.push(...chunk.value!);
+      }
+      expect(Uint8Array.from(received)).toEqual(prefix);
+      abort.abort();
+      await cancelled.promise;
+      const next = await post();
+      expect(next.status).toBe(200);
+      await next.arrayBuffer();
+      expect(calls).toHaveLength(2);
+    } finally {
+      abort.abort();
+      await reader.cancel().catch(() => {});
+    }
+  }, 10_000);
 });

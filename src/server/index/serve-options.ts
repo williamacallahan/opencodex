@@ -212,7 +212,7 @@ import { withGrokSessionIdentity } from "../../grok/session-identity";
 import { withCallerSessionIdentity } from "../caller-session-identity";
 import { agentAssertionUnsupportedResponse, hasAgentAssertionAuthorization } from "../../lib/authorization-scheme";
 
-export type ServerIngress = "public" | "unauthenticated-loopback" | "hub-management" | "claude-intercept" | "hub-link";
+export type ServerIngress = "public" | "unauthenticated-loopback" | "hub-management" | "hub-management-container" | "claude-intercept" | "hub-link";
 
 export function trustedLoopbackForIngress(ingress: ServerIngress, hostname: string): boolean {
   return ingress === "unauthenticated-loopback"
@@ -319,9 +319,10 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       maxRequestBodySize: inboundBodyLimitBytes,
       async fetch(req: Request, requestServer: Server<WsData>): Promise<Response> {
       const ingress = ingressForServer(requestServer);
+      const managementIngress = ingress === "hub-management" || ingress === "hub-management-container";
       // Bind management-origin trust to the actual Bun listener object resolved above.
       // Neither Host nor any X-Forwarded-* header can manufacture this process-local mark.
-      if (ingress === "hub-management" && config.runtimeRole === "hub") {
+      if (managementIngress && config.runtimeRole === "hub") {
         markTrustedHubManagementRequest(req);
       }
       const requestUrl = codexCompatibleUrl(req.url);
@@ -343,9 +344,9 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           linkPolicyView!,
         );
       }
-      // Tailscale Serve terminates only on this separately bound loopback socket. Reject before
+      // Management sockets reject before
       // dispatch so no data, readiness, health, WebSocket, or unknown-static handler can run.
-      if (ingress === "hub-management" && !managementIngressRouteAllowed(codexCompatibleUrl(req.url), req)) {
+      if (managementIngress && !managementIngressRouteAllowed(codexCompatibleUrl(req.url), req)) {
         return withCors(
           formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${new URL(req.url).pathname}`),
           req,
@@ -1524,7 +1525,14 @@ export function createServeOptions(ctx: ServeOptionsContext) {
 
       // Anthropic Messages inbound (Claude Code). count_tokens FIRST (longer path).
       // Claude Code posts `/v1/messages?beta=true` — pathname match ignores the query (003 G9).
-      if (url.pathname === "/v1/messages/count_tokens" && req.method === "POST") {
+      // An explicit public base URL isolates strict callers without changing shared config.
+      const strictMessagesPath = ingress === "public" &&
+        (url.pathname === "/strict/v1/messages" || url.pathname === "/strict/v1/messages/count_tokens");
+      const messagesConfig = strictMessagesPath
+        ? { ...config, claudeCode: { ...config.claudeCode, strictPassthrough: true } }
+        : config;
+      const messagesPath = strictMessagesPath ? url.pathname.slice("/strict".length) : url.pathname;
+      if (messagesPath === "/v1/messages/count_tokens" && req.method === "POST") {
         if (isDraining()) {
           return drainingResponse(req, policy);
         }
@@ -1535,14 +1543,14 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         if (!isAllowedRequestOrigin(req, policy)) {
           return withCors(anthropicErrorResponse(403, "cross-origin data-plane request blocked", "permission_error"), req, policy);
         }
-        return runAdmittedHttpTurn(req, policy, async () => withCors(
-          await handleClaudeCountTokens(req, config, policy, { claudeIntercept: ingress === "claude-intercept" }),
+        return runAdmittedHttpTurn(req, policy, async (turnAdmissionLease) => withCors(
+          await handleClaudeCountTokens(req, messagesConfig, policy, { claudeIntercept: ingress === "claude-intercept", admission, turnAdmissionLease }),
           req,
           policy,
         ));
       }
 
-      if (url.pathname === "/v1/messages" && req.method === "POST") {
+      if (messagesPath === "/v1/messages" && req.method === "POST") {
         disableResponsesRequestTimeout(req, requestServer);
         if (isDraining()) {
           return drainingResponse(req, policy);
@@ -1566,17 +1574,17 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         // Logging is finalized inside handleClaudeMessages (Responses-vocab tap on the
         // pre-translation stream + native passthrough callbacks) — do not re-wrap the
         // translated Anthropic stream here.
-        const sessionReq = withCallerSessionIdentity(req, admission);
+        const sessionReq = messagesConfig.claudeCode?.strictPassthrough ? req : withCallerSessionIdentity(req, admission);
         // Entering the handler, or a logged refusal, means the final request log owns requestId.
         let ownsRequestLog = false;
         const claimRequestLog = (work: (lease: ActiveTurnLease) => Promise<Response>) =>
           (lease: ActiveTurnLease) => { ownsRequestLog = true; return work(lease); };
         const response = await runAdmittedHttpTurn(sessionReq, policy, claimRequestLog(async turnAdmissionLease => withCors(
-          await handleClaudeMessages(sessionReq, config, logCtx, { requestId, start, turnAdmissionLease, admission }, policy, { claudeIntercept: ingress === "claude-intercept" }),
+          await handleClaudeMessages(sessionReq, messagesConfig, logCtx, { requestId, start, turnAdmissionLease, admission }, policy, { claudeIntercept: ingress === "claude-intercept" }),
           req,
           policy,
         )), { requestId, start, logCtx, onLogged: () => { ownsRequestLog = true; } });
-        return ownsRequestLog ? withMessagesRequestLogId(response, requestId) : response;
+        return ownsRequestLog && !messagesConfig.claudeCode?.strictPassthrough ? withMessagesRequestLogId(response, requestId) : response;
       }
 
       // OpenAI Chat Completions inbound (GitHub Copilot App / OpenAI-compatible clients).
@@ -1919,7 +1927,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           }
           const pairing = managementAuth.available
             ? consumeGuiPairingGrant(req, body, config, managementAuth, Date.now(), {
-              ingress: ingress === "hub-management" ? "hub-management" : "public",
+              ingress: managementIngress ? "hub-management" : "public",
               peerAddress: requestServer.requestIP(req)?.address ?? null,
               tailscaleUser: ingress === "hub-management" ? req.headers.get("Tailscale-User-Login") : null,
               browserOrigin: req.headers.get("Origin") ?? "",

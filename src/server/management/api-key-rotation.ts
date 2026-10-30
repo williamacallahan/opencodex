@@ -34,13 +34,14 @@ export function startApiKeyRotation(
   config: OcxConfig,
   keyId: string,
   now = Date.now(),
+  replacementKey?: string,
 ): ApiKeyRotationStart | { error: "not-found" | "already-pending" } {
   const entry = (config.apiKeys ?? []).find(candidate => candidate.id === keyId);
   if (!entry) return { error: "not-found" };
   if (entry.pendingRotation && Date.parse(entry.pendingRotation.expiresAt) > now) {
     return { error: "already-pending" };
   }
-  const key = `ocx_data_${randomBytes(20).toString("hex")}`;
+  const key = replacementKey ?? `ocx_data_${randomBytes(20).toString("hex")}`;
   const rotationId = randomUUID();
   const createdAt = new Date(now).toISOString();
   const expiresAt = new Date(now + API_KEY_ROTATION_TTL_MS).toISOString();

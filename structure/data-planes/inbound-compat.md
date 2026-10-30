@@ -10,6 +10,10 @@ Thinking enablement is separate from strength: `src/responses/schema.ts` accepts
 The names used for these paths (native, translated, legacy bridge) and the declared per-feature
 dispositions are owned by [Protocol Paths](protocol-paths.md).
 
+Opt-in [strict Messages transport](../transports/strict-messages.md) precedes
+both caller passthrough and translation. Its upstream count_tokens operation retains managed
+admission and response-lifetime ownership instead of returning a local estimate.
+
 Native result continuations and function-result injection follow [the mode-specific result and control contract](../transports/streaming-health.md#experimental-native-function-result-injection); this surface does not infer upstream support or alter its defaults.
 
 Native steering follows [the shared WebSocket contract](../transports/streaming-health.md#experimental-native-mid-turn-steering); this surface's defaults remain unchanged.

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,7 @@ import { handleOauthAccountRoutes } from "../../src/server/management/oauth-acco
 import type { ManagementContext } from "../../src/server/management/context";
 import { isDataPlaneAdmissionSecret } from "../../src/server/auth-cors";
 import { ownAdmissionTokens } from "../../src/claude/auth-detect";
+import * as keyUsage from "../../src/server/management/api-key-usage";
 import { commitClientKeyRotation, startClientKeyRotation } from "../../src/client/hub-client";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -99,7 +100,78 @@ afterEach(() => {
   testHome = "";
 });
 
+test("minimal key discovery returns metadata while the historical usage reader is stalled", async () => {
+  const config = baseConfig();
+  config.apiKeys = [{ id: "metadata-key", name: "metadata", key: "synthetic-data-key", createdAt: "2026-01-01T00:00:00Z" }];
+  saveConfig(config);
+  const stalled = spyOn(keyUsage, "readApiKeyUsageRollup").mockImplementation(() => new Promise(() => {}));
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/api/keys", server.url), {
+      headers: { "x-opencodex-api-key": ADMIN_TOKEN, Prefer: "return=minimal" },
+      signal: AbortSignal.timeout(1000),
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.usageIncluded).toBe(false);
+    expect(body.keys[0]).toMatchObject({ id: "metadata-key", name: "metadata" });
+    expect(body.keys[0]).not.toHaveProperty("usage");
+    expect(body.authMatrix.length).toBeGreaterThan(0);
+    expect(JSON.stringify(body)).not.toContain("synthetic-data-key");
+  } finally { stalled.mockRestore(); await server.stop(true); }
+});
+
 describe("API key rotation", () => {
+  test("an operator-supplied client credential rotates under the existing key identity and scope", async () => {
+    saveConfig(baseConfig());
+    const server = startServer(0);
+    const replacement = "native-subscription-fixture-" + "a".repeat(64);
+    try {
+      const created = await keysRequest(server, "POST", { name: "native client" });
+      const id = created.json.id as string;
+      const oldKey = created.json.key as string;
+      expect((await keysRequest(server, "PATCH", { id, allowedProviders: ["anthropic"] })).status).toBe(200);
+      const started = await managementRequest(server, "/api/keys/rotate", "POST", { id, key: replacement });
+      expect(started.status).toBe(201);
+      expect(started.json.key).toBe(replacement);
+      expect(isDataPlaneAdmissionSecret(replacement, loadConfig())).toBe(true);
+      expect(isDataPlaneAdmissionSecret(oldKey, loadConfig())).toBe(true);
+      const conflict = await managementRequest(server, "/api/keys/rotate", "POST", { id, key: oldKey });
+      expect(conflict.status).toBe(409);
+      expect((await managementRequest(server, "/api/keys/rotate/commit", "POST", { id, rotationId: started.json.rotationId })).status).toBe(200);
+      const stored = loadConfig().apiKeys?.find(key => key.id === id);
+      expect(stored?.key).toBe(replacement);
+      expect(stored?.allowedProviders).toEqual(["anthropic"]);
+      expect(isDataPlaneAdmissionSecret(oldKey, loadConfig())).toBe(false);
+      expect((await managementRequest(server, "/api/keys/rotate", "POST", { id, key: replacement })).status).toBe(409);
+      const listed = await fetch(new URL("/api/keys", server.url), { headers: { "x-opencodex-api-key": ADMIN_TOKEN, Prefer: "return=minimal" } });
+      expect(JSON.stringify(await listed.json())).not.toContain(replacement);
+      for (const key of [null, "short", " " + replacement, replacement + "\n", "Å".repeat(50), "ocx_admin_" + "b".repeat(64)]) {
+        const refused = await managementRequest(server, "/api/keys/rotate", "POST", { id, key });
+        expect([400, 409]).toContain(refused.status);
+        expect(loadConfig().apiKeys?.find(entry => entry.id === id)?.pendingRotation).toBeUndefined();
+      }
+    } finally { await server.stop(true); }
+  });
+
+  test("a file-backed management credential cannot become a data credential", async () => {
+    const config = baseConfig();
+    config.apiKeys = [{ id: "client", name: "client", key: "c".repeat(64), createdAt: "2026-01-01T00:00:00Z" }];
+    saveConfig(config);
+    delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+    const admin = "ocx_admin_" + "e".repeat(43);
+    writeFileSync(join(testHome, "admin-api-token"), admin, { mode: 0o600 });
+    const server = startServer(0);
+    try {
+      const response = await fetch(new URL("/api/keys/rotate", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json", "x-opencodex-api-key": admin },
+        body: JSON.stringify({ id: "client", key: admin }),
+      });
+      expect(response.status).toBe(409);
+      expect(loadConfig().apiKeys?.[0]?.pendingRotation).toBeUndefined();
+    } finally { await server.stop(true); }
+  });
+
   test("BUG-R3303 completes the server-to-client rotation round trip with the persisted creation time", async () => {
     saveConfig(baseConfig());
     const server = startServer(0);

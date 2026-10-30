@@ -8,7 +8,7 @@ import { rotateAnthropicAccountOn429 } from "../helpers/anthropic-shared-quota";
  * synthetic, and any real network call fails the case.
  */
 import { afterEach, beforeEach, describe, expect, test, spyOn, mock } from "bun:test";
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deriveAnthropicAccountDeviceId } from "../../src/adapters/anthropic/account-metadata";
@@ -27,6 +27,7 @@ import { providerRequestPacingStatus, resetProviderRequestPacingForTest, waitFor
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { drainAndRemoveFixtureRoots } from "../helpers/fixture-teardown";
 
 const ALLOWED_BETA = "interleaved-thinking-2025-05-14";
 const UNKNOWN_BETA = "fixture-unlisted-beta-2099-01-01";
@@ -915,4 +916,178 @@ test("malformed native model routes answer 400 rather than an authentication ref
   expect(response.status).toBe(400);
   expect(JSON.parse(text).error.type).toBe("invalid_request_error");
   expect(sent).toHaveLength(0);
+});
+
+describe("strict Messages OAuth public HTTP transport", () => {
+  type Captured = { path: string; search: string; headers: Headers; bytes: Uint8Array };
+  let proxy: ReturnType<typeof import("../../src/server").startServer> | undefined;
+  let upstream: ReturnType<typeof Bun.serve> | undefined;
+  let previousClaude: string | undefined;
+  let previousCodex: string | undefined;
+  let captured: Captured[];
+  let config: OcxConfig;
+  const encode = (text: string) => new TextEncoder().encode(text);
+  const raw = String.raw`{ "model":"claude-sonnet-4-5", "max_tokens":64, "stream":false,
+ "system":"caller-owned system", "metadata":{"user_id":"caller-owned","future":-0},
+ "tools":[{"name":"custom.lookup","input_schema":{"type":"object","future":[]}}],
+ "messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"opaque","signature":"sig+/==\u0061"},
+ {"type":"tool_use","id":"tool/id:1","name":"custom.lookup","input":{"future":1e+02}}]},
+ {"role":"user","content":[{"type":"tool_result","tool_use_id":"tool/id:1","content":"done"}]}],
+ "future":{"large":9007199254740993,"dup":1,"dup":2} }`;
+  const answer = encode('{ "id":"msg_strict_oauth", "type":"message", "role":"assistant", "model":"upstream-model", "content":[{"type":"tool_use","id":"tool/id:2","name":"custom.lookup","input":{"future":-0}}], "stop_reason":"tool_use", "usage":{"input_tokens":9,"output_tokens":4} }');
+
+  beforeEach(() => {
+    captured = [];
+    previousClaude = process.env.CLAUDE_CONFIG_DIR;
+    previousCodex = process.env.CODEX_HOME;
+    process.env.CLAUDE_CONFIG_DIR = join(home, "claude");
+    process.env.CODEX_HOME = join(home, "codex");
+    mkdirSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true });
+    mkdirSync(process.env.CODEX_HOME, { recursive: true });
+    writeFileSync(join(process.env.CLAUDE_CONFIG_DIR, ".credentials.json"), JSON.stringify({ claudeAiOauth: {
+      accessToken: "synthetic-unused-cli-access", refreshToken: "synthetic-unused-cli-refresh", expiresAt: Date.now() + 3_600_000,
+    } }));
+    // Canonical OAuth destinations are intercepted only at the physical executor, AFTER the
+    // production integrity check. Native fetch is called exclusively with these fixture origins.
+    globalThis.fetch = Object.assign((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.origin === proxy?.url.origin || url.origin === upstream?.url.origin) return originalFetch(input, init);
+      if (upstream && url.origin === "https://api.anthropic.com"
+        && ["/v1/messages", "/v1/messages/count_tokens"].includes(url.pathname)) {
+        return originalFetch(new URL(url.pathname + url.search, upstream.url), init);
+      }
+      unexpectedFetches++;
+      throw new Error("strict OAuth fixture blocked unexpected network");
+    }, { preconnect(input: Parameters<typeof fetch.preconnect>[0]) {
+      const origin = new URL(String(input)).origin;
+      if (origin === proxy?.url.origin || origin === upstream?.url.origin || origin === "https://api.anthropic.com") return;
+      unexpectedFetches++;
+      throw new Error("strict OAuth fixture blocked unexpected preconnect");
+    } }) as typeof fetch;
+  });
+
+  afterEach(async () => {
+    try {
+      await proxy?.stop(true); proxy = undefined;
+      await upstream?.stop(true); upstream = undefined;
+      await drainAndRemoveFixtureRoots({ roots: [], restoreEnvironment() {} });
+    } finally {
+      if (previousClaude === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousClaude;
+      if (previousCodex === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodex;
+    }
+  });
+
+  async function launch(reply: (request: Captured) => Response = request => new Response(
+    request.path.endsWith("count_tokens") ? encode('{ "input_tokens":731, "future":-0 }') : answer,
+    { headers: { "content-type": "application/json", "request-id": "req_oauth_strict" } }),
+  configure: (config: OcxConfig) => void = () => {}) {
+    upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
+      const url = new URL(req.url);
+      const entry = { path: url.pathname, search: url.search, headers: req.headers, bytes: new Uint8Array(await req.arrayBuffer()) };
+      captured.push(entry);
+      return reply(entry);
+    } });
+    config = {
+      port: 0, hostname: "127.0.0.1", defaultProvider: "anthropic", anthropicAccountPool: { enabled: true },
+      providers: { anthropic: { adapter: "anthropic", baseUrl: "https://api.anthropic.com", authMode: "oauth",
+        models: ["claude-sonnet-4-5"], liveModels: false } },
+      protocols: { rollout: { managedMessagesNative: true, managedMessagesNativeOAuth: true } },
+      clientIntegrations: { codex: false }, checkForUpdates: false, syncResumeHistory: false,
+      claudeCode: { strictPassthrough: true, intercept: { enabled: false } },
+    } as OcxConfig;
+    configure(config);
+    saveConfig(config);
+    proxy = (await import("../../src/server")).startServer(0);
+  }
+
+  function post(path = "/v1/messages", body = raw, signal?: AbortSignal) {
+    return fetch(new URL(path + "?beta=true&future=a%2Fb&future=a+b", proxy!.url), {
+      method: "POST", body: encode(body), signal, decompress: false, headers: {
+        "content-type": "application/json", "authorization": "Bearer fixture-caller-token", "x-api-key": "fixture-caller-key",
+        "anthropic-beta": "future-beta-2099", "anthropic-version": "2099-01-01",
+      },
+    });
+  }
+
+  for (const path of ["/v1/messages", "/v1/messages/count_tokens"]) {
+    test(`strict OAuth selection only changes auth for ${path}`, async () => {
+      const ids = await seed(2);
+      await setAccountPaused("anthropic", ids[0]!, true);
+      await launch();
+      const response = await post(path);
+      expect(response.status).toBe(200);
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(path.endsWith("count_tokens")
+        ? encode('{ "input_tokens":731, "future":-0 }') : answer);
+      expect(response.headers.get("request-id")).toBe("req_oauth_strict");
+      expect(captured).toHaveLength(1);
+      expect(captured[0]!.bytes).toEqual(encode(raw));
+      expect(captured[0]!.path).toBe(path);
+      expect(captured[0]!.search).toBe("?beta=true&future=a%2Fb&future=a+b");
+      expect(captured[0]!.headers.get("authorization")).toBe(`Bearer ${credential(1).access}`);
+      expect(captured[0]!.headers.has("x-api-key")).toBe(false);
+      expect(captured[0]!.headers.get("anthropic-beta")).toBe("future-beta-2099");
+      expect(captured[0]!.headers.get("anthropic-version")).toBe("2099-01-01");
+    });
+
+    for (const status of [401, 429]) test(`strict OAuth ${status} on ${path} does not refresh or fail over`, async () => {
+      await seed(2);
+      const bytes = encode('{ "type":"error", "error":{"type":"rate_limit_error","message":"synthetic refusal"}, "future":-0 }');
+      await launch(() => new Response(bytes, { status, headers: { "content-type": "application/json", "retry-after": "17" } }));
+      const response = await post(path);
+      expect(response.status).toBe(status);
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
+      expect(response.headers.get("retry-after")).toBe("17");
+      expect(captured).toHaveLength(1);
+      expect(captured[0]!.bytes).toEqual(encode(raw));
+      // The file-level unexpected-fetch assertion also detects attempted OAuth refresh/usage I/O.
+    });
+
+    test(`strict OAuth all paused refuses ${path} without sending`, async () => {
+      const ids = await seed(2);
+      for (const id of ids) await setAccountPaused("anthropic", id, true);
+      await launch();
+      const response = await post(path);
+      await response.arrayBuffer();
+      expect(response.status).toBeGreaterThanOrEqual(400);
+      expect(captured).toHaveLength(0);
+    });
+  }
+
+  test("strict OAuth revalidates credential generation after a pacing wait", async () => {
+    const ids = await seed(1);
+    let held: ReadableStreamDefaultController<Uint8Array> | undefined;
+    await launch(() => captured.length === 1 ? new Response(new ReadableStream<Uint8Array>({
+      start(controller) { held = controller; controller.enqueue(encode(": holding\n\n")); },
+    }), { headers: { "content-type": "text/event-stream" } }) : new Response(answer), cfg => {
+      cfg.anthropicAccountPool = { enabled: false };
+      cfg.providers.anthropic!.requestPacing = { enabled: true, maxConcurrentRequests: 1 };
+    });
+    const abort = new AbortController();
+    const first = await post("/v1/messages", raw.replace('"stream":false', '"stream":true'), abort.signal);
+    expect(first.status).toBe(200);
+    const reader = first.body!.getReader();
+    let pending: Promise<Response> | undefined;
+    try {
+      expect((await reader.read()).done).toBe(false);
+      pending = post("/v1/messages", raw, abort.signal);
+      const deadline = Date.now() + 2_000;
+      while (providerRequestPacingStatus("anthropic", config.providers.anthropic!).queued === 0 && Date.now() < deadline) await Bun.sleep(5);
+      expect(providerRequestPacingStatus("anthropic", config.providers.anthropic!).queued).toBe(1);
+      await saveAccountCredential("anthropic", ids[0]!, { ...credential(0), access: "access-token-value-generation-two" });
+      held!.close();
+      while (!(await reader.read()).done) { /* drain the first response to release its slot */ }
+      const second = await pending;
+      expect(second.status).toBe(200);
+      await second.arrayBuffer();
+      expect(captured).toHaveLength(2);
+      expect(captured[1]!.headers.get("authorization")).toBe("Bearer access-token-value-generation-two");
+      expect(captured[1]!.bytes).toEqual(encode(raw));
+    } finally {
+      abort.abort();
+      await pending?.then(response => response.body?.cancel()).catch(() => {});
+      await reader.cancel().catch(() => {});
+    }
+  }, 10_000);
 });

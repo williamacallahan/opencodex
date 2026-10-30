@@ -1125,9 +1125,8 @@ function ensureUsageLogDir(now: number): void {
  * One owner hook, run after an append lands.
  *
  * A slot rather than a direct call, because the only consumer -- ledger retention -- reads this
- * module's revision helpers, and importing it back here would be a static cycle. The hook runs
- * INSIDE the synchronous append call stack on purpose: that is what makes "no in-process append
- * can interleave with a compaction" true rather than merely likely.
+ * module's revision helpers, and importing it back here would be a static cycle. Retention only
+ * schedules its compaction here, so the append that crosses the limit does not pay for it.
  */
 let afterUsageLedgerAppend: (() => void) | null = null;
 

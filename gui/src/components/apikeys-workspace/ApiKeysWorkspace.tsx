@@ -471,7 +471,9 @@ export default function ApiKeysWorkspace({
                   {/* Branch on the DATASET field, not on `usage`: a key with zero
                       requests under a live dataset really was used zero times,
                       which is not the same as having nothing to attribute. */}
-                  {!attributionSince ? (
+                  {!selected.usage ? (
+                    <p className="muted">{t("api.attribution.unavailable")}</p>
+                  ) : !attributionSince ? (
                     <p className="muted">{t("api.attribution.unavailableDetail")}</p>
                   ) : selected.usage.ambiguous ? (
                     <p className="muted">{t("api.attribution.ambiguous")}</p>

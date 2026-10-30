@@ -35,10 +35,8 @@ import {
 } from "./api-keys-utils";
 
 interface KeysResponse extends UsageReadMetadata {
-  // `usage` is optional on the wire only so a malformed payload lands in
-  // fetchKeys' validator rather than at the type boundary. A row without it is
-  // rejected, not defaulted: zeroes would assert "never used" about data we
-  // could not read.
+  usageIncluded?: boolean;
+  // Only an explicit minimal response may omit usage; missing statistics are not zeroes.
   keys?: Array<Omit<ApiKeyEntry, "usage"> & { usage?: ApiKeyEntry["usage"] }>;
   attributionSince?: string;
   historyTruncated?: boolean;
@@ -64,6 +62,7 @@ interface StartRotationResponse extends CreateKeyResponse {
 
 type CachedKeysShape = UsageReadMetadata & {
   keys: ApiKeyEntry[];
+  usageIncluded?: boolean;
   endpoints: ApiEndpointInfo;
   claudeCodeEnabled: boolean;
   /** Absent when the server predates API surface settings. */
@@ -98,7 +97,7 @@ function seedEndpointsFromApiBase(apiBase: string): ApiEndpointInfo {
 /** Session-cache entries get the same scrutiny as a network payload. */
 function validCachedKeys(cached: CachedKeysShape | null): CachedKeysShape | null {
   if (!cached || !isApiAuthMatrix(cached.authMatrix)) return null;
-  if (!Array.isArray(cached.keys) || cached.keys.some(key => !key || !isApiKeyUsage(key.usage) || !validPendingRotation(key.pendingRotation))) return null;
+  if (!Array.isArray(cached.keys) || cached.keys.some(key => !key || (!(cached?.usageIncluded === false && key.usage === undefined) && !isApiKeyUsage(key.usage)) || !validPendingRotation(key.pendingRotation))) return null;
   if (cached.surfaces !== undefined && !parseApiSurfaces(cached.surfaces)) {
     // Drop an unusable surface record rather than the whole entry: the page falls back to
     // the flat endpoint list until the network answer arrives.
@@ -165,14 +164,14 @@ export default function ApiKeys({ apiBase, active = true }: { apiBase: string; a
   }, []);
   const disclosure = useKeyDisclosure(apiBase, active, clearDisclosure);
 
-  const fetchKeys = useCallback(async (signal: AbortSignal): Promise<CachedKeysShape> => {
-    const res = await fetch(`${apiBase}/api/keys`, { signal });
+  const fetchKeys = useCallback(async (signal: AbortSignal, includeUsage = false): Promise<CachedKeysShape> => {
+    const res = await fetch(`${apiBase}/api/keys`, { signal, headers: includeUsage ? {} : { Prefer: "return=minimal" } });
     const data = await readJsonIfOk<KeysResponse>(res);
     // The auth matrix is server truth; without it the page would have to describe
     // the rules from memory, which is the defect this replaces.
     if (!data || !isApiAuthMatrix(data.authMatrix)) throw new Error(t("api.keysLoadFailed"));
     const rows = data.keys ?? [];
-    if (rows.some(key => !isApiKeyUsage(key.usage) || !validPendingRotation(key.pendingRotation))) throw new Error(t("api.keysLoadFailed"));
+    if (rows.some(key => (!(data.usageIncluded === false && key.usage === undefined) && !isApiKeyUsage(key.usage)) || !validPendingRotation(key.pendingRotation))) throw new Error(t("api.keysLoadFailed"));
     const validatedKeys = rows as ApiKeyEntry[];
     const derived = deriveApiEndpoints(data.endpoint ?? "");
     // An older server sends no surfaces; the endpoints panel then keeps its flat list.
@@ -182,6 +181,7 @@ export default function ApiKeys({ apiBase, active = true }: { apiBase: string; a
       // become zeroes, which says "used zero times" about data we could not
       // read — and every reader downstream would believe it.
       keys: validatedKeys,
+      ...(data.usageIncluded === false ? { usageIncluded: false } : {}),
       endpoints: {
         baseUrl: data.baseUrl ?? derived.baseUrl,
         responses: data.responsesEndpoint ?? data.endpoint ?? DEFAULT_ENDPOINTS.responses,
@@ -201,6 +201,8 @@ export default function ApiKeys({ apiBase, active = true }: { apiBase: string; a
     if (!signal.aborted) writeSessionListCacheEntry(keysCacheKey, next);
     return next;
   }, [apiBase, keysCacheKey, t]);
+
+  const fetchKeyUsage = useCallback((signal: AbortSignal) => fetchKeys(signal, true), [fetchKeys]);
 
   const fetchModels = useCallback(async (signal: AbortSignal): Promise<ExternalModelRow[]> => {
     const res = await fetch(`${apiBase}/v1/models`, { signal });
@@ -238,6 +240,10 @@ export default function ApiKeys({ apiBase, active = true }: { apiBase: string; a
       enabled: active,
     },
   );
+  const keyUsageResource = useDataSurface<CachedKeysShape>(
+    `api-key-usage:${apiBase}`, [apiBase], fetchKeyUsage,
+    { isEmpty: data => data.keys.length === 0, enabled: active && keysResource.state.data?.usageIncluded === false },
+  );
   const modelsResource = useDataSurface<ExternalModelRow[]>(
     modelsResourceKey,
     [apiBase],
@@ -253,18 +259,22 @@ export default function ApiKeys({ apiBase, active = true }: { apiBase: string; a
   const keysState = keysResource.state;
   const modelsState = modelsResource.state;
   const keysData = keysState.data ?? cachedKeys;
+  const usageData = keyUsageResource.state.data ?? (keysData?.usageIncluded === false ? undefined : keysData);
   const models = modelsState.data ?? cachedModels ?? EMPTY_MODELS;
-  const keys = keysData?.keys ?? [];
+  const keys = useMemo(() => {
+    const usageById = new Map(usageData?.keys.map(key => [key.id, key.usage]));
+    return (keysData?.keys ?? []).map(key => ({ ...key, usage: usageById.get(key.id) ?? key.usage }));
+  }, [keysData, usageData]);
   const endpoints = keysData?.endpoints ?? seedEndpointsFromApiBase(apiBase);
   const claudeCodeEnabled = keysData?.claudeCodeEnabled ?? true;
   const surfaces = keysData?.surfaces;
-  const attributionSince = keysData?.attributionSince;
-  const historyTruncated = keysData?.historyTruncated === true;
+  const attributionSince = usageData?.attributionSince;
+  const historyTruncated = usageData?.historyTruncated === true;
   // `?? []` only ever fires while there is no key data at all — both the network
   // and cache paths reject a payload without a valid matrix, so an empty table
   // can never be presented as the server's answer.
   const authMatrix = keysData?.authMatrix ?? [];
-  const refreshKeys = keysResource.refresh;
+  const refreshKeys = () => { keysResource.refresh(); keyUsageResource.refresh(); };
   const refreshModels = modelsResource.refresh;
 
   const filteredModels = useMemo(() => {
@@ -570,6 +580,7 @@ export default function ApiKeys({ apiBase, active = true }: { apiBase: string; a
       {hiddenMutationBase === apiBase && <Notice tone="warn">{t("api.key.mutationHidden")}</Notice>}
       {actionError && <Notice tone="err">{actionError}</Notice>}
       {keysState.showError && keysData && <Notice tone="err">{t("api.keysLoadFailed")}</Notice>}
+      {keyUsageResource.state.showError && <Notice tone="warn">{t("api.attribution.unavailable")}</Notice>}
       {/* The model failure is reported inside the models panel, beside the
           retry that repairs it. A page banner said it a second time and stayed
           up while the panel below it showed perfectly good cached rows. */}
@@ -591,7 +602,7 @@ export default function ApiKeys({ apiBase, active = true }: { apiBase: string; a
         apiBase={apiBase}
         attributionSince={attributionSince}
         historyTruncated={historyTruncated}
-        usageMetadata={readUsageMetadata(keysData)}
+        usageMetadata={readUsageMetadata(usageData)}
         authMatrix={authMatrix}
         keysLoading={false}
         keysLoadFailed={keysState.showError}

@@ -73,6 +73,8 @@ export interface OcxClaudeCodeConfig {
    * caller's own sk-ant-* credential (Claude Code subscription OAuth). Default: enabled.
    */
   nativePassthrough?: boolean;
+  /** Opt-in byte-preserving managed Messages transport. No translation or request retries. */
+  strictPassthrough?: boolean;
   /** Upstream for the native passthrough (tests/enterprise gateways). Default: https://api.anthropic.com */
   anthropicBaseUrl?: string;
   /**
@@ -452,13 +454,13 @@ export interface OcxHubConfig {
    */
   dataPublicOrigin?: string;
   /**
-   * Optional management-only listener for a local HTTPS frontend such as Tailscale Serve.
-   * The hostname is deliberately not configurable: when enabled the socket is always bound
-   * to 127.0.0.1, and only GUI, session-bootstrap, and management API routes are admitted.
+   * Management-only listener behind an HTTPS frontend. Default loopback binding trusts
+   * Tailscale Serve identity; explicit container binding listens on 0.0.0.0 without that trust.
+   * Container mode requires public hostname 0.0.0.0; keep its port unpublished on an isolated network.
    */
   managementIngress?:
     | { enabled: false }
-    | { enabled: true; port: number };
+    | { enabled: true; port: number; bind?: "loopback" | "container" };
 }
 
 export interface OcxRemoteGuiConfig {

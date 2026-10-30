@@ -7,8 +7,16 @@ For SSH machine links, see [Remote Link](/guides/remote-link/).
 
 An opencodex hub keeps provider credentials and usage state on one host while authenticated clients
 use its data plane remotely. The browser-facing management plane is separate: an optional listener
-binds only `127.0.0.1`, serves the dashboard and `/api/*`, and is intended to sit behind Tailscale
+defaults to `127.0.0.1`, serves the dashboard and `/api/*`, and is intended to sit behind Tailscale
 Serve or another operator-owned HTTPS frontend.
+
+For a Docker-network frontend such as Dokploy's Traefik, set
+`hub.managementIngress` to `{"enabled":true,"port":10101,"bind":"container"}` and configure
+the canonical HTTPS `hub.managementPublicOrigin` and public `hostname: "0.0.0.0"`. Container mode listens on `0.0.0.0` inside the
+container without trusting Tailscale identity headers. Keep that port out of Compose `ports:`,
+use an isolated project network, and route the dashboard/API to it through Dokploy domain records.
+Keep all inference and health routes on the data listener, with no path stripping. Remembered
+devices use the existing admin-token exchange, Secure HttpOnly cookie, and origin-scoped proof.
 
 The data plane is **one port**. Remote machines dial `hostname:port` with their own per-client key;
 the hub's own processes dial `127.0.0.1:<the same port>` with no credential, through the loopback

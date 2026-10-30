@@ -1,9 +1,16 @@
 import { expect, test } from "bun:test";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { classifyInterceptClient, interceptEntrypoint, interceptRouteFor } from "../../src/claude/intercept/client-class";
 import { startClaudeInterceptListener } from "../../src/claude/intercept/listener";
 import { createLocalInterceptCa, issueLocalInterceptLeaf } from "../../src/claude/intercept/local-ca";
+import { startClaudeIntercept } from "../../src/claude/intercept/runtime";
+import { startConnectProxy } from "../../src/claude/intercept/connect-proxy";
+import { readClaudeInterceptProxyToken } from "../../src/claude/intercept/proxy-auth";
 import { buildInterceptDesiredClients } from "../../src/server/index/claude-intercept-lifecycle";
 import type { OcxConfig } from "../../src/types";
+import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const samples: Array<[string | null, string | null, "desktop" | "cli" | "unknown"]> = [
   ["claude-cli/2.1.282 (external, cli)", "cli", "cli"],
@@ -32,6 +39,60 @@ test("intent matrix routes only identified, desired clients", () => {
         client !== "unknown" && (client === "desktop" ? desktop : cli) ? "router" : "relay-native",
       );
     }
+  }
+});
+
+test("strict interception reaches managed dispatch regardless of client intent; other paths keep native routing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "strict-intercept-"));
+  const originalFetch = globalThis.fetch;
+  const relay: string[] = [];
+  const config = { port: 10100, providers: {}, defaultProvider: "anthropic",
+    claudeCode: { strictPassthrough: true, intercept: { port: 10200, picker: false },
+      anthropicBaseUrl: "https://unused.fixture.invalid" } } as OcxConfig;
+  let handle: Awaited<ReturnType<typeof startClaudeIntercept>>;
+  const body = '{ "model" : "claude-x", "opaque" : 1e+02 }';
+  const dispatch: string[] = [];
+  let blocked = 0;
+  // No external sockets: canonical upstream calls are synthetic, client calls need our proxy.
+  globalThis.fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (handle && init?.proxy === `http://opencodex:${readClaudeInterceptProxyToken(dir)}@127.0.0.1:${handle.proxyPort}`) {
+      return originalFetch(input, init);
+    }
+    if (url.startsWith("https://api.anthropic.com/")) { relay.push(url); return new Response("fixture relay"); }
+    blocked++;
+    throw new Error("unexpected strict intercept network");
+  }, { preconnect: () => { blocked++; throw new Error("unexpected preconnect"); } }) as typeof fetch;
+  try {
+    handle = await startClaudeIntercept({ config, publicPort: 10100, configDir: dir,
+      desiredClients: () => ({ desktop: false, cli: false }),
+      startProxy: (_port, options) => startConnectProxy(0, options),
+      dispatch: async request => { dispatch.push(new URL(request.url).pathname); return new Response(await request.arrayBuffer()); },
+    });
+    expect(handle).not.toBeNull();
+    const proxy = `http://opencodex:${readClaudeInterceptProxyToken(dir)}@127.0.0.1:${handle!.proxyPort}`;
+    const tls = { ca: readFileSync(handle!.caCertPath, "utf8") };
+    for (const ua of ["unrecognized-client", "claude-cli/2.1.282 (external, cli)"]) {
+      for (const path of ["/v1/messages", "/v1/messages/count_tokens"]) {
+        const response = await fetch(`https://api.anthropic.com${path}`, {
+          method: "POST", body, headers: { "user-agent": ua }, proxy, tls,
+        });
+        expect(await response.text()).toBe(body);
+      }
+    }
+    expect(dispatch).toEqual(["/v1/messages", "/v1/messages/count_tokens", "/v1/messages", "/v1/messages/count_tokens"]);
+    expect(relay).toEqual([]);
+    const other = await fetch("https://api.anthropic.com/v1/models", { proxy, tls });
+    expect(await other.text()).toBe("fixture relay");
+    config.claudeCode!.strictPassthrough = false;
+    const legacy = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", body, proxy, tls });
+    expect(await legacy.text()).toBe("fixture relay");
+    expect(relay).toEqual(["https://api.anthropic.com/v1/models", "https://api.anthropic.com/v1/messages"]);
+    expect(blocked).toBe(0);
+  } finally {
+    await handle?.stop();
+    globalThis.fetch = originalFetch;
+    removeTreeWithRetry(dir);
   }
 });
 

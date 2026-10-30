@@ -119,6 +119,34 @@ function retryButton(container: HTMLDivElement): HTMLButtonElement | undefined {
   return [...container.querySelectorAll<HTMLButtonElement>(".api-models-error button")][0];
 }
 
+test("key management renders while optional historical usage is stalled", async () => {
+  let resolveUsage!: (value: Response) => void;
+  const pendingUsage = new Promise<Response>(resolve => { resolveUsage = resolve; });
+  const key = { id: "ready-key", name: "ready-without-statistics", prefix: "ocx_data_12345678...", createdAt: "2026-01-01T00:00:00Z" };
+  globalThis.fetch = (async (input, options) => {
+    const url = String(input);
+    if (url.endsWith("/api/keys")) {
+      if (new Headers(options?.headers).get("Prefer") !== "return=minimal") return pendingUsage;
+      return Response.json({ ...KEYS_OK, usageIncluded: false, attributionSince: undefined,
+        keys: [key] });
+    }
+    if (url.endsWith("/v1/models")) return Response.json({ data: [] });
+    return new Response(null, { status: 404 });
+  }) as typeof fetch;
+  const { container, root } = await mountPage();
+  try {
+    await tick();
+    expect(container.textContent).toContain("ready-without-statistics");
+    expect(container.textContent).toContain("Usage unavailable");
+    expect(container.querySelector('input[placeholder="Key name (optional)"]')).toBeTruthy();
+    await act(async () => { resolveUsage(Response.json({ ...KEYS_OK, keys: [{ ...key, usage: { requests7d: 37, totalRequests: 82 } }] })); });
+    await tick();
+    const row = [...container.querySelectorAll("tr")].find(row => row.textContent?.includes(key.name));
+    expect(row?.textContent).toContain("37");
+    expect(row?.textContent).not.toContain("Usage unavailable");
+  } finally { await act(async () => { root.unmount(); }); }
+});
+
 test("an empty catalog says the catalog is empty, with no query in the sentence", async () => {
   const counter = { gets: 0 };
   installFetch(() => Response.json({ data: [] }), counter);

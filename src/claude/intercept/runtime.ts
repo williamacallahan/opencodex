@@ -8,7 +8,7 @@ import type { ClaudeFirstPartyDesired } from "../first-party-settings";
 import { classifyInterceptClient, interceptRouteFor } from "./client-class";
 import { createCliCatalogProvider } from "./cli-picker";
 import { CLAUDE_INTERCEPT_HOSTS, isBrowserConnect, startConnectProxy, type ConnectProxyHandle } from "./connect-proxy";
-import { startClaudeInterceptListener } from "./listener";
+import { isClaudeInterceptedPath, startClaudeInterceptListener } from "./listener";
 import { claudeInterceptCaCertPath, ensureLocalInterceptCaForStartup, issueLocalInterceptLeaf } from "./local-ca";
 import { discardPickerCaKey } from "./picker-ca";
 import { preparePersistentPickerAuthority } from "./picker-ca-startup";
@@ -155,8 +155,13 @@ export async function startClaudeIntercept<T>(options: StartClaudeInterceptOptio
   const listener = startClaudeInterceptListener<T>({
     leaf,
     dispatch: options.dispatch,
-    ...(options.desiredClients ? { route: (req: Request) =>
-      interceptRouteFor(classifyInterceptClient(req.headers.get("user-agent")), options.desiredClients!()) } : {}),
+    // Strict Messages must reach managed admission, even for an unrecognized client.
+    route: (req: Request) => options.config.claudeCode?.strictPassthrough !== undefined
+      && options.config.claudeCode.strictPassthrough !== false
+      && isClaudeInterceptedPath(new URL(req.url).pathname, req.method) ? "router"
+      : options.desiredClients
+        ? interceptRouteFor(classifyInterceptClient(req.headers.get("user-agent")), options.desiredClients())
+        : "router",
     // The CLI's /model catalog (cli-picker.ts): wired from the routes alone, never from Desktop picker state.
     ...(options.loadPickerRoutes && options.desiredClients ? { cliCatalog: createCliCatalogProvider({
       configDir, loadRoutes: options.loadPickerRoutes, desiredClients: options.desiredClients,

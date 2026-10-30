@@ -84,7 +84,11 @@ ENV NODE_ENV=production \
     OCX_API_TOKEN_FILE=/home/bun/.opencodex/service-api-token
 
 # These homes have incompatible auth.json formats; persist them without combining them.
-RUN install -d -m 0700 -o bun -g bun /home/bun/.opencodex /home/bun/.codex
+# The derived index and the response spills are rebuildable, so a deployment may mount each on its
+# own volume and leave it out of backups. A new named volume copies the ownership of an existing
+# image directory; at a path the image lacks it would come up root-owned and unwritable for bun.
+RUN install -d -m 0700 -o bun -g bun /home/bun/.opencodex /home/bun/.codex \
+  /home/bun/.opencodex/request-history /home/bun/.opencodex/responses-state-spill
 COPY --chown=bun:bun --chmod=0600 docker/config.json /home/bun/.opencodex/config.json
 
 COPY --from=build --chown=bun:bun /home/bun/app/package.json ./package.json

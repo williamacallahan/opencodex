@@ -8,7 +8,8 @@ import {
   MIN_USAGE_LEDGER_MAX_BYTES,
   USAGE_LEDGER_RETENTION_TARGET_RATIO,
 } from "../../src/usage/retention-contract";
-import { usageLogPath } from "../../src/usage/log";
+import { appendUsageEntry, usageLogPath } from "../../src/usage/log";
+import { setUsageLedgerRetention } from "../../src/server/usage-ledger-retention";
 
 let home: string;
 let previousHome: string | undefined;
@@ -38,6 +39,22 @@ afterEach(() => {
 });
 
 describe("usage ledger retention", () => {
+  test("the append that crosses the limit returns before the compaction, which runs once on its own turn", async () => {
+    writeRows(200, 16 * 1024);
+    setUsageLedgerRetention(MIN_USAGE_LEDGER_MAX_BYTES);
+    try {
+      appendUsageEntry({ requestId: "crossing", timestamp: 1, provider: "a", model: "m", status: 200, durationMs: 1 });
+      appendUsageEntry({ requestId: "next", timestamp: 2, provider: "a", model: "m", status: 200, durationMs: 1 });
+      expect(statSync(usageLogPath()).size).toBeGreaterThan(MIN_USAGE_LEDGER_MAX_BYTES);
+      const deadline = Date.now() + 5_000;
+      while (statSync(usageLogPath()).size > MIN_USAGE_LEDGER_MAX_BYTES && Date.now() < deadline) await Bun.sleep(50);
+      expect(statSync(usageLogPath()).size).toBeLessThanOrEqual(MIN_USAGE_LEDGER_MAX_BYTES);
+      expect(readFileSync(usageLogPath(), "utf-8")).toContain('"requestId":"next"');
+    } finally {
+      setUsageLedgerRetention(undefined);
+    }
+  });
+
   test("no limit, a limit below the floor, and a ledger under the limit leave the file alone", () => {
     writeRows(20, 64);
     const before = readFileSync(usageLogPath(), "utf-8");

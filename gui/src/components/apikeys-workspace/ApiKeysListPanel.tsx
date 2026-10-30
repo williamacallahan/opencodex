@@ -301,14 +301,14 @@ export default function ApiKeysListPanel({
                       )}
                     </td>
                     <td>
-                      {!attributionSince
+                      {!k.usage || !attributionSince
                         ? t("api.attribution.unavailable")
                         : k.usage.ambiguous
                           ? t("api.attribution.railAmbiguous")
                           : k.usage.requests7d.toLocaleString(localeTag)}
                     </td>
                     <td>
-                      {!attributionSince || k.usage.ambiguous
+                      {!k.usage || !attributionSince || k.usage.ambiguous
                         ? "—"
                         : k.usage.lastUsedAt
                           ? formatCreatedDate(k.usage.lastUsedAt, localeTag)

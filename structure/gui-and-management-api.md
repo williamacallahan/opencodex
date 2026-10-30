@@ -175,12 +175,12 @@ Windows ACL hardening results must be checked explicitly because an `icacls` tim
 
 Local dashboard page entry requires a loopback binding, a valid parseable loopback `Host`, and an
 exact request origin. A hub may additionally enable `hub.managementIngress`, a second management
-surface bound exactly to `127.0.0.1` for a local Tailscale Serve or operator TLS frontend. That
-listener serves only packaged GUI/SPA routes, `GET`/`POST /opencodex-session`, and `/api/*`; all data,
+surface bound by default to `127.0.0.1` for Tailscale Serve or another TLS frontend. Explicit `bind: "container"` uses a private container-network bind; see [listener isolation](runtime.md#lifecycle).
+The listener serves only packaged GUI/SPA routes, `GET`/`POST /opencodex-session`, and `/api/*`; all data,
 health, readiness, WebSocket, and unknown-static routes receive a JSON 404 before dispatch.
 
-Tailscale identity headers authorize session issuance only when the request arrived on that specific
-listener and the exact login appears in `remoteGui.allowedTailscaleUsers`. The public listener and
+Tailscale identity headers authorize session issuance only when the request arrived on the loopback
+management listener and the exact login appears in `remoteGui.allowedTailscaleUsers`. Container management, the public listener and
 the unauthenticated data-loopback listener always pass `trustedTailscaleIngress: false`, regardless
 of `Host`, `Origin`, `Forwarded`, `X-Forwarded-*`, or `Tailscale-User-*` values. A generic TLS proxy
 cannot establish a Tailscale identity and uses the existing single-use, digest-only, origin-bound
@@ -190,7 +190,7 @@ That canonical origin governs non-loopback management CORS, session admission an
 The server issues a local in-memory session for five minutes or a remote session for twelve hours,
 with 128 live sessions maximum. Stored-key reads require a current pairing or trusted Tailscale-identity session, not automatic loopback issuance or admin tokens. `POST /api/keys/reveal` uses `createManagementSessionControl().canRevealDataKeys` before and after body reception; absent controls deny. Every session is bound to the exact server and browser origins;
 state-changing requests additionally require the session CSRF token. A raw admin token remains
-ordinary management authority only and cannot satisfy consent routes. The dashboard never attaches
+ordinary management authority only and cannot satisfy consent routes. Data-key rotation in `src/server/management/api-key-rotation.ts` preserves key identity and scope; an optional operator-supplied key enters the same overlap/commit path after malformed and conflicting/reserved admission credentials are refused. The dashboard never attaches
 its management session to `/v1/*` requests. Only `POST /api/session/logout` tolerates remembered-device User-Agent drift after session-token, Origin, CSRF, cookie, server-origin and current admin-credential checks; ordinary access, currentness and resumption retain the User-Agent binding (`tests/server/persistent-dashboard-admission.test.ts`). Pages containing a session bootstrap are served with
 `Cache-Control: no-store`.
 
