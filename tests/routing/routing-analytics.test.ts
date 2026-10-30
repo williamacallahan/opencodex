@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdtempSync} from "node:fs";
+import { appendFileSync, closeSync, mkdtempSync, openSync, readFileSync, statSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleManagementAPI } from "../../src/server/management-api";
@@ -10,7 +10,7 @@ import {
   usageLogPath,
   type PersistedUsageEntry,
 } from "../../src/usage/log";
-import { closeRequestHistoryIndex } from "../../src/routing/history/indexer";
+import { closeRequestHistoryIndex, openRequestHistoryIndex, requestHistoryDb, retryAfterCorruption, REQUEST_HISTORY_WORKER_REBUILD_MIN_BYTES } from "../../src/routing/history/indexer";
 import { computeRoutingAnalytics } from "../../src/routing/analytics";
 import { computeEntryCost } from "../../src/usage/summary";
 import type { OcxConfig } from "../../src/types";
@@ -289,4 +289,55 @@ describe("routing analytics (RI-03)", () => {
       expect(body.error?.code).toBe(code);
     }
   });
+});
+
+test.each([
+  ["requests", "direct"], ["idx_requests_ts", "direct"],
+  ["requests", "api"], ["idx_requests_ts", "api"],
+])("analytics rebuilds damaged %s pages through the %s reader", async (damaged, reader) => {
+  appendUsageEntry(entry("baseline", { timestamp: 0, status: 200, durationMs: 1 }));
+  // Real large ledger/index, at the supported default worker threshold. No seam or fake SQLite error.
+  const lines = Array.from({ length: 400 }, (_, i) => JSON.stringify(entry(`page-${i}`, {
+    timestamp: i + 1, status: 200, durationMs: 10, errorCode: "x".repeat(4096),
+  }))).join("\n") + "\n";
+  appendFileSync(usageLogPath(), lines);
+  const canonical = readFileSync(usageLogPath());
+  const meta = await openRequestHistoryIndex();
+  const handle = requestHistoryDb();
+  const { rootpage } = handle.query("SELECT rootpage FROM sqlite_master WHERE name = ?").get(damaged) as { rootpage: number };
+  const { page_size: pageSize } = handle.query("PRAGMA page_size").get() as { page_size: number };
+  handle.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  closeRequestHistoryIndex();
+  expect(statSync(meta.dbPath).size).toBeGreaterThanOrEqual(REQUEST_HISTORY_WORKER_REBUILD_MIN_BYTES);
+  const fd = openSync(meta.dbPath, "r+");
+  try { writeSync(fd, Buffer.from([0]), 0, 1, (rootpage - 1) * pageSize); }
+  finally { closeSync(fd); }
+  // Schema metadata still opens. Only the requests-page read detects the real damage.
+  expect((await openRequestHistoryIndex()).indexedRows).toBe(401);
+  expect(() => requestHistoryDb().query("SELECT row_json FROM requests ORDER BY timestamp DESC LIMIT 1").all()).toThrow();
+  if (reader === "direct") {
+    expect((await computeRoutingAnalytics({})).totalRequests).toBe(401);
+  } else {
+    const req = new ManagementRequest("http://localhost/api/routing-analytics");
+    const response = await handleManagementAPI(req, new URL(req.url), config());
+    expect(response?.status).toBe(200);
+    expect(await response!.json()).toMatchObject({ totalRequests: 401 });
+  }
+  expect(readFileSync(usageLogPath())).toEqual(canonical);
+  expect((await openRequestHistoryIndex()).indexedRows).toBe(401);
+}, 20_000);
+
+test("shared index recovery propagates a real non-corruption SQL error without rebuilding", async () => {
+  appendUsageEntry(entry("keep", { timestamp: 1, status: 200, durationMs: 10 }));
+  await openRequestHistoryIndex();
+  const handle = requestHistoryDb();
+  let calls = 0;
+  await expect(retryAfterCorruption(async () => {
+    await openRequestHistoryIndex();
+    calls += 1;
+    return requestHistoryDb().query("SELECT missing_column FROM requests").all();
+  })).rejects.toMatchObject({ code: "SQLITE_ERROR" });
+  expect(calls).toBe(1);
+  expect(requestHistoryDb()).toBe(handle);
+  expect(handle.query("SELECT request_id FROM requests").all()).toEqual([{ request_id: "keep" }]);
 });

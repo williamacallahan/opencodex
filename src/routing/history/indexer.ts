@@ -250,7 +250,7 @@ export function discardCorruptRequestHistoryIndex(error: unknown): boolean {
 }
 
 /** Run an index read once more after discarding a corrupt index; the retry rebuilds it. */
-async function retryAfterCorruption<T>(read: () => Promise<T>): Promise<T> {
+export async function retryAfterCorruption<T>(read: () => Promise<T>): Promise<T> {
   try {
     return await read();
   } catch (error) {

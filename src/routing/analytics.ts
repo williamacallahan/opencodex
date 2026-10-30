@@ -13,7 +13,7 @@
 
 import { normalizePersistedUsageRow, type PersistedUsageEntry } from "../usage/log";
 import { computeEntryCost } from "../usage/summary";
-import { openRequestHistoryIndex, requestHistoryDb } from "./history/indexer";
+import { openRequestHistoryIndex, requestHistoryDb, retryAfterCorruption } from "./history/indexer";
 
 export const ANALYTICS_MAX_ROWS = 50_000;
 /** Default row cap for the management API (full cap remains available via `limit`). */
@@ -168,8 +168,6 @@ export async function computeRoutingAnalytics(
   filters: RoutingAnalyticsFilters,
   options: { maxRows?: number } = {},
 ): Promise<RoutingAnalyticsResult> {
-  await openRequestHistoryIndex();
-  const handle = requestHistoryDb();
   const maxRows = Math.min(
     Math.max(1, Math.trunc(options.maxRows ?? ANALYTICS_MAX_ROWS)),
     ANALYTICS_MAX_ROWS,
@@ -189,15 +187,19 @@ export async function computeRoutingAnalytics(
   if (filters.to !== undefined) add("timestamp <= ?", filters.to);
   const whereSql = where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "";
 
-  const rows = handle.query(
-    `SELECT provider, model, api_key_id AS apiKeyId, profile_id AS profileId,
-            profile_revision AS profileRevision, status,
-            duration_ms AS durationMs, first_output_ms AS firstOutputMs,
-            close_reason AS closeReason, terminal_status AS terminalStatus,
-            usage_status AS usageStatus, usage_json AS usageJson,
-            attempt_count AS attemptCount, fallback, row_json AS rowJson
-     FROM requests${whereSql} ORDER BY timestamp DESC LIMIT ?`,
-  ).all(...values, maxRows + 1) as ScannedRow[];
+  const rows = await retryAfterCorruption(async () => {
+    await openRequestHistoryIndex();
+    const handle = requestHistoryDb();
+    return handle.query(
+      `SELECT provider, model, api_key_id AS apiKeyId, profile_id AS profileId,
+              profile_revision AS profileRevision, status,
+              duration_ms AS durationMs, first_output_ms AS firstOutputMs,
+              close_reason AS closeReason, terminal_status AS terminalStatus,
+              usage_status AS usageStatus, usage_json AS usageJson,
+              attempt_count AS attemptCount, fallback, row_json AS rowJson
+       FROM requests${whereSql} ORDER BY timestamp DESC LIMIT ?`,
+    ).all(...values, maxRows + 1) as ScannedRow[];
+  });
 
   const scanned = rows.slice(0, maxRows);
   const historyTruncated = rows.length > maxRows;
