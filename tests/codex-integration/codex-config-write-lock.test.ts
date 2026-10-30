@@ -14,7 +14,7 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, renameSync, symlin
 import * as promptLock from "../../src/codex/prompt-lock";
 import { atomicWriteFile } from "../../src/config/atomic-write";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   acquireConfigWriteLock,
   CONFIG_WRITE_LOCKED_MESSAGE,
@@ -33,6 +33,7 @@ import {
   transitionMultiAgentV2,
 } from "../../src/codex/features";
 import { readPromptLayers, setToggle } from "../../src/codex/prompt-layers";
+import { resetCodexRuntimeResolveCacheForTests, setCodexRuntimeResolveCacheForTests } from "../../src/codex/runtime";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoRoot } from "../helpers/repo-root";
 
@@ -296,8 +297,15 @@ describe("every writer honors the shared lock", () => {
     const path = fixtureConfig("[features.multi_agent_v2]\nenabled = true\n");
     const before = readFileSync(path, "utf8");
     holdLock(path);
-    expect(setMultiAgentModeHintText("hint", path)).toEqual({ ok: false, error: CONFIG_WRITE_LOCKED_MESSAGE });
-    expect(readFileSync(path, "utf8")).toBe(before);
+    const command = join(dirname(path), "codex-old");
+    writeFileSync(command, Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46]), Buffer.from("older_codex_schema")]));
+    setCodexRuntimeResolveCacheForTests({ runtime: { command, version: "test", source: "fallback" }, failures: [] });
+    try {
+      expect(setMultiAgentModeHintText("hint", path)).toEqual({ ok: false, error: CONFIG_WRITE_LOCKED_MESSAGE });
+      expect(readFileSync(path, "utf8")).toBe(before);
+    } finally {
+      resetCodexRuntimeResolveCacheForTests();
+    }
   });
 
   test("transitionMultiAgentV2 refuses busy without running the toggle", () => {

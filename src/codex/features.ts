@@ -1113,6 +1113,9 @@ export const MODE_HINT_UNSUPPORTED_ERROR =
  * so the key spelling must match codex-rs exactly.
  */
 export function setMultiAgentModeHintText(value: string | null, configPath?: string, heldConfigWriteLock?: LockHandle): ConfigEditResult {
+  const path = configPath ?? activeCodexConfigPath();
+  if (codexHomeIsAbsent(dirname(path))) return { ok: false, error: `config.toml not readable at ${path}` };
+  const locked = withConfigWriteLockHeld(path, heldConfigWriteLock, (held): ConfigEditResult => {
   // The upstream `multi_agent_mode_hint_text` key is newer than the v2 config
   // surface opencodex already manages; an older Codex build rejects the unknown
   // member (`#[serde(deny_unknown_fields)]`) and fails to start. Probe the
@@ -1130,7 +1133,10 @@ export function setMultiAgentModeHintText(value: string | null, configPath?: str
     }
   }
   const canonicalValue = value === null ? null : canonicalizeOpenCodexModeHint(value);
-  return setV2StringField("multi_agent_mode_hint_text", canonicalValue, configPath, heldConfigWriteLock);
+  return setV2StringField("multi_agent_mode_hint_text", canonicalValue, path, held);
+  });
+  if (!locked.ok) return { ok: false, error: configWriteLockFailureMessage(locked), ...(locked.error === "unsafe" ? { retryable: false } : {}) };
+  return locked.value;
 }
 
 export const MODE_HINT_CAPABILITY_CACHE_MAX_ENTRIES = 8;

@@ -465,8 +465,8 @@ obtains it from `/api/v2` rather than maintaining its own preset. An explicit da
 API or CLI hint write passes through `setMultiAgentModeHintText`, which replaces only
 the two byte-exact released OpenCodex presets with the current recommendation. Other
 valid custom text, including whitespace variants, is preserved. Reads, unrelated writes
-and upgrades do not migrate stored hints. The writer retains its native capability check
-and stores only `features.multi_agent_v2.multi_agent_mode_hint_text` in Codex TOML;
+and upgrades do not migrate stored hints. The writer takes the shared configuration lock before its native capability check, so a busy destination refuses without runtime discovery or capability work. It
+stores only `features.multi_agent_v2.multi_agent_mode_hint_text` in Codex TOML;
 `null` removes that key. The hint affects new native Codex sessions when their v2 surface
 is active, without changing reasoning effort or the proxy guidance switch.
 
