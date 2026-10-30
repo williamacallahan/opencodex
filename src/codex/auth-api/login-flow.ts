@@ -213,7 +213,7 @@ export async function handleCodexAuthLoginStart(req: Request, config: OcxConfig,
   const loginOwner: CodexLoginStateRow = { status: "starting", startedAt: Date.now() };
   codexAuthLoginState.set(flowId, loginOwner);
   try {
-    const { startLoginFlow, getLoginStatus, publicOAuthAuthenticationErrorMessage } = await import("../../oauth");
+    const { startLoginFlow, getLoginStatus, loginFlowAccountId, publicOAuthAuthenticationErrorMessage } = await import("../../oauth");
     const result = await startLoginFlow("chatgpt", {
       forceLogin: true,
       ...(useDeviceFlow ? { flow: "device" as const } : {}),
@@ -254,9 +254,10 @@ export async function handleCodexAuthLoginStart(req: Request, config: OcxConfig,
             break;
           }
           const st = getLoginStatus("chatgpt", true, flowId);
-          if (st.done && st.loggedIn) {
-            const { getCredential } = await import("../../oauth/store");
-            const cred = getCredential("chatgpt");
+          if (st.done && !st.error) {
+            const { getAccountCredential } = await import("../../oauth/store");
+            const savedId = loginFlowAccountId("chatgpt", flowId);
+            const cred = savedId && st.loggedIn ? getAccountCredential("chatgpt", savedId) : null;
             if (cred) {
               const oauthAccountId = cred.accountId;
               if (!oauthAccountId) {
@@ -456,6 +457,12 @@ export async function handleCodexAuthLoginStart(req: Request, config: OcxConfig,
                 });
                 completed = true;
               }
+            } else {
+              setCodexLoginState(flowId, {
+                status: "error", error: "OAuth account is no longer available. Please retry OAuth login.",
+                doneAt: Date.now(),
+              });
+              completed = true;
             }
             break;
           }

@@ -66,7 +66,7 @@ import { logOAuthEvent } from "./log";
 import { MAX_OAUTH_TOKEN_REFRESH_WAITERS, retireSettledOAuthRefreshFlight, tokenRefreshWaiters, type OAuthRefreshFlightEvidence } from "./refresh-flight-retirement";
 export { MAX_OAUTH_TOKEN_REFRESH_WAITERS };
 import { captureConfigGeneration, sweepExpiredOnWrite } from "../lib/state-store-sweeper";
-import { admitLoginFlow, classifyLoginCodeError, clearManualCodeSlot, CodeLoginUnsupportedError, ensureManualCodeSlot, kiroLoginSettling, latestLoginFlowKey, loginAbort, loginFlowProvider, loginState, recordStartedLoginFlow, settleLoginFlow, waitForManualLoginCode, type LoginCodeError, type OAuthLoginHint } from "./login-flow-state";
+import { admitLoginFlow, classifyLoginCodeError, clearManualCodeSlot, CodeLoginUnsupportedError, ensureManualCodeSlot, kiroLoginSettling, latestLoginFlowKey, loginAbort, loginFlowAccountId, loginFlowProvider, loginState, recordStartedLoginFlow, settleLoginFlow, waitForManualLoginCode, type LoginCodeError, type OAuthLoginHint } from "./login-flow-state";
 export { cancelLoginFlow, clearLoginState, CodeLoginUnsupportedError, isCodeLoginFlow, loginFlowAccountId, reconcileOAuthFlowState, submitLoginCode, submitManualLoginCode, waitForLoginSettled } from "./login-flow-state";
 export type { LoginCodeError, LoginFlowState } from "./login-flow-state";
 import { randomUUID } from "node:crypto";
@@ -1828,12 +1828,15 @@ export interface OAuthAccountSummary {
  * The default masks, so every existing caller keeps today's behaviour.
  */
 export function getLoginStatus(provider: string, maskEmails = true, flowId?: string): { loggedIn: boolean; email?: string; source?: OAuthCredentials["source"]; error?: string; errorCode?: LoginCodeError; done: boolean; status: "idle" | "pending" | "complete" | "error"; mode?: "callback" | "code"; flowId?: string; expiresAt?: number; hint?: OAuthLoginHint; activeAccountId?: string; accounts?: OAuthAccountSummary[] } {
-  const cred = getCredential(provider);
   // `flowId` reads one of several concurrent flows; without it, the provider's newest flow.
   const flowKey = flowId ?? latestLoginFlowKey(provider);
   // An explicit flow id from another provider must not leak that flow's lifecycle or hint.
   const st = flowKey === undefined || loginFlowProvider(flowKey) !== provider ? undefined : loginState.get(flowKey);
   const set = getAccountSet(provider);
+  // Explicit flows resolve only their persisted receipt, never another login's active account.
+  const accountId = flowId === undefined ? set?.activeAccountId : loginFlowAccountId(provider, flowId);
+  const account = set?.accounts.find(a => a.id === accountId);
+  const cred = account?.credential;
   const accounts: OAuthAccountSummary[] | undefined = set?.accounts.map(a => ({
     id: a.id,
     ...(a.alias ? { alias: a.alias } : {}),
@@ -1851,10 +1854,9 @@ export function getLoginStatus(provider: string, maskEmails = true, flowId?: str
   // logged in unless refresh-attention evidence applies; refresh eligibility stays internal.
   // Invalid/unknown local-import expiries are handled at parse/adoption time
   // (local-token-detect.ts), never by over-reporting login state here.
-  const activeAccount = set?.accounts.find(a => a.id === set.activeAccountId);
-  const activeNeedsReauth = activeAccount && accountNeedsReauthForStatus(provider, activeAccount);
+  const needsReauth = account && accountNeedsReauthForStatus(provider, account);
   return {
-    loggedIn: !!cred && !activeNeedsReauth,
+    loggedIn: !!cred && !needsReauth,
     email: projectEmail(cred?.email, maskEmails) ?? undefined,
     source: cred?.source,
     error: st?.error,

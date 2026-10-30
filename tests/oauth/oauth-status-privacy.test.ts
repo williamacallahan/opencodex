@@ -18,8 +18,8 @@ import {
   publicOAuthAuthenticationErrorMessage,
   UnsupportedOAuthProviderError,
 } from "../../src/oauth";
-import { loginState } from "../../src/oauth/login-flow-state";
-import { getAccountSet, OAuthMutationBusyError, saveCredential, setAccountPaused } from "../../src/oauth/store";
+import { loginState, recordStartedLoginFlow, settleLoginFlow } from "../../src/oauth/login-flow-state";
+import { getAccountSet, markAccountNeedsReauth, OAuthMutationBusyError, removeAccount, saveCredential, setAccountPaused } from "../../src/oauth/store";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { handleResponses } from "../../src/server/responses";
 import type { OcxConfig } from "../../src/types";
@@ -94,6 +94,31 @@ describe("OAuth status privacy", () => {
     loginState.set("pending-xai", { provider: "xai", flowId: "pending-xai", done: false });
     expect(cancelLoginFlow("xai", "pending-xai")).toBe(true);
     expect(getLoginStatus("xai", true, "pending-xai")).toMatchObject({ status: "error", error: "Login cancelled" });
+  });
+
+  test("completed flow A reports its receipt after B becomes active, without falling back", async () => {
+    recordStartedLoginFlow("xai", "flow-a", false);
+    const receipt = await saveCredential("xai", { access: "fixture-a", refresh: "refresh-a",
+      expires: Date.now() + 60_000, email: "alice@example.test", accountId: "account-a", source: "oauth" });
+    expect(receipt).not.toBeNull();
+    settleLoginFlow("flow-a", { accountId: receipt!.accountId });
+    await saveCredential("xai", { access: "fixture-b", refresh: "refresh-b",
+      expires: Date.now() + 60_000, email: "bob@example.test", accountId: "account-b", source: "local-cli" });
+    expect(getLoginStatus("xai", false)).toMatchObject({ email: "bob@example.test", source: "local-cli" });
+    expect(getLoginStatus("xai", false, "flow-a")).toMatchObject({
+      status: "complete", done: true, loggedIn: true, email: "alice@example.test", source: "oauth",
+    });
+    expect(getLoginStatus("xai", true, "flow-a").email).toBe("a***e@example.test");
+    const active = getAccountSet("xai")!.activeAccountId;
+    await markAccountNeedsReauth("xai", active, true);
+    expect(getLoginStatus("xai", true, "flow-a").loggedIn).toBe(true);
+    await markAccountNeedsReauth("xai", receipt!.accountId, true);
+    await markAccountNeedsReauth("xai", active, false);
+    expect(getLoginStatus("xai", true, "flow-a").loggedIn).toBe(false);
+    await removeAccount("xai", receipt!.accountId);
+    expect(getLoginStatus("xai", false, "flow-a")).toMatchObject({ loggedIn: false, email: undefined });
+    expect(getLoginStatus("xai", false, "missing-flow").loggedIn).toBe(false);
+    expect(getLoginStatus("anthropic", false, "flow-a").loggedIn).toBe(false);
   });
 
   test("getLoginStatus returns a masked provider email", async () => {

@@ -49,7 +49,10 @@ unchanged.
   any other error falls to `invalid_or_expired_code`, with the original message kept on the flow.
   Without a `flowId` and with no code-mode flow, the legacy accept-only contract is unchanged.
 - **Status.** `GET /api/oauth/status` reports the provider's newest flow, including `mode` for a
-  code flow. An explicit flow id is honoured only for its own provider. A caller running several flows tracks each one through its own paste response.
+  code flow. An explicit flow id is honoured only for its own provider. Its login identity and
+  reauth status come from that completed flow's account receipt, not the provider-active account;
+  a missing receipt or removed account never falls back to another account. Provider-only reads
+  retain active-account semantics. A caller running several flows tracks each paste response.
 - **Account store semantics: single operator.** A successful code login writes the same credential
   store as any other login, and the store has one active account per provider. Two concurrent code
   logins that both succeed leave the **later** one active. This is a single-operator convenience
