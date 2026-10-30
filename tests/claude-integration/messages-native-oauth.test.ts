@@ -1124,6 +1124,52 @@ describe("strict Messages OAuth public HTTP transport", () => {
     expect(getAnthropicAccountHealthSnapshot(id!)).toBeNull();
   });
 
+  for (const path of ["/strict/v1/messages", "/strict/v1/messages/count_tokens"]) {
+    test(`explicit strict requests accumulate the default auto-pause threshold on ${path}`, async () => {
+      const [id] = await seed(1);
+      const bytes = gzipSync('{"type":"error","error":{"type":"permission_error","message":"Your Claude subscription has expired."}}');
+      await launch(() => new Response(bytes, { status: 403, headers: { "content-encoding": "gzip" } }), cfg => {
+        cfg.claudeCode!.strictPassthrough = false;
+        cfg.anthropicAccountPool = { enabled: false };
+        cfg.providers.anthropic!.accountAutoPause = { enabled: true };
+      });
+      for (const paused of [false, true]) {
+        const response = await post(path);
+        expect(response.status).toBe(403);
+        expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array(bytes));
+        expect(getAccountSet("anthropic")!.accounts.find(account => account.id === id)?.paused === true).toBe(paused);
+      }
+      expect(captured).toHaveLength(2);
+    });
+  }
+
+  for (const path of ["/v1/messages", "/v1/messages/count_tokens"]) {
+    test(`explicit strict preserves caller headers when ordinary ${path} remains translated`, async () => {
+      await seed(1);
+      await launch(undefined, cfg => { cfg.claudeCode!.strictPassthrough = false; });
+      const response = await post(`/strict${path}`, raw, undefined, { "x-session-id": "fixture-caller-session" });
+      expect(response.status).toBe(200); await response.arrayBuffer();
+      expect(captured).toHaveLength(1);
+      expect(captured[0]!.headers.has("session_id")).toBe(false);
+      expect(captured[0]!.headers.get("x-session-id")).toBe("fixture-caller-session");
+      expect(captured[0]!.bytes).toEqual(encode(raw));
+    });
+  }
+
+  test("strict encoded invalid UTF-8 cannot authorize an account cooldown", async () => {
+    const [id] = await seed(2);
+    const bytes = gzipSync(new Uint8Array([
+      ...encode('{"type":"error","error":{"type":"permission_error","message":"Your Claude subscription has expired."},"padding":"'),
+      0xff, ...encode('"}'),
+    ]));
+    await launch(() => new Response(bytes, { status: 403, headers: { "content-encoding": "gzip" } }));
+    const response = await post();
+    expect(response.status).toBe(403);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array(bytes));
+    expect(captured).toHaveLength(1);
+    expect(getAnthropicAccountHealthSnapshot(id!)).toBeNull();
+  });
+
   test("strict compressed refusal cannot mark a replacement credential", async () => {
     const [id] = await seed(1);
     const bytes = gzipSync('{"type":"error","error":{"type":"authentication_error","message":"OAuth access token has been revoked."}}');

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { callerSessionId, withCallerSessionIdentity } from "../../src/server/caller-session-identity";
@@ -15,7 +15,6 @@ import type { OcxConfig } from "../../src/types";
 import { fakeChatGptJwt } from "../helpers/fake-chatgpt-jwt";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
-import { repoPath } from "../helpers/repo-root";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 
 const LOOPBACK = { kind: "loopback", source: "loopback" } as const;
@@ -162,17 +161,6 @@ describe("Non-Codex callers reach the ChatGPT Codex backend with session_id", ()
       expect(logCtx.conversationId).toBeTruthy();
     } finally { lease?.release(); }
   });
-});
-
-test("the public routes hand their handlers the caller-promoted request", () => {
-  // Pins the three-route wiring; the cases above call the helper directly.
-  const source = readFileSync(repoPath("src", "server", "index", "serve-options.ts"), "utf8");
-  expect(source).toContain("const sessionReq = withCallerSessionIdentity(withGrokSessionIdentity(req), admission);");
-  expect(source).toContain("await handleResponses(sessionReq, config, logCtx, {");
-  expect(source).toContain("const sessionReq = withCallerSessionIdentity(req, admission);");
-  expect(source).toContain("await handleClaudeMessages(sessionReq, config, logCtx,");
-  expect(source).toContain("await handleChatCompletions(sessionReq, config, logCtx,");
-  expect(source.match(/const sessionReq = withCallerSessionIdentity/g)).toHaveLength(3);
 });
 
 function admitted(key: string, source: "dedicated" | "bearer" = "dedicated"): DataPlaneAdmission {

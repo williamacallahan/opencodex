@@ -54,6 +54,8 @@ transient/quota/model/request failures. No provider body or account identifier e
 Strict Messages supplies the existing bounded content decoder only for its raw (`decompress: false`)
 response clones. Inspection bounds both compressed and decoded bytes and retains the same 250 ms read
 deadlines; malformed/oversized/incomplete evidence has no authority. Fetch-decoded transports do not opt in.
+Streaks and response-arrival serialization belong to the serving provider roster, shared by
+request-local strict transport config clones; replacing that roster on config reload resets them.
 The opt-in counter defaults to two refusals; each process owns its counters. Durable pause
 uses `setAccountPaused`, `setCodexAccountPaused`, or
 `src/providers/api-key-pause.ts`; resume changes an incarnation fence and clears the reason.

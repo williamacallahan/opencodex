@@ -66,7 +66,7 @@ async function isRevokedOAuthToken(response: Response, signal?: AbortSignal, dec
 
 async function isAccountRefusal(response: Response, signal?: AbortSignal, decodeBody?: BoundedBodyOptions["decodeBody"]): Promise<boolean> {
   try {
-    const body = await readBoundedResponseBody(response.clone(), { signal, decodeBody });
+    const body = await readBoundedResponseBody(response.clone(), { signal, fatalUtf8: true, decodeBody });
     if (!body.displaySafe || body.truncated) return false;
     const payload: unknown = JSON.parse(body.text);
     if (!payload || typeof payload !== "object" || Array.isArray(payload) || !("error" in payload)) return false;

@@ -18,7 +18,8 @@ import { clearThreadAccountMapForAccount, reconcileCodexActiveAfterExclusion } f
 import { isNonReplayableResponse } from "../lib/upstream-retry";
 import { hasUpstreamRewriters, upstreamRewriterEpoch } from "../plugins/upstream-hooks";
 
-const streaks = new WeakMap<OcxConfig, AccountRefusalStreaks>();
+// Request-local transport config shares the serving roster; config reload replaces it.
+const streaks = new WeakMap<OcxConfig["providers"], AccountRefusalStreaks>();
 export { wasAccountAutoPaused, wasPermanentAccountRefusal } from "../lib/account-auto-pause-response";
 import { markAccountAutoPaused, markPermanentAccountRefusal } from "../lib/account-auto-pause-response";
 export interface AccountAutoPauseBinding {
@@ -134,8 +135,8 @@ export function captureAccountAutoPauseAttempt(name: string, provider: OcxProvid
     });
   }
   incarnation += `\0${fence.diskRevision}\0${fence.localGen}`;
-  let tracker = streaks.get(config);
-  if (!tracker) { tracker = new AccountRefusalStreaks(); streaks.set(config, tracker); }
+  let tracker = streaks.get(config.providers);
+  if (!tracker) { tracker = new AccountRefusalStreaks(); streaks.set(config.providers, tracker); }
   const observed = new WeakSet<Response>();
   // undefined: no HTTP final-send report (Codex WebSocket). Such a send is attributable only when
   // no rewriter was registered at capture and none was registered or removed before the response,
