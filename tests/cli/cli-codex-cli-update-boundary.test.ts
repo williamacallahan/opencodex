@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { codexCliPackedFilename } from "../../src/codex/cli-update-artifacts";
 import {
   chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync,
 } from "node:fs";
@@ -223,8 +224,7 @@ describe("Codex CLI selection inspection boundary", () => {
         cwd: dir, encoding: "utf8", timeout: 30_000, env: npmEnv,
       });
       expect(packed.status).toBe(0);
-      const meta = JSON.parse(packed.stdout) as { filename?: string }[];
-      const filename = meta[0]?.filename ?? "";
+      const filename = codexCliPackedFilename(packed.stdout) ?? "";
       // The tarball name comes from npm's own report, never a guess at how the
       // scoped package name is flattened.
       expect(filename).toMatch(/^[^/\\]+[.]tgz$/);

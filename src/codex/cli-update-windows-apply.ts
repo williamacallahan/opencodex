@@ -1,4 +1,5 @@
 import { writeFileSync } from "node:fs";
+import { codexCliPackedFilename } from "./cli-update-artifacts";
 import { randomUUID } from "node:crypto";
 import { win32 } from "node:path";
 import type { CodexCliApplyDeps, CodexCliApplyResult, CodexCliApplyCleanupError } from "./cli-update-apply";
@@ -186,9 +187,9 @@ export async function applyWindowsCodexCliUpdate(planId: string, deps: CodexCliA
         if (!packed.terminal) return finish("ambiguous", "installer_state_unknown");
         if (cleanupPending) return finish("ambiguous", "child_cleanup_unverified");
         if (packed.failed || packed.overflow || packed.exitCode !== 0) throw new Error("pack_failed");
-        const names = JSON.parse(packed.stdout);
-        if (!Array.isArray(names) || names.length !== 1 || !/^[A-Za-z0-9][A-Za-z0-9._-]*\.tgz$/.test(names[0]?.filename)) throw new Error("pack_unverified");
-        path = win32.join(owner.staging, names[0].filename);
+        const filename = codexCliPackedFilename(packed.stdout);
+        if (!filename) throw new Error("pack_unverified");
+        path = win32.join(owner.staging, filename);
       }
       if (cancelled()) return finish("refused", "cancelled");
       archives.push(path);

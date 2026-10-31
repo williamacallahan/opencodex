@@ -7,6 +7,16 @@ import { parseStrictSemver } from "../lib/strict-semver";
 import { codexCliContentFileDigest, codexCliContentSetDigest, codexCliPlatformBacking } from "./cli-install-provenance";
 import { windowsArchivePathValidator, WINDOWS_CODEX_HEADER_BYTES, WINDOWS_CODEX_NATIVE_MEMBER } from "./cli-update-windows-paths";
 
+/** Normalize legacy arrays and npm 12's package-name-keyed pack reports. */
+export function codexCliPackedFilename(stdout: string): string | null {
+  const report: unknown = JSON.parse(stdout);
+  if (report === null || typeof report !== "object") return null;
+  const entries: unknown[] = Array.isArray(report) ? report : Object.values(report);
+  const entry = entries.length === 1 ? entries[0] : undefined;
+  const filename = entry !== null && typeof entry === "object" && "filename" in entry ? entry.filename : undefined;
+  return typeof filename === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]*\.tgz$/.test(filename) ? filename : null;
+}
+
 export const CODEX_CLI_REGISTRY = "https://registry.npmjs.org";
 export interface CodexCliArtifact {
   readonly name: string;

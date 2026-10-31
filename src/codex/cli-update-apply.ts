@@ -8,7 +8,7 @@ import { inspectCodexCliInstall, observeCodexCliSelectedCommand, codexCliMutatio
 import { createCodexCliUpdatePlan, createNpmConfigIsolation, isolatedNpmTarget,
   type CodexCliUpdatePlanDeps } from "./cli-update-plan";
 import { codexCliPlatformBacking } from "./cli-install-provenance";
-import { verifyCodexCliArchive,
+import { codexCliPackedFilename, verifyCodexCliArchive,
   verifiedCodexCliContent, type CodexCliArtifact } from "./cli-update-artifacts";
 import { acquireCodexCliApplyLease } from "./cli-update-lease";
 import { scanCodexSessionProcessesAsync } from "./app-server-processes";
@@ -174,10 +174,9 @@ async function packArtifact(artifact: CodexCliArtifact, dir: string, env?: NodeJ
   if (!invocation) throw new Error("npm_unavailable");
   const packed = await runNpm({ bin: invocation.bin, args: invocation.args, cwd: isolation.dir, env: isolation.env }, true);
   if (packed.exitCode !== 0) throw new Error("artifact_pack_failed");
-  const files = JSON.parse(packed.stdout);
-  if (!Array.isArray(files) || files.length !== 1 || typeof files[0]?.filename !== "string"
-    || !/^[A-Za-z0-9][A-Za-z0-9._-]*\.tgz$/.test(files[0].filename)) throw new Error("artifact_pack_unverified");
-  const path = join(dir, files[0].filename);
+  const filename = codexCliPackedFilename(packed.stdout);
+  if (!filename) throw new Error("artifact_pack_unverified");
+  const path = join(dir, filename);
   if (realpathSync.native(path) !== path) throw new Error("artifact_pack_unverified");
   return path;
 }

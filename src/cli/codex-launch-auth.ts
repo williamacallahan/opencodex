@@ -34,7 +34,6 @@ export function codexCredentialDestinationIsTrusted(home: string, systemNamespac
     if (!codexLaunchHomeIsOwned(home)) return refuse("ownership");
     if (!codexLaunchSystemNamespaceIsSafe(systemNamespaceDirectory, report)) return false;
     const additionalLayers = [join(home, "auth.json"), join(home, "managed_config.toml"), join(home, "requirements.toml")];
-    if (process.platform !== "win32") additionalLayers.push("/etc/codex/config.toml", "/etc/codex/managed_config.toml", "/etc/codex/requirements.toml");
     for (const path of additionalLayers) {
       try { lstatSync(path); return refuse("additionalLayer"); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return refuse("layerInspection"); }

@@ -1,7 +1,7 @@
 import { createCodexCliTestRoot } from "../helpers/codex-cli-fixture-root";
 import { describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
-import { codexCliArtifactSet, codexCliArtifactSetDigest, MAX_CODEX_ARCHIVE_BYTES, MAX_CODEX_MEMBER_BYTES, verifyCodexCliArchive, verifiedCodexCliContent } from "../../src/codex/cli-update-artifacts";
+import { codexCliPackedFilename, codexCliArtifactSet, codexCliArtifactSetDigest, MAX_CODEX_ARCHIVE_BYTES, MAX_CODEX_MEMBER_BYTES, verifyCodexCliArchive, verifiedCodexCliContent } from "../../src/codex/cli-update-artifacts";
 import { codexCliUpdatePlanId } from "../../src/codex/cli-update-plan";
 import { fixtureArtifact, fixtureArtifactSet, fixtureTar } from "../helpers/codex-cli-apply-artifact";
 import { applyCodexCliUpdate, cleanupCodexCliApply, verifyInstalledCodexVersion } from "../../src/codex/cli-update-apply";
@@ -15,6 +15,14 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { observeCodexCliPreimage, sameCodexCliPreimage, sameCodexCliFiles, type CodexCliFileSet } from "../../src/codex/cli-update-files";
 
 describe("Codex CLI apply artifacts", () => {
+  test("pack reports preserve the single safe tarball contract across npm versions", () => {
+    for (const report of [[{ filename: "codex-1.0.0.tgz" }], { "@openai/codex": { filename: "codex-1.0.0.tgz" } }]) {
+      expect(codexCliPackedFilename(JSON.stringify(report))).toBe("codex-1.0.0.tgz");
+    }
+    for (const report of [null, [], {}, [{ filename: "../bad.tgz" }], { a: { filename: "a.tgz" }, b: { filename: "b.tgz" } }]) {
+      expect(codexCliPackedFilename(JSON.stringify(report))).toBeNull();
+    }
+  });
   test("real npm installs main and platform aliases from local tarballs into a private prefix offline", () => {
     const root = createCodexCliTestRoot("ocx-apply-alias-");
     try {
