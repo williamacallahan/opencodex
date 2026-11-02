@@ -85,6 +85,8 @@ import { siblingOfLivePort } from "../../codex/sibling-start";
 import { DEFAULT_PROVIDER_CONTEXT_CAP, globalContextCapValue, providerContextCap, providerContextCaps, setAllProviderContextCaps, setGlobalContextCapValue, setProviderContextCap } from "../../providers/context-cap";
 import { resolveCodexHomeDir } from "../../codex/home";
 import { readUsageEntries } from "../../usage/log";
+import { MIN_USAGE_LEDGER_MAX_BYTES } from "../../usage/retention-contract";
+import { setUsageLedgerRetention, usageLedgerRetentionStatus } from "../usage-ledger-retention";
 import { getUsageDebugLogEntries } from "../../usage/debug";
 import { parseRange, parseUsageSurface, summarizeUsage } from "../../usage/summary";
 import { stripCodexRuntimeProviderFields } from "../../codex/auth-context";
@@ -445,6 +447,8 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
       hostname: config.hostname ?? "127.0.0.1",
       streamMode: config.streamMode ?? "auto",
       appOwnedMemoryBudgetMb: config.appOwnedMemoryBudgetMb ?? 256,
+      usageLedgerMaxBytes: config.usageLedgerMaxBytes ?? null,
+      usageLedgerRetention: usageLedgerRetentionStatus(),
       codexAccountPickerEnabled: codexAccountPickerEnabled(config),
       codexQuotaAutoRefresh: quotaAutoRefreshSettings(config),
       // Absent means off, same convention: the GUI renders a plain switch without
@@ -555,6 +559,7 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
       codexAutoStart?: unknown;
       streamMode?: unknown;
       appOwnedMemoryBudgetMb?: unknown;
+      usageLedgerMaxBytes?: unknown;
       codexAccountPickerEnabled?: unknown;
       codexQuotaAutoRefresh?: unknown;
       oauthOpenBrowser?: unknown;
@@ -574,6 +579,7 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
     if (body.codexAutoStart === undefined
       && body.streamMode === undefined
       && body.appOwnedMemoryBudgetMb === undefined
+      && body.usageLedgerMaxBytes === undefined
       && body.codexAccountPickerEnabled === undefined
       && body.codexQuotaAutoRefresh === undefined
       && body.oauthOpenBrowser === undefined
@@ -589,7 +595,7 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
       && body.compactionRecovery === undefined
       && body.reasoningRetention === undefined
       && body.memoryModels === undefined) {
-      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, showCodexCredits, ultraFastTier, fastRows, codexMainAccountHardLock, codexMainAccountHardLockThresholds, codexMainAccountHardLockFallback, codexDesktopAuthless, codexClientCompaction, compactionRouting, compactionRecovery, reasoningRetention, or memoryModels" }, 400);
+      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, usageLedgerMaxBytes, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, showCodexCredits, ultraFastTier, fastRows, codexMainAccountHardLock, codexMainAccountHardLockThresholds, codexMainAccountHardLockFallback, codexDesktopAuthless, codexClientCompaction, compactionRouting, compactionRecovery, reasoningRetention, or memoryModels" }, 400);
     }
     if (body.codexAutoStart !== undefined && typeof body.codexAutoStart !== "boolean") {
       return jsonResponse({ error: "codexAutoStart boolean is required" }, 400);
@@ -686,6 +692,13 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
     )) {
       return jsonResponse({ error: `appOwnedMemoryBudgetMb must be an integer from ${MIN_APP_OWNED_MEMORY_BUDGET_MB} to ${MAX_APP_OWNED_MEMORY_BUDGET_MB}` }, 400);
     }
+    if (body.usageLedgerMaxBytes !== undefined && body.usageLedgerMaxBytes !== null && (
+      typeof body.usageLedgerMaxBytes !== "number"
+      || !Number.isSafeInteger(body.usageLedgerMaxBytes)
+      || body.usageLedgerMaxBytes < MIN_USAGE_LEDGER_MAX_BYTES
+    )) {
+      return jsonResponse({ error: `usageLedgerMaxBytes must be null or a safe integer of at least ${MIN_USAGE_LEDGER_MAX_BYTES}` }, 400);
+    }
     let pickerWasEnabled = false, pickerIsEnabled = false;
     let authlessIsEnabled = false, clientCompactionIsEnabled = false, fastRowsIsEnabled = false;
     let desktopSwitchesChanged = false, fastRowsChanged = false;
@@ -704,7 +717,7 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
       const authlessWasEnabled = config.codexDesktopAuthless === true;
       const clientCompactionWasEnabled = config.codexClientCompaction === true;
       const fastRowsWasEnabled = config.fastRows !== false;
-      const restoreCompactionRouting = captureConfigTopLevelRollback(config, ["compactionRouting", "compactionRecovery", "memoryModels", "reasoningRetention"]);
+      const restoreCompactionRouting = captureConfigTopLevelRollback(config, ["compactionRouting", "compactionRecovery", "memoryModels", "reasoningRetention", "usageLedgerMaxBytes"]);
       const previousSettings = {
         codexAutoStart: config.codexAutoStart,
         hasCodexAutoStart: Object.hasOwn(config, "codexAutoStart"),
@@ -751,6 +764,8 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
         if (typeof body.appOwnedMemoryBudgetMb === "number") {
           config.appOwnedMemoryBudgetMb = body.appOwnedMemoryBudgetMb;
         }
+        if (body.usageLedgerMaxBytes === null) deleteConfigTopLevelKey(config, "usageLedgerMaxBytes");
+        else if (typeof body.usageLedgerMaxBytes === "number") config.usageLedgerMaxBytes = body.usageLedgerMaxBytes;
         if (body.codexAccountPickerEnabled === true) {
           config.codexAccountPickerEnabled = true;
           initializeDefaultCodexAccountNamespaces(config);
@@ -858,6 +873,9 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
       configureAppOwnedMemoryBudget(resolveAppOwnedMemoryBudgetBytes(body.appOwnedMemoryBudgetMb));
       enforceAppOwnedMemoryBudget();
     }
+    if (body.usageLedgerMaxBytes !== undefined) {
+      setUsageLedgerRetention(config.usageLedgerMaxBytes);
+    }
     // Catalog convergence is not config injection, and the comment that used to sit here said
     // it was. `convergeCodexCatalog` rejects any scope but `catalog` and never reaches the
     // injector, which is why flipping either switch left `config.toml` in its old shape until
@@ -889,6 +907,8 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
       codexAutoStart: codexAutoStartEnabled(config),
       streamMode: config.streamMode ?? "auto",
       appOwnedMemoryBudgetMb: config.appOwnedMemoryBudgetMb ?? 256,
+      usageLedgerMaxBytes: config.usageLedgerMaxBytes ?? null,
+      usageLedgerRetention: usageLedgerRetentionStatus(),
       codexAccountPickerEnabled: pickerIsEnabled,
       codexQuotaAutoRefresh: quotaAutoRefreshSettings(config),
       oauthOpenBrowser: config.oauthOpenBrowser !== false,

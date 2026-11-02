@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { atomicWriteFileAsync, getConfigDir, resolveWriteTarget } from "../config";
-import { enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
+import { configuredAppOwnedMemoryBudgetBytes, enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
 import { windowsSecretAclApplies } from "../lib/windows-secret-acl";
 import type { OcxProviderContinuationState } from "../types";
 import {
@@ -69,12 +69,11 @@ const MAX_STORED_RESPONSES = 1_000;
  */
 export const RESPONSE_TTL_MS = 24 * 60 * 60 * 1_000;
 const SNAPSHOT_DEBOUNCE_MS = 2_000;
-/** Snapshot size below which the debounce stays at its base value. */
 const SNAPSHOT_DEBOUNCE_SCALE_FROM_BYTES = 1 * 1024 * 1024;
-/** Ceiling for the stretched debounce. Continuation state is only read after a
- *  restart, and a graceful shutdown flushes, so the exposure a longer debounce adds
- *  is bounded by a hard kill — paid against rewriting the whole snapshot every 2 s. */
-const SNAPSHOT_DEBOUNCE_MAX_MS = 30_000;
+const SNAPSHOT_DEBOUNCE_PER_EXTRA_MIB_MS = 21_500;
+/** Continuation state is read only on restart and graceful shutdown flushes synchronously,
+ *  so a 5-minute ceiling bounds hard-kill exposure while cutting 24 MiB snapshot write amplification 10x. */
+const SNAPSHOT_DEBOUNCE_MAX_MS = 300_000;
 /** In-memory high-water byte cap across all entries. Forced store:false retention (kiro/cursor
  * continuation chains) stores the full expanded input each turn — ~quadratic bytes per chain —
  * so a count cap alone cannot bound memory. Oldest-first eviction applies past this mark. */
@@ -221,7 +220,7 @@ function deferSupersededSpill(ref: ResponseSpillRef | undefined): void {
 
 
 function byteCap(): number {
-  return byteCapOverride ?? MAX_STORED_RESPONSE_BYTES;
+  return byteCapOverride ?? Math.max(MAX_STORED_RESPONSE_BYTES, Math.floor(configuredAppOwnedMemoryBudgetBytes() / 4));
 }
 
 /** Test-only: lower/restore the in-memory byte cap (null restores the default). */
@@ -780,8 +779,8 @@ function drainPendingSpillUnlinks(): void {
  */
 function snapshotDebounceMs(): number {
   if (lastSnapshotBytes <= SNAPSHOT_DEBOUNCE_SCALE_FROM_BYTES) return SNAPSHOT_DEBOUNCE_MS;
-  const scaled = Math.round(SNAPSHOT_DEBOUNCE_MS * (lastSnapshotBytes / SNAPSHOT_DEBOUNCE_SCALE_FROM_BYTES));
-  return Math.min(scaled, SNAPSHOT_DEBOUNCE_MAX_MS);
+  const extraMib = (lastSnapshotBytes - SNAPSHOT_DEBOUNCE_SCALE_FROM_BYTES) / SNAPSHOT_DEBOUNCE_SCALE_FROM_BYTES;
+  return Math.min(SNAPSHOT_DEBOUNCE_MS + Math.round(extraMib * SNAPSHOT_DEBOUNCE_PER_EXTRA_MIB_MS), SNAPSHOT_DEBOUNCE_MAX_MS);
 }
 
 function schedulePersistAt(path: string, replace = false): void {

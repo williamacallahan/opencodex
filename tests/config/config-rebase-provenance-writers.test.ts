@@ -10,7 +10,7 @@ const writerContracts: Record<string, string[]> = {
   ],
   "src/server/management/claude-desktop-config-writers.ts": ["clientIntegrations"],
   "src/server/management/config-routes.ts": [
-    "streamMode", "codexAutoStart", "appOwnedMemoryBudgetMb", "codexAccountNamespaces",
+    "streamMode", "codexAutoStart", "appOwnedMemoryBudgetMb", "usageLedgerMaxBytes", "codexAccountNamespaces",
     "codexAccountPickerEnabled", "oauthOpenBrowser",
   ],
   "src/server/management/combo-routes.ts": ["combos"],

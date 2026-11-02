@@ -1143,3 +1143,66 @@ describe("manual compaction settings", () => {
     }
   });
 });
+
+describe("usageLedgerMaxBytes settings", () => {
+  test("saves, enforces against an oversized ledger, reloads, and clears via null", async () => {
+    const { MIN_USAGE_LEDGER_MAX_BYTES } = await import("../../src/usage/retention-contract");
+    const { setUsageLedgerRetention } = await import("../../src/server/usage-ledger-retention");
+    const { usageLogPath } = await import("../../src/usage/log");
+    setUsageLedgerRetention(undefined);
+    try {
+      const config = baseConfig();
+      const initial = await (await getSettings(config))!.json() as {
+        usageLedgerMaxBytes?: number | null;
+        usageLedgerRetention?: { maxBytes?: number; currentBytes: number };
+      };
+      expect(initial.usageLedgerMaxBytes).toBeNull();
+      expect(initial.usageLedgerRetention).toEqual({ currentBytes: 0 });
+
+      mkdirSync(TEST_DIR, { recursive: true });
+      const oversizedRow = `${JSON.stringify({ requestId: "seed", pad: "x".repeat(16 * 1024) })}\n`;
+      writeFileSync(usageLogPath(), oversizedRow.repeat(100), { mode: 0o600 });
+
+      const put = await putSettings(config, { usageLedgerMaxBytes: MIN_USAGE_LEDGER_MAX_BYTES });
+      expect(put?.status).toBe(200);
+      const saved = await put!.json() as {
+        usageLedgerMaxBytes?: number | null;
+        usageLedgerRetention?: { maxBytes?: number; currentBytes: number };
+      };
+      expect(saved.usageLedgerMaxBytes).toBe(MIN_USAGE_LEDGER_MAX_BYTES);
+      expect(saved.usageLedgerRetention?.maxBytes).toBe(MIN_USAGE_LEDGER_MAX_BYTES);
+      expect(loadConfig().usageLedgerMaxBytes).toBe(MIN_USAGE_LEDGER_MAX_BYTES);
+
+      const deadline = Date.now() + 5_000;
+      while (readFileSync(usageLogPath()).byteLength > MIN_USAGE_LEDGER_MAX_BYTES && Date.now() < deadline) {
+        await Bun.sleep(50);
+      }
+      expect(readFileSync(usageLogPath()).byteLength).toBeLessThanOrEqual(MIN_USAGE_LEDGER_MAX_BYTES);
+
+      const cleared = await putSettings(config, { usageLedgerMaxBytes: null });
+      expect(cleared?.status).toBe(200);
+      expect(config.usageLedgerMaxBytes).toBeUndefined();
+      expect(loadConfig().usageLedgerMaxBytes).toBeUndefined();
+      const afterClear = await (await getSettings(config))!.json() as {
+        usageLedgerMaxBytes?: number | null;
+        usageLedgerRetention?: { maxBytes?: number; currentBytes: number };
+      };
+      expect(afterClear.usageLedgerMaxBytes).toBeNull();
+      expect(afterClear.usageLedgerRetention?.maxBytes).toBeUndefined();
+    } finally {
+      setUsageLedgerRetention(undefined);
+    }
+  });
+
+  test("rejects values below the floor or non-integers without mutating config", async () => {
+    const { MIN_USAGE_LEDGER_MAX_BYTES } = await import("../../src/usage/retention-contract");
+    const config = baseConfig();
+    config.usageLedgerMaxBytes = MIN_USAGE_LEDGER_MAX_BYTES * 2;
+    const before = structuredClone(config);
+    for (const bad of [false, "1048576", 0, -1, MIN_USAGE_LEDGER_MAX_BYTES - 1, MIN_USAGE_LEDGER_MAX_BYTES + 0.5]) {
+      const res = await putSettings(config, { usageLedgerMaxBytes: bad });
+      expect(res?.status).toBe(400);
+      expect(config).toEqual(before);
+    }
+  });
+});
