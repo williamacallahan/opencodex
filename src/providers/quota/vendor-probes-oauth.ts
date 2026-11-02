@@ -268,7 +268,7 @@ export async function fetchAnthropicUsageProbeForInstance(
   // Recovery evidence must be requested after the claimed cooldown. Joining an older request
   // can return after the 429 while still describing provider state from before that refusal.
   const credentialIdentity = getAccountSet(instance)?.accounts.filter(row => row.credential.access === accessToken)
-    .map(row => [row.id, row.loginId, row.addedAt, credentialGeneration(row.credential)]);
+    .map(row => [row.id, row.loginId, row.addedAt, credentialGeneration(row.credential), row.pauseRevision]);
   const key = `${instance}\0${captureProviderAccountQuotaEpoch(instance)}\0${JSON.stringify(credentialIdentity)}\0${accessToken}`;
   const joinable = requireFreshDispatch ? undefined : anthropicUsageInflight.get(key);
   if (joinable) return joinable;

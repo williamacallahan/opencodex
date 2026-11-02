@@ -258,13 +258,15 @@ export default function ProviderAuthPanel({
     [claudeGrantsEnabled, accounts],
   );
   const claudeGrants = useAnthropicResetGrants({ apiBase, provider: isAnthropicInstanceId(item.name) ? item.name : "anthropic", accountIds: claudeAccountIds, enabled: claudeGrantsEnabled });
-  // The open reset dialog belongs to the pool it was opened in. Switching server or pool
-  // hides it during render rather than resetting it from an effect, as does pausing its account.
+  // Switching server or pool hides the selection; observing its paused row closes it for good.
   const grantScope = `${apiBase}\0${item.name}`;
-  const [grantSelection, setGrantSelection] = useState<{ scope: string; account: OAuthAccountRow } | null>(null);
-  const grantAccount = grantSelection?.scope === grantScope && !accounts.find(row => row.id === grantSelection.account.id)?.paused ? grantSelection.account : null;
+  const [grantSelection, setGrantSelection] = useState<{ scope: string; accountId: string } | null>(null);
+  const selectedGrantRow = grantSelection?.scope === grantScope
+    ? accounts.find(row => row.id === grantSelection.accountId) : undefined;
+  if (selectedGrantRow?.paused) setGrantSelection(null);
+  const grantAccount = selectedGrantRow && !selectedGrantRow.paused ? selectedGrantRow : null;
   const setGrantAccount = (account: OAuthAccountRow | null) => {
-    setGrantSelection(account ? { scope: grantScope, account } : null);
+    setGrantSelection(account ? { scope: grantScope, accountId: account.id } : null);
   };
   const refreshQuota = async () => {
     if (!onRefreshQuota || refreshingQuota) return;

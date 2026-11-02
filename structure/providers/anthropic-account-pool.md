@@ -168,7 +168,12 @@ preserves, `null` deletes and an instance sets; an unset choice is never written
 `src/providers/quota/anthropic-account-quota.ts` probes per-account usage for either
 instance. It refuses an unconfigured instance, resolves token renewal before keying its
 flight on the credential actually dispatched, and publishes only while the instance's
-quota epoch, configured row, account incarnation and login identity are unchanged.
+quota epoch, configured row, account incarnation, login identity and pause revision are unchanged.
+A pause retires in-flight usage evidence even if the account resumes before the response arrives;
+neither cooldown recovery nor cache/decision publication adopts that result. Both account and
+shared vendor flight keys include the pause revision, so a resumed read cannot join a pre-pause read.
+Failed probes retain last-good bars only when `anthropicQuotaEntryIsCurrent` still accepts their
+credential generation and flight; a failed replacement probe never renews old-credential bars.
 `captureProviderAccountQuotaEpoch(instance)` and the cache keys in
 `src/providers/quota/account-cache.ts` are per instance, so clearing Pool 2 quota never
 invalidates the primary pool.

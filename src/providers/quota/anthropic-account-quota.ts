@@ -31,7 +31,7 @@ export async function fetchAnthropicAccountQuota(
   const targetIdentity = JSON.stringify(target);
   const epoch = captureProviderAccountQuotaEpoch(instance);
   const initialRow = getAccountSet(instance)?.accounts.find(row => row.id === accountId);
-  if (!initialRow) return unavailable();
+  if (!initialRow || initialRow.paused) return unavailable();
   const recovery = anthropicCooldownRecoveryFor(instance);
   const incarnation = recovery.reserveAnthropicAccountIncarnation(accountId);
   const ownerCurrent = () => {
@@ -40,7 +40,8 @@ export async function fetchAnthropicAccountQuota(
       && configuredAnthropicInstance(config, instance) === instance
       && JSON.stringify(config.providers[instance]) === targetIdentity
       && recovery.anthropicAccountIncarnation(accountId) === incarnation
-      && !!row && row.loginId === initialRow.loginId && row.addedAt === initialRow.addedAt;
+      && !!row && !row.paused && row.pauseRevision === initialRow.pauseRevision
+      && row.loginId === initialRow.loginId && row.addedAt === initialRow.addedAt;
   };
   hydrateAccountQuotaCache();
   const key = accountCacheKey(instance, accountId);
@@ -74,7 +75,7 @@ export async function fetchAnthropicAccountQuota(
   /** Cache the settled probe result for an account and publish its decision evidence only while the flight is still current for its credential and generation. */
   const publish = (result: AnthropicQuotaRecoveryResult | null, failure?: QuotaFailureCode): AccountQuotaCacheEntry => {
     const previous = accountQuotaCache.get(key);
-    const retained = previous?.isCurrent?.() === false ? undefined : previous;
+    const retained = anthropicQuotaEntryIsCurrent(instance, accountId, previous) ? previous : undefined;
     const isCurrent = result?.isCurrent ?? flightCurrent;
     const entry: AccountQuotaCacheEntry = {
       ts: Date.now(), quota: normalizeAnthropicQuota(result?.quota ?? retained?.quota, Date.now()),

@@ -296,6 +296,77 @@ test("UX-05: late Pool 2 settings and reset reads never render in the primary po
   expect(calls).toEqual([["poolThreshold", "anthropic", 40]]);
 });
 
+for (const item of [POOL_A, POOL_B]) {
+  for (const uncertain of [false, true]) {
+    test(`${item.name}: pause closes the reset dialog until a click${uncertain ? " and recovers the same uncertain operation" : ""}`, async () => {
+      const posts: Array<Record<string, unknown>> = [];
+      let pendingOperation: Record<string, unknown> | null = null;
+      respond = async request => {
+        const provider = request.provider ?? "anthropic";
+        if (request.path === "/api/pool/settings") return Response.json(poolSettings(provider, true, 55));
+        if (request.path === "/api/anthropic/reset-grants") return Response.json({ ...grantSnapshot(provider, 1), pendingOperation });
+        if (request.path.endsWith("/consume")) {
+          posts.push(request.body!);
+          if (posts.length === 1) {
+            pendingOperation = { ...request.body, retryableUntil: Date.now() + 60_000 };
+            throw new TypeError("synthetic unknown claim outcome");
+          }
+          pendingOperation = null;
+          return Response.json({ provider, code: "reset", resetsLeft: 0 });
+        }
+        throw new Error("unexpected request");
+      };
+      const rows = accounts(item.name);
+      const handlers = recordingHandlers([]);
+      const panel = (roster: OAuthAccountRow[]) => <ProviderAuthPanel item={item} apiBase="" accounts={roster} authHandlers={handlers} />;
+      await render(panel(rows));
+      await tick();
+      await tick();
+      await click(host.querySelector("[data-anthropic-grant-badge]"));
+      expect(host.querySelector("dialog[open]")).not.toBeNull();
+      if (uncertain) {
+        await click(host.querySelector("[data-anthropic-grant-use]"));
+        await click(host.querySelector("[data-anthropic-grant-confirm]"));
+        expect(posts).toHaveLength(1);
+        expect(host.querySelector("[data-anthropic-grant-retry]")).not.toBeNull();
+      }
+      await render(panel(rows.map(row => row.id === "shared" ? { ...row, paused: true } : row)));
+      expect(host.querySelector("dialog")).toBeNull();
+      await render(panel(rows));
+      await tick();
+      await tick();
+      expect(host.querySelector("dialog")).toBeNull();
+      expect(posts).toHaveLength(uncertain ? 1 : 0);
+      await click(host.querySelector("[data-anthropic-grant-badge]"));
+      expect(host.querySelector("dialog[open]")).not.toBeNull();
+      if (uncertain) {
+        expect(host.querySelector("[data-anthropic-grant-use]")).toBeNull();
+        await click(host.querySelector("[data-anthropic-grant-retry]"));
+        expect(posts).toHaveLength(2);
+        expect(posts[1]).toEqual(posts[0]);
+      } else expect(posts).toEqual([]);
+    });
+  }
+}
+
+test("a reset selection is hidden outside its roster and scope without adopting an equal-ID paused row", async () => {
+  respond = async request => request.path === "/api/pool/settings"
+    ? Response.json(poolSettings(request.provider ?? "anthropic", true, 55))
+    : Response.json(grantSnapshot(request.provider ?? "anthropic", 1));
+  const handlers = recordingHandlers([]);
+  await render(<ProviderAuthPanel item={POOL_A} apiBase="" accounts={accounts("anthropic")} authHandlers={handlers} />);
+  await tick();
+  await tick();
+  await click(host.querySelector("[data-anthropic-grant-badge]"));
+  await render(<ProviderAuthPanel item={POOL_A} apiBase="" accounts={accounts("anthropic").filter(row => row.id !== "shared")} authHandlers={handlers} />);
+  expect(host.querySelector("dialog")).toBeNull();
+  await render(<ProviderAuthPanel item={POOL_B} apiBase="" accounts={accounts("anthropic2").map(row => ({ ...row, paused: true }))} authHandlers={handlers} />);
+  expect(host.querySelector("dialog")).toBeNull();
+  await render(<ProviderAuthPanel item={POOL_A} apiBase="" accounts={accounts("anthropic")} authHandlers={handlers} />);
+  expect(host.querySelector("dialog[open]")).not.toBeNull();
+  expect(requests.filter(request => request.method === "POST")).toEqual([]);
+});
+
 test("UX-05: an unmarked custom anthropic2 row receives neither pool's settings nor reset reads", async () => {
   respond = async () => Response.json({});
   await render(<ProviderAuthPanel item={CUSTOM_B} apiBase="" accounts={accounts("custom")} authHandlers={recordingHandlers([])} />);

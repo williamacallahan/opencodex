@@ -176,14 +176,14 @@ async function handleRead(ctx: ManagementContext, deps: AnthropicResetGrantRoute
   const refuse = () => refusedAccount(deps, accountId) === "account_paused"
     ? fail(ctx, 409, "account_paused", receipt) : fail(ctx, 401, "auth_failed", receipt);
   const accessToken = await tokenFor(deps, accountId);
-  if (!accessToken || deps.isCurrent?.() === false) return refuse();
+  if (!accessToken || deps.isPaused?.(accountId) || deps.isCurrent?.() === false) return refuse();
   let status;
   try {
     status = await fetchAnthropicResetGrantStatus({ accessToken, fetchFn: deps.fetchFn });
   } catch (error) {
-    return readFailure(ctx, error, receipt);
+    return deps.isPaused?.(accountId) || deps.isCurrent?.() === false ? refuse() : readFailure(ctx, error, receipt);
   }
-  if (deps.isCurrent?.() === false) return refuse();
+  if (deps.isPaused?.(accountId) || deps.isCurrent?.() === false) return refuse();
   let pendingOperation = null;
   let journalAvailable = true;
   try {
@@ -220,14 +220,14 @@ async function handleConsume(ctx: ManagementContext, injected?: AnthropicResetGr
     ? scopedFail(409, "account_paused") : scopedFail(401, "auth_failed");
 
   const accessToken = await tokenFor(deps, accountId);
-  if (!accessToken || deps.isCurrent?.() === false) return scopedRefuse();
+  if (!accessToken || deps.isPaused?.(accountId) || deps.isCurrent?.() === false) return scopedRefuse();
   let organizationUuid: string;
   try {
     organizationUuid = await fetchAnthropicOrganizationUuid({ accessToken, fetchFn: deps.fetchFn });
   } catch (error) {
-    return readFailure(ctx, error, operationReceipt);
+    return deps.isPaused?.(accountId) || deps.isCurrent?.() === false ? scopedRefuse() : readFailure(ctx, error, operationReceipt);
   }
-  if (deps.isCurrent?.() === false) return scopedRefuse();
+  if (deps.isPaused?.(accountId) || deps.isCurrent?.() === false) return scopedRefuse();
   const ledger = { journalPath: deps.journalPath, now: deps.now?.() };
   // Retry-after cooldowns survive a usage probe. A journaled reset, including a
   // replay after the process died before admission, has to lift this account,
@@ -254,14 +254,15 @@ async function handleConsume(ctx: ManagementContext, injected?: AnthropicResetGr
     try {
       status = await fetchAnthropicResetGrantStatus({ accessToken, fetchFn: deps.fetchFn });
     } catch (error) {
-      return readFailure(ctx, error, operationReceipt);
+      return deps.isPaused?.(accountId) || deps.isCurrent?.() === false ? scopedRefuse() : readFailure(ctx, error, operationReceipt);
     }
+    if (deps.isPaused?.(accountId) || deps.isCurrent?.() === false) return scopedRefuse();
     const blocker = anthropicResetGrantBlocker(status, grantId);
     if (blocker) return scopedFail(409, "grant_not_usable", { reason: blocker });
   }
 
   let begin;
-  if (deps.isCurrent?.() === false) return scopedRefuse();
+  if (deps.isPaused?.(accountId) || deps.isCurrent?.() === false) return scopedRefuse();
   try {
     begin = beginAnthropicResetOperation(
       { operationId, accountId, grantId, orgDigest: anthropicOrgDigest(organizationUuid) },
