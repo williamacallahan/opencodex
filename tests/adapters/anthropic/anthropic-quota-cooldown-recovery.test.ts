@@ -159,3 +159,26 @@ test("a transient hold ending with a quota hold on the same account keeps the re
   f.ratePolicy.anthropicRatePolicyFor("anthropic").pauseAnthropicRateAdmission(f.ids[0], now + 600_000);
   expect(routing.anthropicPoolCooldownError(now).usageLimit).toBeNull();
 });
+
+test("a token refresh after a served turn makes the next unforced read probe again", async () => {
+  const [{ fetchAnthropicAccountQuota }, cache, store, sweeper, fixture] = await Promise.all([
+    import("../../../src/providers/quota/anthropic-account-quota"), import("../../../src/providers/quota/account-cache"),
+    import("../../../src/oauth/store"), import("../../../src/lib/state-store-sweeper"), import("../../helpers/anthropic-instance-fixture"),
+  ]);
+  const id = f.ids[0];
+  usage(10, 10);
+  await fetchAnthropicAccountQuota("anthropic", id, false, undefined, false);
+  // A served turn records its unified headers under the credential that sent it.
+  const served = new Headers({ "anthropic-ratelimit-unified-7d-utilization": "0.2" });
+  cache.recordAnthropicAccountQuotaFromHeadersForInstance("anthropic", id, served, sweeper.captureConfigGeneration(), 200);
+  // The token refreshes: routing can no longer see that row.
+  const refreshed = { ...fixture.instanceFixtureCredential("anthropic", 1), access: "synthetic-anthropic-1-access-refreshed" };
+  const account = store.getAccountSet("anthropic")!.accounts.find(row => row.id === id)!;
+  await store.mergeAccountCredential("anthropic", id, { ...refreshed, anthropicIdentity: account.credential.anthropicIdentity });
+  expect(cache.getCachedProviderAccountQuota("anthropic", id)).toBeNull();
+
+  usage(30, 40);
+  await fetchAnthropicAccountQuota("anthropic", id, false, undefined, false);
+
+  expect(cache.getCachedProviderAccountQuota("anthropic", id)?.weeklyPercent).toBe(40);
+});

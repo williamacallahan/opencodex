@@ -10,7 +10,7 @@ import type { QuotaFailureCode } from "../quota-types";
 import { AnthropicQuotaProbeOwnershipError, anthropicCooldownRecoveryFor, type AnthropicQuotaRecoveryResult } from "./anthropic-cooldown-recovery";
 import {
   accountCacheKey, accountQuotaCache, accountQuotaInflight, captureProviderAccountQuotaEpoch,
-  getTokenForAccountQuotaProbe, hydrateAccountQuotaCache, mayCommitAccountQuotaKey,
+  anthropicQuotaEntryIsCurrent, getTokenForAccountQuotaProbe, hydrateAccountQuotaCache, mayCommitAccountQuotaKey,
   normalizeAnthropicQuota, type AccountQuotaCacheEntry,
 } from "./account-cache";
 
@@ -45,7 +45,9 @@ export async function fetchAnthropicAccountQuota(
   hydrateAccountQuotaCache();
   const key = accountCacheKey(instance, accountId);
   const candidate = accountQuotaCache.get(key);
-  const cached = candidate?.isCurrent?.() === false ? undefined : candidate;
+  // A row routing cannot see (a revoked flight, or headers recorded under a credential a token
+  // refresh has since replaced) is a miss: serving it as fresh left routing blind until the TTL.
+  const cached = anthropicQuotaEntryIsCurrent(instance, accountId, candidate) ? candidate : undefined;
   if (!force && cached && Date.now() - cached.ts < ACCOUNT_QUOTA_TTL_MS) {
     return { ...cached, quota: normalizeAnthropicQuota(cached.quota, Date.now()) };
   }

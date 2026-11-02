@@ -151,6 +151,16 @@ describe("GET /api/anthropic/reset-grants", () => {
     expect((await call("GET", "/api/anthropic/reset-grants?accountId=acct-1", paused)).status).toBe(200);
   });
 
+  test("a pause that lands mid-read is reported as paused, and the default account skips paused slots", async () => {
+    const up = upstream();
+    let pausedNow = false;
+    const racing = deps(up, { isPaused: () => pausedNow, accessTokenFor: async () => { pausedNow = true; throw new Error("paused"); } });
+    expect(await call("GET", "/api/anthropic/reset-grants?accountId=acct-1", racing))
+      .toMatchObject({ status: 409, json: { error: { code: "account_paused" } } });
+    const firstPaused = deps(up, { isPaused: id => id === "acct-1", activeAccountId: () => null });
+    expect(await call("GET", "/api/anthropic/reset-grants", firstPaused)).toMatchObject({ status: 200, json: { accountId: "acct-2" } });
+  });
+
   test("unknown account, token failure, and upstream failures use fixed codes", async () => {
     const up = upstream();
     expect((await call("GET", "/api/anthropic/reset-grants?accountId=nope", deps(up))).json.error.code).toBe("no_account");

@@ -57,6 +57,7 @@ const REFUSED_KEYS: Record<string, TKey> = {
   ledger_unavailable: "anthropicGrant.journalBusy",
   ledger_capacity: "anthropicGrant.journalBusy",
   auth_failed: "anthropicGrant.resultAuthError",
+  account_paused: "pws.accountPausedHint",
 };
 
 /** Ticket badge on an Anthropic account row. Muted at zero, amber when a reset is spendable. */

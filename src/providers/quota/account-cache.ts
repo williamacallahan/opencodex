@@ -218,17 +218,25 @@ export function accountCacheKey(provider: string, accountId: string): string {
  * Synchronous last-good per-account quota read for routing. Never probes the network.
  * Returns null when nothing is cached (or the cached row has no bars).
  */
+/** Whether an Anthropic row still belongs to the account's current credential and flight. */
+export function anthropicQuotaEntryIsCurrent(
+  instance: AnthropicInstanceId, accountId: string, entry: AccountQuotaCacheEntry | undefined,
+): boolean {
+  if (entry?.anthropicCredentialGeneration) {
+    const credential = getAccountCredential(instance, accountId);
+    if (!credential || credentialGeneration(credential) !== entry.anthropicCredentialGeneration) return false;
+  }
+  return !(entry?.isCurrent && !entry.isCurrent());
+}
+
 export function getCachedProviderAccountQuota(provider: string, accountId: string): ProviderQuota | null {
   const entry = accountQuotaCache.get(accountCacheKey(provider, accountId));
   if (provider === "kiro") {
     const account = getAccountSet("kiro")?.accounts.find(row => row.id === accountId);
     if (!account || entry?.identity !== kiroEvidenceIdentity(account)) return null;
   }
-  if (isAnthropicInstanceId(provider) && entry?.anthropicCredentialGeneration) {
-    const credential = getAccountCredential(provider, accountId);
-    if (!credential || credentialGeneration(credential) !== entry.anthropicCredentialGeneration) return null;
-  }
-  if (entry?.isCurrent && !entry.isCurrent()) return null;
+  if (isAnthropicInstanceId(provider) ? !anthropicQuotaEntryIsCurrent(provider, accountId, entry)
+    : entry?.isCurrent && !entry.isCurrent()) return null;
   return isAnthropicInstanceId(provider) ? normalizeAnthropicQuota(entry?.quota, Date.now()) : entry?.quota ?? null;
 }
 
