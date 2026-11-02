@@ -463,11 +463,12 @@ with `POST /api/storage/cleanup-policy/run`.
 `usageLedgerMaxBytes` is unset by default, and unset means the request history in `usage.jsonl`
 grows without limit. Nothing deletes history you did not ask to have deleted.
 
-Set it to a byte ceiling and the proxy trims the file after an append crosses it, keeping the
-newest whole rows and dropping the oldest. It trims a little below the ceiling rather than exactly
-to it, so the next append does not immediately re-cross the line. The minimum accepted value is
-1 MiB; a smaller number, or one that is not a safe integer, leaves the limit off rather than
-failing the configuration.
+Set it to a byte ceiling and the proxy trims an already-oversized ledger when the policy is
+installed at startup or through `PUT /api/settings`, and trims again after any append crosses it,
+keeping the newest whole rows and dropping the oldest. It trims a little below the ceiling rather
+than exactly to it, so the next append does not immediately re-cross the line. The minimum accepted
+value is 1 MiB; a smaller number, or one that is not a safe integer, is rejected at the write
+boundary and ignored if read from a hand-edited file.
 
 Rows are copied byte for byte and never rewritten, so every field survives a trim — including
 fields a newer build wrote that an older one does not understand. The replacement is refused
@@ -475,8 +476,8 @@ outright if anything appended to the ledger while it ran, so a request logged du
 never lost; the next append tries again. Trimming also refreshes what the dashboard shows, so
 `/api/logs` stops serving rows the ledger no longer has.
 
-There is no dashboard control for this yet; set it in `config.json` or with
-`ocx config set usageLedgerMaxBytes <bytes>`.
+Configure it in `config.json`, with `ocx config set usageLedgerMaxBytes <bytes>`, or through
+`GET`/`PUT /api/settings` (`null` clears the limit).
 
 ## Catalog auto-refresh (`catalogAutoRefresh`)
 

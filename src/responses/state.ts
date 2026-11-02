@@ -5,18 +5,10 @@ import { configuredAppOwnedMemoryBudgetBytes, enforceAppOwnedMemoryBudget, type 
 import { windowsSecretAclApplies } from "../lib/windows-secret-acl";
 import type { OcxProviderContinuationState } from "../types";
 import {
-  deleteResponseSpill,
-  inspectResponseSpillDir,
-  noteStubSwapForTest,
-  readResponseSpill,
-  recoverOrphanedResponseSpills,
-  resetPeriodicSpillSweepCursorForTests,
-  responseSpillDirectory,
-  responseSpillPayloadCap,
-  sweepOrphanedResponseSpillsPeriodically,
-  type ResponseSpillDirInspection,
-  type ResponseSpillRef,
-  writeResponseSpillDurably,
+  deleteResponseSpill, inspectResponseSpillDir, noteStubSwapForTest, prospectiveResponseSpillBytes,
+  readResponseSpill, recoverOrphanedResponseSpills, resetPeriodicSpillSweepCursorForTests,
+  responseSpillDirectory, responseSpillPayloadCap, sweepOrphanedResponseSpillsPeriodically,
+  type ResponseSpillDirInspection, type ResponseSpillRef, writeResponseSpillDurably,
 } from "./spill-store";
 import { collectReferencedSpillFileNames, snapshotReferencedSpillFileNames } from "./state/spill-inspect";
 import { selectSnapshotEntries, snapshotPayload } from "./state/snapshot-select";
@@ -37,18 +29,10 @@ import { isBodyNonPersistable } from "./state/body-policy";
 export { isBodyNonPersistable, markBodyNonPersistable } from "./state/body-policy";
 export { flushPendingResponseSpillsForTests, awaitResponseSpillPublicationTailForTests, pendingResponseSpillMetricsForTests, setResponseSpillShutdownBudgetForTests, setResponseSpillAsyncAclAttemptBudgetForTests, setResponseSpillShutdownTerminalizationPassLimitForTests } from "./state/spill-queue";
 import {
-  bindSpillQueueStore,
-  cancelPendingResponseSpill,
-  drainResponseSpillPublications,
-  queuePendingResponseSpill,
-  replaceWithPendingResponseSpill,
-  resetSpillQueueForTests,
-  spillQueueAccounting,
-  spillQueueHoldsResidentCandidate,
-  spillQueuePendingBytes,
-  spillQueueReferencedSpillFileNames,
-  spillQueueResidentCandidates,
-  spillQueueSupersededSpillFor,
+  armSpillQueueDemotionDrainCeiling, bindSpillQueueStore, cancelPendingResponseSpill, clearSpillQueueDemotionDrainCeiling,
+  drainResponseSpillPublications, queuePendingResponseSpill, replaceWithPendingResponseSpill, resetSpillQueueForTests,
+  spillQueueAccounting, spillQueueHoldsResidentCandidate, spillQueuePendingBytes, spillQueueReferencedSpillFileNames,
+  spillQueueResidentCandidates, spillQueueShouldDeferDemotion, spillQueueSupersededSpillFor,
 } from "./state/spill-queue";
 
 const MAX_STORED_RESPONSES = 1_000;
@@ -493,7 +477,9 @@ function setResidentEntry(id: string, entry: ResidentInput): void {
     pruneResponses();
     return;
   }
-  if (candidate.sizeBytes > byteCap()) {
+  const spillCap = responseSpillPayloadCap();
+  if (candidate.sizeBytes > byteCap()
+    || (candidate.sizeBytes + 16 > spillCap && (prospectiveResponseSpillBytes(id, candidate) ?? Infinity) > spillCap)) {
     admitOversizedCandidate(id, candidate, expected);
     pruneResponses();
     return;
@@ -526,7 +512,9 @@ function admitOversizedCandidate(
   candidate: ResidentResponseState,
   expected?: StoredResponseState,
 ): void {
-  if (candidate.sizeBytes > responseSpillPayloadCap()) {
+  const spillCap = responseSpillPayloadCap();
+  if (candidate.sizeBytes > spillCap
+    || (candidate.sizeBytes + 16 > spillCap && (prospectiveResponseSpillBytes(id, candidate) ?? Infinity) > spillCap)) {
     admissionCounters.oversizedDrops += 1;
     replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
     return;
@@ -937,7 +925,8 @@ function pruneResponses(at = now()): void {
   }
   // Unconditional RAM cap. Resident payloads demote durably; stubs/tombstones are
   // deleted only when even their bounded metadata cannot fit the override.
-  while (storedResponseBytes > byteCap() && states.size > 0) {
+  const cap = byteCap();
+  while (storedResponseBytes - currentPendingResidentBytes() > cap && states.size > 0) {
     const oldestResident = [...states].find(([id, entry]) => entry.kind === "resident"
       && !spillQueueHoldsResidentCandidate(id, entry));
     const hasPendingResident = !oldestResident && [...states].some(([id, entry]) => entry.kind === "resident"
@@ -951,6 +940,7 @@ function pruneResponses(at = now()): void {
       continue;
     }
     if (windowsSecretAclApplies()) {
+      if (spillQueueShouldDeferDemotion(oldestId, entry, storedResponseBytes - currentPendingResidentBytes(), cap)) break;
       queuePendingResponseSpill(oldestId, entry);
       continue;
     }
@@ -969,6 +959,7 @@ function pruneResponses(at = now()): void {
       replaceWithSpillFailure(oldestId, entry);
     }
   }
+  if (storedResponseBytes - currentPendingResidentBytes() <= cap) clearSpillQueueDemotionDrainCeiling();
   enforceSpilledResponseBudget();
 }
 
@@ -987,11 +978,16 @@ export function sweepExpiredResponseStates(at = now()): number {
   return removed;
 }
 
-export function responseContinuationRetainedStoreSnapshot(): RetainedStoreSnapshot {
-  let currentPendingBytes = 0;
+function currentPendingResidentBytes(): number {
+  let pending = 0;
   for (const job of spillQueueResidentCandidates()) {
-    if (states.get(job.id) === job.candidate) currentPendingBytes += job.sizeBytes;
+    if (states.get(job.id) === job.candidate) pending += job.sizeBytes;
   }
+  return pending;
+}
+
+export function responseContinuationRetainedStoreSnapshot(): RetainedStoreSnapshot {
+  const currentPendingBytes = currentPendingResidentBytes();
   const detachedPendingBytes = Math.max(0, spillQueuePendingBytes() - currentPendingBytes);
   const bytes = storedResponseBytes + detachedPendingBytes;
   const evictableBytes = Math.max(0, residentResponseBytes - currentPendingBytes);
@@ -1004,29 +1000,37 @@ export function responseContinuationRetainedStoreSnapshot(): RetainedStoreSnapsh
   };
 }
 
+export function enforceResponseContinuationByteCap(): void {
+  const unqueuedBytes = storedResponseBytes - currentPendingResidentBytes();
+  if (!loaded || unqueuedBytes <= byteCap()) return;
+  armSpillQueueDemotionDrainCeiling(unqueuedBytes);
+  pruneResponses();
+  schedulePersist();
+}
+
 export function evictOldestResponseContinuationForBudget(): number {
   if (oldestResidentId === undefined) return 0;
   const id = oldestResidentId;
   const entry = states.get(id);
   if (!entry || entry.kind !== "resident") return 0;
   if (windowsSecretAclApplies()) {
+    if (spillQueueShouldDeferDemotion(id, entry, storedResponseBytes - currentPendingResidentBytes(), byteCap())) return 0;
     queuePendingResponseSpill(id, entry);
-    schedulePersist();
-    return 0;
-  }
-  try {
-    const ref = writeResponseSpillDurably(id, {
-      createdAt: entry.createdAt,
-      ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
-      items: entry.items,
-      ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
-      ...(entry.providers ? { providers: entry.providers } : {}),
-      ...(entry.unforcedStoreFalse ? { unforcedStoreFalse: entry.unforcedStoreFalse } : {}),
-    });
-    if (swapResidentForSpill(id, entry, ref)) noteSpillWriteSuccess();
-  } catch (error) {
-    noteSpillWriteFailure(error);
-    replaceWithSpillFailure(id, entry);
+  } else {
+    try {
+      const ref = writeResponseSpillDurably(id, {
+        createdAt: entry.createdAt,
+        ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
+        items: entry.items,
+        ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
+        ...(entry.providers ? { providers: entry.providers } : {}),
+        ...(entry.unforcedStoreFalse ? { unforcedStoreFalse: entry.unforcedStoreFalse } : {}),
+      });
+      if (swapResidentForSpill(id, entry, ref)) noteSpillWriteSuccess();
+    } catch (error) {
+      noteSpillWriteFailure(error);
+      replaceWithSpillFailure(id, entry);
+    }
   }
   schedulePersist();
   const replacement = states.get(id);

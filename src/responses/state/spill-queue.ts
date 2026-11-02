@@ -22,6 +22,7 @@ import {
   noteSpillWriteFailure,
   noteSpillWriteSuccess,
   spillAclMemoRefusalOrigin,
+  spillWriteHealth,
   type ResponseSpillWriteFailureCode,
   type ResponseSpillWriteFailureOrigin,
 } from "./spill-failure";
@@ -84,6 +85,7 @@ interface PendingResponseSpill {
 const pendingResponseSpills = new Set<PendingResponseSpill>();
 const pendingResponseSpillById = new Map<string, PendingResponseSpill>();
 let pendingResponseSpillBytes = 0;
+let demotionDrainCeilingBytes = 0;
 /**
  * On-disk bytes a queued publication is about to occupy but has not yet installed into
  * `states`.
@@ -657,6 +659,40 @@ export function spillQueuePendingBytes(): number {
   return pendingResponseSpillBytes;
 }
 
+export function armSpillQueueDemotionDrainCeiling(unqueuedBytes: number): void {
+  demotionDrainCeilingBytes = Math.max(demotionDrainCeilingBytes, unqueuedBytes);
+}
+
+export function clearSpillQueueDemotionDrainCeiling(): void {
+  demotionDrainCeilingBytes = 0;
+}
+
+/**
+ * Pace Windows `pruneResponses()` and `evictOldestResponseContinuationForBudget()` waves across the
+ * 256 MiB async ACL backlog and 2x publication footprint reservations while at least one healthy
+ * spill job is already draining (its settlement `finally` re-enters both enforcers). Bounds unqueued
+ * overshoot to one queue width so a hung `icacls` subprocess still hits `ECAPACITY`.
+ */
+export function spillQueueShouldDeferDemotion(
+  id: string,
+  candidate: ResidentResponseState,
+  unqueuedBytes: number,
+  capBytes: number,
+): boolean {
+  if (unqueuedBytes <= capBytes) {
+    demotionDrainCeilingBytes = 0;
+  } else if (demotionDrainCeilingBytes > 0) {
+    demotionDrainCeilingBytes = Math.min(demotionDrainCeilingBytes, unqueuedBytes);
+  }
+  const allowedUnqueued = Math.max(capBytes, demotionDrainCeilingBytes) + MAX_PENDING_RESPONSE_SPILL_BYTES;
+  if (pendingResponseSpills.size === 0 || spillWriteHealth.consecutiveFailures > 0 || unqueuedBytes > allowedUnqueued) {
+    return false;
+  }
+  if (pendingResponseSpillBytes + candidate.sizeBytes > MAX_PENDING_RESPONSE_SPILL_BYTES) return true;
+  return reservedResponseSpillBytes > 0
+    && requireStore().accountedResponseSpillBytes() + publicationFootprintBytes(id, candidate) > requireStore().spillByteCap();
+}
+
 /** True when this resident entry is the candidate a queued publication will install. */
 export function spillQueueHoldsResidentCandidate(id: string, state: ResidentResponseState): boolean {
   return pendingResponseSpillById.get(id)?.candidate === state;
@@ -686,6 +722,7 @@ export function spillQueueReferencedSpillFileNames(): Set<string> {
 export function resetSpillQueueForTests(): void {
   for (const id of [...pendingResponseSpillById.keys()]) cancelPendingResponseSpill(id);
   pendingResponseSpillById.clear();
+  demotionDrainCeilingBytes = 0;
   reservedResponseSpillBytes = 0;
   unreclaimableSpillPaths.clear();
 }

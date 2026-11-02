@@ -18,6 +18,7 @@ import { configReasoningPinsConfigError } from "./provider-validation";
 import { loopbackCompanionAllowed } from "../codex/loopback-target";
 import { UPSTREAM_HOST_CIRCUIT_MAX_THRESHOLD } from "../codex/upstream-host-health";
 import { MAX_APP_OWNED_MEMORY_BUDGET_MB, MIN_APP_OWNED_MEMORY_BUDGET_MB } from "../lib/app-owned-memory";
+import { MIN_USAGE_LEDGER_MAX_BYTES } from "../usage/retention-contract";
 import { isMissingPathError } from "./atomic-write";
 import { getConfigDir, getConfigPath } from "./paths";
 import { getDefaultConfig } from "./proxy-env";
@@ -254,6 +255,16 @@ function appOwnedMemoryBudgetError(value: unknown): string | null {
   if (typeof budget !== "number" || !Number.isInteger(budget)
     || budget < MIN_APP_OWNED_MEMORY_BUDGET_MB || budget > MAX_APP_OWNED_MEMORY_BUDGET_MB) {
     return `schema_invalid: appOwnedMemoryBudgetMb: must be an integer from ${MIN_APP_OWNED_MEMORY_BUDGET_MB} to ${MAX_APP_OWNED_MEMORY_BUDGET_MB}`;
+  }
+  return null;
+}
+
+function usageLedgerMaxBytesError(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const maxBytes = (value as Record<string, unknown>).usageLedgerMaxBytes;
+  if (maxBytes === undefined) return null;
+  if (typeof maxBytes !== "number" || !Number.isSafeInteger(maxBytes) || maxBytes < MIN_USAGE_LEDGER_MAX_BYTES) {
+    return `schema_invalid: usageLedgerMaxBytes: must be a safe integer of at least ${MIN_USAGE_LEDGER_MAX_BYTES}`;
   }
   return null;
 }
@@ -750,6 +761,7 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
     ?? (rawSubagentModelForce(value) !== undefined && !isSubagentModelEntry(rawSubagentModelForce(value)) ? "schema_invalid: claudeCode.subagentModelForce: expected a safe roster-style model id" : null)
     ?? claudeSubagentEffortError(value)
     ?? appOwnedMemoryBudgetError(value)
+    ?? usageLedgerMaxBytesError(value)
     ?? upstreamHostCircuitThresholdError(value)
     ?? upstreamRequestCompressionError(value)
     ?? plaintextV2AgentMessagesError(value)

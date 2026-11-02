@@ -68,9 +68,17 @@ function enforceNow(): void {
   }
 }
 
+function safeCurrentUsageLogBytes(): number {
+  try {
+    return currentUsageLogRevision()?.size ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
 function scheduleEnforcement(): void {
   if (scheduledEnforcement !== null || configuredMaxBytes === undefined) return;
-  if ((currentUsageLogRevision()?.size ?? 0) <= configuredMaxBytes) return;
+  if (safeCurrentUsageLogBytes() <= configuredMaxBytes) return;
   scheduledEnforcement = setTimeout(() => {
     scheduledEnforcement = null;
     enforceNow();
@@ -89,9 +97,13 @@ export function setUsageLedgerRetention(maxBytes: number | undefined): void {
   if (maxBytes !== undefined) scheduleEnforcement();
 }
 
-export function usageLedgerRetentionStatus(): UsageLedgerRetentionStatus {
+export function configuredUsageLedgerMaxBytes(): number | undefined {
+  return configuredMaxBytes;
+}
+
+export function usageLedgerRetentionStatus(maxBytes: number | undefined = configuredMaxBytes): UsageLedgerRetentionStatus {
   return {
-    ...(configuredMaxBytes !== undefined ? { maxBytes: configuredMaxBytes } : {}),
-    currentBytes: currentUsageLogRevision()?.size ?? 0,
+    ...(maxBytes !== undefined ? { maxBytes } : {}),
+    currentBytes: safeCurrentUsageLogBytes(),
   };
 }
