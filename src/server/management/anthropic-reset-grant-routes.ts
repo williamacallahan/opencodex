@@ -52,6 +52,7 @@ const MESSAGES = {
   invalid_operation_id: "operationId must be a UUIDv4.",
   no_account: "No matching Anthropic OAuth account.",
   auth_failed: "Sign in to this Anthropic account again.",
+  account_paused: "This account is paused; resume it to read or use its resets.",
   upstream_unavailable: "Anthropic did not return the reset-grant status.",
   grant_not_usable: "This reset grant cannot be used right now.",
   operation_identity_mismatch: "This operation belongs to another account or grant.",
@@ -76,6 +77,8 @@ export interface AnthropicResetGrantRouteDeps {
   listAccountIds: () => string[];
   activeAccountId: () => string | null;
   accessTokenFor: (accountId: string) => Promise<string>;
+  /** A paused account is excluded from upstream use, so its refusal must not read as a sign-in failure. */
+  isPaused?: (accountId: string) => boolean;
   /** Lift local admission after a journaled reset, bounded by its journal evidence. Tests omit it. */
   admitReset?: (accountId: string, evidence: AnthropicResetAdmissionEvidence) => Promise<void>;
 }
@@ -95,6 +98,7 @@ function defaultDepsFor(ctx: ManagementContext, provider: AnthropicInstanceId): 
     provider, journalPath: anthropicResetJournalPathForInstance(provider),
     listAccountIds: () => listAccounts(provider).map(account => account.id),
     activeAccountId: () => captureOAuthAccountSelection(provider)?.accountId ?? null,
+    isPaused: accountId => getAccountCredentialWithStatus(provider, accountId)?.paused === true,
     isCurrent: () => {
       if (!targetCurrent() || !owner || !anthropicPhysicalSendOwnershipIsCurrent(owner)) return false;
       const row = getAccountCredentialWithStatus(provider, owner.accountId);
@@ -162,6 +166,7 @@ async function handleRead(ctx: ManagementContext, deps: AnthropicResetGrantRoute
   const receipt = { provider: deps.provider };
   const accountId = resolveAccountId(deps, ctx.url.searchParams.get("accountId") ?? undefined);
   if (!accountId) return fail(ctx, 400, "no_account", receipt);
+  if (deps.isPaused?.(accountId)) return fail(ctx, 409, "account_paused", receipt);
   const accessToken = await tokenFor(deps, accountId);
   if (!accessToken) return fail(ctx, 401, "auth_failed", receipt);
   if (deps.isCurrent?.() === false) return fail(ctx, 401, "auth_failed", receipt);
@@ -203,6 +208,7 @@ async function handleConsume(ctx: ManagementContext, injected?: AnthropicResetGr
   if (typeof body.accountId !== "string") return scopedFail(400, "no_account");
   const accountId = resolveAccountId(deps, body.accountId);
   if (!accountId) return scopedFail(400, "no_account");
+  if (deps.isPaused?.(accountId)) return scopedFail(409, "account_paused");
 
   const accessToken = await tokenFor(deps, accountId);
   if (!accessToken || deps.isCurrent?.() === false) return scopedFail(401, "auth_failed");

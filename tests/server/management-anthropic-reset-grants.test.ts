@@ -139,6 +139,18 @@ describe("GET /api/anthropic/reset-grants", () => {
     expect(JSON.stringify(json)).not.toContain("claude_max_20x");
   });
 
+  test("a paused account is refused as paused, not as a sign-in failure, before any token or upstream use", async () => {
+    const up = upstream();
+    let tokenReads = 0;
+    const paused = deps(up, { isPaused: id => id === "acct-2", accessTokenFor: async () => { tokenReads++; return TOKEN; } });
+    expect(await call("GET", "/api/anthropic/reset-grants?accountId=acct-2", paused))
+      .toMatchObject({ status: 409, json: { error: { code: "account_paused" } } });
+    expect(await consume(paused, { accountId: "acct-2", grantId: GRANT, operationId: OP }))
+      .toMatchObject({ status: 409, json: { error: { code: "account_paused" } } });
+    expect({ tokenReads, claims: up.claims.length }).toEqual({ tokenReads: 0, claims: 0 });
+    expect((await call("GET", "/api/anthropic/reset-grants?accountId=acct-1", paused)).status).toBe(200);
+  });
+
   test("unknown account, token failure, and upstream failures use fixed codes", async () => {
     const up = upstream();
     expect((await call("GET", "/api/anthropic/reset-grants?accountId=nope", deps(up))).json.error.code).toBe("no_account");
