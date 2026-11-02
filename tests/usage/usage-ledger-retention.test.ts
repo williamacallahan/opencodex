@@ -55,6 +55,22 @@ describe("usage ledger retention", () => {
     }
   });
 
+  test("installing a limit over an already-oversized ledger compacts it without waiting for an append", async () => {
+    writeRows(200, 16 * 1024);
+    expect(statSync(usageLogPath()).size).toBeGreaterThan(MIN_USAGE_LEDGER_MAX_BYTES);
+    setUsageLedgerRetention(MIN_USAGE_LEDGER_MAX_BYTES);
+    try {
+      const deadline = Date.now() + 5_000;
+      while (statSync(usageLogPath()).size > MIN_USAGE_LEDGER_MAX_BYTES && Date.now() < deadline) await Bun.sleep(50);
+      expect(statSync(usageLogPath()).size).toBeLessThanOrEqual(
+        Math.floor(MIN_USAGE_LEDGER_MAX_BYTES * USAGE_LEDGER_RETENTION_TARGET_RATIO),
+      );
+      expect(readFileSync(usageLogPath(), "utf-8")).toContain('"requestId":"req-199"');
+    } finally {
+      setUsageLedgerRetention(undefined);
+    }
+  });
+
   test("no limit, a limit below the floor, and a ledger under the limit leave the file alone", () => {
     writeRows(20, 64);
     const before = readFileSync(usageLogPath(), "utf-8");

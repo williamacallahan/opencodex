@@ -81,11 +81,12 @@ function scheduleEnforcement(): void {
 /** Install or update the policy. `undefined` removes the hook entirely. */
 export function setUsageLedgerRetention(maxBytes: number | undefined): void {
   configuredMaxBytes = maxBytes;
-  if (maxBytes === undefined && scheduledEnforcement !== null) {
+  if (scheduledEnforcement !== null) {
     clearTimeout(scheduledEnforcement);
     scheduledEnforcement = null;
   }
   setUsageLedgerAppendHook(maxBytes === undefined ? null : scheduleEnforcement);
+  if (maxBytes !== undefined) scheduleEnforcement();
 }
 
 export function usageLedgerRetentionStatus(): UsageLedgerRetentionStatus {

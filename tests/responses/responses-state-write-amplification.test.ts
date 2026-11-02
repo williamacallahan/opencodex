@@ -15,9 +15,12 @@ import {
   clearResponseStateForTests,
   clearResponseStateMemoryForTests,
   flushResponseState,
+  MAX_STORED_RESPONSE_BYTES,
   rememberResponseState,
+  responseStateMetrics,
   setResponseStateByteCapForTests,
 } from "../../src/responses/state";
+import { configureAppOwnedMemoryBudget, resetAppOwnedMemoryForTests } from "../../src/lib/app-owned-memory";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 function remember(id: string, text: string): void {
@@ -42,6 +45,7 @@ describe("responses-state snapshot write amplification (#2460)", () => {
   });
 
   afterEach(() => {
+    resetAppOwnedMemoryForTests();
     setResponseStateByteCapForTests(null);
     clearResponseStateForTests();
     removeTreeWithRetry(home);
@@ -173,18 +177,18 @@ describe("responses-state snapshot write amplification (#2460)", () => {
     await flushResponseState();
 
     expect(delay).toBeGreaterThan(2_000);
-    expect(delay).toBeLessThanOrEqual(30_000);
-    // Roughly proportional to size: ~3.2 MiB of payload is ~6 s, not ~2 s.
+    expect(delay).toBeLessThanOrEqual(300_000);
+    // Roughly proportional to size: ~3.2 MiB of payload stretches well past the 2 s base.
     expect(delay).toBeGreaterThanOrEqual(5_000);
   });
 
   // The ceiling is the half of the scaling rule that a proportional formula gets
-  // wrong silently: `<= 30_000` passes for any well-behaved input, so it proves
+  // wrong silently: `<= 300_000` passes for any well-behaved input, so it proves
   // the clamp exists only when something actually reaches it. A snapshot at the
   // byte cap is the case that does.
-  test("the scheduled debounce clamps to exactly 30s at the snapshot cap", async () => {
-    // The scaling rule is 2s per MiB, so a payload at or past 15 MiB computes above
-    // the ceiling. 900 KB of text per entry matters: the entry is serialized with the
+  test("the scheduled debounce clamps to exactly 300s at the snapshot cap", async () => {
+    // At 21.5s per additional MiB past 1 MiB, a payload past 15 MiB computes above
+    // the 300s ceiling. 900 KB of text per entry matters: the entry is serialized with the
     // input echoed alongside the output, so ~1.5 MB of text lands past the 2 MiB
     // per-entry bound and is skipped entirely, leaving an empty snapshot.
     for (let i = 0; i < 20; i += 1) remember(`resp_amp_cap_${i}`, "c".repeat(900 * 1024));
@@ -196,7 +200,17 @@ describe("responses-state snapshot write amplification (#2460)", () => {
     const delay = scheduledDelay(() => remember("resp_amp_cap_next", "next"));
     await flushResponseState();
 
-    expect(delay).toBe(30_000);
+    expect(delay).toBe(300_000);
+  });
+
+  test("raising appOwnedMemoryBudget scales the resident continuation ceiling above 64 MiB without spilling", async () => {
+    configureAppOwnedMemoryBudget(512 * 1024 * 1024);
+    for (let i = 0; i < 25; i += 1) remember(`resp_amp_budget_${i}`, "b".repeat(1500 * 1024));
+    await flushResponseState();
+    const metrics = responseStateMetrics();
+    expect(metrics.totalBytes).toBeGreaterThan(MAX_STORED_RESPONSE_BYTES);
+    expect(metrics.spillWrites).toBe(0);
+    expect(metrics.spillStubCount).toBe(0);
   });
 
   // Shutdown is the one moment the debounce must not apply: a pending write that
