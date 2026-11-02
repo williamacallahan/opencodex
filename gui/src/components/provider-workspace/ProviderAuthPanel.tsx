@@ -259,10 +259,10 @@ export default function ProviderAuthPanel({
   );
   const claudeGrants = useAnthropicResetGrants({ apiBase, provider: isAnthropicInstanceId(item.name) ? item.name : "anthropic", accountIds: claudeAccountIds, enabled: claudeGrantsEnabled });
   // The open reset dialog belongs to the pool it was opened in. Switching server or pool
-  // hides it during render rather than resetting it from an effect.
+  // hides it during render rather than resetting it from an effect, as does pausing its account.
   const grantScope = `${apiBase}\0${item.name}`;
   const [grantSelection, setGrantSelection] = useState<{ scope: string; account: OAuthAccountRow } | null>(null);
-  const grantAccount = grantSelection?.scope === grantScope ? grantSelection.account : null;
+  const grantAccount = grantSelection?.scope === grantScope && !accounts.find(row => row.id === grantSelection.account.id)?.paused ? grantSelection.account : null;
   const setGrantAccount = (account: OAuthAccountRow | null) => {
     setGrantSelection(account ? { scope: grantScope, account } : null);
   };

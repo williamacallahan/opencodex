@@ -66,8 +66,8 @@ Authorization: Bearer <admin-token>
 | `POST /api/grok/apply` | 通过托管同步应用已持久化的 Grok 配置 | 409 `grok_apply_busy`；400/500 应用失败 |
 | `GET /api/grok/reset-coupons?accountId=...` | 读取活跃或指定 xAI 账号剩余的 Grok 计费重置 token 及有效期窗口 | 400 缺少账号；401 未认证；502 上游 gRPC-Web 错误 |
 | `POST /api/grok/reset-coupons/consume` | 兑换一个符合条件的重置优惠券。请求体为 `{ accountId?, tokenId?, operationId? }`。可选的 `operationId`（UUIDv4）让兑换具备幂等性：重复相同 id 会重放持久化结果，而不会重复兑换。 | 400 无效的 JSON/UUID；401 未认证；409 `operation_id_owned_by_another_account` / `coupon_unavailable` / `operation_token_mismatch` / `operation_state_changed` / `attempt_in_progress` / `attempt_unresolved`；502 上游错误；503 ledger 容量 / `ledger_unavailable`; 500 `attempt_mark_failed` |
-| `GET /api/anthropic/reset-grants?accountId=...` | 读取一个 Anthropic OAuth 账号的 Claude 用量额度重置机会：是否符合条件、每项重置机会的剩余次数、有效期及可恢复的用量窗口，以及仍可重试的未确认请求 | 400 无匹配账号；401 需要重新认证；502 上游不可用 |
-| `POST /api/anthropic/reset-grants/consume` | 使用一次重置机会。请求体为 `{ accountId, grantId, operationId }`；`operationId` 是作为请求 ID 发送给上游的 UUIDv4，重复发送会重试同一次请求。需要仪表板会话。 | 400 请求体无效；401 需要重新认证；403 `session_required`；409 `grant_not_usable`、`in_flight`、`unresolved_prior_operation`、`unknown_outcome_expired`、`operation_identity_mismatch`；500 `journal_write_failed`；502 `unknown_outcome`；503 日志正忙、不可用或已满 |
+| `GET /api/anthropic/reset-grants?accountId=...` | 读取一个 Anthropic OAuth 账号的 Claude 用量额度重置机会：是否符合条件、每项重置机会的剩余次数、有效期及可恢复的用量窗口，以及仍可重试的未确认请求 | 400 无匹配账号；401 需要重新认证；409 `account_paused`；502 上游不可用 |
+| `POST /api/anthropic/reset-grants/consume` | 使用一次重置机会。请求体为 `{ accountId, grantId, operationId }`；`operationId` 是作为请求 ID 发送给上游的 UUIDv4，重复发送会重试同一次请求。需要仪表板会话。 | 400 请求体无效；401 需要重新认证；403 `session_required`；409 `account_paused`、`grant_not_usable`、`in_flight`、`unresolved_prior_operation`、`unknown_outcome_expired`、`operation_identity_mismatch`；500 `journal_write_failed`；502 `unknown_outcome`；503 日志正忙、不可用或已满 |
 | `GET, PUT /api/claude-desktop` | 读取或持久化 Claude Desktop 的路由/原生配置文件 | 400 分配无效或不可用 |
 | `POST /api/claude-desktop/apply` | 将已保存的配置文件写入 Claude Desktop 的托管配置 | 400/500 写入失败 |
 | `GET /api/claude-desktop/status` | 检查已保存与已应用的配置文件以及 Desktop 健康状态 | 400 状态读取失败 |
