@@ -3,7 +3,10 @@
 `src/codex/quota.ts` and `src/providers/account-quota-disk.ts` persist last-known account
 quotas for restart recovery. The Codex snapshot also carries bounded observation history
 and separately identity-bound main-policy evidence; provider snapshots include Kiro's
-identity-bound exhaustion verdicts. Their existing hydration and expiry rules govern readers.
+identity-bound exhaustion verdicts and Anthropic's private credential-generation digest in the
+existing row snapshot. Anthropic hydration strips that metadata from public quota bars, keeps its
+probe clock at zero, and treats missing or mismatched ownership as historical rather than current
+routing evidence. Only matching current ownership is persisted. Existing expiry rules still apply.
 
 ## Bounded write deferral
 

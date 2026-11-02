@@ -1,6 +1,6 @@
 import { loadConfig } from "../../config";
 import type { OcxConfig } from "../../types";
-import { getAccountSet } from "../../oauth/store";
+import { credentialGeneration, getAccountCredential, getAccountSet } from "../../oauth/store";
 import { captureConfigGeneration, sweepExpiredOnWrite } from "../../lib/state-store-sweeper";
 import { configuredAnthropicInstance, type AnthropicInstanceId } from "../anthropic-instance";
 import { ACCOUNT_QUOTA_TTL_MS } from "../quota-wire";
@@ -59,6 +59,9 @@ export async function fetchAnthropicAccountQuota(
     return { ...unavailable(), quotaFailure: "account_unavailable", quotaFailureIsCurrent: ownerCurrent };
   }
   if (!ownerCurrent()) return unavailable();
+  const credential = getAccountCredential(instance, accountId);
+  if (!credential || credential.access !== token) return unavailable();
+  const generation = credentialGeneration(credential);
   const flightKey = recovery.anthropicCredentialQuotaFlightKey(key, accountId);
   const flightCurrent = () => ownerCurrent()
     && recovery.anthropicCredentialQuotaFlightKey(key, accountId) === flightKey;
@@ -79,6 +82,7 @@ export async function fetchAnthropicAccountQuota(
     const isCurrent = result?.isCurrent ?? flightCurrent;
     const entry: AccountQuotaCacheEntry = {
       ts: Date.now(), quota: normalizeAnthropicQuota(result?.quota ?? retained?.quota, Date.now()),
+      anthropicCredentialGeneration: generation,
       ...(!result ? { unavailable: true as const } : {}), isCurrent,
       ...(!result && failure ? { quotaFailure: failure, quotaFailureIsCurrent: isCurrent } : {}),
     };

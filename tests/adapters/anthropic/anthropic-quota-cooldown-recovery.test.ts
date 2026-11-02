@@ -300,3 +300,72 @@ for (const instance of INSTANCE_FIXTURE_INSTANCES) {
     });
   }
 }
+
+for (const instance of INSTANCE_FIXTURE_INSTANCES) {
+  for (const ownership of ["matching", "replaced", "legacy"] as const) {
+    for (const failure of ["http", "transport"] as const) {
+      test(`${instance}: restart ${ownership} ownership with a failed ${failure} probe`, async () => {
+        const [{ readFileSync, writeFileSync }, { join }, cache, disk, reader] = await Promise.all([
+          import("node:fs"), import("node:path"), import("../../../src/providers/quota/account-cache"),
+          import("../../../src/providers/account-quota-disk"), import("../../../src/providers/quota/anthropic-account-quota"),
+        ]);
+        const id = f.ids[0];
+        const sibling = instance === "anthropic" ? "anthropic2" : "anthropic";
+        usage(12, 34);
+        await reader.fetchAnthropicAccountQuota(instance, id, false, f.config);
+        expect(cache.accountQuotaCache.get(cache.accountCacheKey(instance, id))?.anthropicCredentialGeneration)
+          .toBe(f.store.credentialGeneration(f.store.getAccountCredential(instance, id)!));
+        cache.recordAnthropicAccountQuotaFromHeadersForInstance(instance, id,
+          new Headers({ "anthropic-ratelimit-unified-7d-utilization": "0.34" }),
+          (await import("../../../src/lib/state-store-sweeper")).captureConfigGeneration(), 200);
+        usage(56, 78);
+        await reader.fetchAnthropicAccountQuota(sibling, id, false, f.config);
+        cache.persistAccountQuotaCache();
+        // Exercise the canonical debounced writer and parser, not an in-memory entry fake.
+        await new Promise(resolve => setTimeout(resolve, 350));
+        const path = join(f.paths.OPENCODEX_HOME, "provider-account-quota-cache.json");
+        const saved = JSON.parse(readFileSync(path, "utf8"));
+        const key = cache.accountCacheKey(instance, id);
+        expect(saved.rows[key].anthropicCredentialGeneration)
+          .toBe(f.store.credentialGeneration(f.store.getAccountCredential(instance, id)!));
+        const serialized = readFileSync(path, "utf8");
+        for (const account of f.store.getAccountSet(instance)!.accounts) {
+          expect(serialized).not.toContain(account.credential.access);
+          expect(serialized).not.toContain(account.credential.refresh);
+        }
+        if (ownership === "legacy") {
+          delete saved.rows[key].anthropicCredentialGeneration;
+          writeFileSync(path, JSON.stringify(saved));
+        }
+        if (ownership === "replaced") {
+          const row = f.store.getAccountCredential(instance, id)!;
+          await f.store.mergeAccountCredential(instance, id, { ...row, access: `synthetic-${instance}-replacement` });
+        }
+        // Drop process-local ownership and clocks, preserving the actual snapshot as on restart.
+        cache.clearAccountQuotaCache();
+        cache.hydrateAccountQuotaCache();
+        expect(cache.accountQuotaCache.get(key)?.ts).toBe(0);
+        expect(cache.accountQuotaCache.get(key)?.quota?.weeklyPercent).toBe(34);
+        expect(cache.getCachedProviderAccountQuota(instance, id)?.weeklyPercent ?? null)
+          .toBe(ownership === "matching" ? 34 : null);
+        expect(cache.getCachedProviderAccountQuota(sibling, id)?.weeklyPercent).toBe(78);
+        let sends = 0;
+        globalThis.fetch = (async () => {
+          sends++;
+          if (failure === "transport") throw new TypeError("synthetic restart probe failure");
+          return new Response(null, { status: 503 });
+        }) as typeof fetch;
+        const result = await reader.fetchAnthropicAccountQuota(instance, id, false, f.config);
+        const next = await reader.fetchAnthropicAccountQuota(instance, id, false, f.config);
+        expect(sends).toBe(1);
+        expect(result.unavailable).toBe(true);
+        const expected = ownership === "matching" ? 34 : null;
+        expect(result.quota?.weeklyPercent ?? null).toBe(expected);
+        expect(next.quota?.weeklyPercent ?? null).toBe(expected);
+        expect(cache.getCachedProviderAccountQuota(instance, id)?.weeklyPercent ?? null).toBe(expected);
+        expect(cache.getCachedProviderAccountQuota(sibling, id)?.weeklyPercent).toBe(78);
+        disk.cancelPendingAccountQuotaPersist();
+      });
+    }
+  }
+}

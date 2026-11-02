@@ -628,7 +628,7 @@ export default function ProviderAuthPanel({
                       />
                     )}
                     {claudeGrantsEnabled && !showReauth && !account.paused && (
-                      <AnthropicGrantBadge entry={claudeGrants.entries[account.id]} t={t} onClick={() => setGrantAccount(account)} />
+                      <AnthropicGrantBadge entry={claudeGrants.entries[account.id]} held={!!claudeGrants.held[account.id]} t={t} onClick={() => setGrantAccount(account)} />
                     )}
                     <button type="button" className="btn btn-ghost btn-sm"
                       onClick={() => void authHandlers.onEditAlias(item.name, "oauth", account.id, account.alias)}>

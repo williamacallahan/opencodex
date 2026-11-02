@@ -174,6 +174,10 @@ neither cooldown recovery nor cache/decision publication adopts that result. Bot
 shared vendor flight keys include the pause revision, so a resumed read cannot join a pre-pause read.
 Failed probes retain last-good bars only when `anthropicQuotaEntryIsCurrent` still accepts their
 credential generation and flight; a failed replacement probe never renews old-credential bars.
+The existing account-quota snapshot stores the non-secret `credentialGeneration` digest as private
+Anthropic metadata. Hydration removes it from public bars and keeps the probe clock at zero.
+Matching digests preserve last-good retention after restart; legacy unbound or mismatched snapshots
+remain historical and cannot seed routing, failed-probe retention, or a fresh header merge.
 `captureProviderAccountQuotaEpoch(instance)` and the cache keys in
 `src/providers/quota/account-cache.ts` are per instance, so clearing Pool 2 quota never
 invalidates the primary pool.

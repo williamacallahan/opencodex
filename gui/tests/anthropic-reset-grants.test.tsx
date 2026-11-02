@@ -123,7 +123,7 @@ function Harness() {
   const [open, setOpen] = useState(false);
   return (
     <>
-      <AnthropicGrantBadge entry={controller.entries["acct-1"]} t={t} onClick={() => setOpen(true)} />
+      <AnthropicGrantBadge entry={controller.entries["acct-1"]} held={!!controller.held["acct-1"]} t={t} onClick={() => setOpen(true)} />
       {open && (
         <AnthropicResetGrantModal accountId="acct-1" accountLabel="acct-1" entry={controller.entries["acct-1"]}
           controller={controller} onClose={() => setOpen(false)} />
@@ -233,6 +233,11 @@ test("a refused same-id retry keeps holding the attempt instead of offering a ne
   expect(container.querySelector("[data-anthropic-grant-retry]")).not.toBeNull();
   expect(container.querySelector("[data-anthropic-grant-use]")).toBeNull();
   expect(container.textContent).toContain("journal is busy");
+  // Finish this real held attempt before the next test mounts another controller.
+  globalThis.fetch = (async (_input, init) => init?.method === "POST"
+    ? Response.json({ code: "already_used", resetsLeft: 0 }) : Response.json(SNAPSHOT)) as typeof fetch;
+  await click(container, "[data-anthropic-grant-retry]");
+  expect(container.querySelector("[data-anthropic-grant-retry]")).toBeNull();
   await act(async () => { root.unmount(); });
 });
 
