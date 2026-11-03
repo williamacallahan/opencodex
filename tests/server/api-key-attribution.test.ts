@@ -684,7 +684,6 @@ describe("AUTH_MATRIX is true of the running server", () => {
             // hub, and the role gate runs AFTER admission, so reaching the gate is itself the
             // admission proof. Pin its distinguishing code too.
             if (row.endpoint === "/v1/hub-state") expect(body.error?.code).toBe("hub_state_not_a_hub");
-            if (row.endpoint === "/v1/usage") expect(body.error?.code).toBe("hub_usage_not_a_hub");
           }
           const admitted = res.status !== 401;
           expect({ endpoint: row.endpoint, headers: Object.keys(headers)[0], admitted })

@@ -1,0 +1,8 @@
+# Ignored tool output that garbage-collection-worktrees may delete with a landed checkout.
+# Gitignore patterns from the repository root; each names the writer that recreates it.
+# scripts/generate-compatibility-version.ts: the compatibility manifest, rewritten on every build and test run
+/src/generated/compatibility-version.json
+# src/lab/artifacts/secure-fs.ts: the per-process directory-fd capability probe
+/.dirfd-probe-*
+# tests/server/api-catalog-route.test.ts and sibling suites: per-process test scratch directories
+/tests/**/.tmp-*
