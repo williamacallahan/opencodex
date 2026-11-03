@@ -12,6 +12,7 @@
  */
 
 import { normalizePersistedUsageRow, type PersistedUsageEntry } from "../usage/log";
+import { upstreamDiagnosticLogFields, upstreamDiagnosticLogProjection } from "../server/request-log-terminal-status";
 import { computeEntryCost } from "../usage/summary";
 import { openRequestHistoryIndex, requestHistoryDb, retryAfterCorruption } from "./history/indexer";
 
@@ -139,9 +140,9 @@ function classifyRow(row: ScannedRow): "success" | "failure" | "cancelled" {
   return "success";
 }
 
-function parseEntry(rowJson: string): PersistedUsageEntry | null {
+function parseEntry(rowJson: string, projectDiagnostics: typeof upstreamDiagnosticLogFields): PersistedUsageEntry | null {
   try {
-    return normalizePersistedUsageRow(JSON.parse(rowJson)) ?? null;
+    return normalizePersistedUsageRow(JSON.parse(rowJson), projectDiagnostics) ?? null;
   } catch {
     return null;
   }
@@ -219,6 +220,7 @@ export async function computeRoutingAnalytics(
 
   const byKey = new Map<string, Bucket>();
   const byProfile = new Map<string, AnalyticsProfileRow>();
+  const projectDiagnostics = upstreamDiagnosticLogProjection();
 
   for (const row of scanned) {
     const kind = classifyRow(row);
@@ -236,7 +238,7 @@ export async function computeRoutingAnalytics(
 
     let rowCostUsd: number | null = null;
     if (kind === "success") {
-      const entry = parseEntry(row.rowJson);
+      const entry = parseEntry(row.rowJson, projectDiagnostics);
       if (entry) {
         rowCostUsd = successCostUsd(entry);
         if (rowCostUsd !== null) {
@@ -247,7 +249,7 @@ export async function computeRoutingAnalytics(
     }
 
     if (kind === "failure") {
-      const failureEntry = parseEntry(row.rowJson);
+      const failureEntry = parseEntry(row.rowJson, projectDiagnostics);
       if (cooldownTriggering(failureEntry, row.status)) cooldownFailures += 1;
     }
 

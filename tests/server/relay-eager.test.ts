@@ -13,6 +13,7 @@ import {
 } from "../../src/server/relay";
 import { relaySseEagerBounded, type EagerRelayHooks } from "../../src/server/relay-eager";
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
+import { ServerShutdownError } from "../../src/lib/abort";
 import type { RequestLogContext } from "../../src/server/request-log";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../../src/server/sse-frame-buffer";
 import { createRoutedCustomToolRestoreBlockRewrite } from "../../src/server/responses-custom-tool-repair";
@@ -161,11 +162,12 @@ describe("relaySseEagerBounded — inline payload rewrite (#864)", () => {
     await settle();
     // Enqueue the terminal and abort without yielding in between.
     up.push(enc.encode(`event: response.completed\ndata: ${COMPLETED}\n\n`));
-    upstream.abort(new Error("drain window expired"));
+    upstream.abort(new ServerShutdownError());
     up.close();
     await reading;
 
     expect(rec.terminals.map(t => t.status)).toContain("completed");
+    expect(rec.cancels).toBe(0);
   });
 
   test("rewrites complete blocks across fragmented chunks and flushes the tail at EOF", async () => {

@@ -6,6 +6,7 @@ import type { CodexAffinityMove, CodexAffinityReason } from "../codex/routing";
 import { enforceAppOwnedMemoryBudget } from "../lib/app-owned-memory";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
 import { redactSecretString, sanitizeLogMetadataString } from "../lib/redact";
+import { upstreamDiagnosticLogFields, upstreamDiagnosticLogProjection, type UpstreamErrorDiagnostics } from "../server/request-log-terminal-status";
 import { usageDisplayTotalTokens } from "./totals";
 import {
   normalizePersistedJevDecision,
@@ -296,7 +297,7 @@ export function normalizeRequestSpend(value: unknown): PersistedRequestSpend | u
   };
 }
 
-export interface PersistedUsageEntry {
+export interface PersistedUsageEntry extends UpstreamErrorDiagnostics {
   requestedAlias?: string;
   requestId: string;
   /**
@@ -315,6 +316,8 @@ export interface PersistedUsageEntry {
   admissionKind?: "configured" | "environment" | "loopback";
   /** The inbound wire, not the client product — see `surface`. */
   inboundProtocol?: "responses" | "chat" | "messages";
+  /** Fixed local-answer path identifier; absent on older rows. */
+  localTerminalReason?: string;
   /** Stable non-PII identity for Codex Pool usage; absent for Direct/non-Codex traffic. */
   accountLogLabel?: CodexUsageAccountLogLabel;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
@@ -967,7 +970,7 @@ export function normalizeUsageEntryForTest(entry: PersistedUsageEntry): Persiste
   return normalizeUsageEntry(entry);
 }
 
-function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
+function normalizeUsageEntry(entry: PersistedUsageEntry, projectDiagnostics = upstreamDiagnosticLogFields): PersistedUsageEntry {
   const attempts = normalizedAttempts(entry.attempts);
   const tierOutcome = entry.tierOutcome ? normalizeAttemptTierOutcome(entry.tierOutcome) : undefined;
   const callerServiceTier = sanitizeLogMetadataString(entry.callerServiceTier);
@@ -1008,6 +1011,8 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       : {}),
     ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
     ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
+    ...(entry.localTerminalReason ? { localTerminalReason: sanitizeLogMetadataString(entry.localTerminalReason) } : {}),
+    ...projectDiagnostics(entry),
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
       : {}),
@@ -1437,6 +1442,7 @@ async function parseUsageTextCooperatively(text: string, signal: AbortSignal): P
   const lines = text.split("\n");
   usageReadCacheStats.parsedLines += lines.filter(line => line.trim()).length;
   const entries: PersistedUsageEntry[] = [];
+  const projectDiagnostics = upstreamDiagnosticLogProjection();
   // Byte length of each accepted row including its newline, so a later read can trim
   // rows that fall out of the bounded window without re-reading the file.
   const entryLengths: number[] = [];
@@ -1456,7 +1462,7 @@ async function parseUsageTextCooperatively(text: string, signal: AbortSignal): P
       // The split leaves a trailing "" after the final newline; it occupies no bytes.
       const isLastLine = offset + index === lines.length - 1;
       const lineBytes = Buffer.byteLength(line, "utf-8") + (isLastLine && line === "" ? 0 : 1);
-      const parsed = parseUsageLines([line]);
+      const parsed = parseUsageLines([line], projectDiagnostics);
       if (parsed.length === 0) {
         pendingSkippedBytes += lineBytes;
         continue;
@@ -1795,11 +1801,11 @@ export async function readUsageEntriesForManagement(): Promise<PersistedUsageEnt
 }
 
 /** Keep legacy optional fields permissive, but reject rows that cannot be safely attributed. */
-export function normalizePersistedUsageRow(value: unknown): PersistedUsageEntry | undefined {
+export function normalizePersistedUsageRow(value: unknown, projectDiagnostics = upstreamDiagnosticLogFields): PersistedUsageEntry | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
   const row = value as Record<string, unknown>;
   if (typeof row.requestId !== "string" || typeof row.provider !== "string") return undefined;
-  return normalizeUsageEntry(row as unknown as PersistedUsageEntry);
+  return normalizeUsageEntry(row as unknown as PersistedUsageEntry, projectDiagnostics);
 }
 
 export function readUsageEntries(): PersistedUsageEntry[] {
@@ -1807,10 +1813,11 @@ export function readUsageEntries(): PersistedUsageEntry[] {
   if (!existsSync(path)) return [];
   const lines = readFileSync(path, "utf-8").split(/\r?\n/);
   const entries: PersistedUsageEntry[] = [];
+  const projectDiagnostics = upstreamDiagnosticLogProjection();
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
-      const parsed = normalizePersistedUsageRow(JSON.parse(line));
+      const parsed = normalizePersistedUsageRow(JSON.parse(line), projectDiagnostics);
       if (parsed) entries.push(parsed);
     } catch {
       /* keep reading after a partially written or hand-edited line */
@@ -1819,12 +1826,12 @@ export function readUsageEntries(): PersistedUsageEntry[] {
   return entries;
 }
 
-function parseUsageLines(lines: string[]): PersistedUsageEntry[] {
+function parseUsageLines(lines: string[], projectDiagnostics = upstreamDiagnosticLogProjection()): PersistedUsageEntry[] {
   const entries: PersistedUsageEntry[] = [];
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
-      const parsed = normalizePersistedUsageRow(JSON.parse(line));
+      const parsed = normalizePersistedUsageRow(JSON.parse(line), projectDiagnostics);
       if (parsed) entries.push(parsed);
     } catch {
       /* skip partial / hand-edited lines */

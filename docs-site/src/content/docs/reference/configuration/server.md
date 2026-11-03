@@ -58,6 +58,20 @@ kernel process identity, so PID reuse cannot redirect it. The sentinel's watchin
 `(pidfd)`. Unsupported kernels or architectures retain the existing live-parent PID check and log
 that fallback; other binding failures disable recovery for that proxy. macOS retains the live-parent
 check, and Windows retains its process handle binding.
+
+## Graceful shutdown
+
+`shutdownTimeoutMs` bounds how long the proxy drains admitted requests before aborting them.
+Set it before starting the process. A container or service manager must allow additional time
+for persistence cleanup after that deadline; changing the replacement's configuration does not
+extend the running process's drain budget.
+
+Forced shutdown of an HTTP Responses or Responses WebSocket turn records `server_shutdown`
+with status 503 in request history, rather than attributing it to a client disconnect. Already
+sent HTTP headers do not change. A genuine upstream terminal observed before cancellation
+keeps its original outcome. Shutdown does not prove the upstream never processed the request
+and does not authorize an automatic replay.
+
 ## Native reasoning retention
 
 The dashboard overview exposes two independent opt-ins: retain reasoning when switching models, and retain it when switching accounts. Both default off. The same policy can be saved in `config.json`:

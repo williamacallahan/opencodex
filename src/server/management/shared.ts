@@ -57,6 +57,7 @@ import type { OcxClaudeCodeConfig, OcxClaudeDesktopProfile, OcxConfig, OcxCustom
 import type { DesktopProfileModel } from "../../claude/desktop-profile";
 import { drainAndShutdown } from "../lifecycle";
 import { filterRequestLogs, getRequestLogEntries, type RequestLogEntry } from "../request-log";
+import { upstreamDiagnosticLogFields } from "../request-log-terminal-status";
 import { estimateComboCost, estimateRequestCost, serviceTierContext, normalizeCostTokens, tokensPerSecond } from "../../usage/cost";
 import type { PersistedUsageAttempt } from "../../usage/log";
 import { usageModelPriceOptions } from "../../usage/model-identity";
@@ -250,10 +251,17 @@ function resendVerdict(row: { failureStage?: string; failureCause?: string }): {
 }
 export function requestLogDto(
   entry: RequestLogEntry,
-  { includeDecodeRate = true }: { includeDecodeRate?: boolean } = {},
+  { includeDecodeRate = true, projectDiagnostics = upstreamDiagnosticLogFields }: {
+    includeDecodeRate?: boolean;
+    projectDiagnostics?: typeof upstreamDiagnosticLogFields;
+  } = {},
 ): Record<string, unknown> {
+  const diagnostics = projectDiagnostics(entry);
   return {
     ...entry,
+    upstreamErrorCode: diagnostics.upstreamErrorCode,
+    upstreamErrorType: diagnostics.upstreamErrorType,
+    upstreamRequestId: diagnostics.upstreamRequestId,
     ...resendVerdict(entry),
     displayMetrics: {
       tokPerSecond: tokPerSecondResult(entry),

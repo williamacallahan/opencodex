@@ -19,10 +19,11 @@ import { existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs
 import { dirname } from "node:path";
 import { getConfigDir } from "../../config";
 import { recordOwnedConfigPath } from "../../lib/config-ownership";
+import { upstreamDiagnosticLogFields, upstreamDiagnosticLogProjection } from "../../server/request-log-terminal-status";
 import {
   currentUsageLogRevision,
   encodePersistedRequestedModel,
-  normalizeUsageEntryForTest,
+  normalizePersistedUsageRow,
   usageLogPath,
   type PersistedUsageEntry,
   type UsageLogRevision,
@@ -653,13 +654,10 @@ function requireDb(): Database {
   return handle;
 }
 
-function hydrateRow(row: HistoryQueryRow | undefined): PersistedUsageEntry | null {
+function hydrateRow(row: HistoryQueryRow | undefined, projectDiagnostics = upstreamDiagnosticLogFields): PersistedUsageEntry | null {
   if (!row) return null;
   try {
-    const parsed = JSON.parse(row.row_json) as PersistedUsageEntry;
-    if (parsed && typeof parsed === "object" && typeof parsed.requestId === "string") {
-      return normalizeUsageEntryForTest(parsed);
-    }
+    return normalizePersistedUsageRow(JSON.parse(row.row_json), projectDiagnostics) ?? null;
   } catch {
     /* defensive: a damaged row is skipped, canonical ledger unaffected */
   }
@@ -693,8 +691,9 @@ async function queryRequestHistoryPage(
   const hasMore = fetched > limit;
   const pageRows = rows.slice(0, limit);
   const entries: PersistedUsageEntry[] = [];
+  const projectDiagnostics = upstreamDiagnosticLogProjection();
   for (const row of pageRows) {
-    const entry = hydrateRow(row);
+    const entry = hydrateRow(row, projectDiagnostics);
     if (entry) entries.push(entry);
   }
   let nextCursor: string | undefined;

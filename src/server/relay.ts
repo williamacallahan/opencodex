@@ -12,6 +12,7 @@ import {
   upstreamErrorMessageFromPayload,
 } from "../lib/errors";
 import { redactSecretString } from "../lib/redact";
+import { ServerShutdownError } from "../lib/abort";
 import { isTranslatorBudgetExceededError } from "../lib/translator-budget";
 import { carryReplayRefusal, isReplayRefusalResponse } from "../lib/upstream-retry";
 import { isUsageDebugEnabled } from "../usage/debug";
@@ -131,14 +132,17 @@ export function relayWithAbort(
 }
 
 export function buildFailedTailPayload(err: unknown, maskCredential?: (text: string) => string): string {
+  const shutdown = err instanceof ServerShutdownError;
   const translatorOverflow = isTranslatorBudgetExceededError(err);
-  const diagnostic = redactSecretString((translatorOverflow
+  const diagnostic = shutdown ? "Proxy shutdown interrupted this response" : redactSecretString((translatorOverflow
     ? "upstream translation buffer exceeded the safe limit"
     : `Upstream stream terminated unexpectedly: ${err instanceof Error ? err.message : String(err)}`));
   const message = (maskCredential?.(diagnostic) ?? diagnostic).slice(0, MAX_TAIL_ERROR_MESSAGE_CHARS);
+  let code = translatorOverflow ? "translation_buffer_limit" : "upstream_reset";
+  if (shutdown) code = "server_shutdown";
   const failure = {
-    type: "upstream_error",
-    code: translatorOverflow ? "translation_buffer_limit" : "upstream_reset",
+    type: shutdown ? "server_error" : "upstream_error",
+    code,
     message,
   };
   return JSON.stringify({
@@ -848,15 +852,16 @@ export function trackSseForRequestLog(
   let terminalReported = false;
   let cancelled = false;
 
-  const reportTerminal = (status: ResponsesTerminalStatus) => {
+  const reportTerminal = (status: ResponsesTerminalStatus, source: NonNullable<RequestLogContext["terminalSource"]> = "upstream") => {
     if (terminalReported) return;
     terminalReported = true;
+    if (logCtx) logCtx.terminalSource = source;
     onTerminal(status);
   };
   // Reuse the byte-bounded inspector so translated responses cannot retain an
   // unterminated upstream frame or parse the same event once per observer.
   const inspector = createSseInspector({
-    onTerminal: reportTerminal,
+    onTerminal: status => reportTerminal(status),
     logCtx,
     onFirstOutput,
   });
@@ -868,7 +873,7 @@ export function trackSseForRequestLog(
         if (done) {
           if (!cancelled) {
             inspector.finish();
-            if (!terminalReported) reportTerminal("incomplete");
+            if (!terminalReported) reportTerminal("incomplete", "synthetic");
           }
           inspector.dispose();
           controller.close();
@@ -883,7 +888,7 @@ export function trackSseForRequestLog(
         if (!cancelled && !terminalReported && logCtx?.activeAttempt) {
           logCtx.activeAttempt.streamAborted = true;
         }
-        if (!cancelled && !terminalReported) reportTerminal("incomplete");
+        if (!cancelled && !terminalReported) reportTerminal("incomplete", "synthetic");
         inspector.dispose();
         try { controller.error(err); } catch { /* already torn down */ }
       }
@@ -1169,7 +1174,7 @@ function outputBearingSseEvent(event: { type?: unknown; output_index?: unknown }
  * - finish() skips the trailing-buffer scan once reported, while per-block
  *   onCompletedResponse continues firing after reported — an intentional
  *   asymmetry inherited from consumeForInspection.
- * - logCtx.transportPhase/terminalSource are mutated BEFORE onTerminal fires.
+ * - Terminal facts are retained even without onTerminal, before any outcome callback fires.
  * - Synthetic terminals (incomplete / failed-502) are the CALLER's decision:
  *   the caller owns `cancelled` state and reads `reported()` to decide.
  */
@@ -1433,14 +1438,15 @@ export function createSseInspector(handlers: SseInspectorHandlers): SseInspector
     const policyTerminal = status === "failed"
       && isPolicyRewriteType(parsed)
       && cyberPolicyTerminalError(parsed) !== undefined;
+    if (status && !sawTerminal && handlers.logCtx) {
+      handlers.logCtx.observedTerminalStatus = status;
+      handlers.logCtx.transportPhase = "terminal_sse";
+      handlers.logCtx.terminalSource = "upstream";
+    }
     if (status) sawTerminal = true;
     try {
       if (!reported && handlers.onTerminal && status) {
         reported = true;
-        if (handlers.logCtx) {
-          handlers.logCtx.transportPhase = "terminal_sse";
-          handlers.logCtx.terminalSource = "upstream";
-        }
         handlers.onTerminal(status, policyTerminal ? 400 : undefined);
       }
       if (status === "completed" && reconstructedTerminalResponse && handlers.onCompletedResponse) {
@@ -1606,7 +1612,6 @@ function startBoundedInspectionPump(options: InspectionPumpOptions): void {
     if (cancelled) return;
     cancelled = true;
     reader.cancel(signal?.reason).catch(() => {});
-    fireCancel();
   };
 
   if (signal?.aborted) {
@@ -1627,9 +1632,12 @@ function startBoundedInspectionPump(options: InspectionPumpOptions): void {
     try {
       for (;;) {
         const { done, value } = await reader.read();
-        // Hard cancellation settles a pending read as EOF. Do not flush a
-        // partial terminal after the owner already finalized cancellation.
-        if (cancelled) break;
+        if (cancelled) {
+          // A terminal chunk may have settled this read before the abort listener ran.
+          // Inspect that chunk, like the eager relay, but never flush a partial frame.
+          if (!done && value !== undefined) inspector.feed(value);
+          break;
+        }
         if (clientGoneSignal?.aborted) markClientGone();
         if (drainStopped) {
           // stopDrain() cancelled the reader; the settled read is the wake-up.
@@ -1684,6 +1692,7 @@ function startBoundedInspectionPump(options: InspectionPumpOptions): void {
       if (drainTimer) clearTimeout(drainTimer);
       signal?.removeEventListener("abort", abortImmediately);
       clientGoneSignal?.removeEventListener("abort", markClientGone);
+      if (cancelled && !inspector.terminalSeen()) fireCancel();
       if (clientGone) {
         if (boundEndedDrain) inspectionCounters.postCancelDrainStops += 1;
         if (clientGoneWithoutTerminal) fireCancel();

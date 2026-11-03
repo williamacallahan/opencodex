@@ -4,9 +4,10 @@ import { stampApiKeyAccountLabel, usesApiKeyAccount } from "../providers/label";
 import { KEY_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
 import { attemptAccountChanged, sealRequestAttemptIdentity } from "./request-log-account-rotation";
 export { sealRequestAttemptIdentity };
-import { captureUpstreamTerminalDiagnostics, upstreamDiagnosticLogFields, type UpstreamErrorDiagnostics, type UpstreamErrorPayload } from "./request-log-terminal-status";
+import { captureUpstreamTerminalDiagnostics, upstreamDiagnosticLogFields, upstreamDiagnosticLogProjection, type UpstreamErrorDiagnostics, type UpstreamErrorPayload } from "./request-log-terminal-status";
 export { noteUpstreamRequestId } from "./request-log-terminal-status";
 import { readBoundedResponseBody } from "../lib/bounded-body";
+import { ServerShutdownError } from "../lib/abort";
 import type { ResponsesTerminalStatus } from "../bridge";
 import {
   classifyError,
@@ -114,9 +115,11 @@ export function cacheDiagnosticsObserving(): boolean {
 export interface RequestLogContext extends UpstreamErrorDiagnostics {
   model: string;
   provider: string;
+  /** Ephemeral lifecycle ownership; never serialized into request history. */
+  cancellationReason?: unknown;
   /** Optional process-lifetime aggregate sink, injected by the server composition owner. */
   requestMetricsRecorder?: RequestMetricsRecorder;
-  /** Bounded terminal enum observed while inspecting a buffered response body. */
+  /** Bounded terminal enum observed while inspecting a buffered body or SSE stream. */
   observedTerminalStatus?: ResponsesTerminalStatus;
   /**
    * Identity of the ONE logical request this context serves (#4546). Set from the execution
@@ -461,7 +464,7 @@ function asCloseReason(value: string | undefined): RequestLogEntry["closeReason"
 }
 
 /** Project a persisted usage.jsonl row back into the in-memory /api/logs shape. */
-export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): RequestLogEntry {
+export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry, projectDiagnostics = upstreamDiagnosticLogFields): RequestLogEntry {
   const terminalStatus = asTerminalStatus(entry.terminalStatus);
   const closeReason = asCloseReason(entry.closeReason);
   const routeDecision = normalizeRouteDecisionTraceForLog(entry.routeDecision);
@@ -479,6 +482,11 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     ...(entry.genStartMs !== undefined ? { genStartMs: entry.genStartMs } : {}),
     ...(entry.lastOutputMs !== undefined ? { lastOutputMs: entry.lastOutputMs } : {}),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
+    ...(entry.apiKeyId ? { apiKeyId: entry.apiKeyId } : {}),
+    ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
+    ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
+    ...(entry.localTerminalReason ? { localTerminalReason: sanitizeLogMetadataString(entry.localTerminalReason) } : {}),
+    ...projectDiagnostics(entry),
     ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
@@ -577,7 +585,8 @@ export function hydrateRequestLogsFromDisk(
     const slice = persisted.length > MAX_LOG_SIZE
       ? persisted.slice(persisted.length - MAX_LOG_SIZE)
       : persisted;
-    for (const entry of slice) retainRequestLogEntry(requestLogEntryFromPersistedUsage(entry));
+    const projectDiagnostics = upstreamDiagnosticLogProjection();
+    for (const entry of slice) retainRequestLogEntry(requestLogEntryFromPersistedUsage(entry, projectDiagnostics));
     return slice.length;
   } catch (err) {
     requestLogsHydratedFromDisk = true;
@@ -664,6 +673,8 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.apiKeyId ? { apiKeyId: entry.apiKeyId } : {}),
       ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
       ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
+      ...(entry.localTerminalReason ? { localTerminalReason: sanitizeLogMetadataString(entry.localTerminalReason) } : {}),
+      ...upstreamDiagnosticLogFields(entry),
       ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
         ? { accountLogLabel: entry.accountLogLabel }
         : {}),
@@ -1371,9 +1382,20 @@ export function addFinalRequestLog(
   meta?: Pick<RequestLogEntry, "terminalStatus" | "closeReason">,
   addLog: (entry: RequestLogEntry) => void = addRequestLog,
 ): void {
+  // A genuine terminal already read from the origin wins a simultaneous shutdown abort.
+  const shutdown = logCtx.cancellationReason instanceof ServerShutdownError
+    && !(meta?.terminalStatus && logCtx.terminalSource === "upstream");
+  if (shutdown) {
+    status = 503;
+    meta = undefined; // No caller cancellation or genuine terminal was observed.
+    logCtx.errorCode = "server_shutdown";
+    logCtx.causeHint = "transport-ambiguous"; // Shutdown does not prove the origin never processed it.
+    logCtx.terminalSource = "synthetic";
+    if (logCtx.activeAttempt) logCtx.activeAttempt.streamAborted = true;
+  }
   // Mid-stream web-search aborts used to emit response.failed and land as 502/upstream_server_error.
   // Prefer the client-close classification whenever the captured reason says so.
-  const effectiveStatus = status >= 500 && logCtx.upstreamError && isClientClosedMessage(logCtx.upstreamError)
+  const effectiveStatus = !shutdown && status >= 500 && logCtx.upstreamError && isClientClosedMessage(logCtx.upstreamError)
     ? 499
     : status;
   // Locally assigned codes name proxy refusals that status and upstream text cannot reconstruct.

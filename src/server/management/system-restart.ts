@@ -427,7 +427,7 @@ export function acceptSystemRestart(io: SystemRestartIo = restartIo, admission: 
     if (!vetoed && drainGraceMs < RESTART_RESPONSE_FLUSH_DELAY_MS) {
       cancelEarlyCut = scheduleDeadline(() => {
         if (vetoed) return;
-        (io.abortActiveTurns ?? (() => abortAndReleaseAllTurns(new Error("server shutdown"))))();
+        (io.abortActiveTurns ?? abortAndReleaseAllTurns)();
       }, drainGraceMs);
     }
     schedule(async () => {

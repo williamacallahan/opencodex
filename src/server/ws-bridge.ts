@@ -6,6 +6,7 @@ import type { CodexAuthContext } from "../codex/auth-context";
 import { headersForCodexAuthContext } from "../codex/auth-context";
 import type { ResponsesTerminalStatus } from "../bridge";
 import type { DataPlaneAdmission } from "./auth-cors";
+import type { RequestLogContext } from "./request-log";
 import type { AdmissionLease, AdmissionReservation } from "../lib/admission";
 import { BoundedSseFrameBuffer } from "./sse-frame-buffer";
 import { sseDataPayload as parseSseBlock } from "./sse-payload-rewrite";
@@ -17,7 +18,7 @@ import { AGENT_ASSERTION_HEADER } from "../lib/authorization-scheme";
 export { safeResponseHeaders } from "./safe-response-headers";
 
 const OPEN = 1;
-type ResponsesTerminalReporter = (status: ResponsesTerminalStatus) => void;
+type ResponsesTerminalReporter = (status: ResponsesTerminalStatus, source: NonNullable<RequestLogContext["terminalSource"]>) => void;
 type ResponsesPayloadObserver = (payload: string) => void;
 
 export interface WsData {
@@ -255,10 +256,10 @@ export async function pumpResponsesSseToWebSocket(
   const isCurrent = options.isCurrent ?? (() => true);
   let clientCancelled = false;
   let terminalReported = false;
-  const reportTerminal = (status: ResponsesTerminalStatus) => {
+  const reportTerminal: ResponsesTerminalReporter = (status, source) => {
     if (terminalReported || clientCancelled || !isCurrent()) return;
     terminalReported = true;
-    options.onTerminal?.(status);
+    options.onTerminal?.(status, source);
   };
   const cancel = () => {
     clientCancelled = true;
@@ -281,7 +282,7 @@ export async function pumpResponsesSseToWebSocket(
     }
     const type = payloadType(payload);
     if (!type) {
-      reportTerminal("incomplete");
+      reportTerminal("incomplete", "synthetic");
       sendProtocolError(ws, 502, "Invalid JSON payload in upstream SSE frame");
       terminalSeen = true;
       void reader.cancel().catch(() => {});
@@ -293,7 +294,7 @@ export async function pumpResponsesSseToWebSocket(
     const terminalStatus = type === "error" && options.untilEof ? "failed" : terminalStatusFromType(type);
     if (terminalStatus) {
       if (options.untilEof) { lastTerminal = terminalStatus; return false; }
-      reportTerminal(terminalStatus);
+      reportTerminal(terminalStatus, "upstream");
       terminalSeen = true;
       void reader.cancel().catch(() => {});
       return true;
@@ -316,11 +317,11 @@ export async function pumpResponsesSseToWebSocket(
       if (payload) handlePayload(payload);
     }
     if (options.untilEof && lastTerminal && isCurrent() && !clientCancelled) {
-      reportTerminal(lastTerminal);
+      reportTerminal(lastTerminal, "upstream");
       terminalSeen = true;
     }
     if (!terminalSeen && isCurrent() && !clientCancelled) {
-      reportTerminal("incomplete");
+      reportTerminal("incomplete", "synthetic");
       sendProtocolError(ws, 502, "Upstream stream ended before response terminal event");
     }
   } catch (err) {
@@ -330,7 +331,7 @@ export async function pumpResponsesSseToWebSocket(
       && isCurrent()
       && ws.readyState === OPEN
       && !(err instanceof WsSendDroppedError)) {
-      reportTerminal("incomplete");
+      reportTerminal("incomplete", "synthetic");
       try {
         sendUpstreamError(ws, 502, err);
       } catch (sendErr) {
@@ -370,7 +371,7 @@ export function sendResponsesJsonAsEvents(
   for (const frame of responsesJsonEventSequence(response)) {
     sendObservedFrame(frame);
   }
-  onTerminal?.(finalStatus);
+  onTerminal?.(finalStatus, "upstream");
 }
 
 function errorPayloadFromText(text: string): Record<string, unknown> {
@@ -412,7 +413,7 @@ export async function sendResponseToWebSocket(
 
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   if (!response.body) {
-    options.onTerminal?.("incomplete");
+    options.onTerminal?.("incomplete", "synthetic");
     sendJsonFrame(ws, buildWsErrorFrame(502, {
       type: "protocol_error",
       code: "websocket_protocol_error",
@@ -463,7 +464,7 @@ export async function sendResponseToWebSocket(
     return;
   }
 
-  options.onTerminal?.("incomplete");
+  options.onTerminal?.("incomplete", "synthetic");
   sendJsonFrame(ws, buildWsErrorFrame(502, {
     type: "protocol_error",
     code: "websocket_protocol_error",

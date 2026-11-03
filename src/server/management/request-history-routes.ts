@@ -18,6 +18,7 @@ import {
 } from "../../routing/history/indexer";
 import { InvalidCursorError } from "../../routing/history/cursor";
 import { requestLogEntryFromPersistedUsage } from "../request-log";
+import { upstreamDiagnosticLogProjection } from "../request-log-terminal-status";
 import { requestLogDto } from "./shared";
 import { jsonResponse } from "../auth-cors";
 import type { ManagementContext } from "./context";
@@ -105,10 +106,11 @@ export async function handleRequestHistoryRoutes(ctx: ManagementContext): Promis
         from,
         to,
       }, cursor, limit);
+      const projectDiagnostics = upstreamDiagnosticLogProjection();
       return jsonResponse({
         // The decode rate is a Logs-page metric; this endpoint shares the DTO but not its
         // contract, so it opts out rather than silently widening its own response shape (#4038).
-        entries: page.rows.map(row => requestLogDto(requestLogEntryFromPersistedUsage(row), { includeDecodeRate: false })),
+        entries: page.rows.map(row => requestLogDto(requestLogEntryFromPersistedUsage(row, projectDiagnostics), { includeDecodeRate: false, projectDiagnostics })),
         ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
         hasMore: page.hasMore,
         index: {

@@ -290,7 +290,13 @@ export function createWebsocketHandler(
           return;
         }
 
-        const turnAdmissionLease = tryAdmitTurn(ws.data.sessionLaneId);
+        const wsAdmission = ws.data.admission;
+        const logCtx: RequestLogContext = {
+          model: "unknown", provider: "unknown", inboundProtocol: "responses",
+          ...(requestMetricsRecorder ? { requestMetricsRecorder } : {}),
+          ...(wsAdmission ? admissionFields(wsAdmission) : {}),
+        };
+        const turnAdmissionLease = tryAdmitTurn(ws.data.sessionLaneId, undefined, logCtx);
         if (!turnAdmissionLease) {
           sendJsonFrame(ws, buildWsErrorFrame(503, {
             type: "server_error",
@@ -311,18 +317,6 @@ export function createWebsocketHandler(
         void (async () => {
           const start = Date.now();
           const requestId = nextRequestLogId(start);
-          // Resolved once at the handshake — a frame has no request headers left
-          // to re-resolve from. Optional on WsData like every other member, so
-          // narrow rather than assume: an unattributed frame is preferable to a
-          // fabricated attribution.
-          const wsAdmission = ws.data.admission;
-          const logCtx: RequestLogContext = {
-            model: "unknown",
-            provider: "unknown",
-            ...(requestMetricsRecorder ? { requestMetricsRecorder } : {}),
-            ...(wsAdmission ? admissionFields(wsAdmission) : {}),
-            inboundProtocol: "responses",
-          };
           let logged = false;
           const finalizeLog = (
             status: number,
@@ -372,7 +366,15 @@ export function createWebsocketHandler(
                 ws.data.responsesActivity?.observePayload(payload, providerExecuted);
                 observeLog(payload);
               },
-              onTerminal: status => {
+              onTerminal: (status, source) => {
+                // Eager inspection can observe an origin terminal that drain prevents
+                // the WS reader from receiving. Control chains retain their last-terminal owner.
+                const observed = nativeControl?.relayActive !== true && logCtx.terminalSource === "upstream"
+                  ? logCtx.observedTerminalStatus : undefined;
+                if (source === "synthetic" && observed) { status = observed; source = "upstream"; }
+                // EOF/error fallbacks are not origin terminals. Preserve any earlier
+                // synthetic provenance on a generated SSE tail as well.
+                if (source === "synthetic" || logCtx.terminalSource === undefined) logCtx.terminalSource = source;
                 terminalRecorder?.(status, logCtx.terminalHttpStatus);
                 finalizeLog(httpStatusForRequestLogTerminal(status, logCtx), {
                   terminalStatus: status,

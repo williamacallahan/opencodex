@@ -7,6 +7,7 @@ import {
   type SseInspector,
 } from "../../src/server/relay";
 import type { RequestLogContext } from "../../src/server/request-log";
+import { ServerShutdownError } from "../../src/lib/abort";
 
 // Regression for issue #44: native-passthrough turns are inspected on a teed background stream.
 // Codex disconnects the instant it finishes reading, so the inspection stream is frequently
@@ -97,6 +98,44 @@ describe("consumeForInspection cancel finalization (#44)", () => {
     expect(cancel).toBe(1);
     expect(done).toBe(1);
     expect(terminal).toBe(0);
+  });
+
+  test.each(["completed", "failed"] as const)("an already-settled %s terminal wins a same-turn shutdown", async status => {
+    const source = controlledStream();
+    const abort = new AbortController();
+    const logCtx: RequestLogContext = { model: "fixture", provider: "fixture" };
+    const outcomes: Array<{ status: string; httpStatus?: number }> = [];
+    let cancels = 0;
+    let dones = 0;
+    const done = new Promise<void>(resolve => {
+      consumeForInspection(source.stream, (terminalStatus, httpStatus) => {
+        outcomes.push({ status: terminalStatus, httpStatus });
+      }, abort.signal, () => { dones += 1; resolve(); }, logCtx, () => { cancels += 1; });
+    });
+    source.push(encoder.encode(`data: ${JSON.stringify({
+      type: `response.${status}`,
+      response: {
+        id: `resp_shutdown_race_${status}`, status, output: [],
+        usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+        ...(status === "failed" ? {
+          error: { type: "rate_limit_error", code: "rate_limit_exceeded", message: "fixture quota refusal" },
+        } : {}),
+      },
+    })}\n\n`));
+    // Enqueue settles the pending read; shutdown fires before its continuation runs.
+    abort.abort(new ServerShutdownError());
+    await done;
+    expect(outcomes).toEqual([{ status, httpStatus: undefined }]);
+    expect(cancels).toBe(0);
+    expect(dones).toBe(1);
+    expect(logCtx.terminalSource).toBe("upstream");
+    expect(logCtx.observedTerminalStatus).toBe(status);
+    expect(logCtx.usage).toMatchObject({ inputTokens: 3, outputTokens: 2, totalTokens: 5 });
+    if (status === "failed") {
+      expect(logCtx.upstreamErrorCode).toBe("rate_limit_exceeded");
+      expect(logCtx.upstreamErrorType).toBe("rate_limit_error");
+      expect(logCtx.terminalHttpStatus).toBe(429);
+    }
   });
 
   test("clean close without a terminal payload → onTerminal(incomplete), not a cancel", async () => {

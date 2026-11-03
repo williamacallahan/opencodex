@@ -25,6 +25,7 @@ import {
 } from "../adapters/cursor/native-exec-shell";
 import type { CodexAccountSelectionAdmission } from "../codex/auth-context";
 import { releaseNativeMainStartupLifecycle } from "../codex/native-profile-startup";
+import { ServerShutdownError } from "../lib/abort";
 
 // ---------------------------------------------------------------------------
 // Active turn tracking + graceful shutdown drain
@@ -36,6 +37,7 @@ export const SESSION_LANE_ID_BYTES = 32;
 const turnGate = createAdmissionGate("active_turns", MAX_ACTIVE_TURNS);
 export interface ActiveTurnLease extends AdmissionLease {
   attach(lease: AdmissionLease): void;
+  cancel(reason: unknown): void;
   bindAbortSignal(signal: AbortSignal): () => void;
   bindAbortController(ac: AbortController): void;
   unbindAbortController(ac: AbortController): void;
@@ -171,7 +173,7 @@ export function resetLifecycleDrainStateForTests(): void {
   serverStartupReleaseFlights = new WeakMap<ReturnType<typeof Bun.serve>, Promise<void>>();
   releaseServerStartupLifecycleImpl = releaseNativeMainStartupLifecycle;
 }
-export function tryAdmitTurn(sessionLaneId?: string, clientSignal?: AbortSignal): ActiveTurnLease | null {
+export function tryAdmitTurn(sessionLaneId?: string, clientSignal?: AbortSignal, cancellationContext?: { cancellationReason?: unknown }): ActiveTurnLease | null {
   if (isDraining()) return null;
   const opaqueSessionLaneId = sessionLaneId
     ? createHash("sha256").update(sessionLaneId).digest("hex").slice(0, SESSION_LANE_ID_BYTES)
@@ -204,14 +206,17 @@ export function tryAdmitTurn(sessionLaneId?: string, clientSignal?: AbortSignal)
       if (!active) attachedLease.release();
       else attachedLeases.add(attachedLease);
     },
+    cancel(reason) {
+      if (!active) return;
+      cancellationReason = reason;
+      if (cancellationContext) cancellationContext.cancellationReason = reason;
+      const boundControllers = [...controllers];
+      lease.release();
+      for (const controller of boundControllers) controller.abort(reason);
+    },
     bindAbortSignal(signal) {
       if (!active || abortListeners.has(signal)) return () => {};
-      const onAbort = () => {
-        cancellationReason = signal.reason;
-        const boundControllers = [...controllers];
-        lease.release();
-        for (const controller of boundControllers) controller.abort(cancellationReason);
-      };
+      const onAbort = () => lease.cancel(signal.reason);
       abortListeners.set(signal, onAbort);
       signal.addEventListener("abort", onAbort, { once: true });
       if (signal.aborted) onAbort();
@@ -373,13 +378,9 @@ export function activeRegistryMetrics(): Record<string, AdmissionMetrics> {
   };
 }
 
-export function abortAndReleaseAllTurns(reason: unknown = new Error("server shutdown")): void {
+export function abortAndReleaseAllTurns(reason: unknown = new ServerShutdownError()): void {
   const owners = [...admittedTurns];
-  for (const owner of owners) {
-    const controllers = [...activeTurns].filter(([, lease]) => lease === owner).map(([controller]) => controller);
-    for (const controller of controllers) controller.abort(reason);
-    owner.release();
-  }
+  for (const owner of owners) owner.cancel(reason);
 }
 /** Live listen port of the Bun server, when started. */
 export function getServerListenPort(): number | undefined {
@@ -540,7 +541,7 @@ export async function drainAndShutdown(
     }
     if (admittedTurns.size > 0) {
       console.warn(`⚠️  Aborting ${admittedTurns.size} in-flight turn(s) after ${timeoutMs}ms deadline`);
-      abortAndReleaseAllTurns(new Error("server shutdown"));
+      abortAndReleaseAllTurns();
     }
 
     const shellDrain = await Promise.allSettled([terminateAllBackgroundShells()]);

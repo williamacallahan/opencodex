@@ -561,6 +561,8 @@ An absent upstream model stays absent; the tooltip
 retains all available model identities. Historical Codex `openai`, `chatgpt` and `openai-multi` main
 labels collapse for reporting; configured provider names ending in `-main` remain separate. Native Messages request and attempt `requestedEffort` labels follow the [native Messages logging contract](data-planes/protocol-paths.md#managed-native-messages).
 
+JSONL append and historical readback preserve `apiKeyId`, `admissionKind`, `inboundProtocol`, local-answer provenance, and sanitized upstream diagnostics; older rows may omit these fields. Bulk reads, ledger scans, startup hydration, and history pages use `upstreamDiagnosticLogProjection` to acquire credential sources once per batch instead of once per row. Each read or publication creates a fresh projection, preserving content-based credential checks without repeated file reads inside its row loop.
+
 Rows also carry the observed protocol path (`protocolTrace`), persisted in `usage.jsonl` and
 re-validated on read; the Logs list shows it as a text badge, the detail dialog as a section, and
 `src/server/request-log-filter.ts` owns the `/api/logs` query filters including `protocolMode`; its single-pass query applies provider, conversation, model, account, protocol mode and status before `tail`, then reports the pre-pagination count alongside the offset/limit page. `src/server/request-log-filter.ts` accepts the full provider/model label shown by `ocx logs` and bare model IDs, including IDs containing slashes. Qualified failover matches bind provider/model from the same attempt; matching occurs before the row cap and pagination.
