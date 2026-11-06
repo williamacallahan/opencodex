@@ -501,6 +501,14 @@ test("recovery waits for a 10 percent ratio sustained 30 seconds", () => {
   expect(isCodexFailureWindowDegraded("a", recoveredAt + 30_000)).toBe(false);
 });
 
+test("a degraded account with no traffic rejoins new-thread selection once its faults age out", () => {
+  const cfg = config();
+  fill("a", 5, 15);
+  expect(failureWindowSteersNewThreads(cfg, "a", NOW)).toBe(true);
+  expect(resolveCodexAccountForThread("rejoined-thread", cfg, NOW + 60_001)).toBe("a");
+  expect(failureWindowSteersNewThreads(cfg, "a", NOW + 60_001)).toBe(false);
+});
+
 test("disabling the window records nothing", () => {
   const cfg = config({ codexFailureWindow: false });
   for (let index = 0; index < 20; index += 1) noteCodexFailureWindowSample(cfg, "a", true, NOW);

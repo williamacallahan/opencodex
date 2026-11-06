@@ -20,6 +20,7 @@ import { isAccountNeedsReauth, markAccountNeedsReauth } from "./account-runtime-
 import { ConfigMutationLockError } from "../config";
 import { NativeProfileError } from "./native-profile-types";
 import { codexAccountUnusableReason, isCodexAccountUsable } from "./account-usability";
+import { isSelectableCodexPoolAccount } from "./account-id";
 import { reconcileMainCodexAccountRuntimeState } from "./account-lifecycle";
 import {
   MAIN_CODEX_ACCOUNT_ID,
@@ -562,8 +563,37 @@ export class CodexPoolAccountCreditsOffError extends CodexAccountCooldownError {
   }
 }
 
+/** No pool account can serve: every unpaused account is held at its usage limit. */
+export class CodexPoolExhaustedError extends CodexPoolAccountCreditsOffError {
+  constructor(accountId: string, resetAt: number, quotaScope?: CodexQuotaScope) {
+    super(accountId, resetAt, false, quotaScope);
+    this.name = "CodexPoolExhaustedError";
+    this.message = "Every Codex pool account reached its usage limit, and none may spend credits now."
+      + ` The earliest reset is ${new Date(resetAt).toISOString()}.`
+      + " Wait for the reset, add credits to an account, or allow credits for an account in Codex Auth.";
+  }
+}
+
 function assertPoolAccountCredits(accountId: string, resetAt: number | undefined, creditRecovery: boolean, quotaScope?: CodexQuotaScope): void {
   if (resetAt !== undefined) throw new CodexPoolAccountCreditsOffError(accountId, resetAt, creditRecovery, quotaScope);
+}
+
+/**
+ * The unpaused pool account whose usage-limit hold ends first, if any account is held. When
+ * selection finds no account, a hold means spent capacity with a known reset, not a bad
+ * credential: callers must wait for the reset instead of resending against an "invalid key".
+ */
+function earliestPoolCreditHold(
+  policy: CodexAuthPolicyConfig,
+  catalog: OcxConfig,
+): { accountId: string; resetAt: number } | undefined {
+  let earliest: { accountId: string; resetAt: number } | undefined;
+  for (const account of catalog.codexAccounts ?? []) {
+    if (!isSelectableCodexPoolAccount(account) || policy.pausedCodexAccountIds?.includes(account.id)) continue;
+    const resetAt = poolCreditHoldResetAt(policy, account.id, catalog);
+    if (resetAt !== undefined && (!earliest || resetAt < earliest.resetAt)) earliest = { accountId: account.id, resetAt };
+  }
+  return earliest;
 }
 
 /** The main login may not spend credits and one of its usage windows is full (#6334). */
@@ -982,6 +1012,11 @@ export function cooldownErrorResponse(
   now = Date.now(),
   accountSelector?: string,
 ): Response {
+  if (err instanceof CodexPoolExhaustedError) {
+    // Same known-horizon reasoning as the hard lock below: the whole pool is spent until a reset.
+    return formatUsageLimitReachedResponse(err.message, err.resetAt,
+      Math.max(1, Math.ceil((err.resetAt - now) / 1000)));
+  }
   if (err instanceof CodexMainAccountHardLockError) {
     // A local policy refusal with a known horizon, not a transient throttle (#7046): Codex keeps
     // a Goal active and sleeps through `rate_limit_exceeded` for the whole Retry-After, but
@@ -1544,6 +1579,8 @@ async function resolveCodexAuthContextUnannotated(
             : "Codex accounts that support this model are currently unavailable",
         );
       }
+      const hold = earliestPoolCreditHold(policy, config);
+      if (hold) throw new CodexPoolExhaustedError(hold.accountId, hold.resetAt, quotaScope);
       throw new CodexPoolAuthenticationError(undefined, {
         quarantinedMain: !nativeMainReadsForbidden
           && options.excludeAccountId !== MAIN_CODEX_ACCOUNT_ID

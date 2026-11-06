@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { OcxConfig } from "../../src/types";
 import {
   resolveCodexAuthContext, materializeCodexUpstreamAuth, applyCodexAuthContextToProvider,
-  assertCodexAuthContextNotCooled, CodexPoolAccountCreditsOffError, createCodexAuthDispatchGuard,
+  assertCodexAuthContextNotCooled, CodexPoolAccountCreditsOffError, CodexPoolExhaustedError, createCodexAuthDispatchGuard,
   cooldownErrorMessage, cooldownErrorResponse, shouldMarkAccountNeedsReauthForCodexAuthFailure,
 } from "../../src/codex/auth-context";
 import { rebindPoolCreditPolicy } from "../../src/codex/pool-credit-policy";
@@ -72,6 +72,20 @@ describe("stored-account credit policy at authentication", () => {
       if (dir) removeTreeWithRetry(dir);
       dir = "";
     }
+  });
+  test("a pool with every account held answers usage_limit_reached with the reset, not a bad credential", async () => {
+    const resetAt = Date.now() + 3_600_000;
+    quota(100, resetAt);
+    const error = await resolveCodexAuthContext(new Headers(), config(), "pool", { modelId: "gpt-5.5" })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CodexPoolExhaustedError);
+    const response = cooldownErrorResponse(error as CodexPoolExhaustedError);
+    expect(response.status).toBe(429);
+    const body = await response.json() as { error: { code: string; resets_at: number } };
+    expect(body.error.code).toBe("usage_limit_reached");
+    expect(body.error.resets_at).toBe(Math.ceil(resetAt / 1000));
+    expect(Number(response.headers.get("Retry-After"))).toBeGreaterThan(3_500);
+    expect(isAccountNeedsReauth(ID)).toBe(false);
   });
   test("an exact selector respects the credits-off hold without quarantining the account", async () => {
     quota();

@@ -78,6 +78,17 @@ function recompute(
     && (sample.credentialGeneration === undefined || live?.(accountId, sample.credentialGeneration)));
   state.credentialGeneration ??= state.samples.find(sample => sample.credentialGeneration !== undefined)?.credentialGeneration;
   const samples = state.samples.length;
+  // An empty window is no evidence of a fault. Degradation steers new threads away, so a
+  // degraded account with no bound traffic never collects the samples recovery needs and
+  // stayed out of rotation indefinitely (10 h on a credited seat while every other seat was
+  // spent). Once the faults age out of the window, the account rejoins and a recurring fault
+  // degrades it again after another full window of evidence.
+  if (samples === 0) {
+    state.degraded = false;
+    state.healthySince = undefined;
+    pinnedDegradeWarned.delete(accountId);
+    return;
+  }
   const failed = state.samples.reduce((count, sample) => count + (sample.failed ? 1 : 0), 0);
   const degraded = samples >= CODEX_SLIDING_FAILURE_MIN_SAMPLES
     && failed * 4 >= samples;
