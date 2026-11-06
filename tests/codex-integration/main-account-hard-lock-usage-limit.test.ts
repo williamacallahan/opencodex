@@ -261,6 +261,30 @@ describe("exhausted pool without a main login", () => {
     expect((await body(response)).type).toBe("rate_limit_error");
   });
 
+  test("the quota 429 names the held pool, not a selected account or a cooldown to clear", async () => {
+    const cfg = poolOnly();
+    const now = Date.now();
+    setAccountHealth(POOL_A, { consecutiveFailures: 1, lastFailureStatus: 429, cooldownUntil: now + 3 * 3_600_000 });
+    setAccountHealth(POOL_B, { consecutiveFailures: 1, lastFailureStatus: 429, cooldownUntil: now + 2 * 3_600_000 });
+    const error = await resolveCodexAuthContext(new Headers(), cfg, "pool").catch(cause => cause);
+    const message = String((await body(mapCodexAuthContextErrorToResponse(error, { now })!)).message);
+    expect(message).toContain("every Codex pool account is held on quota");
+    expect(message).not.toContain("Selected");
+    expect(message).not.toContain("clear-cooldown");
+  });
+
+  test("an account that needs sign-in answers 401 even while it still carries a quota hold", async () => {
+    const cfg = poolOnly();
+    const now = Date.now();
+    setAccountHealth(POOL_A, { consecutiveFailures: 1, lastFailureStatus: 429, cooldownUntil: now + 3 * 3_600_000 });
+    setAccountHealth(POOL_B, { consecutiveFailures: 1, lastFailureStatus: 429, cooldownUntil: now + 3_600_000 });
+    markAccountNeedsReauth(POOL_B);
+    const error = await resolveCodexAuthContext(new Headers(), cfg, "pool").catch(cause => cause);
+    const response = mapCodexAuthContextErrorToResponse(error, { now })!;
+    expect(response.status).toBe(401);
+    expect((await body(response)).type).toBe("authentication_error");
+  });
+
   test("accounts whose credentials need sign-in still answer 401", async () => {
     const cfg = poolOnly();
     markAccountNeedsReauth(POOL_A);
@@ -269,5 +293,20 @@ describe("exhausted pool without a main login", () => {
     const response = mapCodexAuthContextErrorToResponse(error, { now: Date.now() })!;
     expect(response.status).toBe(401);
     expect((await body(response)).type).toBe("authentication_error");
+  });
+});
+
+describe("exhausted pool with a briefly held main login", () => {
+  test("main's minutes-long hold sets Retry-After instead of the pool's hours-long reset", async () => {
+    const cfg = config([POOL_A, POOL_B]);
+    const now = Date.now();
+    setAccountHealth(MAIN, { consecutiveFailures: 0, softAvoidUntil: now + 5 * 60_000 });
+    setAccountHealth(POOL_A, { consecutiveFailures: 1, lastFailureStatus: 429, cooldownUntil: now + 3 * 3_600_000 });
+    setAccountHealth(POOL_B, { consecutiveFailures: 1, lastFailureStatus: 429, cooldownUntil: now + 2 * 3_600_000 });
+    // A same-request retry after POOL_B failed, so the selector may not fall back to it.
+    const error = await resolveCodexAuthContext(new Headers(), cfg, "pool", { excludeAccountId: POOL_B }).catch(cause => cause);
+    const response = mapCodexAuthContextErrorToResponse(error, { now })!;
+    expect(response.status).toBe(429);
+    expect(Number(response.headers.get("retry-after"))).toBe(5 * 60);
   });
 });

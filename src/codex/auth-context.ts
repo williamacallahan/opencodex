@@ -578,6 +578,16 @@ export class CodexPoolFailureWindowError extends CodexAccountCooldownError {
   }
 }
 
+/** No account was selected: every pool rotation candidate is held on quota with a known end. */
+export class CodexPoolQuotaHeldError extends CodexAccountCooldownError {
+  constructor(accountId: string, retryAt: number, quotaScope?: CodexQuotaScope) {
+    super(accountId, retryAt, undefined, quotaScope);
+    this.name = "CodexPoolQuotaHeldError";
+    this.message = `No Codex account can serve now: every Codex pool account is held on quota until ${new Date(retryAt).toISOString()}`
+      + " at the earliest. Retry after that; the holds lapse on their own as quota resets.";
+  }
+}
+
 /** No pool account can serve: every unpaused account is held at its usage limit. */
 export class CodexPoolExhaustedError extends CodexPoolAccountCreditsOffError {
   constructor(accountId: string, resetAt: number, quotaScope?: CodexQuotaScope) {
@@ -673,9 +683,7 @@ export class CodexReserveHelperUnsupportedError extends CodexReserveUnavailableE
  *
  * What must NOT be inherited is the quota wording -- "cooling down", `ocx account
  * clear-cooldown` -- because none of it describes a 5xx hold and following it would do
- * nothing. {@link cooldownErrorMessage} therefore returns this class's own message verbatim,
- * the same escape hatch {@link CodexMainAccountHardLockError} and
- * {@link CodexReserveUnavailableError} already use.
+ * nothing. {@link cooldownErrorMessage} therefore returns its message verbatim, as for every subclass.
  *
  * `cooldownUntil` carries the limiter's own change point, which is strictly in the future:
  * either the moment the held account may next be probed or the moment the recovery window
@@ -992,17 +1000,8 @@ export function cooldownAccountLabel(accountId: string): string {
  * injected `openai_base_url` in config.toml.
  */
 export function cooldownErrorMessage(err: CodexAccountCooldownError, accountSelector?: string): string {
-  if (err instanceof CodexMainAccountHardLockError
-    // A credits-off refusal is a configuration policy, not a cooldown: clearing a cooldown
-    // cannot lift it, so its own wording (wait for the reset or allow credits) is the remedy.
-    || err instanceof CodexMainAccountCreditsOffError
-    || err instanceof CodexPoolAccountCreditsOffError
-    || err instanceof CodexReserveUnavailableError
-    // A transient-hold refusal is not a quota cooldown. Its own wording is the only accurate
-    // one, and the quota recovery advice below would send the operator after a cooldown that
-    // does not exist (#4701).
-    || err instanceof CodexRecoveryWithheldError
-    || err instanceof CodexPoolFailureWindowError) return err.message;
+  // Every subclass is a refusal no cooldown clear can lift, and each owns its accurate wording.
+  if (err.constructor !== CodexAccountCooldownError) return err.message;
   const until = new Date(err.cooldownUntil).toISOString();
   const scopeLabels: Record<CodexQuotaScope, string> = {
     shared: "shared native quota", reserve: "Reserve quota",
@@ -1611,11 +1610,11 @@ async function resolveCodexAuthContextUnannotated(
       }
       const unavailable = poolUnavailableUntilKnownHorizon(policy, config, Date.now(), quotaScope);
       if (unavailable) throw unavailable;
-      const quarantinedMain = !nativeMainReadsForbidden && options.excludeAccountId !== MAIN_CODEX_ACCOUNT_ID
-        && !policy.pausedCodexAccountIds?.includes(MAIN_CODEX_ACCOUNT_ID)
-        && codexAccountUnusableReason(config, MAIN_CODEX_ACCOUNT_ID, selectionOptions) === "needs_reauth";
-      const exhausted = quarantinedMain ? undefined : exhaustedCodexPoolRecovery(config, Date.now(), quotaScope, selectionOptions);
-      if (exhausted) throw new CodexAccountCooldownError(exhausted.accountId, exhausted.retryAt, undefined, quotaScope);
+      const mainCandidate = !nativeMainReadsForbidden && options.excludeAccountId !== MAIN_CODEX_ACCOUNT_ID
+        && !policy.pausedCodexAccountIds?.includes(MAIN_CODEX_ACCOUNT_ID);
+      const quarantinedMain = mainCandidate && codexAccountUnusableReason(config, MAIN_CODEX_ACCOUNT_ID, selectionOptions) === "needs_reauth";
+      const exhausted = quarantinedMain ? undefined : exhaustedCodexPoolRecovery(config, Date.now(), quotaScope, selectionOptions, mainCandidate);
+      if (exhausted) throw new CodexPoolQuotaHeldError(exhausted.accountId, exhausted.retryAt, quotaScope);
       throw new CodexPoolAuthenticationError(undefined, { quarantinedMain });
     }
     accountId = selected;

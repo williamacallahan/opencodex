@@ -24,7 +24,7 @@
  */
 import { isCodexAccountPaused } from "../account-pause";
 import { codexUsageLimitResetAt } from "../account-credit-use";
-import { isSelectableCodexPoolAccount } from "../account-id";
+import { MAIN_CODEX_ACCOUNT_ID, isSelectableCodexPoolAccount } from "../account-id";
 import { isAccountNeedsReauth } from "../account-runtime-state";
 import { isCodexAccountUsable, type CodexAccountUsabilityOptions } from "../account-usability";
 import { getCodexPoolRefreshCooldownUntil } from "../pool-refresh-backoff";
@@ -44,10 +44,11 @@ function poolAccountRecoveryAt(
   id: string,
   now: number,
   quotaScope?: CodexQuotaScope,
+  selectionOptions?: CodexAccountUsabilityOptions,
 ): number | undefined {
   if (isCodexAccountPaused(config, id)
     || isCodexAccountPlanExcluded(config, id) || isAccountNeedsReauth(id)
-    || !isCodexAccountUsable(config, id) || failureWindowSteersNewThreads(config, id, now)) return undefined;
+    || !isCodexAccountUsable(config, id, selectionOptions) || failureWindowSteersNewThreads(config, id, now)) return undefined;
   const holds: number[] = [];
   const health = getCodexQuotaHealthSnapshot(id, quotaScope, now);
   if (health) {
@@ -60,8 +61,8 @@ function poolAccountRecoveryAt(
   if (softAvoidUntil !== null) holds.push(softAvoidUntil);
   const refreshCooldownUntil = getCodexPoolRefreshCooldownUntil(id, now);
   if (refreshCooldownUntil !== null) holds.push(refreshCooldownUntil);
-  if (isCodexAccountHeldAtUsageLimit(config, id, now)) {
-    const resetAt = codexUsageLimitResetAt(getAccountQuota(id), getPoolAccountPlanForSelection(config, id), now);
+  if (isCodexAccountHeldAtUsageLimit(config, id, now, selectionOptions)) {
+    const resetAt = codexUsageLimitResetAt(getAccountQuota(id), getPoolAccountPlanForSelection(config, id, selectionOptions), now);
     if (resetAt === undefined) return undefined;
     holds.push(resetAt);
   }
@@ -92,18 +93,24 @@ export function nextCodexPoolRecoveryAt(
 }
 
 /**
- * The pool account that recovers first, when quota is the only reason no stored account is
+ * The account that recovers first, when quota is the only reason no stored account is
  * selectable: every rotation candidate (paused and plan-excluded rows are operator choices, not
- * candidates) is refused by a quota cooldown, quota avoidance, or a credits-off usage limit.
- * Undefined when any candidate is refused for another reason -- a pool of missing or dead
- * credentials stays a credential failure -- or when no held account has a known reset. The caller
- * answers a retryable 429 at that reset instead of a 401, which clients treat as final.
+ * candidates) is a usable credential refused by a quota cooldown, quota avoidance, or a
+ * credits-off usage limit with a known end. Undefined when any candidate needs sign-in, is
+ * otherwise unusable, or is held with no known end: a pool holding a dead credential stays a
+ * credential failure even while that row still carries a stale quota hold. The caller answers a
+ * retryable 429 at that reset instead of a 401, which clients treat as final.
+ *
+ * `mainCandidate` says the caller may still route to the main login. When main is then held out
+ * only by a hold with a known end (often a cooldown of minutes), that end competes with the pool's
+ * resets, so the client is not told to wait hours for a pool reset while main returns first.
  */
 export function exhaustedCodexPoolRecovery(
   config: OcxConfig,
   now: number,
   quotaScope?: CodexQuotaScope,
   selectionOptions?: CodexAccountUsabilityOptions,
+  mainCandidate = false,
 ): { accountId: string; retryAt: number } | undefined {
   let soonest: { accountId: string; retryAt: number } | undefined;
   for (const account of config.codexAccounts ?? []) {
@@ -111,10 +118,14 @@ export function exhaustedCodexPoolRecovery(
     const reason = codexAccountBlockReason(config, account.id, now, quotaScope, selectionOptions);
     if (reason === "paused" || reason === "plan_excluded") continue;
     if (reason !== "cooldown" && reason !== "quota_avoided" && reason !== "credits_off") return undefined;
-    const retryAt = poolAccountRecoveryAt(config, account.id, now, quotaScope);
-    if (retryAt !== undefined && (soonest === undefined || retryAt < soonest.retryAt)) {
-      soonest = { accountId: account.id, retryAt };
-    }
+    // The block reason reports a quota hold before usability, so check the credential itself.
+    if (isAccountNeedsReauth(account.id) || !isCodexAccountUsable(config, account.id, selectionOptions)) return undefined;
+    const retryAt = poolAccountRecoveryAt(config, account.id, now, quotaScope, selectionOptions);
+    if (retryAt === undefined) return undefined;
+    if (soonest === undefined || retryAt < soonest.retryAt) soonest = { accountId: account.id, retryAt };
   }
-  return soonest;
+  if (soonest === undefined || !mainCandidate) return soonest;
+  const mainRetryAt = poolAccountRecoveryAt(config, MAIN_CODEX_ACCOUNT_ID, now, quotaScope, selectionOptions);
+  return mainRetryAt !== undefined && mainRetryAt < soonest.retryAt
+    ? { accountId: MAIN_CODEX_ACCOUNT_ID, retryAt: mainRetryAt } : soonest;
 }
