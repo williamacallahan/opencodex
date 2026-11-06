@@ -72,6 +72,7 @@ import type { CodexCooldownSource, CodexQuotaScope } from "./routing";
 import { maskAccountId } from "../lib/privacy";
 import { formatErrorResponse, formatUsageLimitReachedResponse } from "../bridge";
 import { nextCodexPoolRecoveryAt } from "./routing/pool-recovery";
+import { failureWindowSteeringEndsAt } from "./routing/failure-window";
 import { CODEX_UNKNOWN_USAGE_SCORE, getAccountQuota, getMainPolicyQuota, isValidWhamHistoryObservation, parseUsageQuota, parseMainPolicyUsageQuota, setAccountQuotaFromParsed } from "./quota";
 import { codexAccountUsesCreditsAfterLimit, codexUsageLimitResetAt } from "./account-credit-use";
 import type { CodexAccountMode, OcxConfig, OcxProviderConfig } from "../types";
@@ -563,6 +564,20 @@ export class CodexPoolAccountCreditsOffError extends CodexAccountCooldownError {
   }
 }
 
+/**
+ * No pool account can serve now, but one is held back only by the sliding failure window, which
+ * lapses within a minute. A transient wait, never the spent-pool reset days away.
+ */
+export class CodexPoolFailureWindowError extends CodexAccountCooldownError {
+  constructor(accountId: string, lapsesAt: number, quotaScope?: CodexQuotaScope) {
+    super(accountId, lapsesAt, undefined, quotaScope);
+    this.name = "CodexPoolFailureWindowError";
+    this.message = `No Codex pool account can serve now: account ${cooldownAccountLabel(accountId)}`
+      + " is held out of new threads after recent upstream failures"
+      + ` until ${new Date(lapsesAt).toISOString()} at the latest. Retry after that.`;
+  }
+}
+
 /** No pool account can serve: every unpaused account is held at its usage limit. */
 export class CodexPoolExhaustedError extends CodexPoolAccountCreditsOffError {
   constructor(accountId: string, resetAt: number, quotaScope?: CodexQuotaScope) {
@@ -579,21 +594,35 @@ function assertPoolAccountCredits(accountId: string, resetAt: number | undefined
 }
 
 /**
- * The unpaused pool account whose usage-limit hold ends first, if any account is held. When
- * selection finds no account, a hold means spent capacity with a known reset, not a bad
- * credential: callers must wait for the reset instead of resending against an "invalid key".
+ * Why selection found no unpaused pool account, when the wait has a known horizon. An account
+ * held back only by the failure window rejoins within a minute, so that short wait wins. With
+ * every account held at its usage limit the pool is spent until the earliest reset. Either way
+ * the capacity is temporarily gone, not a bad credential, so callers must not resend at once
+ * against an "invalid key".
  */
-function earliestPoolCreditHold(
+function poolUnavailableUntilKnownHorizon(
   policy: CodexAuthPolicyConfig,
   catalog: OcxConfig,
-): { accountId: string; resetAt: number } | undefined {
-  let earliest: { accountId: string; resetAt: number } | undefined;
+  now: number,
+  quotaScope?: CodexQuotaScope,
+): CodexAccountCooldownError | undefined {
+  let hold: { accountId: string; resetAt: number } | undefined;
+  let lapse: { accountId: string; lapsesAt: number } | undefined;
+  let unheld = false;
   for (const account of catalog.codexAccounts ?? []) {
     if (!isSelectableCodexPoolAccount(account) || policy.pausedCodexAccountIds?.includes(account.id)) continue;
     const resetAt = poolCreditHoldResetAt(policy, account.id, catalog);
-    if (resetAt !== undefined && (!earliest || resetAt < earliest.resetAt)) earliest = { accountId: account.id, resetAt };
+    if (resetAt !== undefined) {
+      if (!hold || resetAt < hold.resetAt) hold = { accountId: account.id, resetAt };
+      continue;
+    }
+    unheld = true;
+    const lapsesAt = failureWindowSteeringEndsAt(catalog, account.id, now);
+    if (lapsesAt !== undefined && (!lapse || lapsesAt < lapse.lapsesAt)) lapse = { accountId: account.id, lapsesAt };
   }
-  return earliest;
+  if (lapse) return new CodexPoolFailureWindowError(lapse.accountId, lapse.lapsesAt, quotaScope);
+  if (hold && !unheld) return new CodexPoolExhaustedError(hold.accountId, hold.resetAt, quotaScope);
+  return undefined;
 }
 
 /** The main login may not spend credits and one of its usage windows is full (#6334). */
@@ -972,7 +1001,8 @@ export function cooldownErrorMessage(err: CodexAccountCooldownError, accountSele
     // A transient-hold refusal is not a quota cooldown. Its own wording is the only accurate
     // one, and the quota recovery advice below would send the operator after a cooldown that
     // does not exist (#4701).
-    || err instanceof CodexRecoveryWithheldError) return err.message;
+    || err instanceof CodexRecoveryWithheldError
+    || err instanceof CodexPoolFailureWindowError) return err.message;
   const until = new Date(err.cooldownUntil).toISOString();
   const scopeLabels: Record<CodexQuotaScope, string> = {
     shared: "shared native quota", reserve: "Reserve quota",
@@ -1579,8 +1609,8 @@ async function resolveCodexAuthContextUnannotated(
             : "Codex accounts that support this model are currently unavailable",
         );
       }
-      const hold = earliestPoolCreditHold(policy, config);
-      if (hold) throw new CodexPoolExhaustedError(hold.accountId, hold.resetAt, quotaScope);
+      const unavailable = poolUnavailableUntilKnownHorizon(policy, config, Date.now(), quotaScope);
+      if (unavailable) throw unavailable;
       throw new CodexPoolAuthenticationError(undefined, {
         quarantinedMain: !nativeMainReadsForbidden
           && options.excludeAccountId !== MAIN_CODEX_ACCOUNT_ID

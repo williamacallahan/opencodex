@@ -5,7 +5,8 @@ import { join } from "node:path";
 import type { OcxConfig } from "../../src/types";
 import {
   resolveCodexAuthContext, materializeCodexUpstreamAuth, applyCodexAuthContextToProvider,
-  assertCodexAuthContextNotCooled, CodexPoolAccountCreditsOffError, CodexPoolExhaustedError, createCodexAuthDispatchGuard,
+  assertCodexAuthContextNotCooled, CodexPoolAccountCreditsOffError, CodexPoolExhaustedError, CodexPoolFailureWindowError,
+  createCodexAuthDispatchGuard,
   cooldownErrorMessage, cooldownErrorResponse, shouldMarkAccountNeedsReauthForCodexAuthFailure,
 } from "../../src/codex/auth-context";
 import { rebindPoolCreditPolicy } from "../../src/codex/pool-credit-policy";
@@ -20,6 +21,7 @@ import {
   recordCodexUpstreamOutcome, tryAcquireCodexQuotaProbeLease,
 } from "../../src/codex/routing";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
+import { forgetCodexFailureWindows, noteCodexFailureWindowSample } from "../../src/codex/routing/failure-window";
 import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -63,7 +65,7 @@ describe("stored-account credit policy at authentication", () => {
   afterEach(async () => {
     try {
       clearAccountQuota(); clearCodexUpstreamHealth(); clearThreadAccountMap(); clearPoolRotationState();
-      clearAccountNeedsReauth(ID);
+      clearAccountNeedsReauth(ID); forgetCodexFailureWindows();
       await flushConfigDirHardeningForTests();
     } finally {
       setIcaclsRunnerForTests(null); setAsyncIcaclsRunnerForTests(null);
@@ -86,6 +88,29 @@ describe("stored-account credit policy at authentication", () => {
     expect(body.error.resets_at).toBe(Math.ceil(resetAt / 1000));
     expect(Number(response.headers.get("Retry-After"))).toBeGreaterThan(3_500);
     expect(isAccountNeedsReauth(ID)).toBe(false);
+  });
+  test("a spent pool whose only other account sits out a failure window answers a short retry, not the reset", async () => {
+    const degraded = "credit-policy-degraded";
+    const cfg = config();
+    cfg.codexAccounts = [...cfg.codexAccounts!, { id: degraded, email: "degraded@example.test", isMain: false, plan: "pro" }];
+    saveCodexAccountCredential(degraded, {
+      accessToken: "access-token-value-degraded", refreshToken: "fixture-refresh-degraded",
+      expiresAt: Date.now() + 3_600_000, chatgptAccountId: "fixture-workspace-degraded",
+    });
+    quota(100, Date.now() + 2 * 86_400_000);
+    updateAccountQuota(degraded, 10, Date.now() + 3 * 86_400_000);
+    for (let sample = 0; sample < 20; sample += 1) noteCodexFailureWindowSample(cfg, degraded, true, Date.now());
+    const error = await resolveCodexAuthContext(new Headers(), cfg, "pool", { modelId: "gpt-5.5" })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CodexPoolFailureWindowError);
+    const response = cooldownErrorResponse(error as CodexPoolFailureWindowError);
+    expect(response.status).toBe(429);
+    const body = await response.json() as { error: { code?: string; type?: string } };
+    expect(body.error.code).not.toBe("usage_limit_reached");
+    const retryAfter = Number(response.headers.get("Retry-After"));
+    expect(retryAfter).toBeGreaterThan(0);
+    expect(retryAfter).toBeLessThanOrEqual(60);
+    expect(isAccountNeedsReauth(degraded)).toBe(false);
   });
   test("an exact selector respects the credits-off hold without quarantining the account", async () => {
     quota();

@@ -171,6 +171,20 @@ export function failureWindowSteersNewThreads(
   return false;
 }
 
+/**
+ * The latest time the failure window keeps steering new threads off this account: degradation
+ * lapses once its newest sample ages out of the window. Undefined when it does not steer them.
+ */
+export function failureWindowSteeringEndsAt(
+  config: OcxConfig,
+  accountId: string,
+  now: number,
+): number | undefined {
+  if (!failureWindowSteersNewThreads(config, accountId, now)) return undefined;
+  const newest = windows.get(accountId)?.samples.at(-1)?.at;
+  return newest === undefined ? undefined : newest + CODEX_SLIDING_FAILURE_WINDOW_MS;
+}
+
 export function forgetCodexFailureWindow(accountId: string): void {
   windows.delete(accountId);
   pinnedDegradeWarned.delete(accountId);
