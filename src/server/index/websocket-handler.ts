@@ -33,6 +33,7 @@ import {
 import {
   CodexAccountCooldownError,
   CodexMainAccountHardLockError,
+  CodexPoolExhaustedError,
   cooldownErrorMessage,
   cooldownErrorResponse,
 } from "../../codex/auth-context";
@@ -393,7 +394,7 @@ export function createWebsocketHandler(
                 const accountSelector = typeof payload.model === "string"
                   ? codexAccountNamespaceForModel(config.codexAccountNamespaces, payload.model)
                   : undefined;
-                if (err instanceof CodexMainAccountHardLockError) {
+                if (err instanceof CodexMainAccountHardLockError || err instanceof CodexPoolExhaustedError) {
                   // Same terminal usage-limit body and Retry-After as HTTP (#7046).
                   const refusal = cooldownErrorResponse(err, Date.now(), accountSelector);
                   const body = await refusal.json() as { error: Record<string, unknown> };
