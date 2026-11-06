@@ -434,6 +434,8 @@ MiMo model Command Code serves.
   restarts. When upstream rejects a request with `INVALID_ARGUMENT` or a signature error, whether
   as HTTP 400 or inside a 200 response, that conversation's cached signatures are dropped so the
   next turn does not replay them; the rejected request itself is not retried.
+- Antigravity's Gemini 4 Argon requests include the selected thinking tier when thought summaries
+  are enabled, allowing its thought summaries to appear in supported clients.
 - **Malformed response shapes fail closed.** A claimed candidate, its `content`, or its
   `content.parts` that is not the documented container terminates the turn with a
   `google response contained invalid …` error naming the structural reason and the offending
