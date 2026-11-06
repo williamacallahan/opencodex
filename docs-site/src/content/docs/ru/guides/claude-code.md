@@ -573,7 +573,7 @@ Claude Code — это лишь учётные данные для доступ�
 | `tool_use` ассистента | `function_call` (`input` → `arguments` в виде JSON-строки) |
 | `tool_result` пользователя | `function_call_output` (`is_error` → префикс `[tool error]`) |
 | Повтор `thinking` / `redacted_thinking` | Элементы `reasoning` с ограниченными конвертами `ocxr1` для подписей и скрытых данных |
-| Function-инструменты | `{type: "function"}` (`web_search*` → `{type: "web_search"}`). На переведённом маршруте к `api.anthropic.com` типизированные объявления `web_search_*` и `web_fetch_*` также передаются Anthropic для выполнения на сервере, если только сайдкар веб-поиска сам не предоставляет `web_search`. Поиск и загрузка возвращаются клиенту как `server_tool_use` и соответствующий `web_search_tool_result` / `web_fetch_tool_result` |
+| Function-инструменты | `{type: "function"}` (`web_search*` → `{type: "web_search"}`). На переведённом маршруте к `api.anthropic.com` типизированные объявления `web_search_*` и `web_fetch_*` также передаются Anthropic для выполнения на сервере, если только сайдкар веб-поиска сам не предоставляет `web_search`. Поиск и загрузка возвращаются клиенту как `server_tool_use` и соответствующий `web_search_tool_result` / `web_fetch_tool_result` Поиск с `allowed_domains`, `blocked_domains` или `user_location` исключается из переведённых маршрутов Responses/Chat; принудительный вызов исключённого поиска возвращает 400. Корректные определения функций с `defer_loading` остаются доступными как обычные функции. См. [ограничения перевода](/guides/claude-code/#search-restrictions-and-deferred-tools-on-translated-routes). |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, именованная функция→`{type:"function",name}`, размещённый WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
@@ -605,7 +605,7 @@ id/name; именованный `tool_choice` без имени.
 **Таксономия ошибок:** 400 `invalid_request_error`, 401 `authentication_error`,
 402 `billing_error`, 403 `permission_error`, 404 `not_found_error`, 409 `conflict_error`,
 413 `request_too_large`, 429 `rate_limit_error`, 504 `timeout_error`, 529 `overloaded_error`,
-прочие 5xx — `api_error`. `Retry-After` сохраняется.
+прочие 5xx — `api_error`. `Retry-After` передаётся целым числом секунд (HTTP-дата переводится в оставшиеся секунды) и ограничивается восемью днями.
 
 ## Кеширование промптов и расход токенов
 

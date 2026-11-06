@@ -17,7 +17,7 @@
  */
 
 import type { OcxConfig } from "../types";
-import { discardCorruptRequestHistoryIndex, openRequestHistoryIndexSync, requestHistoryDb } from "./history/indexer";
+import { openRequestHistoryIndexSync, reportRequestHistoryCorruption, requestHistoryDb } from "./history/indexer";
 import { OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import {
   getCodexAccountCooldownUntil,
@@ -251,9 +251,10 @@ function computeHistoricalHealthEvidence(
   input: Pick<HealthEvidenceInput, "provider" | "model" | "accountRef">,
   now: number,
 ): HistoricalHealthEvidence {
+  let handle: ReturnType<typeof requestHistoryDb> | undefined;
   try {
     openRequestHistoryIndexSync();
-    const handle = requestHistoryDb();
+    handle = requestHistoryDb();
     const where: string[] = ["provider = ?", "model = ?", "timestamp >= ?"];
     const values: Array<string | number> = [input.provider, input.model, now - HEALTH_WINDOW_MS];
     if (input.accountRef) {
@@ -342,8 +343,8 @@ function computeHistoricalHealthEvidence(
     }
     return out;
   } catch (error) {
-    // Unreadable index: evidence stays unknown. A corrupt one is discarded so the next refresh rebuilds it.
-    discardCorruptRequestHistoryIndex(error);
+    if (handle) reportRequestHistoryCorruption(error, handle);
+    /* index unreadable: evidence stays unknown */
     return {};
   }
 }

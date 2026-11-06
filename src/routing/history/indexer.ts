@@ -3,7 +3,7 @@
  *
  * `usage.jsonl` stays canonical; this module maintains a rebuildable SQLite
  * projection (ADR-1, ADR-8). On every open/query it verifies schema version,
- * file identity, integrity, and byte offset, then appends whatever complete
+ * file identity and byte offset, then appends whatever complete
  * JSONL rows arrived since the last index. Missing/corrupt/stale index or a
  * replaced/truncated source triggers an automatic full rebuild; canonical
  * history is never touched.
@@ -12,10 +12,12 @@
  * runs on a worker thread (#6990): the worker writes a private build file and
  * this thread swaps it in once complete. Async readers wait for it; the
  * routing-time sync entry never waits and throws `RequestHistoryIndexBusyError`.
+ * Full integrity scans run on that worker at open and periodically while in
+ * use, never synchronously on the serving thread (#7966).
  */
 
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import { getConfigDir } from "../../config";
 import { recordOwnedConfigPath } from "../../lib/config-ownership";
@@ -50,6 +52,8 @@ import {
 } from "./ingest";
 import { buildFilePath, removeAbandonedBuilds, removeBuildFiles } from "./build-file";
 import { RebuildWorkerJob } from "./rebuild-job";
+import { RequestHistoryIntegrityMonitor, type RequestHistoryIntegrityOptions } from "./integrity";
+import { isHistoryIndexCorruption } from "./sqlite-errors";
 
 export {
   REQUEST_HISTORY_INSERT_BATCH,
@@ -143,9 +147,15 @@ class RebuildHandedOff {
   constructor(readonly rebuild: WorkerRebuild) {}
 }
 
+/** An initial integrity check, or a scanner draining before index replacement. */
+class IntegrityHandedOff {
+  constructor(readonly promise: Promise<void>) {}
+}
+
 let db: Database | null = null;
 let dbPath = "";
 let openPromise: Promise<RequestHistoryIndexMeta> | null = null;
+let manualRebuild: Promise<RequestHistoryIndexMeta> | null = null;
 let workerRebuild: WorkerRebuild | null = null;
 let workerFailure: { at: number; error: unknown; consecutive: number } | null = null;
 let workerFailureCooldownMs = WORKER_FAILURE_COOLDOWN_MS;
@@ -154,6 +164,33 @@ let maxAsyncRefreshBuilds = MAX_ASYNC_REFRESH_BUILDS;
 let buildSequence = 0;
 // Bumped by closeRequestHistoryIndex, so a rebuild finishing after a close is discarded.
 let indexLifetime = 0;
+let integrity = new RequestHistoryIntegrityMonitor();
+let integrityDrain: Promise<void> | null = null;
+let corruptHandle: Database | null = null;
+let validatedBuildPath: string | null = null;
+
+/** Test seam: replace integrity scheduling without leaving a scanner on an old file. */
+export function setRequestHistoryIntegrityOptionsForTests(options?: RequestHistoryIntegrityOptions): void {
+  closeRequestHistoryIndex();
+  integrity = new RequestHistoryIntegrityMonitor(options);
+}
+
+function stopIntegrityScan(): Promise<void> | null {
+  const pending = integrity.quiesce();
+  if (pending && !integrityDrain) {
+    const drained = pending.finally(() => {
+      if (integrityDrain === drained) integrityDrain = null;
+    });
+    integrityDrain = drained;
+  }
+  return integrityDrain;
+}
+
+/** Never delete/rename a database that a cancelled scanner may still hold on Windows. */
+function prepareIndexReplacement(): void {
+  const pending = stopIntegrityScan();
+  if (pending) throw new IntegrityHandedOff(pending);
+}
 
 /** Test seam: move the worker threshold; `undefined` restores the default. */
 export function setRequestHistoryWorkerRebuildMinBytesForTests(bytes: number | undefined): void {
@@ -223,42 +260,6 @@ export function sourceIdentityMatches(dbHandle: Database, revision: UsageLogRevi
     && storedBirthtimeMs === Number(revision.birthtimeMs);
 }
 
-function isHealthy(dbHandle: Database): boolean {
-  try {
-    const row = dbHandle.query("PRAGMA quick_check").get() as { quick_check?: string } | undefined;
-    return row?.quick_check === "ok";
-  } catch {
-    return false;
-  }
-}
-
-/** SQLite's page-damage codes. Bun's SQLiteError carries the extended code as a string. */
-function isCorruptIndexError(error: unknown): boolean {
-  const code = error instanceof Error ? (error as { code?: unknown }).code : undefined;
-  return typeof code === "string" && (code.startsWith("SQLITE_CORRUPT") || code === "SQLITE_NOTADB");
-}
-
-/**
- * Discard the index when `error` reports page damage, so the next refresh rebuilds it from the
- * canonical ledger. Indexes past the worker threshold skip the open-time quick_check, so this
- * is how their corruption is found. Returns whether the index was discarded.
- */
-export function discardCorruptRequestHistoryIndex(error: unknown): boolean {
-  if (!db || !isCorruptIndexError(error)) return false;
-  destroyAndRecreate(dbPath, "corruption detected; index rebuilt");
-  return true;
-}
-
-/** Run an index read once more after discarding a corrupt index; the retry rebuilds it. */
-export async function retryAfterCorruption<T>(read: () => Promise<T>): Promise<T> {
-  try {
-    return await read();
-  } catch (error) {
-    if (!discardCorruptRequestHistoryIndex(error)) throw error;
-    return read();
-  }
-}
-
 /** Remove the index file and its WAL side files. */
 function removeIndexFiles(path: string): void {
   // Windows: a partially-opened handle from a failed `new Database` can hold
@@ -278,6 +279,7 @@ function removeIndexFiles(path: string): void {
 }
 
 function destroyAndRecreate(path: string, reason: string): Database {
+  prepareIndexReplacement();
   if (db) {
     try { db.close(); } catch { /* already closed */ }
     db = null;
@@ -289,18 +291,19 @@ function destroyAndRecreate(path: string, reason: string): Database {
   resetAndCreateSchema(fresh);
   setMeta(fresh, HISTORY_META_KEYS.lastError, reason);
   db = fresh;
+  corruptHandle = null;
+  validatedBuildPath = null;
   return fresh;
 }
 
 function openIndexDb(): Database {
+  if (integrityDrain) throw new IntegrityHandedOff(integrityDrain);
   const path = indexDbPath();
   if (db) return db;
   const legacyPath = legacyHistoryIndexPath(getConfigDir());
   removeIndexFiles(legacyPath);
   removeAbandonedBuilds(legacyPath);
   let handle: Database | undefined;
-  let recreateReason = "unreadable database recreated";
-  const indexBytes = statSync(path, { throwIfNoEntry: false })?.size ?? 0;
   try {
     handle = new Database(path, { create: true });
     handle.exec("PRAGMA journal_mode = WAL");
@@ -318,23 +321,21 @@ function openIndexDb(): Database {
       setMeta(handle, HISTORY_META_KEYS.builtAtMs, Date.now());
       setMeta(handle, HISTORY_META_KEYS.lastError, "created");
     }
-    // Once per opened handle, never per refresh, and only below the worker threshold:
-    // quick_check reads every page on the event loop. A 2.1 GB index took 49.9 s per
-    // check, and running it on every routing-time refresh stalled the proxy for minutes.
-    if (indexBytes < workerRebuildMinBytes && !isHealthy(handle)) {
-      recreateReason = "integrity check failed; index rebuilt";
-      throw new Error(recreateReason);
-    }
-  } catch {
+  } catch (error) {
     // A partially-opened handle on a corrupt file can hold the OS lock on
     // Windows; close it before the destructive recreate.
     if (handle) {
       try { handle.close(); } catch { /* already unusable */ }
     }
-    handle = destroyAndRecreate(path, recreateReason);
+    if (!isHistoryIndexCorruption(error)) throw error;
+    handle = destroyAndRecreate(path, "unreadable database recreated");
   }
   dbPath = path;
   db = handle;
+  if (validatedBuildPath === path) {
+    integrity.acceptRebuilt(handle, path);
+    validatedBuildPath = null;
+  }
   return handle;
 }
 
@@ -345,6 +346,10 @@ function storedSchemaVersion(dbHandle: Database): string | null {
 
 function ensureSchemaAndIdentity(dbHandle: Database): "ready" | "rebuilt" {
   try {
+    if (corruptHandle === dbHandle) {
+      destroyAndRecreate(dbPath, "integrity check failed; index rebuilt");
+      return "rebuilt";
+    }
     const storedVersion = metaValue(dbHandle, HISTORY_META_KEYS.schemaVersion);
     if (storedVersion !== String(HISTORY_SCHEMA_VERSION)) {
       destroyAndRecreate(dbPath, `schema version ${storedVersion ?? "missing"} -> ${HISTORY_SCHEMA_VERSION}`);
@@ -355,16 +360,30 @@ function ensureSchemaAndIdentity(dbHandle: Database): "ready" | "rebuilt" {
       destroyAndRecreate(dbPath, "source identity changed; index rebuilt");
       return "rebuilt";
     }
+    const check = integrity.inspect(dbHandle, dbPath);
+    if (check.state === "pending") throw new IntegrityHandedOff(check.promise);
+    if (check.state === "unavailable") {
+      throw new RequestHistoryIndexBusyError("request-history integrity check unavailable");
+    }
+    if (check.state === "corrupt") {
+      corruptHandle = dbHandle;
+      destroyAndRecreate(dbPath, "integrity check failed; index rebuilt");
+      return "rebuilt";
+    }
     return "ready";
-  } catch {
+  } catch (error) {
+    if (!isHistoryIndexCorruption(error)) throw error;
     // A file that opens but is not actually SQLite (or is mid-corruption)
     // throws on the first statement; treat it as corrupt and rebuild.
+    corruptHandle = dbHandle;
+    integrity.markCorrupt(dbHandle);
     destroyAndRecreate(dbPath, "index unreadable; rebuilt");
     return "rebuilt";
   }
 }
 
 function fullRebuild(dbHandle: Database, reason: string): void {
+  prepareIndexReplacement();
   resetAndCreateSchema(dbHandle);
   setMeta(dbHandle, HISTORY_META_KEYS.lastError, reason);
   const path = usageLogPath();
@@ -375,6 +394,8 @@ function fullRebuild(dbHandle: Database, reason: string): void {
     setMeta(dbHandle, HISTORY_META_KEYS.indexedOffset, 0);
     setMeta(dbHandle, HISTORY_META_KEYS.indexedRows, 0);
     setMeta(dbHandle, HISTORY_META_KEYS.builtAtMs, Date.now());
+    integrity.acceptRebuilt(dbHandle, dbPath);
+    corruptHandle = null;
     return;
   }
   const inserted = ingestSourceTail(dbHandle, path, 0);
@@ -382,6 +403,8 @@ function fullRebuild(dbHandle: Database, reason: string): void {
   setMeta(dbHandle, HISTORY_META_KEYS.indexedRows, inserted);
   setMeta(dbHandle, HISTORY_META_KEYS.indexedOffset, Math.max(current.indexedOffset, 0));
   setMeta(dbHandle, HISTORY_META_KEYS.builtAtMs, Date.now());
+  integrity.acceptRebuilt(dbHandle, dbPath);
+  corruptHandle = null;
 }
 
 /**
@@ -428,12 +451,15 @@ function startWorkerRebuild(reason: string, revision: UsageLogRevision): WorkerR
 
 /** Swap a complete worker build in for the current index file. */
 function installBuild(buildPath: string, indexPath: string): void {
+  prepareIndexReplacement();
   if (db) {
     try { db.close(); } catch { /* already closed */ }
     db = null;
   }
   removeIndexFiles(indexPath);
   renameSync(buildPath, indexPath);
+  corruptHandle = null;
+  validatedBuildPath = indexPath;
 }
 
 /**
@@ -445,6 +471,7 @@ type RefreshCaller = "routing" | "reader";
 
 /** Full rebuild, on the worker when the ledger is large enough to stall the event loop. */
 function rebuildFromLedger(handle: Database, reason: string, caller: RefreshCaller): void {
+  prepareIndexReplacement();
   const revision = sourceIdentity();
   if (revision !== null && Number(revision.size) >= workerRebuildMinBytes) {
     const failure = workerFailure;
@@ -468,19 +495,10 @@ function rebuildFromLedger(handle: Database, reason: string, caller: RefreshCall
   workerFailure = null;
 }
 
-function refreshLockedSync(caller: RefreshCaller): RequestHistoryIndexMeta {
-  try {
-    return refreshOpenIndexSync(caller);
-  } catch (error) {
-    if (!discardCorruptRequestHistoryIndex(error)) throw error;
-    return refreshOpenIndexSync(caller);
-  }
-}
-
 /** Ledger bytes one routing-time refresh may index; well above the 1 MiB indexed-row ceiling. */
 export const ROUTING_TAIL_INGEST_MAX_BYTES = 8 * 1024 * 1024;
 
-function refreshOpenIndexSync(caller: RefreshCaller): RequestHistoryIndexMeta {
+function refreshOnceLockedSync(caller: RefreshCaller): RequestHistoryIndexMeta {
   if (workerRebuild) throw new RebuildHandedOff(workerRebuild);
   openIndexDb();
   const state = ensureSchemaAndIdentity(db!);
@@ -514,27 +532,55 @@ function refreshOpenIndexSync(caller: RefreshCaller): RequestHistoryIndexMeta {
   return metaFor(handle);
 }
 
+function refreshLockedSync(caller: RefreshCaller): RequestHistoryIndexMeta {
+  try {
+    return refreshOnceLockedSync(caller);
+  } catch (error) {
+    // Metadata reads and incremental writes can encounter damage even between
+    // scheduled checks. Operational failures (busy, locked, I/O, full) propagate.
+    if (!isHistoryIndexCorruption(error)) throw error;
+    if (db) {
+      corruptHandle = db;
+      integrity.markCorrupt(db);
+    }
+    const handle = destroyAndRecreate(dbPath, "SQLite corruption; index rebuilt");
+    rebuildFromLedger(handle, "SQLite corruption; index rebuilt", caller);
+    return metaFor(handle);
+  }
+}
+
 /**
  * Synchronous refresh for routing-time evidence reads (RI-06+). Never waits
  * for a worker rebuild: while one runs (this call may start it), throws
  * `RequestHistoryIndexBusyError`, which health scoring reads as unknown evidence.
  */
 export function openRequestHistoryIndexSync(): RequestHistoryIndexMeta {
+  if (manualRebuild) throw new RequestHistoryIndexBusyError();
   try {
     return refreshLockedSync("routing");
   } catch (error) {
-    if (error instanceof RebuildHandedOff) throw new RequestHistoryIndexBusyError();
+    if (error instanceof RebuildHandedOff || error instanceof IntegrityHandedOff) throw new RequestHistoryIndexBusyError();
     throw error;
   }
 }
 
-async function refreshWaitingForWorker(): Promise<RequestHistoryIndexMeta> {
+async function refreshWaitingForWorker(fromManualRebuild = false): Promise<RequestHistoryIndexMeta> {
   const lifetime = indexLifetime;
   for (let builds = 0; ; ) {
+    if (manualRebuild && !fromManualRebuild) {
+      await manualRebuild;
+      if (lifetime !== indexLifetime) throw new RequestHistoryIndexClosedError();
+      continue;
+    }
     let handedOff: RebuildHandedOff;
     try {
       return refreshLockedSync("reader");
     } catch (error) {
+      if (error instanceof IntegrityHandedOff) {
+        await error.promise;
+        if (lifetime !== indexLifetime) throw new RequestHistoryIndexClosedError();
+        continue;
+      }
       if (!(error instanceof RebuildHandedOff)) throw error;
       handedOff = error;
     }
@@ -558,15 +604,19 @@ async function refreshWaitingForWorker(): Promise<RequestHistoryIndexMeta> {
  */
 export function openRequestHistoryIndex(): Promise<RequestHistoryIndexMeta> {
   if (!openPromise) {
-    openPromise = refreshWaitingForWorker().finally(() => {
-      openPromise = null;
+    const pending = refreshWaitingForWorker().finally(() => {
+      if (openPromise === pending) openPromise = null;
     });
+    openPromise = pending;
   }
   return openPromise;
 }
 
 export function closeRequestHistoryIndex(): void {
   indexLifetime += 1;
+  stopIntegrityScan();
+  corruptHandle = null;
+  validatedBuildPath = null;
   const rebuild = workerRebuild;
   workerRebuild = null;
   workerFailure = null;
@@ -577,21 +627,36 @@ export function closeRequestHistoryIndex(): void {
     db = null;
   }
   openPromise = null;
+  manualRebuild = null;
 }
 
 /** Force a full rebuild from the canonical ledger (CLI / tests). */
-export async function rebuildRequestHistoryIndex(): Promise<RequestHistoryIndexMeta> {
+export function rebuildRequestHistoryIndex(): Promise<RequestHistoryIndexMeta> {
+  if (!manualRebuild) {
+    const pending = rebuildManually(indexLifetime).finally(() => {
+      if (manualRebuild === pending) manualRebuild = null;
+    });
+    manualRebuild = pending;
+  }
+  return manualRebuild;
+}
+
+async function rebuildManually(lifetime: number): Promise<RequestHistoryIndexMeta> {
+  const draining = stopIntegrityScan();
+  if (draining) await draining;
+  if (lifetime !== indexLifetime) throw new RequestHistoryIndexClosedError();
   while (workerRebuild) await workerRebuild.promise.catch(() => undefined);
+  if (lifetime !== indexLifetime) throw new RequestHistoryIndexClosedError();
   const handle = openIndexDb();
   const revision = sourceIdentity();
   if (revision !== null && Number(revision.size) >= workerRebuildMinBytes) {
     workerFailure = null;
     const rebuild = startWorkerRebuild("manual rebuild requested", revision);
     if (rebuild) {
-      const lifetime = indexLifetime;
       try {
         await rebuild.promise;
-        return openRequestHistoryIndex();
+        if (lifetime !== indexLifetime) throw new RequestHistoryIndexClosedError();
+        return refreshWaitingForWorker(true);
       } catch (error) {
         // A close is final; any other worker failure falls back to the inline rebuild below.
         if (lifetime !== indexLifetime || error instanceof RequestHistoryIndexClosedError) throw error;
@@ -653,6 +718,29 @@ function requireDb(): Database {
   return handle;
 }
 
+/** Invalidate only the live generation, including errors from routing's synchronous reads. */
+export function reportRequestHistoryCorruption(error: unknown, handle: Database): boolean {
+  if (!isHistoryIndexCorruption(error)) return false;
+  if (db === handle) {
+    corruptHandle = handle;
+    integrity.markCorrupt(handle);
+  }
+  return true;
+}
+
+/** Read-only operations may retry once after repair; ordinary SQLite failures propagate. */
+export async function withRequestHistoryRead<T>(read: (handle: Database, meta: RequestHistoryIndexMeta) => T): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    const meta = await openRequestHistoryIndex();
+    const handle = requireDb();
+    try {
+      return read(handle, meta);
+    } catch (error) {
+      if (!reportRequestHistoryCorruption(error, handle) || attempt > 0) throw error;
+    }
+  }
+}
+
 function hydrateRow(row: HistoryQueryRow | undefined): PersistedUsageEntry | null {
   if (!row) return null;
   try {
@@ -666,20 +754,11 @@ function hydrateRow(row: HistoryQueryRow | undefined): PersistedUsageEntry | nul
   return null;
 }
 
-export function queryRequestHistory(
+export async function queryRequestHistory(
   filters: RequestHistoryFilters,
   rawCursor: string | null | undefined,
   pageSize: number | undefined,
 ): Promise<RequestHistoryPage> {
-  return retryAfterCorruption(() => queryRequestHistoryPage(filters, rawCursor, pageSize));
-}
-
-async function queryRequestHistoryPage(
-  filters: RequestHistoryFilters,
-  rawCursor: string | null | undefined,
-  pageSize: number | undefined,
-): Promise<RequestHistoryPage> {
-  const meta = await openRequestHistoryIndex();
   const cursor = decodeHistoryCursor(rawCursor);
   if (rawCursor !== null && rawCursor !== undefined && cursor === null) {
     throw new InvalidCursorError();
@@ -688,8 +767,9 @@ async function queryRequestHistoryPage(
     Math.max(1, Math.trunc(pageSize ?? REQUEST_HISTORY_DEFAULT_PAGE_SIZE)),
     REQUEST_HISTORY_MAX_PAGE_SIZE,
   );
-  const handle = requireDb();
-  const { rows, fetched } = queryRows(handle, filters, cursor, limit);
+  const { rows, fetched, meta } = await withRequestHistoryRead((handle, meta) => ({
+    ...queryRows(handle, filters, cursor, limit), meta,
+  }));
   const hasMore = fetched > limit;
   const pageRows = rows.slice(0, limit);
   const entries: PersistedUsageEntry[] = [];
@@ -705,15 +785,11 @@ async function queryRequestHistoryPage(
   return { rows: entries, ...(nextCursor ? { nextCursor } : {}), hasMore, meta };
 }
 
-export function requestHistoryRowById(requestId: string): Promise<PersistedUsageEntry | null> {
-  return retryAfterCorruption(async () => {
-    await openRequestHistoryIndex();
-    const handle = requireDb();
-    const row = handle.query("SELECT row_json FROM requests WHERE request_id = ?").get(requestId) as
-      | { row_json: string }
-      | undefined;
-    return hydrateRow(row);
-  });
+export async function requestHistoryRowById(requestId: string): Promise<PersistedUsageEntry | null> {
+  const row = await withRequestHistoryRead(handle => handle.query("SELECT row_json FROM requests WHERE request_id = ?").get(requestId) as
+    | { row_json: string }
+    | undefined);
+  return hydrateRow(row);
 }
 
 export async function requestHistoryIndexStatus(): Promise<RequestHistoryIndexMeta> {

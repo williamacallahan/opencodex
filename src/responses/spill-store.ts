@@ -802,8 +802,12 @@ function openSpillDirScan(dir: string): SpillDirScan | null {
   return {
     nextName: () => {
       if (injected) return injected();
-      const entry = handle!.readSync();
-      return entry ? entry.name : null;
+      try {
+        const entry = handle!.readSync();
+        return entry ? entry.name : null;
+      } catch {
+        return null;
+      }
     },
     close: () => { try { handle?.closeSync(); } catch { /* best effort */ } },
   };
