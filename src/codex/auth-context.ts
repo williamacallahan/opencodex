@@ -71,7 +71,7 @@ import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS, NATIVE_RESERVE_MODEL } from "./cata
 import type { CodexCooldownSource, CodexQuotaScope } from "./routing";
 import { maskAccountId } from "../lib/privacy";
 import { formatErrorResponse, formatUsageLimitReachedResponse } from "../bridge";
-import { nextCodexPoolRecoveryAt } from "./routing/pool-recovery";
+import { exhaustedCodexPoolRecovery, nextCodexPoolRecoveryAt } from "./routing/pool-recovery";
 import { failureWindowSteeringEndsAt } from "./routing/failure-window";
 import { CODEX_UNKNOWN_USAGE_SCORE, getAccountQuota, getMainPolicyQuota, isValidWhamHistoryObservation, parseUsageQuota, parseMainPolicyUsageQuota, setAccountQuotaFromParsed } from "./quota";
 import { codexAccountUsesCreditsAfterLimit, codexUsageLimitResetAt } from "./account-credit-use";
@@ -1611,12 +1611,12 @@ async function resolveCodexAuthContextUnannotated(
       }
       const unavailable = poolUnavailableUntilKnownHorizon(policy, config, Date.now(), quotaScope);
       if (unavailable) throw unavailable;
-      throw new CodexPoolAuthenticationError(undefined, {
-        quarantinedMain: !nativeMainReadsForbidden
-          && options.excludeAccountId !== MAIN_CODEX_ACCOUNT_ID
-          && !policy.pausedCodexAccountIds?.includes(MAIN_CODEX_ACCOUNT_ID)
-          && codexAccountUnusableReason(config, MAIN_CODEX_ACCOUNT_ID, selectionOptions) === "needs_reauth",
-      });
+      const quarantinedMain = !nativeMainReadsForbidden && options.excludeAccountId !== MAIN_CODEX_ACCOUNT_ID
+        && !policy.pausedCodexAccountIds?.includes(MAIN_CODEX_ACCOUNT_ID)
+        && codexAccountUnusableReason(config, MAIN_CODEX_ACCOUNT_ID, selectionOptions) === "needs_reauth";
+      const exhausted = quarantinedMain ? undefined : exhaustedCodexPoolRecovery(config, Date.now(), quotaScope, selectionOptions);
+      if (exhausted) throw new CodexAccountCooldownError(exhausted.accountId, exhausted.retryAt, undefined, quotaScope);
+      throw new CodexPoolAuthenticationError(undefined, { quarantinedMain });
     }
     accountId = selected;
     if (accountId === MAIN_CODEX_ACCOUNT_ID) assertMainAccountPolicy(policy);
