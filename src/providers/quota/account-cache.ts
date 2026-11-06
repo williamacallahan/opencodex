@@ -6,6 +6,7 @@ import { anthropicModelQuotaFor, ANTHROPIC_PASSIVE_FAMILY_MAX_AGE_MS } from "../
 import { createHash } from "node:crypto";
 import { getValidAccessTokenForAccount } from "../../oauth";
 import { credentialGeneration, getAccountCredential, getAccountCredentialWithStatus, getAccountSet } from "../../oauth/store";
+import { subscribeOAuthCredentialRotations } from "../../lib/account-selection-events";
 import { isAnthropicInstanceId, type AnthropicInstanceId } from "../anthropic-instance-id";
 import type { GenerationContext } from "../../lib/state-store-sweeper";
 import { ACCOUNT_QUOTA_TTL_MS, toFiniteNumber } from "../quota-wire";
@@ -237,6 +238,28 @@ export function anthropicQuotaEntryIsCurrent(
   }
   return !(entry?.isCurrent && !entry.isCurrent());
 }
+
+/**
+ * A refresh rotates the access token and expiry, so the generation digest changes on every
+ * refresh. Usage belongs to the login, not the bearer: a reading that was current for the
+ * replaced credential moves to the new generation instead of leaving the account unmeasured
+ * (and eligible past its threshold) until the next probe. Login replacements and re-auth do not
+ * publish a rotation, so their old readings stay historical. Currency is judged before the store
+ * changes; the flight fence is then dropped, as for header observations, because it names the
+ * replaced generation.
+ */
+subscribeOAuthCredentialRotations(({ provider, accountId, previousGeneration, nextGeneration }) => {
+  if (!isAnthropicInstanceId(provider)) return;
+  hydrateAccountQuotaCache();
+  const key = accountCacheKey(provider, accountId);
+  const entry = accountQuotaCache.get(key);
+  if (entry?.anthropicCredentialGeneration !== previousGeneration || !anthropicQuotaEntryIsCurrent(provider, accountId, entry)) return;
+  return () => {
+    if (accountQuotaCache.get(key) !== entry) return;
+    accountQuotaCache.set(key, { ...entry, anthropicCredentialGeneration: nextGeneration, isCurrent: undefined });
+    persistAccountQuotaCache();
+  };
+});
 
 export function getCachedProviderAccountQuota(provider: string, accountId: string): ProviderQuota | null {
   const entry = accountQuotaCache.get(accountCacheKey(provider, accountId));

@@ -16,7 +16,18 @@ export type OAuthAccountRoutingPolicyChange = Readonly<{
   after: OAuthAccountSelectionSnapshot;
 }>;
 
+/** A refresh replaced one login's credential in place; generations are non-secret digests. */
+export type OAuthCredentialRotation = Readonly<{
+  provider: string;
+  accountId: string;
+  previousGeneration: string;
+  nextGeneration: string;
+}>;
+
 const listeners = new Set<(event: AccountSelectionEvent) => void>();
+/** A listener judges evidence against the pre-rotation store and returns its post-persist commit. */
+type OAuthCredentialRotationListener = (event: OAuthCredentialRotation) => (() => void) | void;
+const oauthCredentialRotationListeners = new Set<OAuthCredentialRotationListener>();
 const oauthPauseListeners = new Set<(provider: string) => void>();
 const oauthRoutingPolicyListeners = new Set<(event: OAuthAccountRoutingPolicyChange) => void>();
 let revision = 0;
@@ -67,6 +78,28 @@ export function subscribeOAuthAccountRoutingPolicyChanges(listener: (event: OAut
   const subscription = (event: OAuthAccountRoutingPolicyChange) => listener(event);
   oauthRoutingPolicyListeners.add(subscription);
   return () => { oauthRoutingPolicyListeners.delete(subscription); };
+}
+
+/**
+ * Call inside a generation-fenced, same-identity credential merge, before the store changes, and
+ * run the returned commit only after that merge has been persisted.
+ */
+export function prepareOAuthCredentialRotation(event: OAuthCredentialRotation): () => void {
+  const commits: Array<() => void> = [];
+  for (const listener of [...oauthCredentialRotationListeners]) {
+    try { const commit = listener(event); if (commit) commits.push(commit); } catch { /* An observer cannot block the merge. */ }
+  }
+  return () => {
+    for (const commit of commits) {
+      try { commit(); } catch { /* A process-local evidence observer cannot undo persistence. */ }
+    }
+  };
+}
+
+export function subscribeOAuthCredentialRotations(listener: OAuthCredentialRotationListener): () => void {
+  const subscription: OAuthCredentialRotationListener = event => listener(event);
+  oauthCredentialRotationListeners.add(subscription);
+  return () => { oauthCredentialRotationListeners.delete(subscription); };
 }
 
 export function currentAccountSelectionRevision(): number {

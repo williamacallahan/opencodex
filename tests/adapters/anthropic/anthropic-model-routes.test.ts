@@ -1,7 +1,7 @@
 import { rotateAnthropicAccountOn429 } from "../../helpers/anthropic-shared-quota";
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { OAUTH_PROVIDERS } from "../../../src/oauth";
-import { getAccountCredential, setAnthropicAccountThreshold } from "../../../src/oauth/store";
+import { getAccountCredential, mergeAccountCredential, credentialGeneration, setAnthropicAccountThreshold } from "../../../src/oauth/store";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +12,7 @@ import { parseAnthropicModelRoutes, resolveAnthropicModelRoute } from "../../../
 import { captureOAuthAccountSelection, getAccountSet, markAccountNeedsReauth, replaceProviderAccountSet, saveAccountCredential, saveCredential, setAccountPaused, setActiveAccount } from "../../../src/oauth/store";
 import { clearUpstreamHostHealth, getUpstreamHostHealth, upstreamHostHealthKey } from "../../../src/codex/upstream-host-health";
 import { providerRequestPacingStatus, resetProviderRequestPacingForTest, waitForProviderRequestSlot } from "../../../src/providers/request-pacing";
-import { clearAccountQuotaCache, setCachedProviderAccountQuotaForTests } from "../../../src/providers/quota";
+import { clearAccountQuotaCache, getCachedProviderAccountQuota, setCachedProviderAccountQuotaForTests } from "../../../src/providers/quota";
 import { clearResponseStateForTests } from "../../../src/responses/state";
 import { parseRequest } from "../../../src/responses/parser";
 import { handleResponses } from "../../../src/server/responses";
@@ -105,20 +105,39 @@ test.each([false, true])("threshold edit during credential refresh reselects bef
   const initial = resolveAnthropicAccountForSession(null, cfg);
   await promoteAnthropicActiveAccount(initial.accountId!, captureOAuthAccountSelection("anthropic"), { config: cfg, reason: initial.reason });
   const credential = getAccountCredential("anthropic", a)!;
-  // A usage reading is routing evidence only for the credential generation it was observed
-  // under, so bind the readings to the exact credential the refresh installs, then expire it.
-  const refreshed = { ...credential, expires: Date.now() + 3600_000 };
-  await saveAccountCredential("anthropic", a, refreshed);
-  for (const [id, percent] of [[a, 60], [b, 70], [c, 90]] as const) setCachedProviderAccountQuotaForTests("anthropic", id, { fiveHourPercent: percent, updatedAt: Date.now() });
   await saveAccountCredential("anthropic", a, { ...credential, expires: Date.now() - 1 });
+  // Readings belong to the expired credential; a real refresh returns new tokens for the same login.
+  for (const [id, percent] of [[a, 60], [b, 70], [c, 90]] as const) setCachedProviderAccountQuotaForTests("anthropic", id, { fiveHourPercent: percent, updatedAt: Date.now() });
   const refresh = spyOn(OAUTH_PROVIDERS.anthropic!, "refresh").mockImplementation(async () => {
     await setAnthropicAccountThreshold(a, 50);
-    return refreshed;
+    return { ...credential, access: "synthetic-access-0b", refresh: "synthetic-refresh-0b", expires: Date.now() + 3600_000 };
   });
   try {
     const response = await post(cfg); expect(response.status).toBe(200);
     expect(sends).toEqual(["Bearer synthetic-access-1"]);
   } finally { refresh.mockRestore(); }
+});
+
+test.each([
+  ["same login", "synthetic-0", 60],
+  ["different identity", "synthetic-other", null],
+] as const)("a fenced credential merge for a %s keeps or drops the usage reading", async (_label, nextAccountId, expected) => {
+  const [a] = await seed() as [string];
+  const credential = getAccountCredential("anthropic", a)!;
+  setCachedProviderAccountQuotaForTests("anthropic", a, { fiveHourPercent: 60, updatedAt: Date.now() });
+  await mergeAccountCredential("anthropic", a, {
+    ...credential, access: "synthetic-access-0b", refresh: "synthetic-refresh-0b",
+    expires: Date.now() + 3_600_000, accountId: nextAccountId,
+  }, { expectedGeneration: credentialGeneration(credential) });
+  expect(getCachedProviderAccountQuota("anthropic", a)?.fiveHourPercent ?? null).toBe(expected);
+});
+
+test("a credential replacement outside the refresh merge drops the usage reading", async () => {
+  const [a] = await seed() as [string];
+  const credential = getAccountCredential("anthropic", a)!;
+  setCachedProviderAccountQuotaForTests("anthropic", a, { fiveHourPercent: 60, updatedAt: Date.now() });
+  await saveAccountCredential("anthropic", a, { ...credential, access: "synthetic-access-0b", refresh: "synthetic-refresh-0b" });
+  expect(getCachedProviderAccountQuota("anthropic", a)).toBeNull();
 });
 
 test.each([true, false])("all-paused pool returns 403 without any send (enabled=%s)", async enabled => {

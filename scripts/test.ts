@@ -98,6 +98,15 @@ export function createIsolatedTestEnvironment(
       // whichever adapter collected the metadata. Naming the file keeps the sandbox
       // (git still writes nothing here) while leaving git's own trust decisions intact.
       GIT_CONFIG_GLOBAL: baseEnv.GIT_CONFIG_GLOBAL ?? join(homedir(), ".gitconfig"),
+      // A mise shim on PATH reads the account's global config from the real home but judges its
+      // trust and finds installed tools under HOME. Under the sandbox HOME every `node` it serves
+      // then fails "Config files ... are not trusted" or starts installing tools, and a test that
+      // spawns Node sees no runtime. Pin mise's config and install directories to the real home,
+      // as git's config is pinned above; its state and cache writes stay in the sandbox.
+      MISE_GLOBAL_CONFIG_FILE: baseEnv.MISE_GLOBAL_CONFIG_FILE
+        ?? join(baseEnv.XDG_CONFIG_HOME || join(baseEnv.OCX_REAL_HOME ?? homedir(), ".config"), "mise", "config.toml"),
+      MISE_DATA_DIR: baseEnv.MISE_DATA_DIR
+        ?? join(baseEnv.XDG_DATA_HOME || join(baseEnv.OCX_REAL_HOME ?? homedir(), ".local", "share"), "mise"),
       // Cached JavaScript is executable input. Keep the default beneath the exclusively created
       // private root; nested sandboxes and fixture children retain this path even when HOME moves.
       // Independent runs start cold. A protected explicit cache can share across runs; "" and "0"

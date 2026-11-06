@@ -178,6 +178,10 @@ The existing account-quota snapshot stores the non-secret `credentialGeneration`
 Anthropic metadata. Hydration removes it from public bars and keeps the probe clock at zero.
 Matching digests preserve last-good retention after restart; legacy unbound or mismatched snapshots
 remain historical and cannot seed routing, failed-probe retention, or a fresh header merge.
+A refresh merge (`mergeAccountCredential` with `expectedGeneration`) that keeps the login identity
+prepares `prepareOAuthCredentialRotation` before the write; after it persists the cache moves that account's current reading to
+the new generation, so a refreshed account keeps its usage and threshold standing. Login, re-auth
+and a different-identity replacement publish no rotation, so their old readings stay historical.
 `captureProviderAccountQuotaEpoch(instance)` and the cache keys in
 `src/providers/quota/account-cache.ts` are per instance, so clearing Pool 2 quota never
 invalidates the primary pool.

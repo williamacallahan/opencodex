@@ -638,7 +638,9 @@ describe("update stops the running proxy before replacing files", () => {
       // directory prepended to PATH. That directory holds the real npm, which then shadows
       // fake-bin/npm: the launcher stages a genuine registry install, succeeds, and exits 0.
       // Spawn the resolved Node binary so the child sees exactly the PATH built below.
-      const nodeExecutable = Bun.spawnSync(["node", "-p", "process.execPath"]).stdout.toString().trim();
+      const nodeProbe = Bun.spawnSync(["node", "-p", "process.execPath"]);
+      if (nodeProbe.exitCode !== 0) throw new Error(`node -p process.execPath exited ${nodeProbe.exitCode}: ${nodeProbe.stderr.toString()}`);
+      const nodeExecutable = nodeProbe.stdout.toString().trim();
       const env = {
         ...isolated.env,
         OCX_FAKE_NPM_CACHE: cache,
