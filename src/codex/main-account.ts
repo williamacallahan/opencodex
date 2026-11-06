@@ -29,7 +29,7 @@ import {
   markMainRefreshGrantRejected,
   clearMainRefreshGrantRejection,
 } from "./account-runtime-state";
-import { advanceCodexCredentialMutationEpoch } from "./credential-mutation-epoch";
+import { advanceCodexCredentialMutationEpoch, codexCredentialMutationEpoch } from "./credential-mutation-epoch";
 import { withNativeMainExclusiveClaim } from "./native-main-claim";
 import { resolveNativeProfileContext } from "./native-profile-store";
 import { NativeProfileError } from "./native-profile-types";
@@ -72,8 +72,24 @@ export function mainAccountTokenIsCurrent(token: MainAccountToken): boolean {
     && matchesMainQuotaCredential(token.accessToken, token.chatgptAccountId);
 }
 
+/**
+ * The last ordinary fileless read that found no Codex login at all. Unlike a positive answer,
+ * absence ends only through a login: every login OpenCodex performs writes auth.json, advances
+ * the credential mutation epoch, or moves the identity generation, so remembering it briefly
+ * cannot hide one. Without it every lookup spawned its own `codex app-server`.
+ */
+let codexMainLoginAbsence: { home: string; identityGeneration: number; credentialEpoch: number; until: number } | null = null;
+
+function codexMainLoginKnownAbsent(home: string): boolean {
+  const absence = codexMainLoginAbsence;
+  return absence !== null && absence.home === home && absence.until > Date.now()
+    && isMainAccountIdentityGenerationLive(absence.identityGeneration)
+    && absence.credentialEpoch === codexCredentialMutationEpoch();
+}
+
 function forgetCodexOwnedMainUsability(home: string): void {
   if (codexOwnedMainCredential?.home === home) codexOwnedMainCredential = null;
+  if (codexMainLoginAbsence?.home === home) codexMainLoginAbsence = null;
 }
 
 type MainAuthJsonCredential = {
@@ -523,6 +539,8 @@ async function resolveMainAccountToken(
   // the outside is indistinguishable from a refusal: same failed request, no write, no verdict.
   // A forced refresh is the only caller that passes `rejectedAccessToken`, so only it reports.
   if (!initial) {
+    // Inside the absence window an ordinary read repeats the last app-server answer, claim-free.
+    if (rejectedAccessToken === undefined && codexMainLoginKnownAbsent(codexHome)) return null;
     const refreshMode = await resolveNativeMainRefreshMode(loadConfig());
     if (refreshMode.mode === "codex") {
       const refreshTimeout = AbortSignal.timeout(30_000);
@@ -560,6 +578,8 @@ async function resolveMainAccountToken(
     if (rejectedAccessToken !== undefined) noteNativeMainRefresh("skipped-no-credential");
     return null;
   }
+  // A readable auth.json disproves the absence, even if Codex later moves it to its keyring.
+  if (codexMainLoginAbsence?.home === codexHome) codexMainLoginAbsence = null;
   if (credentialRefreshGrantRejected(initial)) throw new MainAccountTokenRefreshError("reauth");
   const now = Date.now();
   if (initial.accessToken !== rejectedAccessToken
@@ -722,7 +742,10 @@ async function refreshThroughCodex(
   // Deferred to keep lifecycle's cache/plan cleanup off this module's load-time import cycle.
   const { observeCodexOwnedMainAccountCredential } = await import("./account-lifecycle");
   if (resolveCodexHomeDir() !== codexHome) throw new MainAuthJsonChangedDuringRefreshError();
+  // Ordinary reads queued on this home's claim share the read that just observed absence.
+  if (locked === null && rejectedAccessToken === undefined && codexMainLoginKnownAbsent(codexHome)) return null;
   const identityGeneration = captureMainAccountIdentityGeneration();
+  const credentialEpoch = codexCredentialMutationEpoch();
   // This observation is only selection evidence. A later request must ask Codex again:
   // JWT expiry cannot detect logout or an external keyring account switch.
   forgetCodexOwnedMainUsability(codexHome);
@@ -760,7 +783,11 @@ async function refreshThroughCodex(
     // absence, not a refresh failure: report no credential instead of a retryable error.
     // Once the expiring-bearer answer above promoted this lookup into a real refresh, the
     // same no-login outcome is a refresh failure again.
-    if (locked === null && rejectedAccessToken === undefined && !didRefresh) return null;
+    if (locked === null && rejectedAccessToken === undefined && !didRefresh) {
+      // The bearer skew bounds it: a keyring-only `codex login` outside OpenCodex shows within a minute.
+      codexMainLoginAbsence = { home: codexHome, identityGeneration, credentialEpoch, until: Date.now() + MAIN_TOKEN_REFRESH_SKEW_MS };
+      return null;
+    }
     throw new MainAccountTokenRefreshError("transient", { credentialObservedAbsent: true });
   }
   // A transient Codex refresh failure still answers with its cached bearer.

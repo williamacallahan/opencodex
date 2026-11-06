@@ -458,6 +458,49 @@ describe("main account in codex refresh mode (#2999)", () => {
     expect(getMainAccountCredentialStatus().usable).toBe(false);
   });
 
+  test("fileless reads with no Codex login share one app-server answer until a login can exist", async () => {
+    setNativeMainRefreshResolutionForTests(CODEX_MODE);
+    const absent: CodexAuthStatus = { authMethod: null, authToken: null, requiresOpenaiAuth: true };
+    const fresh = fakeChatGptJwt("acct-main");
+    let status = absent;
+    const { calls, codexAuthStatus } = seam(() => status);
+    const read = () => getValidMainAccountToken({ codexAuthStatus });
+
+    expect(await Promise.all([read(), read(), read(), read()])).toEqual([null, null, null, null]);
+    expect(await read()).toBeNull();
+    expect(calls).toHaveLength(1);
+
+    // A keyring-only login outside OpenCodex surfaces once the bounded window ends.
+    status = { authMethod: "chatgpt", authToken: fresh, requiresOpenaiAuth: true };
+    expect(await read()).toBeNull();
+    const realNow = Date.now.bind(Date);
+    const clock = spyOn(Date, "now").mockImplementation(() => realNow() + 61_000);
+    try {
+      expect(await read()).toEqual({ accessToken: fresh, chatgptAccountId: "acct-main" });
+    } finally {
+      clock.mockRestore();
+    }
+    expect(calls).toHaveLength(2);
+
+    // A confirmed native login transition is seen on the very next lookup.
+    status = absent;
+    expect(await read()).toBeNull();
+    status = { authMethod: "chatgpt", authToken: fresh, requiresOpenaiAuth: true };
+    applyConfirmedMainCodexAccountTransition("acct-before-login", "acct-main");
+    expect(await read()).toEqual({ accessToken: fresh, chatgptAccountId: "acct-main" });
+    expect(calls).toHaveLength(4);
+
+    // So is a login written to auth.json, including after Codex later moves it out of the file.
+    status = absent;
+    expect(await read()).toBeNull();
+    seedAuth(fresh);
+    expect(await read()).toEqual({ accessToken: fresh, chatgptAccountId: "acct-main" });
+    rmSync(join(home, "auth.json"));
+    status = { authMethod: "chatgpt", authToken: fresh, requiresOpenaiAuth: true };
+    expect(await read()).toEqual({ accessToken: fresh, chatgptAccountId: "acct-main" });
+    expect(calls).toEqual(Array.from({ length: 6 }, () => ({ refresh: false })));
+  });
+
   test("a missing CODEX_HOME is the same observed absence: no claim, no RPC, null", async () => {
     setNativeMainRefreshResolutionForTests(CODEX_MODE);
     process.env.CODEX_HOME = join(root, "never-created", "codex-home");
