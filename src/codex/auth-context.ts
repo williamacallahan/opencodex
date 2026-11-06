@@ -590,11 +590,14 @@ export class CodexPoolQuotaHeldError extends CodexAccountCooldownError {
 
 /** No pool account can serve: every unpaused account is held at its usage limit. */
 export class CodexPoolExhaustedError extends CodexPoolAccountCreditsOffError {
-  constructor(accountId: string, resetAt: number, quotaScope?: CodexQuotaScope) {
+  constructor(accountId: string, resetAt: number, quotaScope?: CodexQuotaScope, mainNeedsSignIn = false) {
     super(accountId, resetAt, false, quotaScope);
     this.name = "CodexPoolExhaustedError";
+    // A main login that needs sign-in is a credential failure the operator can fix now; the
+    // reset horizon must not hide it.
     this.message = "Every Codex pool account reached its usage limit, and none may spend credits now."
       + ` The earliest reset is ${new Date(resetAt).toISOString()}.`
+      + (mainNeedsSignIn ? " The Codex main account also needs sign-in: run `codex login` to restore it." : "")
       + " Wait for the reset, add credits to an account, or allow credits for an account in Codex Auth.";
   }
 }
@@ -614,11 +617,16 @@ function poolUnavailableUntilKnownHorizon(
   policy: CodexAuthPolicyConfig,
   catalog: OcxConfig,
   now: number,
+  main: { candidate: boolean; needsSignIn: boolean },
   quotaScope?: CodexQuotaScope,
 ): CodexAccountCooldownError | undefined {
   let hold: { accountId: string; resetAt: number } | undefined;
   let lapse: { accountId: string; lapsesAt: number } | undefined;
   let unheld = false;
+  const noteLapse = (accountId: string): void => {
+    const lapsesAt = failureWindowSteeringEndsAt(catalog, accountId, now);
+    if (lapsesAt !== undefined && (!lapse || lapsesAt < lapse.lapsesAt)) lapse = { accountId, lapsesAt };
+  };
   for (const account of catalog.codexAccounts ?? []) {
     if (!isSelectableCodexPoolAccount(account) || policy.pausedCodexAccountIds?.includes(account.id)) continue;
     const resetAt = poolCreditHoldResetAt(policy, account.id, catalog);
@@ -627,11 +635,13 @@ function poolUnavailableUntilKnownHorizon(
       continue;
     }
     unheld = true;
-    const lapsesAt = failureWindowSteeringEndsAt(catalog, account.id, now);
-    if (lapsesAt !== undefined && (!lapse || lapsesAt < lapse.lapsesAt)) lapse = { accountId: account.id, lapsesAt };
+    noteLapse(account.id);
   }
+  // Main is a first-class rotation candidate outside `codexAccounts`; its policy holds already
+  // threw above, so only its failure-window exclusion can make this wait short.
+  if (main.candidate) noteLapse(MAIN_CODEX_ACCOUNT_ID);
   if (lapse) return new CodexPoolFailureWindowError(lapse.accountId, lapse.lapsesAt, quotaScope);
-  if (hold && !unheld) return new CodexPoolExhaustedError(hold.accountId, hold.resetAt, quotaScope);
+  if (hold && !unheld) return new CodexPoolExhaustedError(hold.accountId, hold.resetAt, quotaScope, main.needsSignIn);
   return undefined;
 }
 
@@ -1608,11 +1618,14 @@ async function resolveCodexAuthContextUnannotated(
             : "Codex accounts that support this model are currently unavailable",
         );
       }
-      const unavailable = poolUnavailableUntilKnownHorizon(policy, config, Date.now(), quotaScope);
-      if (unavailable) throw unavailable;
-      const mainCandidate = !nativeMainReadsForbidden && options.excludeAccountId !== MAIN_CODEX_ACCOUNT_ID
+      const mainCandidate = !nativeMainReadsForbidden
+        && options.excludeAccountId !== MAIN_CODEX_ACCOUNT_ID
         && !policy.pausedCodexAccountIds?.includes(MAIN_CODEX_ACCOUNT_ID);
-      const quarantinedMain = mainCandidate && codexAccountUnusableReason(config, MAIN_CODEX_ACCOUNT_ID, selectionOptions) === "needs_reauth";
+      const quarantinedMain = mainCandidate
+        && codexAccountUnusableReason(config, MAIN_CODEX_ACCOUNT_ID, selectionOptions) === "needs_reauth";
+      const unavailable = poolUnavailableUntilKnownHorizon(policy, config, Date.now(),
+        { candidate: mainCandidate, needsSignIn: quarantinedMain }, quotaScope);
+      if (unavailable) throw unavailable;
       const exhausted = quarantinedMain ? undefined : exhaustedCodexPoolRecovery(config, Date.now(), quotaScope, selectionOptions, mainCandidate);
       if (exhausted) throw new CodexPoolQuotaHeldError(exhausted.accountId, exhausted.retryAt, quotaScope);
       throw new CodexPoolAuthenticationError(undefined, { quarantinedMain });

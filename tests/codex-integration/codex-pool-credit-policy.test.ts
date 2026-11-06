@@ -12,7 +12,8 @@ import {
 import { rebindPoolCreditPolicy } from "../../src/codex/pool-credit-policy";
 import { TERMINAL_SHORT_WINDOW_FRESHNESS_MS } from "../../src/codex/quota-types";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
-import { isAccountNeedsReauth } from "../../src/codex/account-runtime-state";
+import { isAccountNeedsReauth, markAccountNeedsReauth } from "../../src/codex/account-runtime-state";
+import { MAIN_CODEX_ACCOUNT_ID } from "../../src/codex/account-id";
 import { clearAccountNeedsReauth, clearAccountQuota, updateAccountQuota } from "../../src/codex/auth-api";
 import { getAccountQuota, parseUsageQuota, setAccountQuotaFromParsed } from "../../src/codex/quota";
 import { providerFetch, fetchWithHeaderTimeout } from "../../src/server/responses/fetch-helpers";
@@ -65,7 +66,7 @@ describe("stored-account credit policy at authentication", () => {
   afterEach(async () => {
     try {
       clearAccountQuota(); clearCodexUpstreamHealth(); clearThreadAccountMap(); clearPoolRotationState();
-      clearAccountNeedsReauth(ID); forgetCodexFailureWindows();
+      clearAccountNeedsReauth(ID); clearAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID); forgetCodexFailureWindows();
       await flushConfigDirHardeningForTests();
     } finally {
       setIcaclsRunnerForTests(null); setAsyncIcaclsRunnerForTests(null);
@@ -87,6 +88,19 @@ describe("stored-account credit policy at authentication", () => {
     expect(body.error.code).toBe("usage_limit_reached");
     expect(body.error.resets_at).toBe(Math.ceil(resetAt / 1000));
     expect(Number(response.headers.get("Retry-After"))).toBeGreaterThan(3_500);
+    expect(isAccountNeedsReauth(ID)).toBe(false);
+  });
+  test("a spent pool whose main login needs sign-in answers usage_limit_reached that names `codex login`", async () => {
+    quota(100, Date.now() + 2 * 86_400_000);
+    markAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
+    const error = await resolveCodexAuthContext(new Headers(), config(), "pool", { modelId: "gpt-5.5" })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CodexPoolExhaustedError);
+    const response = cooldownErrorResponse(error as CodexPoolExhaustedError);
+    expect(response.status).toBe(429);
+    const body = await response.json() as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("usage_limit_reached");
+    expect(body.error.message).toContain("codex login");
     expect(isAccountNeedsReauth(ID)).toBe(false);
   });
   test("a spent pool whose only other account sits out a failure window answers a short retry, not the reset", async () => {
