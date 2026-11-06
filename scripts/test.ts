@@ -55,7 +55,9 @@ export function createIsolatedTestEnvironment(
   const containedTemp = createContainedTestTemp(root);
   const transpilerCache = baseEnv.BUN_RUNTIME_TRANSPILER_CACHE_PATH ?? join(root, "bun-transpiler-cache");
   if (baseEnv.BUN_RUNTIME_TRANSPILER_CACHE_PATH === undefined) mkdirSync(transpilerCache, { mode: 0o700 });
-  mkdirSync(opencodexHome, { recursive: true });
+  // The product hardens its home to 0700 (hardenConfigDir); mirror that so a umask-0002 host
+  // does not hand owner-only writers (the GUI pairing intent) a group-writable home.
+  mkdirSync(opencodexHome, { recursive: true, mode: 0o700 });
   mkdirSync(codexHome, { recursive: true });
   if (process.platform === "win32") {
     // A Windows sandbox has to look like a real profile, because the known-folder APIs

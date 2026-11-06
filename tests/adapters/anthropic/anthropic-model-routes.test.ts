@@ -104,12 +104,16 @@ test.each([false, true])("threshold edit during credential refresh reselects bef
   cfg.anthropicAccountPool = { enabled: true, strategy: "quota", ...(routed ? { routes: [{ name: "all", match: "claude-*", accounts: ids }] } : {}) };
   const initial = resolveAnthropicAccountForSession(null, cfg);
   await promoteAnthropicActiveAccount(initial.accountId!, captureOAuthAccountSelection("anthropic"), { config: cfg, reason: initial.reason });
-  for (const [id, percent] of [[a, 60], [b, 70], [c, 90]] as const) setCachedProviderAccountQuotaForTests("anthropic", id, { fiveHourPercent: percent, updatedAt: Date.now() });
   const credential = getAccountCredential("anthropic", a)!;
+  // A usage reading is routing evidence only for the credential generation it was observed
+  // under, so bind the readings to the exact credential the refresh installs, then expire it.
+  const refreshed = { ...credential, expires: Date.now() + 3600_000 };
+  await saveAccountCredential("anthropic", a, refreshed);
+  for (const [id, percent] of [[a, 60], [b, 70], [c, 90]] as const) setCachedProviderAccountQuotaForTests("anthropic", id, { fiveHourPercent: percent, updatedAt: Date.now() });
   await saveAccountCredential("anthropic", a, { ...credential, expires: Date.now() - 1 });
   const refresh = spyOn(OAUTH_PROVIDERS.anthropic!, "refresh").mockImplementation(async () => {
     await setAnthropicAccountThreshold(a, 50);
-    return { ...credential, expires: Date.now() + 3600_000 };
+    return refreshed;
   });
   try {
     const response = await post(cfg); expect(response.status).toBe(200);
