@@ -625,7 +625,7 @@ function poolUnavailableUntilKnownHorizon(
   let unheld = false;
   // A credits-allowed seat held only because its credit reading went stale serves again after
   // the next reading, so it answers the short recheck retry, never the included reset days away.
-  let recheck: { accountId: string; resetAt: number } | undefined;
+  let recheck: { accountId: string; resetAt: number; retryAt: number } | undefined;
   const noteLapse = (accountId: string): void => {
     const lapsesAt = failureWindowSteeringEndsAt(catalog, accountId, now);
     if (lapsesAt !== undefined && (!lapse || lapsesAt < lapse.lapsesAt)) lapse = { accountId, lapsesAt };
@@ -635,7 +635,10 @@ function poolUnavailableUntilKnownHorizon(
     const resetAt = poolCreditHoldResetAt(policy, account.id, catalog);
     if (resetAt !== undefined) {
       if (!hold || resetAt < hold.resetAt) hold = { accountId: account.id, resetAt };
-      if (!recheck && poolCreditRecoveryNeeded(policy, account.id)) recheck = { accountId: account.id, resetAt };
+      if (poolCreditRecoveryNeeded(policy, account.id)) {
+        const retryAt = poolCreditRecoveryRetryAt(account.id, resetAt, quotaScope, now);
+        if (!recheck || retryAt < recheck.retryAt) recheck = { accountId: account.id, resetAt, retryAt };
+      }
       continue;
     }
     unheld = true;
@@ -645,7 +648,9 @@ function poolUnavailableUntilKnownHorizon(
   // threw above, so only its failure-window exclusion can make this wait short.
   if (main.candidate) noteLapse(MAIN_CODEX_ACCOUNT_ID);
   if (lapse) return new CodexPoolFailureWindowError(lapse.accountId, lapse.lapsesAt, quotaScope);
-  if (recheck && !unheld && !main.needsSignIn) {
+  // Only when the recheck is the soonest way back: another seat's earlier reset, or a recheck
+  // held to its own reset by a cooldown, keeps the usage_limit_reached answer.
+  if (recheck && !unheld && !main.needsSignIn && hold && recheck.retryAt < hold.resetAt) {
     return new CodexPoolAccountCreditsOffError(recheck.accountId, recheck.resetAt, true, quotaScope);
   }
   if (hold && !unheld) return new CodexPoolExhaustedError(hold.accountId, hold.resetAt, quotaScope, main.needsSignIn);

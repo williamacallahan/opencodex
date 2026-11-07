@@ -140,6 +140,24 @@ describe("stored-account credit policy at authentication", () => {
     expect(retryAfter).toBeGreaterThan(0);
     expect(retryAfter).toBeLessThan(3_600);
   });
+  test("a stale credit reading does not hide another seat's sooner reset", async () => {
+    const soon = "credit-policy-soon";
+    const cfg = config(); cfg.creditCodexAccountIds = [ID];
+    cfg.codexAccounts = [...cfg.codexAccounts!, { id: soon, email: "soon@example.test", isMain: false, plan: "pro" }];
+    saveCodexAccountCredential(soon, {
+      accessToken: "access-token-value-soon", refreshToken: "fixture-refresh-soon",
+      expiresAt: Date.now() + 3_600_000, chatgptAccountId: "fixture-workspace-soon",
+    });
+    updateAccountQuota(ID, 100, Date.now() + 2 * 86_400_000);
+    setAccountQuotaFromParsed(ID, { credits: { hasCredits: true, balance: 42.5, observedAt: Date.now() - 6 * 60_000 } });
+    const soonReset = Date.now() + 60_000;
+    updateAccountQuota(soon, 100, soonReset);
+    const error = await resolveCodexAuthContext(new Headers(), cfg, "pool", { modelId: "gpt-5.5" })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CodexPoolExhaustedError);
+    const body = await cooldownErrorResponse(error as CodexPoolExhaustedError).json() as { error: { resets_at: number } };
+    expect(body.error.resets_at).toBe(Math.ceil(soonReset / 1000));
+  });
   test("an exact selector respects the credits-off hold without quarantining the account", async () => {
     quota();
     await expect(resolve(config())).rejects.toBeInstanceOf(CodexPoolAccountCreditsOffError);
