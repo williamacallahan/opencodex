@@ -5,6 +5,7 @@ const GROK_CONTROL_FRAME_TYPES: Record<string, true> = {
   "codex.rate_limits": true,
   "codex.response.metadata": true,
   "response.metadata": true,
+  "responsesapi.websocket_timing": true,
 };
 
 const GROK_RESPONSE_INTEGER_TIMESTAMP_FIELDS = ["created_at", "completed_at"] as const;
