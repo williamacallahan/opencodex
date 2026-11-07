@@ -19,7 +19,11 @@ export const CODEX_SLIDING_FAILURE_RECOVER_SUSTAIN_MS = 30_000;
 const MAX_SAMPLES = 512;
 
 type Sample = { at: number; failed: boolean; credentialGeneration?: number };
-type WindowState = { samples: Sample[]; degraded: boolean; healthySince?: number; credentialGeneration?: number };
+type WindowState = {
+  samples: Sample[]; degraded: boolean; healthySince?: number; credentialGeneration?: number;
+  /** Newest failed sample, kept after it ages out of the window: a quiet account rejoins from it. */
+  lastFailedAt?: number;
+};
 
 const windows = new Map<string, WindowState>();
 const pinnedDegradeWarned = new Set<string>();
@@ -56,6 +60,12 @@ function stateFor(accountId: string): WindowState {
   return state;
 }
 
+/** When a degraded account below the sample floor rejoins: its newest fault aged out plus the sustain. */
+function quietRejoinAt(state: WindowState): number {
+  const lastFailedAt = state.lastFailedAt ?? state.samples.at(-1)?.at ?? 0;
+  return lastFailedAt + CODEX_SLIDING_FAILURE_WINDOW_MS + CODEX_SLIDING_FAILURE_RECOVER_SUSTAIN_MS;
+}
+
 function recompute(
   accountId: string, state: WindowState, now: number,
   generationLive?: ReturnType<typeof beginCodexAccountGenerationLiveCheck>,
@@ -71,6 +81,7 @@ function recompute(
     state.degraded = false;
     state.healthySince = undefined;
     state.credentialGeneration = undefined;
+    state.lastFailedAt = undefined;
     pinnedDegradeWarned.delete(accountId);
   }
   const cutoff = now - CODEX_SLIDING_FAILURE_WINDOW_MS;
@@ -78,12 +89,12 @@ function recompute(
     && (sample.credentialGeneration === undefined || live?.(accountId, sample.credentialGeneration)));
   state.credentialGeneration ??= state.samples.find(sample => sample.credentialGeneration !== undefined)?.credentialGeneration;
   const samples = state.samples.length;
-  // An empty window is no evidence of a fault. Degradation steers new threads away, so a
-  // degraded account with no bound traffic never collects the samples recovery needs and
-  // stayed out of rotation indefinitely (10 h on a credited seat while every other seat was
-  // spent). Once the faults age out of the window, the account rejoins and a recurring fault
-  // degrades it again after another full window of evidence.
-  if (samples === 0) {
+  // Degradation steers new threads away, so a degraded account with little or no bound traffic
+  // never collects the 20 samples recovery needs and stayed out of rotation indefinitely (10 h
+  // on a credited seat while every other seat was spent; a bound thread sending every 10-50 s
+  // keeps the window non-empty yet short of 20). Below that sample floor, a full fault-free
+  // window plus the recovery sustain ends degradation; a recurring fault degrades it again.
+  if (state.degraded && samples < CODEX_SLIDING_FAILURE_MIN_SAMPLES && quietRejoinAt(state) <= now) {
     state.degraded = false;
     state.healthySince = undefined;
     pinnedDegradeWarned.delete(accountId);
@@ -138,6 +149,7 @@ function appendSample(
   if (credentialGeneration !== undefined && !live?.(accountId, credentialGeneration)) return;
   const state = stateFor(accountId);
   state.samples.push({ at: now, failed, ...(credentialGeneration === undefined ? {} : { credentialGeneration }) });
+  if (failed) state.lastFailedAt = Math.max(state.lastFailedAt ?? now, now);
   if (state.samples.length > MAX_SAMPLES) state.samples.splice(0, state.samples.length - MAX_SAMPLES);
   recompute(accountId, state, now, live);
   if (!state.degraded) pinnedDegradeWarned.delete(accountId);
@@ -181,8 +193,8 @@ export function failureWindowSteeringEndsAt(
   now: number,
 ): number | undefined {
   if (!failureWindowSteersNewThreads(config, accountId, now)) return undefined;
-  const newest = windows.get(accountId)?.samples.at(-1)?.at;
-  return newest === undefined ? undefined : newest + CODEX_SLIDING_FAILURE_WINDOW_MS;
+  const state = windows.get(accountId);
+  return state === undefined ? undefined : quietRejoinAt(state);
 }
 
 export function forgetCodexFailureWindow(accountId: string): void {

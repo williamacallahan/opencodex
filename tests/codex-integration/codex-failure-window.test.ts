@@ -505,8 +505,19 @@ test("a degraded account with no traffic rejoins new-thread selection once its f
   const cfg = config();
   fill("a", 5, 15);
   expect(failureWindowSteersNewThreads(cfg, "a", NOW)).toBe(true);
-  expect(resolveCodexAccountForThread("rejoined-thread", cfg, NOW + 60_001)).toBe("a");
-  expect(failureWindowSteersNewThreads(cfg, "a", NOW + 60_001)).toBe(false);
+  expect(failureWindowSteersNewThreads(cfg, "a", NOW + 89_999)).toBe(true);
+  expect(resolveCodexAccountForThread("rejoined-thread", cfg, NOW + 90_001)).toBe("a");
+  expect(failureWindowSteersNewThreads(cfg, "a", NOW + 90_001)).toBe(false);
+});
+
+test("a degraded account with light bound traffic rejoins once its faults age out", () => {
+  const cfg = config();
+  fill("a", 5, 15);
+  // A bound thread keeps sending every 20 s: the window never empties and never reaches 20 samples.
+  for (let at = NOW + 20_000; at <= NOW + 80_000; at += 20_000) fill("a", 0, 1, at);
+  expect(failureWindowSteersNewThreads(cfg, "a", NOW + 89_999)).toBe(true);
+  fill("a", 0, 1, NOW + 100_000);
+  expect(failureWindowSteersNewThreads(cfg, "a", NOW + 100_000)).toBe(false);
 });
 
 test("disabling the window records nothing", () => {

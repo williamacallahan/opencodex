@@ -123,8 +123,22 @@ describe("stored-account credit policy at authentication", () => {
     expect(body.error.code).not.toBe("usage_limit_reached");
     const retryAfter = Number(response.headers.get("Retry-After"));
     expect(retryAfter).toBeGreaterThan(0);
-    expect(retryAfter).toBeLessThanOrEqual(60);
+    expect(retryAfter).toBeLessThanOrEqual(90);
     expect(isAccountNeedsReauth(degraded)).toBe(false);
+  });
+  test("a spent pool whose credits-allowed seat only has a stale credit reading answers a short recheck, not the reset", async () => {
+    const cfg = config(); cfg.creditCodexAccountIds = [ID];
+    updateAccountQuota(ID, 100, Date.now() + 2 * 86_400_000);
+    setAccountQuotaFromParsed(ID, { credits: { hasCredits: true, balance: 42.5, observedAt: Date.now() - 6 * 60_000 } });
+    const error = await resolveCodexAuthContext(new Headers(), cfg, "pool", { modelId: "gpt-5.5" })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CodexPoolAccountCreditsOffError);
+    expect(error).not.toBeInstanceOf(CodexPoolExhaustedError);
+    const response = cooldownErrorResponse(error as CodexPoolAccountCreditsOffError);
+    expect(response.status).toBe(429);
+    const retryAfter = Number(response.headers.get("Retry-After"));
+    expect(retryAfter).toBeGreaterThan(0);
+    expect(retryAfter).toBeLessThan(3_600);
   });
   test("an exact selector respects the credits-off hold without quarantining the account", async () => {
     quota();
