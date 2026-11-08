@@ -16,6 +16,7 @@ import { claimQuotaRecovery, fencePropagatedQuotaRecovery, quotaRecoveryTerminal
 import { seedLoginRowsForTests } from "./login-state";
 import { nonEmptyPlan } from "./runtime-config";
 import { CODEX_TERMINAL_AUTH_CODES } from "../quota-refresh-outcome";
+import { withPoolReserveQuota } from "../pool-reserve";
 
 export const POOL_CACHE_TTL = 5 * 60_000;
 export const POOL_QUOTA_REFRESH_CONCURRENCY = 4;
@@ -268,6 +269,7 @@ export async function recoverPoolQuotaFrom401(ctx: {
     headers: {
       Authorization: `Bearer ${refreshed.accessToken}`,
       "ChatGPT-Account-Id": refreshed.chatgptAccountId,
+      "x-openai-codex-luna-reserve": "1",
     },
     signal: AbortSignal.timeout(WHAM_REQUEST_TIMEOUT_MS),
   }, () => markQuotaProbeAttempted(ctx.quotaProbeEvidence, refreshed.generation),
@@ -363,7 +365,8 @@ export async function commitPoolQuotaResponse(
     rememberCodexCredits(accountId, ctx.poolWriter.historyIdentity, parseCodexCredits(data.credits));
   }
   const freshPlan = nonEmptyPlan(data.plan_type) ?? undefined;
-  const quota = parseUsageQuota({ ...data, plan_type: freshPlan ?? configuredPlan });
+  const quota = withPoolReserveQuota(data, parseUsageQuota({ ...data, plan_type: freshPlan ?? configuredPlan }),
+    getAccountQuota(accountId), observedAt);
   const freshResetCredits = quota?.resetCredits;
   if (!quota) {
     return {
@@ -415,7 +418,7 @@ export async function fetchFreshPoolAccountQuota(
       }
       const admission = await fetchCodexUsage<PoolQuotaResult>(
         `pool:${accountId}:${writerGeneration}:${generation}${afterDispatchSequence === undefined ? "" : `:post-reset:${afterDispatchSequence}`}`, {
-        headers: { Authorization: `Bearer ${accessToken}`, "ChatGPT-Account-Id": chatgptAccountId },
+        headers: { Authorization: `Bearer ${accessToken}`, "ChatGPT-Account-Id": chatgptAccountId, "x-openai-codex-luna-reserve": "1" },
         signal: AbortSignal.timeout(8000),
       }, () => markQuotaProbeAttempted(quotaProbeEvidence, generation),
       recoveryProbeNow === undefined ? { poolAccountId: accountId }

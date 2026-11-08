@@ -109,7 +109,7 @@ export type StoredAccountQuota = {
   /** Local short-usage observation time; partial/credit updates do not refresh it. */
   shortObservedAt?: number;
   shortWindowSeconds?: number;
-  customWindows?: Array<{ label: string; percent: number; resetAt?: number }>;
+  customWindows?: Array<{ label: string; percent: number; resetAt?: number; observedAt?: number }>;
   resetCredits?: number;
   /** Spendable usage credits; resetCredits are separate, manually redeemed reset tickets. */
   credits?: CodexSpendableCredits | null;
@@ -165,6 +165,8 @@ export type WhamUsageResponse = {
 
 /** Captured from the exact dispatched pool credential; never a management API field. */
 export interface PoolQuotaWriter {
+  /** Reserve response headers must not overwrite the seat's ordinary included windows. */
+  poolReserve?: true;
   accountId: string;
   credentialGeneration: number;
   historyIdentity: string;

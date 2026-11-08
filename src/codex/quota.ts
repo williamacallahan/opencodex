@@ -651,6 +651,7 @@ export function applyAccountQuotaFromUpstreamHeaders(
   mainWriter?: MainQuotaWriter,
   options?: { modelId?: string; poolWriter?: PoolQuotaWriter; poolResponse?: boolean },
 ): void {
+  if (options?.poolWriter?.poolReserve) return;
   const quota = parseUpstreamQuotaHeaders(headers, options);
   if (!quota) return;
   const policyQuota = [

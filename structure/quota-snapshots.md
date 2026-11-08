@@ -8,6 +8,21 @@ existing row snapshot. Anthropic hydration strips that metadata from public quot
 probe clock at zero, and treats missing or mismatched ownership as historical rather than current
 routing evidence. Only matching current ownership is persisted. Existing expiry rules still apply.
 
+## Automatic Pool Luna Reserve
+
+Pool WHAM reads opt in with `x-openai-codex-luna-reserve: 1`, including a 401 replay.
+`src/codex/pool-reserve.ts` reuses the Reserve grant predicates and stores an independently timed
+`Luna Reserve` custom window with its own `observedAt`. A non-granting response retracts that window
+without changing the ordinary weekly bar. The existing account DTO, persistence and dashboard carry it.
+Only automatic stored-account requests for `gpt-6-luna` may use it: ordinary capacity wins, then
+fresh Reserve below 100%, then previously consented fresh credits, then the existing refusal.
+The existing selector still enforces pause, plan, credential, failure-window and account-wide holds.
+Reserve uses its independent quota scope; shared Responses serialization changes only the wire model
+to `gpt-reserve` for HTTP and WebSocket. Ordinary headers cannot renew its five-minute WHAM observation,
+and Reserve headers do not overwrite ordinary quota. Materialization and physical sends recheck the
+grant, including after credential-refresh context copies. Explicit Desktop Reserve and native-main
+authorization remain separate and unchanged. Coverage: `tests/codex-integration/codex-pool-reserve.test.ts`.
+
 ## Bounded write deferral
 
 Both writers coalesce updates with a 250 ms idle debounce and a one-second maximum

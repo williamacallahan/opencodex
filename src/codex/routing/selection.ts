@@ -97,8 +97,9 @@ export function isCodexAccountHeldAtUsageLimit(
   now: number,
   selectionOptions?: CodexAccountUsabilityOptions,
 ): boolean {
+  if (selectionOptions?.poolCapacity === "reserve" && selectionOptions.modelEligibleAccountIds?.has(accountId)) return false;
   return isCodexAccountHeldForCredits(
-    config,
+    selectionOptions?.poolCapacity === "included" ? {} : config,
     accountId,
     getAccountQuota(accountId),
     getPoolAccountPlanForSelection(config, accountId, selectionOptions),

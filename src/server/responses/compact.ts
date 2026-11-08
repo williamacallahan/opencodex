@@ -210,6 +210,7 @@ import { hasResponsesItemIdRepair, relaySseWithResponsesItemIdRepair } from "../
 import type { EffectiveSubagentRoster, SpawnAgentSurface } from "../../codex/catalog";
 import { codexAuthContextLogLabel } from "../../codex/account-label";
 import { rebindPoolCreditPolicy } from "../../codex/pool-credit-policy";
+import { poolReserveWireBody } from "../../codex/pool-reserve";
 import { clientCancelledResponse } from "./core-errors";
 
 import {
@@ -1164,15 +1165,16 @@ export async function handleResponsesCompact(
           replayBody = stripInternalChatMessageMetadataPassthrough(replayBody) as typeof replayBody;
         }
         // A queued key selection can refresh the destination; project only for this send.
-        return isOpenAiOperatedResponsesDestination(sendProvider)
+        const body = isOpenAiOperatedResponsesDestination(sendProvider)
           ? repairUrlCitationAnnotations(replayBody) : stripCanonicalOnlyInputItems(stripCanonicalOnlyTopLevelFields(replayBody));
+        return poolReserveWireBody({ ...body as typeof compactBody, model: route.modelId }, sendProvider);
       };
       const doFetch = (upstreamRecovery?: UpstreamSendRecovery) => fetchWithHeaderTimeout(
         compactUrl,
         applyUpstreamRecoveryInit({
           method: "POST",
           headers: wireHeaders,
-          body: JSON.stringify({ ...buildCompactSendBody() as typeof compactBody, model: route.modelId }),
+          body: JSON.stringify(buildCompactSendBody()),
         }, upstreamRecovery),
         req.signal,
         // Keyed sends can refresh their destination after pacing. Their physical send below
@@ -1225,7 +1227,7 @@ export async function handleResponsesCompact(
                 distributedKeyPhysicalFetch((sendProvider as { fetch?: typeof fetch }).fetch ?? execute, route.providerName, sendProvider, compactUrl), String(input),
                 physicalInit, { providerName: route.providerName, provider: sendProvider })) as typeof fetch;
               return fetchWithHeaderTimeout(compactUrl,
-                { ...init, headers: sendHeaders, body: JSON.stringify({ ...buildCompactSendBody() as typeof compactBody, model: route.modelId }) },
+                { ...init, headers: sendHeaders, body: JSON.stringify(buildCompactSendBody()) },
                 init.signal ?? req.signal, connectMs(), false, physicalFetch);
             } : undefined,
           ...(onPhysicalDispatch ? { onPhysicalDispatch } : {}),

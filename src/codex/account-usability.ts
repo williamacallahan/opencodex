@@ -12,6 +12,8 @@ import { isMainAccountHardLocked } from "./main-account-hard-lock";
 import { configuredCodexMainDuplicate } from "./collision-identity";
 
 export interface CodexAccountUsabilityOptions {
+  /** Request-local capacity tier chosen by the automatic Luna fallback planner. */
+  poolCapacity?: "included" | "reserve";
   /** Route using cached runtime state only; the caller must reject selected main before auth. */
   nativeMainSelectionOnly?: boolean;
   /** Liveness override; ownership/read fences independently control physical credential reads. */

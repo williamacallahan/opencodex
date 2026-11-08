@@ -31,8 +31,9 @@ const pinnedDegradeWarned = new Set<string>();
 /** Read only dispatch-time provenance retained by auth materialization, never recapture at arrival. */
 export function codexFailureWindowOutcomeMeta(
   context: CodexAuthContext,
-): Pick<CodexUpstreamOutcomeMeta, "failureWindowCredentialGeneration" | "mainFailureWindowDispatch"> {
-  if (context.kind === "pool") return { failureWindowCredentialGeneration: context.generation };
+): Pick<CodexUpstreamOutcomeMeta, "failureWindowCredentialGeneration" | "mainFailureWindowDispatch" | "poolReserve"> {
+  if (context.kind === "pool") return { failureWindowCredentialGeneration: context.generation,
+    ...(context.poolReserve ? { poolReserve: true } : {}) };
   return context.kind === "main-pool" ? { mainFailureWindowDispatch: context.mainQuotaDispatch ?? null } : {};
 }
 

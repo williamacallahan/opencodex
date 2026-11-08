@@ -27,6 +27,7 @@ import { repairLegacyDottedToolCallNames } from "../../responses/legacy-dotted-t
 import { preparePlaintextV2AgentMessages } from "../../responses/plaintext-v2-agent-messages";
 import { isMetaAiResponsesDestination, rewriteMuseToolNamesForUpstream } from "../../responses/muse-tool-name-alias";
 import { buildResponsesTransport } from "./transport";
+import { poolReserveWireBody } from "../../codex/pool-reserve";
 export { FORWARD_HEADERS } from "./transport";
 import { normalizeResponsesCodeMode } from "../responses-code-mode";
 import { injectXaiResponsesXSearch, normalizeXaiResponsesWebSearch } from "../xai-web-search";
@@ -495,6 +496,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       if (isOpenAiOperatedResponsesDestination(provider) || provider.reasoningWireFormat !== "gateway-object") {
         wireBody = stripInternalReasoningEnabled(wireBody);
       }
+      wireBody = poolReserveWireBody(wireBody, provider);
       const body = JSON.stringify(wireBody);
       const releaseBodyObservation = translatorBudget.observeExternallyCapped(
         "passthrough_serialization",

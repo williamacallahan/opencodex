@@ -74,12 +74,12 @@ function identityMatches(data: WhamUsageResponse, token: Token): boolean {
   const expectedUser = userId(token.accessToken);
   return expectedUser === undefined || data.user_id == null || data.user_id === expectedUser;
 }
-function reserveLimits(data: WhamUsageResponse) {
+export function reserveLimits(data: WhamUsageResponse) {
   return Array.isArray(data.additional_rate_limits)
     ? data.additional_rate_limits.filter(entry => record(entry) && entry.limit_name === NATIVE_RESERVE_MODEL)
     : [];
 }
-function grantsReserve(data: WhamUsageResponse): boolean {
+export function grantsReserve(data: WhamUsageResponse): boolean {
   const limits = reserveLimits(data);
   return data.rate_limit?.allowed === false && data.rate_limit_upsell?.banner_type === "luna_reserve"
     && limits.length === 1 && limits[0]?.rate_limit?.allowed === true;
