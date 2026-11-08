@@ -11,7 +11,9 @@ import type { CodexQuotaScope } from "./routing/health-store";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers-destination";
 
 const LABEL = "Luna Reserve";
-export const POOL_RESERVE_FRESHNESS_MS = 5 * 60_000;
+// Longer than the 5-minute recovery probe cadence (CODEX_QUOTA_PROBE_INTERVAL_MS), so a grant
+// does not lapse between two scheduled re-reads; a revoked grant still fails closed upstream.
+export const POOL_RESERVE_FRESHNESS_MS = 15 * 60_000;
 
 /** Only a capability-aware WHAM read grants or retracts this independently timed window. */
 function poolReserveWindows(
@@ -60,14 +62,15 @@ export function poolLunaReserveSelection(
 ): { options: CodexAccountUsabilityOptions; quotaScope: CodexQuotaScope | undefined; reserve: boolean } {
   const unchanged = { options, quotaScope, reserve: false };
   if (modelId !== "gpt-6-luna") return unchanged;
-  const includedOnly: CodexAccountUsabilityOptions = { ...options, poolCapacity: "included" };
-  if (getEligiblePoolAccounts(config, excludeId, now, quotaScope, includedOnly).length > 0) {
-    return { ...unchanged, options: includedOnly };
-  }
+  // With no Reserve anywhere, selection must stay exactly as before (credit seats and affinity included).
   const reserveIds = new Set((config.codexAccounts ?? []).filter(account => account.id !== excludeId
     && codexUsageLimitResetAt(getAccountQuota(account.id), account.plan, now) !== undefined
     && hasFreshPoolReserve(account.id, now)).map(account => account.id));
   if (reserveIds.size === 0) return unchanged;
+  const includedOnly: CodexAccountUsabilityOptions = { ...options, poolCapacity: "included" };
+  if (getEligiblePoolAccounts(config, excludeId, now, quotaScope, includedOnly).length > 0) {
+    return { ...unchanged, options: includedOnly };
+  }
   const reserveOptions: CodexAccountUsabilityOptions = { ...options, modelEligibleAccountIds: reserveIds, poolCapacity: "reserve" };
   if (getEligiblePoolAccounts(config, excludeId, now, "reserve", reserveOptions).length === 0) return unchanged;
   return { options: reserveOptions, quotaScope: "reserve", reserve: true };

@@ -9,7 +9,7 @@ import { poolAccountDto } from "../../src/codex/auth-api/account-list";
 import { handleCodexAuthAPI } from "../../src/codex/auth-api/routes";
 import { applyAccountQuotaFromUpstreamHeaders, clearAccountQuota, getAccountQuota, setAccountQuotaFromParsed, updateAccountQuota } from "../../src/codex/quota";
 import { resetQuotaQueryBackoffForTests } from "../../src/codex/quota-query-backoff";
-import { POOL_RESERVE_FRESHNESS_MS } from "../../src/codex/pool-reserve";
+import { POOL_RESERVE_FRESHNESS_MS, poolLunaReserveSelection } from "../../src/codex/pool-reserve";
 import { clearAccountNeedsReauth } from "../../src/codex/account-runtime-state";
 import { clearCodexUpstreamHealth, clearThreadAccountMap, getCodexQuotaHealthSnapshot, recordCodexUpstreamOutcome } from "../../src/codex/routing";
 import { codexFailureWindowOutcomeMeta } from "../../src/codex/routing/failure-window";
@@ -156,6 +156,12 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     setAccountQuotaFromParsed(A, { credits: { hasCredits: true, balance: 20, observedAt: now } });
     const { ctx, request } = await build(cfg);
     expect(ctx.accountId).toBe(B); expect(JSON.parse(request.body).model).toBe("gpt-reserve");
+  });
+  test("without Reserve anywhere, Luna selection options and scope are returned untouched", () => {
+    ordinary(A); ordinary(B, 40);
+    const options = { modelEligibleAccountIds: new Set([A, B]) };
+    const result = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", options, undefined, now);
+    expect(result.reserve).toBe(false); expect(result.options).toBe(options); expect(result.quotaScope).toBe("shared");
   });
   test("without Reserve the existing consented-credit path still serves ordinary Luna", async () => {
     const cfg = config(); cfg.creditCodexAccountIds = [A];
