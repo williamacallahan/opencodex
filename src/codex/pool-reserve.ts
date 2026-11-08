@@ -33,7 +33,9 @@ export function withPoolReserveQuota(
   existing: StoredAccountQuota | null, observedAt: number,
 ): Omit<StoredAccountQuota, "updatedAt"> | null {
   const customWindows = poolReserveWindows(data, existing, observedAt);
-  if (!quota && !existing?.customWindows?.some(window => window.label === LABEL)) return null;
+  const granted = customWindows.some(window => window.label === LABEL);
+  // Only a grant or a retraction writes the list: a present list replaces the stored one on merge.
+  if (!granted && !existing?.customWindows?.some(window => window.label === LABEL)) return quota;
   return { ...quota, customWindows };
 }
 
