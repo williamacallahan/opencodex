@@ -175,8 +175,16 @@ function quotaFromUnknown(quota: unknown, fallbackUpdatedAt?: number): AccountQu
       }
     : undefined;
   const workbuddyCredits = normalizeWorkBuddyCredits(q.workbuddyCredits);
+  const codexCreditsRaw = q.codexCredits && typeof q.codexCredits === "object" && !Array.isArray(q.codexCredits)
+    ? q.codexCredits as Record<string, unknown>
+    : null;
+  const codexCredits = codexCreditsRaw ? {
+    ...(typeof codexCreditsRaw.balance === "string" && /^\d+(\.\d+)?$/.test(codexCreditsRaw.balance) ? { balance: codexCreditsRaw.balance } : {}),
+    ...(typeof codexCreditsRaw.unlimited === "boolean" ? { unlimited: codexCreditsRaw.unlimited } : {}),
+  } : undefined;
   const out: AccountQuota = {
     ...(workbuddyCredits ? { workbuddyCredits } : {}),
+    ...(codexCredits && Object.keys(codexCredits).length > 0 ? { codexCredits } : {}),
     ...(finite(q.fiveHourPercent) !== undefined ? { fiveHourPercent: q.fiveHourPercent as number } : {}),
     ...(finite(q.fiveHourResetAt) !== undefined ? { fiveHourResetAt: q.fiveHourResetAt as number } : {}),
     ...(finite(q.weeklyPercent) !== undefined ? { weeklyPercent: q.weeklyPercent as number } : {}),
@@ -193,6 +201,7 @@ function quotaFromUnknown(quota: unknown, fallbackUpdatedAt?: number): AccountQu
     || (out.customWindows?.length ?? 0) > 0
     || out.creditsUsd !== undefined
     || out.workbuddyCredits !== undefined
+    || out.codexCredits !== undefined
     ? out
     : null;
 }

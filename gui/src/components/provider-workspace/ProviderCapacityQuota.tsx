@@ -15,6 +15,7 @@ import {
 import { type QuotaWindowKey } from "../QuotaBars";
 import QuotaBars from "../QuotaBars";
 import { WorkBuddyCredits } from "./WorkBuddyCredits";
+import CodexCreditsRow from "../CodexCreditsRow";
 
 function bcp47(locale: Locale): string {
   switch (locale) {
@@ -104,6 +105,7 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
           incompleteCustomWindowLabels={showsAggregate ? incompleteCustomWindowLabels : undefined}
         />
       )}
+      <CodexCreditsRow credits={primaryQuota?.codexCredits} t={t} locale={locale} />
       {(credits || aggregation) && (
         <div className="pws-capacity-details">
           {credits && (

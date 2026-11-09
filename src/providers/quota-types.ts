@@ -66,6 +66,8 @@ export interface ProviderQuota {
   kiroCreditsLimit?: number;
   customWindows?: ProviderQuotaWindow[];
   creditsUsd?: ProviderQuotaCreditsUsd;
+  /** Display-only purchased ChatGPT credits of a pooling relay (codex-lb), the Codex seat credits shape. */
+  codexCredits?: import("../codex/credits").CodexCredits;
   updatedAt: number;
 }
 
