@@ -623,7 +623,7 @@ describe("management and data-plane credential separation", () => {
       expect(getActiveTurnCount()).toBe(expected);
     };
     try {
-      request.write("{"); // Never end the body: the server is waiting inside the bounded parser.
+      request.flushHeaders(); request.write("{");
       await waitForCount(baseline + 1);
       request.destroy();
       await waitForCount(baseline);

@@ -1,9 +1,11 @@
+import { comboFailureEvidence, carryProxyError } from "../../lib/client-error-body";
 import { codexAccountModelRefusal, codexAccountModelRefusalHardStopCode, type CodexAccountModelRefusal } from "../../combos/failover";
 import { parseRetryAfterMs } from "../../combos";
 import type { ConsumedComboFailure, HandleResponsesOptions } from "./core-options";
 import type { OcxUsage } from "../../types";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { carryAnthropicRefusalCredential } from "../../oauth/anthropic-account-refusal";
+import { carryCodexAccountCooldownResponse } from "../../codex/account-cooldown-response";
 import { codexQuotaFailureMessage, codexQuotaOutcomeMeta } from "./core-codex-account";
 import {
   isRateLimitOrQuotaFailureMessage,
@@ -61,7 +63,9 @@ export async function consumeComboFailure(
   let scopeRefusalBody: string | undefined;
   let verifiedPlanRefusal = false;
   try {
-    const body = await readBoundedResponseBody(response, { signal, reportUtf8Validity: serverError });
+    const legacy = comboFailureEvidence(response);
+    if (legacy !== undefined) void response.body?.cancel().catch(() => undefined);
+    const body = await readBoundedResponseBody(legacy === undefined ? response : new Response(legacy), { signal, reportUtf8Validity: serverError });
     // A 5xx body counts as quota or classification evidence only when it decoded as valid
     // UTF-8, matching shouldRetryCodexPoolAccountQuota. A malformed byte keeps the status-only
     // fallback, with one exception: a cyber-policy refusal must still stop the combo, so the
@@ -138,9 +142,11 @@ export async function consumeComboFailure(
     },
   );
   if (nonReplayable) markResponseNonReplayable(failureResponse);
+  carryProxyError(response, failureResponse);
   carryReplayRefusal(response, failureResponse);
   if (verifiedPlanRefusal) markVerifiedModelNotInPlanResponse(failureResponse);
   carryAnthropicRefusalCredential(response, failureResponse);
+  carryCodexAccountCooldownResponse(response, failureResponse);
   return {
     response: failureResponse,
     ...(nonReplayable ? { nonReplayable: true } : {}),

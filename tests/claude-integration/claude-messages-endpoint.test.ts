@@ -780,7 +780,7 @@ test("native openai-responses Claude route logs cyber terminals as 400 cyber_pol
       errorCode: "cyber_policy",
       terminalStatus: "failed",
       closeReason: "terminal",
-      upstreamError: "blocked",
+      upstreamCondition: "request_rejected",
     });
   } finally {
     await server.stop(true);
@@ -1423,7 +1423,7 @@ test("compatibility is uniform across translated adapters and rejects before inf
     { messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "document" }] }] }] },
     { messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "tool_reference", tool_name: "lookup" }] }] }] },
     { tools: [{ type: "tool_search_tool_regex_20251119", name: "tool_search" }] },
-    { tools: [{ name: "lookup", input_schema: { type: "object" }, defer_loading: true }] },
+    { tools: [{ name: "lookup", input_schema: { type: "object" } }], defer_tools: true },
     { tools: [{ name: "lookup", input_schema: { type: "object" }, strict: true }] },
     { tools: [{ name: "lookup", input_schema: { type: "object" }, allowed_callers: ["code_execution_20260120"] }] },
     { tools: [{ type: "web_search_20250305", name: "web_search", allowed_domains: ["example.invalid"] }] },

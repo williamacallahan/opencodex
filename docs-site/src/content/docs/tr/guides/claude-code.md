@@ -736,7 +736,7 @@ dönüştürür:
 | Asistan `tool_use` | `function_call` (`input` → JSON dizgeleştirilmiş `arguments`) |
 | Kullanıcı `tool_result` | `function_call_output` (`is_error` → `[tool error]` öneki) |
 | `thinking` / `redacted_thinking` tekrarı | İmzaları ve gizli yükleri sınırlı `ocxr1` zarflarında taşıyan `reasoning` öğeleri |
-| Fonksiyon araçları | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) |
+| Fonksiyon araçları | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) `allowed_domains`, `blocked_domains` veya `user_location` içeren barındırılan arama, çevrilmiş Responses/Chat rotalarından çıkarılır; çıkarılan aramayı zorlamak 400 döndürür. Geçerli `defer_loading` işlev tanımları normal işlevler olarak çağrılabilir. [Çeviri sınırlarına](/guides/claude-code/#search-restrictions-and-deferred-tools-on-translated-routes) bakın. |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, adlandırılmış fonksiyon→`{type:"function",name}`, barındırılan WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
@@ -770,7 +770,7 @@ kimlik/ad içermeyen `tool_use`; ad içermeyen adlandırılmış `tool_choice`.
 402 `billing_error`, 403 `permission_error`, 404 `not_found_error`, 409
 `conflict_error`, 413 `request_too_large`, 429 `rate_limit_error`, 504
 `timeout_error`, 529 `overloaded_error`, diğer 5xx `api_error`. `Retry-After`
-korunur.
+tam saniye olarak gönderilir (HTTP tarihi kalan saniyeye çevrilir) ve en fazla sekiz gündür.
 
 ## İstem önbellekleme ve token kullanımı
 

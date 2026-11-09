@@ -664,7 +664,7 @@ Le proxy traduit chaque requête Anthropic Messages API au format Codex Response
 | Assistant `tool_use` | `function_call` (`input` → JSON-stringifié `arguments`) |
 | Utilisateur `tool_result` | `function_call_output` (`is_error` → préfixe `[tool error]`) |
 | Relecture de `thinking` / `redacted_thinking` | Éléments `reasoning` avec enveloppes `ocxr1` bornées pour les signatures et les contenus masqués |
-| Outils fonctionnels | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) |
+| Outils fonctionnels | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) La recherche hébergée avec `allowed_domains`, `blocked_domains` ou `user_location` est omise sur les routes Responses/Chat traduites ; la forcer renvoie 400. Les définitions de fonctions `defer_loading` valides restent appelables comme fonctions ordinaires. Voir les [limites de traduction](/guides/claude-code/#search-restrictions-and-deferred-tools-on-translated-routes). |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, fonction nommée→`{type:"function",name}`, hébergée WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
@@ -695,7 +695,7 @@ Sur l’adaptateur Anthropic prévu, les blocs signés non masqués (y compris t
 **Taxonomie des erreurs :** 400 `invalid_request_error`, 401 `authentication_error`,
 402 `billing_error`, 403 `permission_error`, 404 `not_found_error`, 409 `conflict_error`,
 413 `request_too_large`, 429 `rate_limit_error`, 504 `timeout_error`, 529 `overloaded_error`,
-autre 5xx `api_error`. `Retry-After` est conservé.
+autre 5xx `api_error`. `Retry-After` est envoyé en secondes entières (une date HTTP devient le nombre de secondes restantes), plafonné à huit jours.
 
 ## Mise en cache des prompts et utilisation des jetons
 

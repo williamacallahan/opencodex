@@ -1,5 +1,5 @@
 import type { OcxConfig } from "../types";
-import type { OcxRuntimeProviderConfig } from "./auth-context";
+import type { OcxRuntimeProviderConfig } from "./auth-context-provider";
 import type { CodexAccountUsabilityOptions } from "./account-usability";
 import { codexUsageLimitResetAt } from "./account-credit-use";
 import { NATIVE_RESERVE_MODEL } from "./catalog/native-models";
