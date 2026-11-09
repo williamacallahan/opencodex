@@ -4,7 +4,9 @@
  * rows, current-account breakdown). Shared by the aggregate dashboard and the
  * single-provider Overview so both surfaces present the same capacity semantics.
  */
+import { useContext } from "react";
 import { useT, useI18n, type Locale } from "../../i18n/shared";
+import { CodexCreditsVisibilityContext } from "../../hooks/useCodexCreditsVisibility";
 import {
   accountQuotaFromReport,
   capacityAggregationFromReport,
@@ -48,6 +50,7 @@ function asDate(value: number): Date | null {
 export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuotaReportView; pending: boolean }) {
   const t = useT();
   const { locale } = useI18n();
+  const creditsVisibility = useContext(CodexCreditsVisibilityContext);
   const aggregation = capacityAggregationFromReport(report);
   const primaryQuota = accountQuotaFromReport(report);
   // Only a passively observed row carries this; see ProviderUsage for the same rule.
@@ -105,7 +108,7 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
           incompleteCustomWindowLabels={showsAggregate ? incompleteCustomWindowLabels : undefined}
         />
       )}
-      <CodexCreditsRow credits={primaryQuota?.codexCredits} t={t} locale={locale} />
+      <CodexCreditsRow credits={creditsVisibility?.visible === false ? undefined : primaryQuota?.codexCredits} t={t} locale={locale} />
       {(credits || aggregation) && (
         <div className="pws-capacity-details">
           {credits && (

@@ -1,7 +1,13 @@
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useEffectEvent, useRef, useState } from "react";
 import { createBoundedFetch } from "../bounded-fetch";
 import type { TFn } from "../i18n/shared";
 import type { NoticeTone } from "../ui";
+
+/** The Providers workspace shares this setting with its cached quota views. */
+export const CodexCreditsVisibilityContext = createContext<{
+  visible: boolean;
+  onConfirmed: (visible: boolean) => void;
+} | null>(null);
 
 /** Display preference only. A saved preference survives a failed account reload. */
 export function useCodexCreditsVisibility(
@@ -15,6 +21,8 @@ export function useCodexCreditsVisibility(
     onRead: (read: Promise<unknown>, signal: AbortSignal) => void;
   },
 ) {
+  const workspaceVisibility = useContext(CodexCreditsVisibilityContext);
+  const reportVisibility = useEffectEvent((visible: boolean) => workspaceVisibility?.onConfirmed(visible));
   const [state, setState] = useState<{ apiBase: string; visible?: boolean; busy: boolean }>({ apiBase, busy: false });
   const scopeRef = useRef<AbortController | null>(null);
   const mutationRevisionRef = useRef(0);
@@ -50,6 +58,7 @@ export function useCodexCreditsVisibility(
       if (!payload || typeof payload !== "object" || !("showCodexCredits" in payload)
         || typeof payload.showCodexCredits !== "boolean") return;
       setState({ apiBase, visible: payload.showCodexCredits, busy: false });
+      reportVisibility(payload.showCodexCredits);
     })
       // A failed read leaves the switch unrendered instead of guessing its state.
       .catch(() => {})
@@ -95,6 +104,7 @@ export function useCodexCreditsVisibility(
       }
       if (!current()) return;
       setState({ apiBase, visible: confirmed, busy: true });
+      workspaceVisibility?.onConfirmed(confirmed);
       showActionFeedback(t(confirmed ? "codexAuth.creditsShown" : "codexAuth.creditsHidden"), "ok");
       try {
         const ok = await reloadAccounts(true);

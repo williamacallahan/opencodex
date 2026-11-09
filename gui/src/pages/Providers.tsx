@@ -12,6 +12,7 @@ import { IconPlus } from "../icons";
 import { useT } from "../i18n/shared";
 import { useProviderAccountPools, type AccountSelectionTarget } from "../hooks/useProviderAccountPools";
 import { useCodexAccountPool } from "../hooks/useCodexAccountPool";
+import { CodexCreditsVisibilityContext } from "../hooks/useCodexCreditsVisibility";
 import { useJsonConfigEditor } from "../hooks/useJsonConfigEditor";
 import { useKeyedClientResource } from "../client-resource";
 import { readSessionListCache } from "../session-list-cache";
@@ -612,6 +613,16 @@ export default function Providers({ apiBase }: { apiBase: string }) {
       {status && (
         <ToastNotice tone={statusTone} onDismiss={clearStatus} dismissLabel={t("common.close")}>{status}</ToastNotice>
       )}
+      <CodexCreditsVisibilityContext.Provider value={{
+        visible: config.showCodexCredits === true,
+        onConfirmed: visible => {
+          if (config.showCodexCredits === visible) return;
+          setConfig(current => current ? { ...current, showCodexCredits: visible } : current);
+          void refreshConfigResult();
+          void fetchProviderQuotas();
+          void fetchKeyPools(Object.keys(keyPools));
+        },
+      }}>
       <ProviderWorkspaceShell
         onRemoveProvider={removeProvider}
         providers={config.providers as Record<string, WorkspaceProvider>}
@@ -690,6 +701,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
           );
         }}
       />
+      </CodexCreditsVisibilityContext.Provider>
       <ProvidersPageModals
         apiBase={apiBase}
         config={config}

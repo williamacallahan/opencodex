@@ -1,6 +1,7 @@
 export interface ProvidersConfig {
   port: number;
   defaultProvider: string;
+  showCodexCredits?: boolean;
   providers: Record<string, {
     adapter: string;
     baseUrl: string;
