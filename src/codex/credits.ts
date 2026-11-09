@@ -62,9 +62,14 @@ export function hasCodexCreditsObservation(accountId: string, identity: string |
   return observation !== undefined && identity !== null && observation.identity === identity;
 }
 
+/** The one `showCodexCredits` gate: every credits display (seat rows and relay reports) passes it. */
+export function shownCodexCredits(config: Pick<OcxConfig, "showCodexCredits">, credits: CodexCredits | undefined): CodexCredits | undefined {
+  return config.showCodexCredits === true ? credits : undefined;
+}
+
 export function codexCreditsDtoField(config: Pick<OcxConfig, "showCodexCredits">, accountId: string, identity: string | null): { credits?: CodexCredits } {
-  const credits = codexCreditsFor(accountId, identity);
-  return config.showCodexCredits === true && credits ? { credits } : {};
+  const credits = shownCodexCredits(config, codexCreditsFor(accountId, identity));
+  return credits ? { credits } : {};
 }
 
 export function pruneCodexCredits(liveAccountIds: Iterable<string>): void {

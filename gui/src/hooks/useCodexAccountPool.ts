@@ -6,6 +6,7 @@ import { normalizeAccountPriority } from "../account-priority";
 import { useKeyedClientResource } from "../client-resource";
 import { extractAutoSwitchThresholdPayload } from "../codex-auto-switch";
 import { quotaAutoRefreshAvailability, type AccountQuota } from "../codex-quota-utils";
+import type { CodexCredits } from "../../../src/codex/quota-types";
 import { accountNeedsReauth } from "../oauth-health-display";
 import {
   codexAccountMutationCompletion,
@@ -47,15 +48,6 @@ export function hardLockThresholds(value: unknown): { short: number; long: numbe
   const percent = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 100;
   if (pair && percent(pair.short) && percent(pair.long)) return { short: pair.short, long: pair.long };
   return { ...DEFAULT_MAIN_HARD_LOCK_THRESHOLDS };
-}
-
-export interface CodexCredits {
-  hasCredits?: boolean;
-  unlimited?: boolean;
-  overageLimitReached?: boolean;
-  balance?: string;
-  approxLocalMessages?: [number, number];
-  approxCloudMessages?: [number, number];
 }
 
 export interface CodexAccountEntry {
