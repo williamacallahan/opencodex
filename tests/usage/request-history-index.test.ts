@@ -311,7 +311,8 @@ describe("request-history index (RI-02)", () => {
     await queryRequestHistory({}, undefined, 10);
     closeRequestHistoryIndex();
     const dbFile = historyIndexPath(getConfigDir());
-    const inspect = new Database(dbFile, { readonly: true });
+    const inspect = new Database(dbFile);
+    inspect.exec("PRAGMA wal_checkpoint(TRUNCATE)");
     const { rootpage } = inspect.query("SELECT rootpage FROM sqlite_master WHERE name = 'requests'").get() as { rootpage: number };
     const { page_size: pageSize } = inspect.query("PRAGMA page_size").get() as { page_size: number };
     inspect.close();

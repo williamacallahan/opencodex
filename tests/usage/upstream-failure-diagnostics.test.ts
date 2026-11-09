@@ -42,7 +42,9 @@ test("upstream failures record the error code and request id without the body", 
   expect(log.upstreamErrorCode).toBe("server_error");
   expect(log.upstreamErrorType).toBe("server_error");
   expect(warnings.join("\n")).not.toContain("secret upstream body");
-  expect(warnings.some(line => line.includes("code=server_error") && line.includes("request_id=req_abc123"))).toBe(true);
+  // Service logs persist: only closed-vocabulary values are printed, never an upstream request id.
+  expect(warnings.some(line => line.includes("type=server_error"))).toBe(true);
+  expect(warnings.join("\n")).not.toContain("req_abc123");
 });
 
 
@@ -141,9 +143,11 @@ test("final request rows expose original upstream error type, code, request id a
     { terminalStatus: "failed", closeReason: "terminal" }, entry => rows.push(entry));
   expect(rows).toHaveLength(1);
   expect(rows[0]!.status).toBe(503);
+  // The deployment line keeps the sanitized upstream diagnostics on the row beside the closed condition.
   expect(rows[0]!.upstreamErrorType).toBe("overloaded_error");
   expect(rows[0]!.upstreamErrorCode).toBe("overloaded_error");
   expect(rows[0]!.upstreamRequestId).toBe("req_diagnostic_fixture");
+  expect(rows[0]!.upstreamCondition).toBe("upstream_unavailable");
 });
 
 // #6740: the Codex WebSocket wraps a backend failure as {type:"error", status|status_code, error}.

@@ -22,6 +22,7 @@ import { contentPartsToText, parseDataUrl } from "./image";
 import { GCP_CREDENTIAL_MARKER_PREFIX, gcpCredentialMarkerAccount, getVertexAccessToken } from "../lib/gcp-adc";
 import { fetchAntigravityWithRetry, fetchVertexWithRetry } from "./google-http";
 import { safeAntigravityHttpErrorMessage, safeVertexHttpErrorMessage } from "./google-errors";
+import { readDisplaySafeErrorPayloadText } from "./upstream-http-error";
 import { isVertexTruncatedTurn, vertexTruncationErrorEvent } from "./google-truncation";
 import { antigravitySessionAnchor, antigravityUserAgentForWireModel, antigravitySessionId, isLikelyRealThoughtSignature, sanitizeAntigravityClaudeSignatures } from "./google-antigravity-wire";
 import { summarizeGoogleWireShape } from "./google-wire-shape";
@@ -981,12 +982,23 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
     // 429 rotation and raw error formatting.
     ...(provider.googleMode === "vertex" || provider.googleMode === "cloud-code-assist"
       ? {
-          fetchResponse: (request: AdapterRequest, ctx?: AdapterFetchContext): Promise<Response> =>
-            (provider.googleMode === "cloud-code-assist" ? fetchAntigravityWithRetry : fetchVertexWithRetry)(
+          fetchResponse: async (request: AdapterRequest, ctx?: AdapterFetchContext): Promise<Response> => {
+            const res = await (provider.googleMode === "cloud-code-assist" ? fetchAntigravityWithRetry : fetchVertexWithRetry)(
               request,
               ctx,
               { toolSchemaProfile, toolSchemaPolicy },
-            ),
+            );
+            // A rejected replay usually arrives as a real HTTP 400, and the dispatcher reports a
+            // non-ok response without ever calling parseStream/parseResponse — the only other
+            // callers of clear-on-invalid. Without this, the bad signature stays cached and is
+            // replayed on every turn until the TTL expires (#8054). Read a clone so the body the
+            // dispatcher formats is untouched, and await it so the next turn cannot race ahead of
+            // the eviction. No resend here: payload rejection stays resend-is-futile.
+            if (res.status === 400) {
+              handleSignatureRejection(await readDisplaySafeErrorPayloadText(res.clone(), ctx?.abortSignal));
+            }
+            return res;
+          },
           formatErrorBody: (status: number, _headers: Headers, payloadText: string): string =>
             (provider.googleMode === "cloud-code-assist" ? safeAntigravityHttpErrorMessage : safeVertexHttpErrorMessage)(status, payloadText),
         }
@@ -1130,21 +1142,21 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         if (!project) throw new Error("Antigravity requires a discovered Cloud Code Assist project id (re-run `ocx login google-antigravity`).");
         const sessionId = antigravitySessionId(parsed);
         const mappedEffort = mapReasoningEffort(provider, parsed.modelId, parsed.options.reasoning);
+        // CCA Gemini exposes provider-authored summaries only when explicitly requested.
+        const includeThoughts = provider.showThinkingSummary === true
+          && parsed.options.hideThinkingSummary !== true
+          && /^gemini-/.test(routedModelId)
+          && !isImageCapableModel(parsed.modelId);
         const { wireModelId, thinkingLevel } = resolveAntigravityEffortWireModel(
           parsed.modelId,
           mappedEffort,
           provider.baseUrl,
+          { includeThoughts },
         );
         antigravityModel = wireModelId;
         antigravitySession = sessionId;
-        // CCA Gemini exposes provider-authored thought summaries with includeThoughts.
-        // Other CCA model families do not share this request contract.
-        const includeThoughts = provider.showThinkingSummary === true
-          && parsed.options.hideThinkingSummary !== true
-          && /^gemini-/.test(wireModelId)
-          && !isImageCapableModel(parsed.modelId);
         // Effort → thinkingConfig for CCA (CLIProxyAPI proven: request.generationConfig.thinkingConfig).
-        // Suffix/compat IDs return thinkingLevel=undefined — the suffix IS the effort, no contradiction.
+        // Argon summaries repeat the suffix tier; other suffix IDs keep their existing shape.
         if (thinkingLevel || includeThoughts) {
           const gc = (body.generationConfig ?? {}) as Record<string, unknown>;
           gc.thinkingConfig = {

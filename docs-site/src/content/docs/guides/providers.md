@@ -69,13 +69,21 @@ is retained once at `~/.opencodex/config.json.pre-openai-tiers-v2.bak`; restore 
 ## Claude Opus 5.5 progress updates
 
 When the `anthropic` adapter sends Claude Opus 5.5 to `api.anthropic.com` (OAuth or API key),
-OpenCodex requests Anthropic's [progress-update display mode](https://platform.claude.com/docs/en/build-with-claude/thinking#progress-updates).
+OpenCodex defaults to Anthropic's [progress-update display mode](https://platform.claude.com/docs/en/build-with-claude/thinking#progress-updates).
 Progress updates and mid-turn acknowledgements appear as visible assistant commentary in Codex,
 even when thinking summaries are hidden. Reasoning summaries are omitted in this mode because
 Anthropic cannot distinguish progress updates from reasoning under `display: "summarized"`.
 The original signed thinking blocks are preserved for tool continuation; no signature is decoded
 or rewritten. Updates appear once their signed block completes. Other models and compatible
 third-party endpoints retain their existing thinking display behavior.
+
+To request summarized thinking instead, explicitly send `reasoning.summary: "concise"` or
+`"detailed"`. OpenCodex then sends `thinking: {type: "adaptive", display: "summarized"}` without
+the updates beta and returns thinking text as reasoning instead of progress commentary. In this
+mode, Anthropic's progress updates may be folded into the reasoning summary. The choice also
+works when reasoning effort is omitted or `"none"`; it does not change the requested effort.
+Omitting `reasoning.summary` or sending `"auto"` (the Codex default) or `"none"` keeps the updates default. Local summary hiding
+still controls reasoning visibility and does not hide progress commentary in updates mode.
 
 ## Anthropic image input
 
@@ -84,8 +92,11 @@ The built-in Claude model seeds advertise text and image input for both `anthrop
 Explicit per-model input-modality overrides remain authoritative; unknown models are not assumed
 image-capable. This applies across integrations wherever the client's configuration supports image
 capability metadata: OpenClaw exports a declared `input` array, and Kimi Code exports
-`capabilities: ["image_in"]` only for image-capable models. OpenClaw omits `input` when no supported
-modalities are declared; Kimi omits `capabilities` for unknown or text-only models. Clients without
+`capabilities: ["image_in"]` only for image-capable models, adding `"thinking"` when the model
+declares an effort ladder. Kimi Code also receives that ladder as `support_efforts` (limited to
+`low`, `medium`, `high`, `xhigh` and `max`, in that order) and the declared default as
+`default_effort` when it is in the ladder. OpenClaw omits `input` when no supported modalities are
+declared; Kimi omits `capabilities` for models that declare neither image input nor an effort ladder. Clients without
 a supported capability field keep their existing configuration shape. After updating opencodex,
 regenerate or refresh the client configuration managed by opencodex to receive the updated metadata.
 
@@ -108,6 +119,12 @@ Only a successful, nonempty completion remembers the rejection for that conversa
 identity for five minutes. Only the refused opaque payloads are suppressed when they can be
 identified; newly issued thinking remains replayable. Plaintext history remains available; a failed or cancelled retry does
 not disable thinking replay on later requests.
+
+## xAI Responses includes
+
+For xAI Responses requests, OpenCodex removes the unsupported `output.encrypted_content` entry
+from `include`, including on the [US regional endpoint](https://docs.x.ai/developers/advanced-api-usage/regions).
+Other include entries are preserved; an empty result omits the field. Other providers are unaffected.
 
 ## Auth modes
 
@@ -204,6 +221,13 @@ Cursor, Kiro, Zed Hosted AI and Nous Portal are login-only and have no API-key e
 login-only too: `ocx login google-antigravity` signs in with your Google account over the Cloud Code
 Assist wire, and the `google` preset beside it is the AI Studio Gemini API — a different product
 reached with its own key, not a key mode for the same login.
+If Antigravity login cannot discover a Cloud Code Assist project, the failure includes a sanitized
+summary for `loadCodeAssist` and the last `onboardUser` response: HTTP status, response category,
+completion/error presence and known project-field types. It distinguishes HTTP refusal, unusable
+JSON, invalid roots, unfinished onboarding and completion with an error or without a project.
+The summary omits upstream values, arbitrary key names and account/project identifiers. Login
+still requires a discovered project and saves no account when discovery fails.
+
 The Antigravity Accounts tab shows an observed membership tier as a badge beside the account
 label, using the upstream tier ID (for example `free-tier` or `gemini-pro`). No badge appears
 when the plan is unknown; it does not affect routing or quota.
@@ -326,7 +350,7 @@ ocx logout <provider>
 | `kimi` | `openai-chat` | `https://api.kimi.com/coding/v1` | Kimi Code Plan coding models. Defaults to the stable `kimi-for-coding` alias (currently K2.8 Preview): 1M-token context window, adjustable `low`/`high`/`max` thinking (default `max`), text + image input. `k3.1-pro` and `k3.1-pro-highspeed` (K3.1 Pro) are also listed: 1M-token context, thinking-only on the same ladder (default `max`). Retired `kimi-k2.x` selections are migrated to the alias on upgrade. |
 | `kimi-responses` | `openai-responses` | `https://api.kimi.com/coding/v1` | Same Kimi account login (reuses the `kimi` OAuth credential) over the OpenAI Responses wire. Same model roster and capabilities as `kimi`; thinking content stays encrypted server-side, tool calls and results stay visible. |
 | `nous` | `openai-chat` | `https://inference-api.nousresearch.com/v1` | Nous Research subscription gateway (same backend Hermes Agent uses). Device-grant login against `portal.nousresearch.com`; the access token is the per-request inference JWT. Mixed paid + `:free` model catalog (`tencent/hy3:free`, `stepfun/step-3.7-flash:free`, ...) discovered live from the signed-in account. Refresh tokens are single-use and rotated on every refresh. |
-| `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | The dashboard Login and Add account buttons offer Builder ID, Google, GitHub device login, or Kiro CLI. Native device login adds an account without signing `kiro-cli` out. The Kiro CLI choice imports or starts a CLI session; its Add account workflow temporarily switches the CLI account and restores it on cancellation or failure. |
+| `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | The dashboard Login and Add account buttons offer AWS IAM Identity Center, Builder ID, Google, GitHub device login, or Kiro CLI. Native device login adds an account without signing `kiro-cli` out. The Kiro CLI choice imports or starts a CLI session; its Add account workflow temporarily switches the CLI account and restores it on cancellation or failure. |
 | `google-antigravity` | `google` | `https://daily-cloudcode-pa.googleapis.com` | Google OAuth over the Cloud Code Assist wire. Live discovery uses CCA's authenticated `v1internal:fetchAvailableModels` endpoint and publishes the agent models available to the signed-in account; the maintained catalog remains the fallback. |
 | `cursor` | `cursor` | `https://api2.cursor.sh` | Experimental PKCE login, live HTTP/2 transport with an opt-in HTTP/1.1 compatibility path, and account-filtered model discovery. |
 | `zed` | `zed` | `https://cloud.zed.dev` | Experimental Zed Hosted AI bridge. Uses Zed's native-app RSA callback, exchanges the account token for a short-lived hosted-inference token, and discovers the account's live roster. |
@@ -419,10 +443,15 @@ think: the picker offers `low` / `high` / `max` (default `max`), Codex `medium` 
 and `xhigh` as `max`, and an explicit `none` leaves `reasoning_effort` out so the upstream default
 applies. Fixed sampling parameters (`temperature`, `top_p`, penalties) are not sent. A saved
 `moonshot` model list that is still the previous built-in list gains both ids at startup when it
-points at the International or China endpoint; an edited list or a Custom URL is left as it is.
-The preset default stays `kimi-k2.7-code`. Moonshot closes the K2 series to new accounts on
-2026-10-31 and plans to retire it by the end of December 2026; see the
-[Kimi API model list](https://platform.kimi.ai/docs/models).
+points at the International or China endpoint; this roster refresh adds no models to an edited
+list or a Custom URL. The retired-id migration below applies separately.
+The preset defaults to the vendor-recommended `kimi-k3.1-pro`. `kimi-k2.5`, discontinued on
+2026-08-31, is removed from the API seeds; saved selections on the official International or China
+endpoint migrate to `kimi-k3.1-pro`, refreshing old built-in context and reasoning metadata while
+preserving explicit overrides. Custom destinations keep their saved selections. `kimi-k2.6` and
+`kimi-k2.7-code` (including highspeed) remain selectable for existing users: Moonshot closes the
+K2 series to new accounts on 2026-10-31 and plans to retire it by the end of December 2026; see the
+[Kimi API model list](https://platform.kimi.ai/docs/models.md) (checked 2026-10-28).
 
 A custom `openai-chat` provider can opt in when its upstream documents support for
 `prompt_cache_key`:
@@ -523,7 +552,7 @@ OAuth providers whose credentials include a stable account id or email can keep 
 login. The Providers page shows those accounts in a dropdown, lets you add another, and switches the
 active account without logging the others out. A normal login with an identity-less Kimi credential
 replaces the active slot, while an explicit **Add account** preserves that slot and activates a new,
-distinct one. Kiro accounts are keyed by profile ARN. `chatgpt` is always single-slot because Codex
+distinct one. Kiro accounts use the profile ARN together with the signed-in user's email when available; different users can keep separate credentials for one organization profile. `chatgpt` is always single-slot because Codex
 pool accounts have a separate ledger.
 Tokens stay in `~/.opencodex/auth.json`; `/api/oauth/accounts` returns masked metadata only.
 
@@ -625,6 +654,8 @@ If Kiro ends with plain text instead of its private final-answer tool, one bound
 still runs, and only the resulting final answer is displayed. Progress accompanying a real
 tool call remains visible. A normal private final answer needs no completion retry.
 
+When Kiro's safety filter stops a turn (`CONTENT_FILTERED`, for example the Claude `BIO` classifier), the request ends as a refusal that clients do not retry: Claude clients see `stop_reason: "refusal"` and Codex sees a failed response carrying Kiro's category and explanation. If the filter stops the bounded retry, no final answer is displayed; the progress held from the first attempt and any partial text from the retry are shown as commentary before the refusal.
+
 When Kiro emits credit metering, request logs preserve the reported spend as
 `usage.providerCredits`, including in the persisted usage ledger. These are Kiro credits;
 token counts may still be estimated, and the credit value does not replace USD cost estimates.
@@ -647,7 +678,19 @@ Other messages, statuses, and AWS SSO responses do not trigger this desktop-spec
 
 ### Kiro credential import
 
-The dashboard offers native Builder ID, Google, and GitHub device login without Kiro CLI.
+The dashboard offers native AWS IAM Identity Center, Builder ID, Google, and GitHub device login without Kiro CLI.
+
+For an organization account, choose **AWS IAM Identity Center**, enter your AWS access portal URL
+(for example `https://example.awsapps.com/start`) and the region where your organization configured
+IAM Identity Center. Open the verification link in your own browser, enter the displayed code,
+and authorize the account. The hub completes the grant; no SSH session or browser callback to
+the hub is required. If AWS lists several Kiro profiles, choose the profile to save. With one
+profile the account is saved automatically. The SSO region and the selected profile's API region
+are kept separately. Profile discovery checks AWS's US East and Frankfurt service regions.
+The signed-in user's email is resolved from AWS for the selected profile before saving; users
+sharing one organization profile keep separate account credentials. Cancellation or expiry before
+the credential write saves no account. Native login adds a slot and keeps the existing selection.
+
 The Kiro CLI choice and `ocx login kiro` import path use the CLI: on Unix, install it with `curl -fsSL https://cli.kiro.dev/install | bash`;
 on Windows PowerShell, use `irm 'https://cli.kiro.dev/install.ps1' | iex`; then sign in with `kiro-cli login`.
 Without a `kiro-cli` session, `ocx login kiro` falls
@@ -684,7 +727,7 @@ an ambiguous token selection), when `KIROCLI_DB_PATH` / `KIRO_CLI_DB_FILE` redir
 from the live CLI store, or when an existing primary CLI database has no recognized token row.
 Repair or remove the unreadable database under the normal `kiro-cli` data path, unset those import
 selectors, then retry. Signing in from a machine with no existing `kiro-cli` session is unaffected.
-The native dashboard choices are add-only and do not sign out `kiro-cli`. A device dialog shows the code and verification destination. Only recognized Kiro or Builder ID hosts are opened as links; an unexpected destination is shown as copyable text for review. Closing the dialog sends cancellation and leaves a bounded background status check to reconcile a commit already in progress. A stalled status response is retried; exhausting the flow deadline produces the neutral ended outcome rather than claiming success. Google and GitHub approval completes when Kiro reports `authorized` (or the legacy `approved` status) with valid tokens and a profile ARN.
+The native dashboard choices are add-only and do not sign out `kiro-cli`. A device dialog shows the code and verification destination. Only recognized Kiro or regional AWS device-SSO hosts are opened as links; an unexpected destination is shown as copyable text for review. Closing the dialog sends cancellation and leaves a bounded background status check to reconcile a commit already in progress. A stalled status response is retried; exhausting the flow deadline produces the neutral ended outcome rather than claiming success. Google and GitHub approval completes when Kiro reports `authorized` (or the legacy `approved` status) with valid tokens and a profile ARN.
 The account list marks Kiro accounts excluded from automatic selection with a reason, when available.
 
 ### DeepSeek API
@@ -1044,6 +1087,10 @@ unchanged and were not probed in this update.
 > models. Coding Plan defaults to `ark-code-latest`, while Agent Plan defaults to
 > `deepseek-v4-flash`.
 
+On the pay-as-you-go Ark route, Kimi K3.1 Pro (`kimi-k3-1-pro`, including dated versions)
+replays tool-only assistant turns with an empty string. Its endpoint rejects the legacy
+empty-text array with HTTP 400; other Ark models keep their existing continuation format.
+
 > **Volcengine Plan usage restriction:** Volcengine documents Coding Plan and Agent Plan quota as
 > valid only inside supported AI coding tools, and warns that using a plan key for general API
 > calls may suspend the subscription or ban the account. Routing Codex or Claude Code through
@@ -1230,6 +1277,14 @@ request translation rather than passthrough reports none. An account that has no
 served a streaming turn simply shows no quota, which is not an error. Rate limits apply
 per team, not per key.
 
+When the current Muse account's latest-started retained request explicitly reports subscription exhaustion
+with a future reset time, the dashboard quota strip can show that observed limit even if
+Meta omitted the normal usage frame. The Muse chip includes a reset countdown. This reads
+local request-log evidence and never sends a model request. It does not classify an unnamed
+window as five-hour or weekly, and a newer successful request or an elapsed reset removes
+this fallback. The fallback selects by request start time across the server-bounded matching
+log history, so an older request that finishes later cannot hide a newer success.
+
 For a supported setup, use `meta-model` above with your own key.
 
 **Command Code quota.** The dashboard and `ocx account refresh` probe Command Code's
@@ -1400,7 +1455,7 @@ OpenCodex provides official adapter support for Qoder through the `qoder` (Globa
 - **Token usage:** Qoder CLI reports zero token counts unless its usage switch is on, so each preset turns it on in its scoped CLI child environment: `QODER_EXPOSE_TOKEN_USAGE=true` for Global and `QODERCN_EXPOSE_TOKEN_USAGE=true` for CN, which reads only its own prefix.
 - **Tool Ownership:** The CLI runs single-turn `stream-json` with `--tools ""`, `--strict-mcp-config`, setting sources disabled, and session persistence disabled, so Codex keeps exclusive tool ownership. Client-declared tools are exposed through an isolated request-scoped MCP server.
 - **Output guard:** If the CLI echoes OpenCodex tool-call/result replay envelopes into assistant text, the turn fails with `vendor_scaffold_detected` (502) instead of returning the envelope as a successful answer, and neither reasoning nor tool calls following the envelope are forwarded. Reasoning starts a fresh replay-text block, so earlier prose or code fences cannot hide an envelope in later text. If the CLI's turn already ended with its own error, that error is reported instead, still without the envelope. The proxy does not retry that failure automatically. Ordinary prose and closed fenced examples follow the shared envelope recognizer; an unverified overflowing fenced example is refused. Assistant text preserves Unicode characters split across CLI frames; unpaired surrogates are replaced with U+FFFD.
-- **Image Input:** Global continues forwarding supported images through the shared projection without a per-model vision allowlist. CN retains its vision-sidecar defaults. Its raw-image route admits only one canonical base64 PNG of at most 1 MiB decoded in a single user turn with `DeepSeek-Flash` or `Qwen3.8-Flash`. Use `qoderclicn 1.1.70`: [issue #7516](https://github.com/lidge-jun/opencodex/issues/7516) reports Windows 11 x64 live success for those models on both `--attachment` and inline `--input-format stream-json --output-format stream-json` stdin; OpenCodex uses only stdin. The adapter validates base64 length/padding, decoded PNG signature and basic IHDR fields before CLI discovery; it does not decompress pixels or validate every PNG chunk/CRC. The 1 MiB ceiling is an OpenCodex resource policy, not a verified vendor maximum: the reported live evidence covers a 96×96 PNG, whose RGBA raster is only 36 KiB. Larger inputs require separate verification. Other CLI versions have not been verified, and the adapter does not probe the installed version. CN refuses raw URL images, other image formats/models, multiple images, tool-result images and image-bearing history/multi-turn replay before starting the CLI with `unsupported_input_modality`; use the vision sidecar for those inputs. Injected CLI tests cover serialization and cancellation without claiming live upstream support. Qoder's supported projection keeps image blocks in conversation order and marks unsupported references as `[image omitted: unsupported reference]`. Global stateless replay can still associate historical images unreliably with their original text; CN does not enable that unverified replay surface.
+- **Image Input:** Global continues forwarding supported images through the shared projection without a per-model vision allowlist. CN retains its vision-sidecar defaults. Its raw-image route admits only one canonical base64 PNG of at most 1 MiB decoded, 8192 pixels per edge, and 16 million total pixels in a single user turn with `DeepSeek-Flash` or `Qwen3.8-Flash`. Use `qoderclicn 1.1.70`: [issue #7516](https://github.com/lidge-jun/opencodex/issues/7516) reports Windows 11 x64 live success for those models on both `--attachment` and inline `--input-format stream-json --output-format stream-json` stdin; OpenCodex uses only stdin. The adapter validates base64 length/padding, decoded PNG signature and basic IHDR fields before CLI discovery; it does not decompress pixels or validate every PNG chunk/CRC. These ceilings are OpenCodex resource policy, not verified vendor maxima: the reported live evidence covers a 96×96 PNG, whose RGBA raster is only 36 KiB. Larger inputs require separate verification. Other CLI versions have not been verified, and the adapter does not probe the installed version. CN refuses raw URL images, other image formats/models, multiple images, tool-result images and image-bearing history/multi-turn replay before starting the CLI with `unsupported_input_modality`; use the vision sidecar for those inputs. Injected CLI tests cover serialization and cancellation without claiming live upstream support. Qoder's supported projection keeps image blocks in conversation order and marks unsupported references as `[image omitted: unsupported reference]`. Global stateless replay can still associate historical images unreliably with their original text; CN does not enable that unverified replay surface.
 - **PAT recovery:** For both Qoder presets, a multi-key API-key pool can switch to another PAT on a supported authentication rejection or account-level quota exhaustion, but only before response content or an event that makes replay unsafe. Recovery requires Qoder-specific classification and respects credential-hop and send budgets; an HTTP 401/429 or quota message alone is not permission to replay. Single-key configurations do not rotate. Sharing the CLI runner does not enable this API-key recovery for CodeBuddy or self-authenticated Claude CLI.
 - **Quota:** No public quota API is used, so totals and reset times are unavailable. Codes 110 (account daily limit) and 118 (personal Credits exhaustion) report `insufficient_quota` and permit consideration of PAT recovery. Other supported quota codes also report `insufficient_quota` but do not authorize it. Numeric error codes take precedence: an unrecognized numeric code does not fall back to quota or authentication text. Without a numeric code, only the supported account-daily message beginning “You've reached your daily usage limit for Chat”, with no team/model/shared qualifier, grants quota recovery; generic credit-limit text does not. Only quota failures eligible for PAT recovery enter key cooldown handling. When such a failure has no reset time, the failed key uses the existing default cooldown; nonrecoverable quota classifications do not create a cooldown through this path, and no next-day reset is inferred.
 - **Operators:** Qoder Global is operated by BRIGHT ZENITH PRIVATE LIMITED under the [product service terms](https://qoder.com/product-service); Qoder CN by 通义云启（杭州）信息技术有限公司 with Alibaba Cloud. Verify `ocx provider test qoder` (or `qoder-cn`) after configuring.
@@ -1783,6 +1838,16 @@ Providers with a live probe: OpenAI/Codex, Anthropic, xAI, Cursor, Kimi,
 Google Antigravity, OpenCode Go, OpenRouter, DeepSeek, ClinePass, Z.AI, MiniMax,
 Moonshot, Venice, Synthetic, DeepInfra, Neuralwatt, Command Code, and any a6api-backed
 or Abliteration custom provider.
+
+**Kimi Coding Plan quota.** Account login and API-key providers on the canonical
+`https://api.kimi.com/coding/v1` endpoint read `/usages`. Plans that report
+`usages.limit_month_total` (or `monthTotal`) show a monthly utilization bar, with
+`limit_month_code` (or `monthCode`) as the fallback when total usage is unavailable.
+The `used_ratio` / `usedRatio` fraction must be in `[0, 1]` before conversion to a consumed
+percentage; invalid ratios are ignored. Empty or unusable `usages` containers do not hide
+usable monthly data in another supported envelope. Any reported reset time is retained.
+Existing 5-hour, weekly, and total subscription-credit
+windows remain separate, and an absent monthly window is not shown as 0%.
 
 **Abliteration credits.** A provider of any name whose `baseUrl` is
 `https://api.abliteration.ai` or `https://api.abliteration.ai/v1` reads

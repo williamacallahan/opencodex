@@ -3,6 +3,7 @@ import { NativeInjectionChannel } from "../responses/native-injection";
 import { NativeSteeringChannel, NativeSteeringError } from "../responses/native-steering";
 import { createNativeSteeringLogObserver } from "../responses/native-steering-log";
 import { reasoningArchiveErrorResponse } from "../responses/reasoning-archive-error";
+import { captureAdmissionPolicy } from "../capture-admission-policy";
 import type { Server, ServerWebSocket } from "bun";
 import {
   LIVE_SIDEBAND_UPSTREAM_OPEN_TIMEOUT_MS,
@@ -93,6 +94,7 @@ import type { ServeOptionsContext } from "./serve-options";
 import type { RequestMetricsRecorder } from "../request-metrics";
 import { resolveInboundBodyLimitBytes } from "../request-decompress";
 import { responseToolOwnership } from "../responses/response-tool-ownership";
+import { noteTurnStateCaller, runTurnStateCallerScope } from "../turn-state-handles";
 
 /**
  * The WebSocket half of the Bun.serve options, split out of serve-options.ts to keep that file
@@ -179,7 +181,7 @@ export function createWebsocketHandler(
             return;
           }
           try {
-            sendUpstreamFrame(upstream, raw);
+            sendUpstreamFrame(upstream, raw, ws.data.authContext);
             if (ws.data.liveMaxSessionMs !== undefined && upstream.bufferedAmount > MAX_WS_FRAME_BYTES) {
               closeLiveSideband(ws, 1013, "audio upstream backpressure");
             }
@@ -310,12 +312,16 @@ export function createWebsocketHandler(
         }
 
         // Only a genuinely admitted turn may receive steering or continuations.
+        const advisorAdmissionPolicy = captureAdmissionPolicy(config, ws.data.admission);
         const finishActivity = ws.data.responsesActivity?.beginTurn(frame.input);
         ws.data.nativeControl = nativeControl;
         const payload: Record<string, unknown> = { ...frame };
         delete payload.type;
         turnAdmissionLease.bindAbortController(turnAbort);
-        void (async () => {
+        // The frame runs with its own caller slot. logCtx was built before the slot existed (turn
+        // admission needs it), so the handshake admission is recorded here for turn-state binding.
+        void runTurnStateCallerScope(async () => {
+          if (wsAdmission) noteTurnStateCaller(wsAdmission);
           const start = Date.now();
           const requestId = nextRequestLogId(start);
           let logged = false;
@@ -338,6 +344,7 @@ export function createWebsocketHandler(
           try {
             let terminalRecorder: ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined;
             const response = await handleResponses(req, config, logCtx, {
+              advisorAdmissionPolicy,
               ...(wsAdmission ? { admission: wsAdmission } : {}),
               forceEmptyResponseId: true,
               inboundTransport: "websocket",
@@ -431,7 +438,7 @@ export function createWebsocketHandler(
             if (!logged && turnAbort.signal.aborted) finalizeLog(499);
             if (ws.data.cancel === cancelTurn) ws.data.cancel = undefined;
           }
-        })();
+        });
       },
       close(ws: ServerWebSocket<WsData>, code: number, reason: string) {
         if (ws.data.kind === "remote-workspace-agent") {
