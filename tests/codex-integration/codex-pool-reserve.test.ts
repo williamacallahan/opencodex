@@ -12,6 +12,7 @@ import { resetQuotaQueryBackoffForTests } from "../../src/codex/quota-query-back
 import { POOL_RESERVE_FRESHNESS_MS, poolLunaReserveSelection } from "../../src/codex/pool-reserve";
 import { clearAccountNeedsReauth } from "../../src/codex/account-runtime-state";
 import { clearCodexUpstreamHealth, clearThreadAccountMap, getCodexQuotaHealthSnapshot, recordCodexUpstreamOutcome } from "../../src/codex/routing";
+import { bindThreadAffinity } from "../../src/codex/routing/thread-affinity";
 import { codexFailureWindowOutcomeMeta } from "../../src/codex/routing/failure-window";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import {
@@ -143,13 +144,21 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     expect(response.status).toBe(429);
     expect((await response.json()).error.code).toBe("usage_limit_reached");
   });
-  test.each(["quota", "round-robin", "fill-first", "reset-first"] as const)("%s prefers ordinary Luna over Reserve and credits", async strategy => {
+  test.each(["quota", "round-robin", "fill-first", "reset-first"] as const)("%s spends Reserve before another seat's included quota", async strategy => {
     reserve(); ordinary(A, 40);
     const cfg = config(); cfg.accountPoolStrategy = strategy; cfg.creditCodexAccountIds = [B];
-    cfg.activeCodexAccountId = B;
     setAccountQuotaFromParsed(B, { credits: { hasCredits: true, balance: 20, observedAt: now } });
     const { ctx, request } = await build(cfg);
-    expect(ctx.accountId).toBe(A); expect(JSON.parse(request.body).model).toBe("gpt-6-luna");
+    expect(ctx.accountId).toBe(B); expect(JSON.parse(request.body).model).toBe("gpt-reserve");
+  });
+  test("a thread bound to a seat with included quota keeps Luna there; one bound to a held seat uses Reserve", () => {
+    reserve(); ordinary(A, 40);
+    bindThreadAffinity("luna-on-included", A, now, "shared");
+    bindThreadAffinity("luna-on-held", B, now, "shared");
+    const kept = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", {}, undefined, "luna-on-included", now);
+    expect(kept.reserve).toBe(false); expect(kept.options.poolCapacity).toBe("included");
+    const moved = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", {}, undefined, "luna-on-held", now);
+    expect(moved.reserve).toBe(true); expect(moved.quotaScope).toBe("reserve");
   });
   test("Reserve comes before a seat that already permits spending fresh credits", async () => {
     reserve(); const cfg = config(); cfg.creditCodexAccountIds = [A];
@@ -160,7 +169,7 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
   test("without Reserve anywhere, Luna selection options and scope are returned untouched", () => {
     ordinary(A); ordinary(B, 40);
     const options = { modelEligibleAccountIds: new Set([A, B]) };
-    const result = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", options, undefined, now);
+    const result = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", options, undefined, undefined, now);
     expect(result.reserve).toBe(false); expect(result.options).toBe(options); expect(result.quotaScope).toBe("shared");
   });
   test("without Reserve the existing consented-credit path still serves ordinary Luna", async () => {
@@ -210,8 +219,9 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     expect(getCodexQuotaHealthSnapshot(B, "shared", now)).toBeNull();
     await expect(build(cfg)).rejects.toBeInstanceOf(CodexPoolExhaustedError);
   });
-  for (const compact of [false, true]) test.each(["reserve", "ordinary", "sol"])(`Responses${compact ? " compact" : ""} HTTP %s dispatches only the expected upstream model`, async state => {
-    reserve(); if (state === "ordinary") ordinary(A, 40);
+  for (const compact of [false, true]) test.each(["reserve", "reserve-before-included", "ordinary", "sol"])(`Responses${compact ? " compact" : ""} HTTP %s dispatches only the expected upstream model`, async state => {
+    if (state !== "ordinary") reserve();
+    if (state === "ordinary" || state === "reserve-before-included") ordinary(A, 40);
     const cfg = config(); cfg.providers.openai = { ...base, codexAccountMode: "pool" };
     let sends = 0; let sentModel: string | undefined; let sentAccount: string | undefined;
     spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -235,8 +245,8 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
       expect(sends).toBe(state === "sol" ? 0 : 1);
       if (state === "sol") expect(body.error.code).toBe("usage_limit_reached");
       else {
-        expect(sentModel).toBe(state === "reserve" ? "gpt-reserve" : "gpt-6-luna");
-        expect(sentAccount).toBe(`fixture-workspace-${state === "reserve" ? B : A}`);
+        expect(sentModel).toBe(state === "ordinary" ? "gpt-6-luna" : "gpt-reserve");
+        expect(sentAccount).toBe(`fixture-workspace-${state === "ordinary" ? A : B}`);
       }
     } finally { release(); }
   });

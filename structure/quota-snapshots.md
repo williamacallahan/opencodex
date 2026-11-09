@@ -14,8 +14,10 @@ Pool WHAM reads opt in with `x-openai-codex-luna-reserve: 1`, including a 401 re
 `src/codex/pool-reserve.ts` reuses the Reserve grant predicates and stores an independently timed
 `Luna Reserve` custom window with its own `observedAt`. A non-granting response retracts that window
 without changing the ordinary weekly bar. The existing account DTO, persistence and dashboard carry it.
-Only automatic stored-account requests for `gpt-6-luna` may use it: ordinary capacity wins, then
-fresh Reserve below 100%, then previously consented fresh credits, then the existing refusal.
+Only automatic stored-account requests for `gpt-6-luna` may use it. Reserve is Luna-only while
+ordinary quota is shared with Sol and Astra, so fresh Reserve below 100% wins, then ordinary
+capacity, then previously consented fresh credits, then the existing refusal. A thread bound to a
+seat that still has ordinary capacity keeps Luna there.
 The existing selector still enforces pause, plan, credential, failure-window and account-wide holds.
 Reserve uses its independent quota scope; shared Responses serialization changes only the wire model
 to `gpt-reserve` for HTTP and WebSocket. Ordinary headers cannot renew its five-minute WHAM observation,
