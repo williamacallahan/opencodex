@@ -13,6 +13,7 @@ import { POOL_RESERVE_FRESHNESS_MS, poolLunaReserveSelection } from "../../src/c
 import { clearAccountNeedsReauth } from "../../src/codex/account-runtime-state";
 import { clearCodexUpstreamHealth, clearThreadAccountMap, getCodexQuotaHealthSnapshot, recordCodexUpstreamOutcome } from "../../src/codex/routing";
 import { bindThreadAffinity } from "../../src/codex/routing/thread-affinity";
+import { forgetCodexFailureWindows, isCodexFailureWindowDegraded, noteCodexFailureWindowSample } from "../../src/codex/routing/failure-window";
 import { codexFailureWindowOutcomeMeta } from "../../src/codex/routing/failure-window";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import {
@@ -165,6 +166,16 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     setAccountQuotaFromParsed(A, { credits: { hasCredits: true, balance: 20, observedAt: now } });
     const { ctx, request } = await build(cfg);
     expect(ctx.accountId).toBe(B); expect(JSON.parse(request.body).model).toBe("gpt-reserve");
+  });
+  test("a bound seat that only new-thread steering avoids still keeps its Luna thread", () => {
+    reserve(); ordinary(A, 40);
+    bindThreadAffinity("luna-on-degraded", A, now, "shared");
+    try {
+      for (let sample = 0; sample < 20; sample++) noteCodexFailureWindowSample(config(), A, true, now);
+      expect(isCodexFailureWindowDegraded(A, now)).toBe(true);
+      const kept = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", {}, undefined, "luna-on-degraded", now);
+      expect(kept.reserve).toBe(false); expect(kept.options.poolCapacity).toBe("included");
+    } finally { forgetCodexFailureWindows(); }
   });
   test("without Reserve anywhere, Luna selection options and scope are returned untouched", () => {
     ordinary(A); ordinary(B, 40);

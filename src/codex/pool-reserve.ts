@@ -6,7 +6,7 @@ import { NATIVE_RESERVE_MODEL } from "./catalog/native-models";
 import { getAccountQuota } from "./quota";
 import { resetAtToMs, type StoredAccountQuota, type WhamUsageResponse } from "./quota-types";
 import { grantsReserve, reserveLimits } from "./reserve-availability";
-import { getEligiblePoolAccounts } from "./routing/selection";
+import { getEligiblePoolAccounts, isCodexAccountSelectable } from "./routing/selection";
 import { getThreadAffinity } from "./routing/thread-affinity";
 import type { CodexQuotaScope } from "./routing/health-store";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers-destination";
@@ -75,8 +75,10 @@ export function poolLunaReserveSelection(
   if (reserveIds.size === 0) return unchanged;
   const includedOnly: CodexAccountUsabilityOptions = { ...options, poolCapacity: "included" };
   const included = getEligiblePoolAccounts(config, excludeId, now, quotaScope, includedOnly);
+  // The resolver's bound-reuse rule, not new-thread placement: a bound thread is never
+  // steered away by the failure window that only shapes where new threads land.
   const boundId = affinityKey === undefined ? undefined : getThreadAffinity(affinityKey, quotaScope)?.accountId;
-  if (boundId !== undefined && included.includes(boundId)) {
+  if (boundId !== undefined && isCodexAccountSelectable(config, boundId, now, quotaScope, includedOnly)) {
     return { ...unchanged, options: includedOnly };
   }
   const reserveOptions: CodexAccountUsabilityOptions = { ...options, modelEligibleAccountIds: reserveIds, poolCapacity: "reserve" };
