@@ -189,6 +189,21 @@ describe("ocx.quota-pool/1 producer", () => {
       .toEqual([["weekly", 42, "estimated", "2026-10-21T11:59:00.000Z"]]);
   });
 
+  test("a held codex-lb relay report never reaches the export", async () => {
+    ensureQuotaPoolIdentity();
+    // Display-only: codex-lb keeps serving on purchased credits, so a full window must not read
+    // to placement as an exhausted provider.
+    setProviderQuotaReportCache({ key: "fixture", ts: NOW, response: { generatedAt: NOW, reports: [{
+      provider: "lb", label: "lb", source: "codex-lb:usage", updatedAt: NOW - 60_000,
+      quota: { weeklyPercent: 100, weeklyResetAt: NOW + 48 * HOUR, codexCredits: { balance: "12.5" }, updatedAt: NOW - 60_000 },
+    }] } });
+    const relayed = config();
+    relayed.providers.lb = { adapter: "openai-responses", baseUrl: "https://lb.example.test/backend-api/codex", apiKey: "fixture-lb-key" };
+    const result = await readQuotaPool(relayed, { now: () => NOW, claudeUsageStatePath: admissionPath });
+    if (!result.ok) throw new Error(result.error);
+    expect(result.pool.providers.map(provider => provider.provider)).toEqual(["claude-cli", "xai"]);
+  });
+
   test("a per-account provider configured with an API key keeps its key's report as the pool", async () => {
     ensureQuotaPoolIdentity();
     setProviderQuotaReportCache({ key: "fixture", ts: NOW, response: { generatedAt: NOW, reports: [{

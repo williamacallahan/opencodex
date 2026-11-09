@@ -86,6 +86,7 @@ import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider } from "../../
 import { codexAccountNamespaceProviderCollisionError } from "../../codex/account-namespace-match";
 import { clearThreadAccountMap } from "../../codex/routing";
 import { primeCodexPoolQuotas } from "../../codex/auth-api";
+import { shownCodexCredits } from "../../codex/credits";
 import { clearModelCache, getProviderDiscoveryStatus } from "../../codex/model-cache";
 import { getCodexModelEntitlementStatus } from "../../codex/model-entitlements";
 import { DEFAULT_PROVIDER_CONTEXT_CAP, globalContextCapValue, providerContextCap, providerContextCaps, selectedProviderContextCaps, forgetProviderContextCap, setAllProviderContextCaps, setGlobalContextCapValue, setProviderContextCap } from "../../providers/context-cap";
@@ -891,10 +892,14 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const now = Date.now();
     return jsonResponse({
       ...snapshot,
-      reports: snapshot.reports.map(report => ({
-        ...report,
-        routingQuota: providerRoutingQuota(config, report.provider, now),
-      })),
+      reports: snapshot.reports.map(({ quota: { codexCredits, ...quota }, ...report }) => {
+        const credits = shownCodexCredits(config, codexCredits);
+        return {
+          ...report,
+          quota: credits ? { ...quota, codexCredits: credits } : quota,
+          routingQuota: providerRoutingQuota(config, report.provider, now),
+        };
+      }),
     });
   }
 

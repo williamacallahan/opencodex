@@ -1,5 +1,5 @@
 import type { CSSProperties } from "react";
-import type { CodexCredits } from "../hooks/useCodexAccountPool";
+import type { CodexCredits } from "../../../src/codex/quota-types";
 import type { Locale, TFn } from "../i18n/shared";
 import "../styles/codex-credits.css";
 

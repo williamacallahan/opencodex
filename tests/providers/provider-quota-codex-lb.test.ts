@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { clearProviderQuotaCache, fetchProviderQuotaReports, providerApiKeyQuotaMode } from "../../src/providers/quota";
 import { getCachedProviderRoutingQuota } from "../../src/providers/quota-routing-cache";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
+import { handleManagementAPI } from "../../src/server/management-api";
+import { ManagementRequest } from "../helpers/management-auth";
 
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
 let opencodexHome = "";
@@ -76,6 +78,41 @@ describe("codex-lb pooled usage quota", () => {
     expect(report.quota.codexCredits).toEqual({ balance: "52451.317714", unlimited: false });
     // Display only: codex-lb spends credits past a full pool, so routing must not read it.
     expect(getCachedProviderRoutingQuota("my-pool", poolProvider, Date.now())).toBeNull();
+  });
+
+  test("a credits-only answer replaces held windows with a report carrying just the balance", async () => {
+    const seen: Seen[] = [];
+    let body: unknown = LIVE_USAGE;
+    const poolProvider = provider("https://lb.example.com/backend-api/codex", undefined, seen);
+    poolProvider.fetch = (async () => Response.json(body)) as typeof fetch;
+    const cfg = config("my-pool", poolProvider);
+    expect((await fetchProviderQuotaReports(cfg, true)).reports[0]!.quota.weeklyPercent).toBeCloseTo(90.4, 1);
+
+    body = { ...LIVE_USAGE, upstream_limits: [], account_pool_usage: null, purchased_credits: { balance: 12.5, unlimited: false } };
+    const result = await fetchProviderQuotaReports(cfg, true);
+    expect(result.reports).toHaveLength(1);
+    const { quota } = result.reports[0]!;
+    expect(quota.codexCredits).toEqual({ balance: "12.5", unlimited: false });
+    expect([quota.fiveHourPercent, quota.weeklyPercent, quota.monthlyPercent]).toEqual([undefined, undefined, undefined]);
+  });
+
+  test("the dashboard read shows the relay balance only while showCodexCredits is on", async () => {
+    const seen: Seen[] = [];
+    const cfg = config("my-pool", provider("https://lb.example.com/backend-api/codex", LIVE_USAGE, seen));
+    const dashboardQuota = async () => {
+      const url = new URL("http://localhost/api/provider-quotas?refresh=1");
+      const response = await handleManagementAPI(new ManagementRequest(url), url, cfg);
+      expect(response?.status).toBe(200);
+      return (await response!.json()).reports[0].quota;
+    };
+    for (const shown of [undefined, false]) {
+      cfg.showCodexCredits = shown;
+      const quota = await dashboardQuota();
+      expect(quota).not.toHaveProperty("codexCredits");
+      expect(quota.weeklyPercent).toBeCloseTo(90.4, 1);
+    }
+    cfg.showCodexCredits = true;
+    expect((await dashboardQuota()).codexCredits).toEqual({ balance: "52451.317714", unlimited: false });
   });
 
   test("hidden upstream quota is an authoritative empty answer, not a row", async () => {

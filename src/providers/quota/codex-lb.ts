@@ -4,9 +4,11 @@ import { resolveProviderApiKey } from "../key-store";
 import { QUOTA_JSON_READ_FAILURE, asRecord, normalizePercent, normalizeResetAt, readQuotaJson, REQUEST_TIMEOUT_MS, toFiniteNumber } from "../quota-wire";
 import type { ProviderQuota } from "../quota-types";
 import type { OcxProviderConfig } from "../../types";
-import { AUTHORITATIVE_EMPTY_QUOTA, report, TERMINAL_QUOTA_FAILURE, type ProviderQuotaProbeResult } from "./report-cache";
+import { AUTHORITATIVE_EMPTY_QUOTA, hasQuotaRows, report, TERMINAL_QUOTA_FAILURE, type ProviderQuotaProbeResult } from "./report-cache";
 
 const CODEX_BACKEND_PATH = "/backend-api/codex";
+/** Report source tag; the quota-pool export leaves these display-only reports out. */
+export const CODEX_LB_USAGE_SOURCE = "codex-lb:usage";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 
 /**
@@ -69,7 +71,7 @@ export function parseCodexLbUsage(body: unknown): ProviderQuota | typeof AUTHORI
     ...(codexCredits ? { codexCredits } : {}),
     updatedAt: Date.now(),
   };
-  return Object.keys(quota).length > 1 ? quota : AUTHORITATIVE_EMPTY_QUOTA;
+  return hasQuotaRows(quota) ? quota : AUTHORITATIVE_EMPTY_QUOTA;
 }
 
 /**
@@ -95,5 +97,5 @@ export async function fetchCodexLbQuota(provider: string, config: OcxProviderCon
   if (raw === QUOTA_JSON_READ_FAILURE) return null;
   const quota = parseCodexLbUsage(raw);
   if (quota === null || quota === AUTHORITATIVE_EMPTY_QUOTA) return quota;
-  return report(provider, "codex-lb:usage", quota);
+  return report(provider, CODEX_LB_USAGE_SOURCE, quota);
 }
