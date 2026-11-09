@@ -25,7 +25,7 @@ export interface AccountQuota {
   };
   resetCredits?: number;
   /** A pooling relay's purchased credit balance (codex-lb), rendered like a Codex seat's credits. */
-  codexCredits?: import("../../src/codex/credits").CodexCredits;
+  codexCredits?: import("../../src/codex/quota-types").CodexCredits;
   updatedAt: number;
 }
 

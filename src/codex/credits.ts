@@ -1,14 +1,5 @@
 import type { OcxConfig } from "../types";
-
-/** Display-only WHAM observation, never persisted or used for routing. */
-export interface CodexCredits {
-  hasCredits?: boolean;
-  unlimited?: boolean;
-  overageLimitReached?: boolean;
-  balance?: string;
-  approxLocalMessages?: [number, number];
-  approxCloudMessages?: [number, number];
-}
+import type { CodexCredits } from "./quota-types";
 
 /**
  * An entry without `credits` means "this identity was observed and reported nothing to show".

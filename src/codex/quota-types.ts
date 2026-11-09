@@ -25,6 +25,19 @@ export const CODEX_EXHAUSTED_USAGE_PERCENT = 100;
 /** Credits have a separate clock: ordinary usage headers do not re-observe the balance. */
 export const CODEX_CREDITS_FRESHNESS_MS = 5 * 60_000;
 
+/**
+ * Display-only WHAM observation, never persisted or used for routing. It lives on this leaf
+ * because the dashboard renders it and must not import the credits owner's config graph.
+ */
+export interface CodexCredits {
+  hasCredits?: boolean;
+  unlimited?: boolean;
+  overageLimitReached?: boolean;
+  balance?: string;
+  approxLocalMessages?: [number, number];
+  approxCloudMessages?: [number, number];
+}
+
 export interface CodexSpendableCredits {
   hasCredits?: boolean;
   unlimited?: boolean;
