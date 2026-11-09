@@ -24,6 +24,8 @@ export interface AccountQuota {
     unlimited?: boolean;
   };
   resetCredits?: number;
+  /** A pooling relay's purchased credit balance (codex-lb), rendered like a Codex seat's credits. */
+  codexCredits?: import("../../src/codex/credits").CodexCredits;
   updatedAt: number;
 }
 

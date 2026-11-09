@@ -14,6 +14,7 @@ import {
   type ProviderQuotaReport,
 } from "./report-cache";
 import { getTokenForAccountQuotaProbe } from "./account-cache";
+import { codexLbUsageUrl, fetchCodexLbQuota } from "./codex-lb";
 import type { AccountQuotaMode, ProviderQuota, ProviderQuotaCreditsUsd } from "../quota-types";
 import type { OcxProviderConfig } from "../../types";
 
@@ -1467,6 +1468,7 @@ export function keyQuotaReaderForProvider(name: string, provider: OcxProviderCon
   // Abliteration has no registry preset, so it is usually a custom provider under any name; the
   // canonical-URL guard alone decides eligibility and keeps the key off lookalike hosts.
   if (isCanonicalAbliterationBaseUrl(provider.baseUrl)) return fetchAbliterationQuota;
+  if (codexLbUsageUrl(provider)) return fetchCodexLbQuota;
   return null;
 }
 
