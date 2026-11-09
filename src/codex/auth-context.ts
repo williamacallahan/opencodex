@@ -1410,7 +1410,7 @@ async function resolveCodexAuthContextUnannotated(
     };
     const poolSelection = poolLunaReserveSelection(config,
       fixedAccountId === undefined && !requestScopedMainCredential ? options.modelId : undefined,
-      quotaScope, selectionOptions, options.excludeAccountId);
+      quotaScope, selectionOptions, options.excludeAccountId, affinityKey);
     selectionOptions = poolSelection.options;
     quotaScope = poolSelection.quotaScope;
     poolReserve = poolSelection.reserve;

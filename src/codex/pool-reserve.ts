@@ -7,6 +7,7 @@ import { getAccountQuota } from "./quota";
 import { resetAtToMs, type StoredAccountQuota, type WhamUsageResponse } from "./quota-types";
 import { grantsReserve, reserveLimits } from "./reserve-availability";
 import { getEligiblePoolAccounts } from "./routing/selection";
+import { getThreadAffinity } from "./routing/thread-affinity";
 import type { CodexQuotaScope } from "./routing/health-store";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers-destination";
 
@@ -55,10 +56,15 @@ export function poolReserveHoldResetAt(accountId: string, now = Date.now()): num
   return now + 60_000;
 }
 
-/** Keep the existing selector and its pause, credential, health, affinity and priority policies. */
+/**
+ * Reserve is Luna-only while included quota is shared with Sol and Astra, so a fresh Reserve
+ * goes before another seat's included quota. A thread bound to a seat that still has included
+ * quota keeps Luna there, with its prompt cache. Selection keeps its pause, credential, health,
+ * affinity and priority policies.
+ */
 export function poolLunaReserveSelection(
   config: OcxConfig, modelId: string | undefined, quotaScope: CodexQuotaScope | undefined,
-  options: CodexAccountUsabilityOptions, excludeId?: string, now = Date.now(),
+  options: CodexAccountUsabilityOptions, excludeId?: string, affinityKey?: string, now = Date.now(),
 ): { options: CodexAccountUsabilityOptions; quotaScope: CodexQuotaScope | undefined; reserve: boolean } {
   const unchanged = { options, quotaScope, reserve: false };
   if (modelId !== "gpt-6-luna") return unchanged;
@@ -68,12 +74,16 @@ export function poolLunaReserveSelection(
     && hasFreshPoolReserve(account.id, now)).map(account => account.id));
   if (reserveIds.size === 0) return unchanged;
   const includedOnly: CodexAccountUsabilityOptions = { ...options, poolCapacity: "included" };
-  if (getEligiblePoolAccounts(config, excludeId, now, quotaScope, includedOnly).length > 0) {
+  const included = getEligiblePoolAccounts(config, excludeId, now, quotaScope, includedOnly);
+  const boundId = affinityKey === undefined ? undefined : getThreadAffinity(affinityKey, quotaScope)?.accountId;
+  if (boundId !== undefined && included.includes(boundId)) {
     return { ...unchanged, options: includedOnly };
   }
   const reserveOptions: CodexAccountUsabilityOptions = { ...options, modelEligibleAccountIds: reserveIds, poolCapacity: "reserve" };
-  if (getEligiblePoolAccounts(config, excludeId, now, "reserve", reserveOptions).length === 0) return unchanged;
-  return { options: reserveOptions, quotaScope: "reserve", reserve: true };
+  if (getEligiblePoolAccounts(config, excludeId, now, "reserve", reserveOptions).length > 0) {
+    return { options: reserveOptions, quotaScope: "reserve", reserve: true };
+  }
+  return included.length > 0 ? { ...unchanged, options: includedOnly } : unchanged;
 }
 
 /** The shared Responses serialization feeds both HTTP and WebSocket dispatch. */

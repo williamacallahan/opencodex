@@ -1287,11 +1287,12 @@ still forwards, and a proxy running in the `client` runtime role is unchanged. E
 restores the normal Reserve path rather than the refusal.
 
 **Automatic Pool fallback for Luna.** Pool account usage probes opt in to Luna Reserve and show
-each granted window as a separate **Luna Reserve** bar, alongside ordinary weekly usage. When
-automatic Pool routing cannot serve `gpt-6-luna` from ordinary quota, it uses a Pool seat with a
-fresh Reserve grant below 100% and sends the upstream model `gpt-reserve`. Ordinary capacity comes
-first, then Reserve, then credits only on accounts already allowed to spend them. Other models do
-not use this fallback. A missing, expired or exhausted grant preserves the existing quota refusal.
+each granted window as a separate **Luna Reserve** bar, alongside ordinary weekly usage. Automatic
+Pool routing serves `gpt-6-luna` from a Pool seat with a fresh Reserve grant below 100% and sends
+the upstream model `gpt-reserve`. Reserve is Luna-only, while ordinary quota is shared with Sol and
+Astra, so Reserve comes first, then ordinary capacity, then credits only on accounts already allowed
+to spend them. A conversation already bound to a seat with ordinary capacity stays there on Luna.
+Other models do not use this fallback. A missing, expired or exhausted grant preserves the existing quota refusal.
 This does not change the explicit Desktop Reserve opt-in or main-login behavior described above.
 
 ## The subagent picker
