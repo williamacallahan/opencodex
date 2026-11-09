@@ -7,6 +7,7 @@ export type { OcxRuntimeProviderConfig } from "./auth-context-provider";
 export { stripCodexRuntimeProviderFields } from "./auth-context-provider";
 import { bindPoolCreditPolicy, poolCreditHoldResetAt, poolContextCreditHoldResetAt, poolCreditRecoveryNeeded, poolContextCreditRecoveryNeeded, poolCreditRecoveryRetryAt, poolUnavailableUntilKnownHorizon } from "./pool-credit-policy";
 import { poolLunaReserveSelection } from "./pool-reserve";
+import { adoptLegacyLineageAffinity } from "./routing/thread-affinity";
 import { nextQuotaQueryDelay } from "./quota-query-backoff";
 import { noteMainAccountActivity } from "./main-account-external-usage";
 import { codexAccountPriorityFailbackEnabled } from "./account-priority";
@@ -1291,6 +1292,11 @@ async function resolveCodexAuthContextUnannotated(
   const lineage = affinityKey !== undefined && poolStateEligible(fixedAccountId, requestScopedMainCredential)
     ? recordCodexThreadLineage(headers)
     : undefined;
+  // Adopt both Luna lanes before the Reserve planner compares their bindings.
+  if (options.modelId === "gpt-6-luna" && affinityKey !== undefined && lineage !== undefined) {
+    adoptLegacyLineageAffinity(affinityKey, lineage, Date.now(), quotaScope, options.modelId);
+    adoptLegacyLineageAffinity(affinityKey, lineage, Date.now(), "reserve", options.modelId);
+  }
   // Why this request is on this account, carried to the request log so a move reads as an event
   // instead of something inferred from account labels across lines (#4546).
   let affinityDecision: CodexAffinityDecision | undefined;

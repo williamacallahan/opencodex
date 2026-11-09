@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../../src/types";
+import * as accountStore from "../../src/codex/account-store";
 import { capturePoolQuotaWriter, saveCodexAccountCredential } from "../../src/codex/account-store";
 import { fetchPoolAccountQuota } from "../../src/codex/auth-api/pool-quota-probe";
 import { poolAccountDto } from "../../src/codex/auth-api/account-list";
@@ -12,7 +13,7 @@ import { resetQuotaQueryBackoffForTests } from "../../src/codex/quota-query-back
 import { POOL_RESERVE_FRESHNESS_MS, poolLunaReserveSelection } from "../../src/codex/pool-reserve";
 import { clearAccountNeedsReauth } from "../../src/codex/account-runtime-state";
 import { clearCodexUpstreamHealth, clearThreadAccountMap, getCodexQuotaHealthSnapshot, recordCodexUpstreamOutcome } from "../../src/codex/routing";
-import { bindThreadAffinity } from "../../src/codex/routing/thread-affinity";
+import { bindThreadAffinity, deleteThreadAffinity, getThreadAffinity } from "../../src/codex/routing/thread-affinity";
 import { forgetCodexFailureWindows, isCodexFailureWindowDegraded, noteCodexFailureWindowSample } from "../../src/codex/routing/failure-window";
 import { codexFailureWindowOutcomeMeta } from "../../src/codex/routing/failure-window";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
@@ -57,8 +58,8 @@ function usage(grant = true) {
     used_percent: 25, reset_at: Math.floor(now / 1000) + 604_800, limit_window_seconds: 604_800,
   } } }] };
 }
-async function build(cfg = config(), modelId = "gpt-6-luna") {
-  const ctx = await resolveCodexAuthContext(new Headers(), cfg, "pool", { modelId });
+async function build(cfg = config(), modelId = "gpt-6-luna", requestHeaders = new Headers()) {
+  const ctx = await resolveCodexAuthContext(requestHeaders, cfg, "pool", { modelId });
   const headers = materializeCodexUpstreamAuth(new Headers(), ctx, { config: cfg, modelId });
   const provider = applyCodexAuthContextToProvider(base, ctx, "pool");
   const raw = { model: modelId, input: [] };
@@ -161,6 +162,90 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     const moved = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", {}, undefined, "luna-on-held", now);
     expect(moved.reserve).toBe(true); expect(moved.quotaScope).toBe("reserve");
   });
+  test("an excluded included owner does not steer a retry onto another shared seat", () => {
+    reserve(); ordinary(A, 40);
+    bindThreadAffinity("excluded-luna-owner", A, now, "shared");
+    const selected = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", {}, A, "excluded-luna-owner", now);
+    expect(selected.reserve).toBe(true);
+    expect(selected.quotaScope).toBe("reserve");
+  });
+  test("auth context adopts a legacy parent binding before choosing Reserve scope", async () => {
+    reserve(); ordinary(A, 40);
+    const legacyParent = "legacy-parent-thread";
+    bindThreadAffinity(legacyParent, A, now, "shared");
+    const headers = new Headers({
+      "session-id": "child-session",
+      "thread-id": "child-thread",
+      "x-codex-parent-thread-id": legacyParent,
+    });
+
+    const { ctx } = await build(config(), "gpt-6-luna", headers);
+
+    expect(ctx.kind).toBe("pool");
+    expect(ctx.accountId).toBe(A);
+    expect(ctx.quotaScope).toBe("shared");
+    expect(ctx.affinityKey).toBeDefined();
+    expect(getThreadAffinity(ctx.affinityKey!, "shared")?.accountId).toBe(A);
+    expect(getThreadAffinity(legacyParent, "shared")).toBeUndefined();
+  });
+  test.each(["quota", "reset-first"] as const)("%s keeps an included owner while another seat has Reserve", async strategy => {
+    ordinary(A, 90);
+    const cfg = config(); cfg.accountPoolStrategy = strategy; cfg.autoSwitchThreshold = 80;
+    cfg.pool = { cacheAffinity: false };
+    const headers = new Headers({ "session-id": "kept-session", "thread-id": "kept-thread" });
+    const first = await build(cfg, "gpt-6-luna", headers);
+    expect(first.ctx.accountId).toBe(A);
+    const alternate = "pool-reserve-c";
+    saveCodexAccountCredential(alternate, { accessToken: "fixture-access-c", refreshToken: "fixture-refresh-c",
+      chatgptAccountId: "fixture-workspace-c", expiresAt: now + 86_400_000 });
+    cfg.codexAccounts!.push({ id: alternate, email: "c@example.test", isMain: false, plan: "pro" });
+    updateAccountQuota(alternate, 10, now + 3_600_000);
+    reserve();
+    const second = await build(cfg, "gpt-6-luna", headers);
+    expect(second.ctx.accountId).toBe(A);
+    expect(second.ctx.quotaScope).toBe("shared");
+    expect(JSON.parse(second.request.body).model).toBe("gpt-6-luna");
+  });
+  test("a newer Reserve binding wins after the older shared owner's quota resets", async () => {
+    ordinary(A, 40);
+    const headers = new Headers({ "session-id": "serving-session", "thread-id": "serving-thread" });
+    const first = await build(config(), "gpt-6-luna", headers);
+    expect(first.ctx.accountId).toBe(A);
+    now += 1000; ordinary(A); reserve();
+    const moved = await build(config(), "gpt-6-luna", headers);
+    expect(moved.ctx.accountId).toBe(B);
+    expect(moved.ctx.quotaScope).toBe("reserve");
+    now += 1000; ordinary(A, 0);
+    const kept = await build(config(), "gpt-6-luna", headers);
+    expect(kept.ctx.accountId).toBe(B);
+    expect(kept.ctx.quotaScope).toBe("reserve");
+    now += 1000; bindThreadAffinity(kept.ctx.affinityKey!, A, now, "shared");
+    expect((await build(config(), "gpt-6-luna", headers)).ctx.accountId).toBe(A);
+  });
+  test.each([false, true])("legacy migration preserves serving order when Reserve is legacy: %s", async reserveLegacy => {
+    ordinary(A, 40);
+    const originalUse = now;
+    const parent = "legacy-serving-parent";
+    const headers = new Headers({ "session-id": "legacy-serving-session", "thread-id": "legacy-serving-thread",
+      "x-codex-parent-thread-id": parent });
+    const first = await build(config(), "gpt-6-luna", headers);
+    expect(first.ctx.accountId).toBe(A);
+    now += 1000; ordinary(A); reserve();
+    const moved = await build(config(), "gpt-6-luna", headers);
+    expect(moved.ctx.accountId).toBe(B);
+    const key = moved.ctx.affinityKey!;
+    deleteThreadAffinity(key, "shared");
+    bindThreadAffinity(parent, A, originalUse, "shared");
+    if (reserveLegacy) {
+      deleteThreadAffinity(key, "reserve");
+      bindThreadAffinity(parent, B, now, "reserve");
+    }
+    now += 1000; ordinary(A, 0);
+    const kept = await build(config(), "gpt-6-luna", headers);
+    expect(kept.ctx.accountId).toBe(B);
+    expect(kept.ctx.quotaScope).toBe("reserve");
+    expect(getThreadAffinity(key, "shared")?.lastUsedAt).toBe(originalUse);
+  });
   test("Reserve comes before a seat that already permits spending fresh credits", async () => {
     reserve(); const cfg = config(); cfg.creditCodexAccountIds = [A];
     setAccountQuotaFromParsed(A, { credits: { hasCredits: true, balance: 20, observedAt: now } });
@@ -229,6 +314,37 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     expect(getCodexQuotaHealthSnapshot(B, "reserve", now)?.quotaScope).toBe("reserve");
     expect(getCodexQuotaHealthSnapshot(B, "shared", now)).toBeNull();
     await expect(build(cfg)).rejects.toBeInstanceOf(CodexPoolExhaustedError);
+  });
+  test("Reserve headers without a captured writer preserve ordinary display quota while ordinary writer-free headers still update it", () => {
+    ordinary(B, 71);
+    const reserveHeaders = new Headers({ "x-codex-primary-used-percent": "30",
+      "x-codex-primary-reset-at": String(Math.floor(now / 1000) + 604_800),
+      "x-codex-secondary-used-percent": "20",
+      "x-codex-secondary-reset-at": String(Math.floor(now / 1000) + 604_800) });
+    applyAccountQuotaFromUpstreamHeaders(B, reserveHeaders, undefined, undefined, { modelId: " GPT-RESERVE ", poolResponse: true });
+    expect(getAccountQuota(B)?.weeklyPercent).toBe(71);
+    applyAccountQuotaFromUpstreamHeaders(B, reserveHeaders, undefined, undefined, { modelId: "gpt-6-luna", poolResponse: true });
+    expect(getAccountQuota(B)?.weeklyPercent).toBe(30);
+  });
+  test("automatic Reserve response publication keeps quota mode when writer capture is unavailable", async () => {
+    reserve(B);
+    const capture = spyOn(accountStore, "capturePoolQuotaWriter").mockReturnValue(undefined);
+    const cfg = config(); cfg.providers.openai = { ...base, codexAccountMode: "pool" };
+    spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (_input: unknown, _init?: RequestInit) =>
+      new Response(JSON.stringify({ id: "resp_pool_reserve_header_guard", object: "response", status: "completed", created_at: 1,
+        model: "gpt-reserve", output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } }), { headers: {
+        "content-type": "application/json", "x-codex-primary-used-percent": "30",
+        "x-codex-primary-reset-at": String(Math.floor(now / 1000) + 604_800),
+        "x-codex-secondary-used-percent": "20", "x-codex-secondary-reset-at": String(Math.floor(now / 1000) + 604_800),
+      } }), { preconnect() {} }));
+    const release = acquireOwnedSpendHome();
+    try {
+      const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
+        headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "openai/gpt-6-luna", input: "ping", stream: false }) }), cfg, { model: "", provider: "" });
+      expect(response.status).toBe(200);
+      expect(capture).toHaveBeenCalled();
+      expect(getAccountQuota(B)?.weeklyPercent).toBe(100);
+    } finally { release(); }
   });
   for (const compact of [false, true]) test.each(["reserve", "reserve-before-included", "ordinary", "sol"])(`Responses${compact ? " compact" : ""} HTTP %s dispatches only the expected upstream model`, async state => {
     if (state !== "ordinary") reserve();

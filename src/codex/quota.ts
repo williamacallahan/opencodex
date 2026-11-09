@@ -656,9 +656,12 @@ export function applyAccountQuotaFromUpstreamHeaders(
   headers: Headers,
   writerGeneration = captureConfigGeneration(),
   mainWriter?: MainQuotaWriter,
-  options?: { modelId?: string; poolWriter?: PoolQuotaWriter; poolResponse?: boolean },
+  options?: { modelId?: string; poolWriter?: PoolQuotaWriter; poolResponse?: boolean; poolReserve?: boolean },
 ): void {
-  if (options?.poolWriter?.poolReserve) return;
+  // Request mode owns this decision. Writer capture is optional, so a missing writer
+  // cannot make Reserve headers eligible to replace the ordinary display quota.
+  if (options?.poolWriter?.poolReserve || options?.poolReserve === true
+    || options?.modelId?.trim().toLowerCase() === "gpt-reserve") return;
   const quota = parseUpstreamQuotaHeaders(headers, options);
   if (!quota) return;
   const policyQuota = [

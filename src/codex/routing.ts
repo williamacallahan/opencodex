@@ -516,6 +516,7 @@ function pickAffinityPriorityFailback(
   quotaScope?: CodexQuotaScope,
   selectionOptions?: CodexAccountUsabilityOptions,
 ): string | null {
+  if (selectionOptions?.poolCapacity === "included") return null;
   if (!codexAccountPriorityFailbackEnabled(config, accountId)
     || accountPoolStrategyForScope(config, quotaScope) !== "quota") return null;
   if (!pickPriorityPreemption(config, accountId, now, quotaScope, selectionOptions)) return null;

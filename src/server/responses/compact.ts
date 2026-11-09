@@ -1088,7 +1088,7 @@ export async function handleResponsesCompact(
       applyAccountQuotaFromUpstreamHeaders(ctx.accountId, response.headers, ctx.writerGeneration,
         ctx.kind === "main-pool" ? ctx.mainQuotaWriter : undefined,
         { modelId: route.modelId, poolWriter: ctx.kind === "pool" ? ctx.poolQuotaWriter : undefined,
-          poolResponse: ctx.kind === "pool" });
+          poolResponse: ctx.kind === "pool", poolReserve: ctx.kind === "pool" && ctx.poolReserve === true });
     };
     // Takes its context explicitly: the alternate-account flow below records a rejection
     // against A while promoting B, then records B's own outcome. A closure over a single
@@ -1662,7 +1662,7 @@ export async function handleResponsesCompact(
     if (outcomeCtx.kind === "pool") {
       const { applyAccountQuotaFromUpstreamHeaders } = await import("../../codex/quota");
       applyAccountQuotaFromUpstreamHeaders(outcomeCtx.accountId, upstream.headers, outcomeCtx.writerGeneration,
-        undefined, { modelId: route.modelId, poolWriter: outcomeCtx.poolQuotaWriter, poolResponse: true });
+        undefined, { modelId: route.modelId, poolWriter: outcomeCtx.poolQuotaWriter, poolResponse: true, poolReserve: outcomeCtx.poolReserve === true });
     }
     const retryAfter = upstream.headers.get("retry-after");
     const resetAt = [

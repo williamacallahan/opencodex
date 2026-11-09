@@ -540,7 +540,7 @@ export async function deliverPassthroughResponse(
         applyAccountQuotaFromUpstreamHeaders(admissionState.authCtx.accountId, upstreamResponse.headers,
           admissionState.authCtx.writerGeneration, admissionState.authCtx.kind === "main-pool" ? admissionState.authCtx.mainQuotaWriter : undefined,
           { modelId: route.modelId, poolWriter: admissionState.authCtx.kind === "pool" ? admissionState.authCtx.poolQuotaWriter : undefined,
-            poolResponse: admissionState.authCtx.kind === "pool" });
+            poolResponse: admissionState.authCtx.kind === "pool", poolReserve: admissionState.authCtx.kind === "pool" && admissionState.authCtx.poolReserve === true });
       }
       if (terminalBodyWillRecord) {
         options.setTerminalOutcomeRecorder?.((status, httpStatusOverride) => {

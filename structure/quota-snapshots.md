@@ -18,10 +18,15 @@ Only automatic stored-account requests for `gpt-6-luna` may use it. Reserve is L
 ordinary quota is shared with Sol and Astra, so fresh Reserve below 100% wins, then ordinary
 capacity, then previously consented fresh credits, then the existing refusal. A thread bound to a
 seat that still has ordinary capacity keeps Luna there.
+Before the selector changes scope, `src/codex/auth-context.ts` adopts a live legacy parent binding
+onto the current cohort key in the existing quota scope, so a code-swap thread keeps its ordinary
+seat when that seat still has capacity. A genuinely unbound thread can still select Reserve.
 The existing selector still enforces pause, plan, credential, failure-window and account-wide holds.
 Reserve uses its independent quota scope; shared Responses serialization changes only the wire model
 to `gpt-reserve` for HTTP and WebSocket. Ordinary headers cannot renew its five-minute WHAM observation,
-and Reserve headers do not overwrite ordinary quota. Materialization and physical sends recheck the
+and Reserve headers do not overwrite ordinary quota, even when an optional Pool history writer was not
+captured. The header publisher uses the normalized wire model and automatic Reserve request mode;
+writer availability does not determine which quota the response describes. Materialization and physical sends recheck the
 grant, including after credential-refresh context copies. Explicit Desktop Reserve and native-main
 authorization remain separate and unchanged. Coverage: `tests/codex-integration/codex-pool-reserve.test.ts`.
 
@@ -43,3 +48,5 @@ Atomic replacement and account identity checks stay with the existing writer and
 `tests/providers/provider-account-quota-persistence.test.ts` check real disk contents under
 controlled timers: idle debounce, consecutive sustained-update windows, cancellation and
 home reset, removed rows, latest provider callbacks, and recovery after a failed write.
+
+When Reserve is available, a continuing Luna thread keeps its eligible included owner through quota and reset-first preference checks. If its newer live binding is already in Reserve, that binding takes precedence over an older shared binding after the old owner's ordinary quota resets. The canonical legacy-lineage adoption preserves the original binding clocks, and the planner compares those last-use times; it creates no separate owner record.

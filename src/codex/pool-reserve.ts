@@ -7,7 +7,7 @@ import { getAccountQuota } from "./quota";
 import { resetAtToMs, type StoredAccountQuota, type WhamUsageResponse } from "./quota-types";
 import { grantsReserve, reserveLimits } from "./reserve-availability";
 import { getEligiblePoolAccounts, isCodexAccountSelectable } from "./routing/selection";
-import { getThreadAffinity } from "./routing/thread-affinity";
+import { getThreadAffinity, isThreadAffinityExpired, isThreadAffinityGenerationLive } from "./routing/thread-affinity";
 import type { CodexQuotaScope } from "./routing/health-store";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers-destination";
 
@@ -75,13 +75,22 @@ export function poolLunaReserveSelection(
   if (reserveIds.size === 0) return unchanged;
   const includedOnly: CodexAccountUsabilityOptions = { ...options, poolCapacity: "included" };
   const included = getEligiblePoolAccounts(config, excludeId, now, quotaScope, includedOnly);
+  const reserveOptions: CodexAccountUsabilityOptions = { ...options, modelEligibleAccountIds: reserveIds, poolCapacity: "reserve" };
+  if (affinityKey !== undefined) {
+    const shared = getThreadAffinity(affinityKey, quotaScope);
+    const serving = getThreadAffinity(affinityKey, "reserve");
+    if (serving && (!shared || serving.lastUsedAt > shared.lastUsedAt)
+      && !isThreadAffinityExpired(serving, now) && isThreadAffinityGenerationLive(serving)
+      && isCodexAccountSelectable(config, serving.accountId, now, "reserve", reserveOptions)) {
+      return { options: reserveOptions, quotaScope: "reserve", reserve: true };
+    }
+  }
   // The resolver's bound-reuse rule, not new-thread placement: a bound thread is never
   // steered away by the failure window that only shapes where new threads land.
   const boundId = affinityKey === undefined ? undefined : getThreadAffinity(affinityKey, quotaScope)?.accountId;
-  if (boundId !== undefined && isCodexAccountSelectable(config, boundId, now, quotaScope, includedOnly)) {
+  if (boundId !== undefined && boundId !== excludeId && isCodexAccountSelectable(config, boundId, now, quotaScope, includedOnly)) {
     return { ...unchanged, options: includedOnly };
   }
-  const reserveOptions: CodexAccountUsabilityOptions = { ...options, modelEligibleAccountIds: reserveIds, poolCapacity: "reserve" };
   if (getEligiblePoolAccounts(config, excludeId, now, "reserve", reserveOptions).length > 0) {
     return { options: reserveOptions, quotaScope: "reserve", reserve: true };
   }

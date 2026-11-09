@@ -37,7 +37,8 @@ export function retainsBoundAccountForQuota(
   config: OcxConfig,
   selectionOptions?: CodexAccountUsabilityOptions,
 ): boolean {
-  return isCacheAffinityEnabled(config)
+  // The Luna Reserve planner keeps an eligible included owner before switching budgets.
+  return selectionOptions?.poolCapacity === "included" || isCacheAffinityEnabled(config)
     || selectionOptions?.retainAccountForUploadedFiles === true;
 }
 

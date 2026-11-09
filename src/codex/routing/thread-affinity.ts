@@ -569,6 +569,7 @@ function bindThreadAffinityForScope(
   accountId: string,
   now: number,
   scope: ThreadAffinityScope,
+  observed?: Pick<ThreadAffinityEntry, "createdAt" | "lastUsedAt" | "lastReevalAt">,
 ): void {
   if (!admissibleAffinityComponent(threadId) || !admissibleAffinityComponent(accountId)) return;
   const record = accountId === MAIN_CODEX_ACCOUNT_ID ? undefined : readCodexAccountRecord(accountId);
@@ -582,11 +583,11 @@ function bindThreadAffinityForScope(
     accountId,
     generation: accountId === MAIN_CODEX_ACCOUNT_ID ? 0 : record!.generation,
     identityFence: fence,
-    createdAt: previous?.createdAt ?? now,
-    lastUsedAt: now,
-    lastReevalAt: now,
+    createdAt: observed?.createdAt ?? previous?.createdAt ?? now,
+    lastUsedAt: observed?.lastUsedAt ?? now,
+    lastReevalAt: observed?.lastReevalAt ?? now,
   };
-  if (fence) recordThreadBind(threadId, scope, { scope, accountId, fence, createdAt: entry.createdAt, lastUsedAt: now });
+  if (fence) recordThreadBind(threadId, scope, { scope, accountId, fence, createdAt: entry.createdAt, lastUsedAt: entry.lastUsedAt });
   else recordThreadDelete(threadId, scope);
   affinities.set(scope, entry);
   if (!previous) threadAffinityEntryTotal += 1;
@@ -645,7 +646,7 @@ function adoptLegacyAffinityForScope(
   const legacy = getThreadAffinityForScope(legacyKey, scope);
   if (legacy === undefined) return;
   if (!isThreadAffinityExpired(legacy, now) && isThreadAffinityGenerationLive(legacy)) {
-    bindThreadAffinityForScope(threadId, legacy.accountId, now, scope);
+    bindThreadAffinityForScope(threadId, legacy.accountId, now, scope, legacy);
   }
   deleteThreadAffinityForScope(legacyKey, scope);
 }
