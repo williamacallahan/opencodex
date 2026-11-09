@@ -25,7 +25,7 @@ import {
   setCachedProviderAccountQuotaForTests,
   sweepExpiredProviderAccountQuotaRows,
 } from "../../../src/providers/quota";
-import { getAccountSet, saveCredential, setActiveAccount } from "../../../src/oauth/store";
+import { credentialGeneration, getAccountCredential, getAccountSet, saveCredential, setActiveAccount } from "../../../src/oauth/store";
 import { clearPoolRotationState } from "../../../src/codex/pool-rotation";
 import { removeTreeWithRetry } from "../../helpers/remove-tree";
 import { settleAccountQuotaPersistForTests } from "../../../src/providers/account-quota-disk";
@@ -35,6 +35,8 @@ const originalHome = process.env.OPENCODEX_HOME;
 const originalFetch = globalThis.fetch;
 const originalNow = Date.now;
 let home: string;
+/** Disk rows carry the generation of the credential they were measured under, or they are historical. */
+const ownedBy = (id: string) => credentialGeneration(getAccountCredential("anthropic", id)!);
 
 beforeEach(() => {
   globalThis.fetch = (async () => { throw new Error("Unexpected network request in quota test"); }) as typeof fetch;
@@ -414,7 +416,7 @@ describe("Anthropic observation and probe clocks", () => {
     test(`restart keeps Anthropic probes due with new headers: ${observeAfterRestart}`, async () => {
       const [id] = await seed(1);
       const updatedAt = Date.now();
-      const saved = { fiveHourPercent: 41, customWindows: [{ label: "Opus", percent: 63 }], updatedAt };
+      const saved = { fiveHourPercent: 41, customWindows: [{ label: "Opus", percent: 63 }], updatedAt, anthropicCredentialGeneration: ownedBy(id!) };
       writeFileSync(join(home, "provider-account-quota-cache.json"), JSON.stringify({
         version: 1,
         rows: { [`anthropic\u0000${id}`]: saved, "zai\u0000other": { monthlyPercent: 17, updatedAt } },
@@ -741,7 +743,7 @@ describe("Anthropic known-reset expiry", () => {
       [`anthropic\u0000${id}`]: {
         fiveHourPercent: 41, weeklyPercent: 100, weeklyResetAt: start + 60_000,
         customWindows: [{ label: "Opus", percent: 100, resetAt: start + 60_000 }, { label: "Fable", percent: 63 }],
-        updatedAt: now,
+        updatedAt: now, anthropicCredentialGeneration: ownedBy(id!),
       },
     } }));
     clearAccountQuotaCache();
@@ -777,7 +779,7 @@ describe("Anthropic known-reset expiry", () => {
       [`anthropic\u0000${id}`]: {
         weeklyPercent: 80, weeklyResetAt: "unknown",
         customWindows: [{ label: "Opus", percent: 70, resetAt: null }, { label: "Sonnet", percent: 60, resetAt: "later" }],
-        updatedAt: now,
+        updatedAt: now, anthropicCredentialGeneration: ownedBy(id!),
       },
     } }));
     clearAccountQuotaCache();
@@ -814,7 +816,7 @@ describe("Anthropic known-reset expiry", () => {
     // The fired callback admits its write after any overlapping config-root ACL flight (#7815).
     await settleAccountQuotaPersistForTests();
     const disk = JSON.parse(readFileSync(join(home, "provider-account-quota-cache.json"), "utf8"));
-    expect(disk.rows[`anthropic\u0000${id}`]).toEqual({ fiveHourPercent: 41, updatedAt: start });
+    expect(disk.rows[`anthropic\u0000${id}`]).toEqual({ fiveHourPercent: 41, updatedAt: start, anthropicCredentialGeneration: ownedBy(id!) });
     expect(disk.rows["zai\u0000untouched"]).toEqual(saved);
   });
 });

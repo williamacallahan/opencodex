@@ -23,8 +23,9 @@ import { log } from "../helpers/request-log-entry";
 const PROVIDER_KEY = "zq7Vb2LmN4pX9tR1sK8wD3fH6jY0cA5e";
 const NUMERIC_KEY = "73915028461739205817";
 // The deployment line keeps sanitized upstream code, type and request id on rows; only the free
-// upstream text is dropped. Credential echoes in those fields are rejected against the configured and
-// outbound credential sets (tests/usage/usage-failure-persistence.test.ts), not by field name.
+// upstream text is dropped, and attempt records keep none of the four. Credential echoes in those
+// fields are rejected against the configured and outbound credential sets
+// (tests/usage/usage-failure-persistence.test.ts), not by field name.
 const UPSTREAM_TEXT = {
   upstreamError: "invalid key " + PROVIDER_KEY + " " + NUMERIC_KEY,
   upstreamErrorCode: "fixture_code",
@@ -194,6 +195,8 @@ describe("request-log rows keep only proxy-owned error facts", () => {
     expect(dto).not.toContain(NUMERIC_KEY);
     expect((live as Record<string, unknown>).upstreamError).toBeUndefined();
     expect(live).toMatchObject({ upstreamErrorCode: "fixture_code", upstreamErrorType: "invalid_request_error", upstreamRequestId: "req_fixture" });
+    // Attempt records skip the top-level credential check, so the live /api/logs row keeps no upstream field on them.
+    for (const field of Object.keys(UPSTREAM_TEXT)) expect(live.attempts?.[0]).not.toHaveProperty(field);
     expect(persisted()).not.toContain(PROVIDER_KEY);
     expect(persisted()).not.toContain(NUMERIC_KEY);
     const hydrated = requestLogEntryFromPersistedUsage(readUsageEntries().find(entry => entry.requestId === "canary-direct")!);

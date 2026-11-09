@@ -168,6 +168,12 @@ export function errorDetailFor(entry: ErrorDetailSource): ErrorDetail {
  */
 export const UPSTREAM_TEXT_FIELDS = ["upstreamError"] as const;
 
+/**
+ * Per-attempt records never pass that credential check, so they keep none of the upstream fields:
+ * the free text and the code, type and request id are all removed from each attempt.
+ */
+const ATTEMPT_UPSTREAM_FIELDS = [...UPSTREAM_TEXT_FIELDS, "upstreamErrorCode", "upstreamErrorType", "upstreamRequestId"] as const;
+
 type ProjectableEntry = ErrorDetailSource & {
   attempts?: unknown; attemptNormalizationDropped?: unknown; responseServiceTier?: unknown; tierOutcome?: unknown;
 };
@@ -185,7 +191,7 @@ function boundedTierOutcome(outcome: unknown): unknown {
 /**
  * The live-row form of {@link errorDetailFor}: attach the proxy-owned facts and remove upstream text.
  * Returns the same object when nothing changes, so callers that rely on identity keep it. Attempt
- * codes outside the vocabulary are corrected, and upstream text fields removed, in place (attempts
+ * codes outside the vocabulary are corrected, and every upstream field removed, in place (attempts
  * keep their identity too).
  */
 export function projectErrorDetail<T extends ProjectableEntry>(entry: T): T {
@@ -193,7 +199,7 @@ export function projectErrorDetail<T extends ProjectableEntry>(entry: T): T {
     for (const attempt of entry.attempts as unknown[]) {
       if (!attempt || typeof attempt !== "object") continue;
       const record = attempt as Record<string, unknown>;
-      for (const field of UPSTREAM_TEXT_FIELDS) if (field in record) delete record[field];
+      for (const field of ATTEMPT_UPSTREAM_FIELDS) if (field in record) delete record[field];
       if ("tierOutcome" in record) record.tierOutcome = boundedTierOutcome(record.tierOutcome);
       if (typeof record.errorCode !== "string") continue;
       const code = normalizeLogErrorCode(record.errorCode, typeof record.status === "number" ? record.status : undefined);
