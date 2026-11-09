@@ -35,7 +35,7 @@ import { latestCodexQuotaObservationSource } from "../codex/quota";
 import { ACCOUNT_LOG_LABEL_RE, oauthAccountLogLabel } from "../codex/account-label";
 import { OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers-destination";
 import { hasCodexPoolProvider, heldProviderQuotaReports, type ProviderQuotaReport } from "../providers/quota/report-cache";
-import { CODEX_LB_USAGE_SOURCE } from "../providers/quota/codex-lb";
+import { CODEX_LB_USAGE_SOURCE } from "../providers/quota-types";
 import {
   accountCacheKey,
   accountQuotaCache,

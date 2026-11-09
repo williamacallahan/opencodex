@@ -2,13 +2,11 @@ import { parseCodexCredits } from "../../codex/credits";
 import { providerOutboundGet } from "../../lib/provider-outbound";
 import { resolveProviderApiKey } from "../key-store";
 import { QUOTA_JSON_READ_FAILURE, asRecord, normalizePercent, normalizeResetAt, readQuotaJson, REQUEST_TIMEOUT_MS, toFiniteNumber } from "../quota-wire";
-import type { ProviderQuota } from "../quota-types";
+import { CODEX_LB_USAGE_SOURCE, type ProviderQuota } from "../quota-types";
 import type { OcxProviderConfig } from "../../types";
 import { AUTHORITATIVE_EMPTY_QUOTA, hasQuotaRows, report, TERMINAL_QUOTA_FAILURE, type ProviderQuotaProbeResult } from "./report-cache";
 
 const CODEX_BACKEND_PATH = "/backend-api/codex";
-/** Report source tag; the quota-pool export leaves these display-only reports out. */
-export const CODEX_LB_USAGE_SOURCE = "codex-lb:usage";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 
 /**
@@ -58,8 +56,8 @@ export function parseCodexLbUsage(body: unknown): ProviderQuota | typeof AUTHORI
   const fiveHourPercent = fiveHour?.percent ?? usedFromRemaining(pool?.primary);
   const weeklyPercent = weekly?.percent ?? usedFromRemaining(pool?.secondary);
   const purchased = asRecord(usage.purchased_credits);
-  const codexCredits = purchased
-    ? parseCodexCredits({ balance: purchased.balance ?? undefined, unlimited: purchased.unlimited })
+  const codexCredits = purchased && purchased.is_partial !== true
+    ? parseCodexCredits({ balance: purchased.balance ?? undefined, unlimited: purchased.unlimited }, { allowNegative: true })
     : null;
   const quota: ProviderQuota = {
     ...(fiveHourPercent !== undefined ? { fiveHourPercent } : {}),

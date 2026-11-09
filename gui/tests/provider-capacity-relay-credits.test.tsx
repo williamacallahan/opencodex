@@ -18,7 +18,15 @@ test("a pooling relay's report renders its pool windows and its purchased credit
   expect(markup).toContain("Credits");
 });
 
-test("a malformed relay balance renders no credits row", () => {
+test("an absent or malformed relay balance renders no credits row", () => {
+  const partial = render({ weeklyPercent: 10 });
+  expect(partial).not.toContain("quota-row--codex-credits");
   const markup = render({ weeklyPercent: 10, codexCredits: { balance: "1e9" } });
   expect(markup).not.toContain("quota-row--codex-credits");
+});
+
+test("a negative relay balance remains visible as a negative value", () => {
+  const markup = render({ weeklyPercent: 10, codexCredits: { balance: "-5", unlimited: false } });
+  expect(markup).toContain('class="quota-val">-5</span>');
+  expect(markup).toContain("--bar-scale:0");
 });

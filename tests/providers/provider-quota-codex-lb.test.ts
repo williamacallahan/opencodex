@@ -4,8 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /** codex-lb pooled usage (`GET /v1/usage`) read through the provider's own key. */
-import { clearProviderQuotaCache, fetchProviderQuotaReports, providerApiKeyQuotaMode } from "../../src/providers/quota";
+import { clearProviderQuotaCache, fetchProviderQuotaReports, flushProviderQuotaObservationsForTests, providerApiKeyQuotaMode } from "../../src/providers/quota";
 import { getCachedProviderRoutingQuota } from "../../src/providers/quota-routing-cache";
+import { clearAccountQuota, flushQuotaObservationsForTests, setAccountQuotaFromParsed } from "../../src/codex/quota";
+import { setQuotaResetSink } from "../../src/quota/reset-observer";
+import { resetQuotaResetStoreForTests } from "../../src/quota/reset-seen-store";
+import type { QuotaResetEvent } from "../../src/quota/reset-detector";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { ManagementRequest } from "../helpers/management-auth";
@@ -80,7 +84,7 @@ describe("codex-lb pooled usage quota", () => {
     expect(getCachedProviderRoutingQuota("my-pool", poolProvider, Date.now())).toBeNull();
   });
 
-  test("a credits-only answer replaces held windows with a report carrying just the balance", async () => {
+  test("a credits-only refresh replaces held windows and clears partial credits", async () => {
     const seen: Seen[] = [];
     let body: unknown = LIVE_USAGE;
     const poolProvider = provider("https://lb.example.com/backend-api/codex", undefined, seen);
@@ -94,13 +98,30 @@ describe("codex-lb pooled usage quota", () => {
     const { quota } = result.reports[0]!;
     expect(quota.codexCredits).toEqual({ balance: "12.5", unlimited: false });
     expect([quota.fiveHourPercent, quota.weeklyPercent, quota.monthlyPercent]).toEqual([undefined, undefined, undefined]);
+
+    // An unknown workspace can coexist with an unlimited flag, but neither is a complete pool balance.
+    body = { ...LIVE_USAGE, upstream_limits: [], account_pool_usage: null,
+      purchased_credits: { balance: 10, unlimited: true, is_partial: true } };
+    expect((await fetchProviderQuotaReports(cfg, true)).reports).toEqual([]);
+    expect((await fetchProviderQuotaReports(cfg)).reports).toEqual([]);
+
+    body = { ...LIVE_USAGE, upstream_limits: [], account_pool_usage: null,
+      purchased_credits: { balance: 12.5, unlimited: false, is_partial: false } };
+    expect((await fetchProviderQuotaReports(cfg, true)).reports[0]!.quota.codexCredits)
+      .toEqual({ balance: "12.5", unlimited: false });
   });
 
-  test("the dashboard read shows the relay balance only while showCodexCredits is on", async () => {
+  test("the dashboard shows relay credits only when enabled and not marked partial", async () => {
     const seen: Seen[] = [];
-    const cfg = config("my-pool", provider("https://lb.example.com/backend-api/codex", LIVE_USAGE, seen));
-    const dashboardQuota = async () => {
-      const url = new URL("http://localhost/api/provider-quotas?refresh=1");
+    let body = { ...LIVE_USAGE, upstream_limits: [...LIVE_USAGE.upstream_limits, {
+      limit_type: "credits", limit_window: "monthly", max_value: 100, current_value: 35,
+      remaining_value: 65, model_filter: null, reset_at: "2026-12-01T00:00:00Z", source: "aggregate",
+    }] };
+    const poolProvider = provider("https://lb.example.com/backend-api/codex", undefined, seen);
+    poolProvider.fetch = (async () => Response.json(body)) as typeof fetch;
+    const cfg = config("my-pool", poolProvider);
+    const dashboardQuota = async (refresh = true) => {
+      const url = new URL(`http://localhost/api/provider-quotas${refresh ? "?refresh=1" : ""}`);
       const response = await handleManagementAPI(new ManagementRequest(url), url, cfg);
       expect(response?.status).toBe(200);
       return (await response!.json()).reports[0].quota;
@@ -113,6 +134,21 @@ describe("codex-lb pooled usage quota", () => {
     }
     cfg.showCodexCredits = true;
     expect((await dashboardQuota()).codexCredits).toEqual({ balance: "52451.317714", unlimited: false });
+
+    body = { ...body, purchased_credits: { ...body.purchased_credits, balance: 10, is_partial: true } };
+    const partial = await dashboardQuota();
+    expect(partial).not.toHaveProperty("codexCredits");
+    expect(partial.fiveHourPercent).toBeCloseTo(37.5, 5);
+    expect(partial.weeklyPercent).toBeCloseTo(90.4, 1);
+    expect(partial.weeklyResetAt).toBe(Date.parse("2026-11-09T10:38:52Z"));
+    expect(partial.monthlyPercent).toBe(35);
+    expect(partial.monthlyResetAt).toBe(Date.parse("2026-12-01T00:00:00Z"));
+    const cachedPartial = await dashboardQuota(false);
+    expect(cachedPartial).not.toHaveProperty("codexCredits");
+    expect(cachedPartial.weeklyPercent).toBeCloseTo(90.4, 1);
+
+    body = { ...body, purchased_credits: { ...body.purchased_credits, balance: -5, is_partial: false } };
+    expect((await dashboardQuota()).codexCredits).toEqual({ balance: "-5", unlimited: false });
   });
 
   test("hidden upstream quota is an authoritative empty answer, not a row", async () => {
@@ -122,6 +158,43 @@ describe("codex-lb pooled usage quota", () => {
       config("codex-lb", provider("https://lb.example.com/backend-api/codex/", hidden, seen)), true);
     expect(seen).toHaveLength(1);
     expect(result.reports).toEqual([]);
+  });
+
+  test("relay seat deadlines do not notify a pool reset, while native account resets still notify", async () => {
+    const events: QuotaResetEvent[] = [];
+    const expired = Date.now() - 60_000;
+    const next = Date.now() + 7 * 24 * 60 * 60_000;
+    const payload = (current: number, reset: number) => ({ ...LIVE_USAGE, upstream_limits: [{
+      ...LIVE_USAGE.upstream_limits[0], current_value: current, max_value: 100,
+      remaining_value: 100 - current, reset_at: new Date(reset).toISOString(),
+    }] });
+    let body = payload(96, expired);
+    const poolProvider = provider("https://lb.example.com/backend-api/codex", undefined, []);
+    poolProvider.fetch = (async () => Response.json(body)) as typeof fetch;
+    const cfg = config("my-pool", poolProvider);
+    await flushProviderQuotaObservationsForTests();
+    resetQuotaResetStoreForTests();
+    setQuotaResetSink(event => { events.push(event); });
+    try {
+      expect((await fetchProviderQuotaReports(cfg, true)).reports[0]!.quota.weeklyPercent).toBe(96);
+      await flushProviderQuotaObservationsForTests();
+      body = payload(2, next);
+      expect((await fetchProviderQuotaReports(cfg, true)).reports[0]!.quota.weeklyPercent).toBe(2);
+      await flushProviderQuotaObservationsForTests();
+      expect(events).toEqual([]);
+
+      setAccountQuotaFromParsed("native-seat", { weeklyPercent: 96, weeklyResetAt: expired });
+      await flushQuotaObservationsForTests();
+      setAccountQuotaFromParsed("native-seat", { weeklyPercent: 2, weeklyResetAt: next });
+      await flushQuotaObservationsForTests();
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ scope: "codex", kind: "scheduled", window: "weekly" });
+    } finally {
+      setQuotaResetSink(null);
+      clearAccountQuota("native-seat");
+      await flushQuotaObservationsForTests();
+      resetQuotaResetStoreForTests();
+    }
   });
 
   test("another relay's /v1/usage shape or a refusal publishes nothing", async () => {

@@ -49,6 +49,7 @@ import { routedSlug, slugEquals } from "../../providers/slug-codec";
 import { clearAccountQuotaCache, clearProviderQuotaCache, clearProviderQuotaCacheFor, fetchProviderAccountQuotas, fetchProviderApiKeyQuotas, fetchProviderQuotaReports, providerOAuthAccountQuotaMode, providerApiKeyQuotaMode, readPassiveProviderAccountQuotas } from "../../providers/quota";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { clearThreadAccountMap } from "../../codex/routing";
+import { shownCodexCredits } from "../../codex/credits";
 import {
   normalizeAccountPoolStickyLimit,
   normalizeAccountPoolStrategy,
@@ -1081,8 +1082,10 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
         const row = byId.get(key.id);
         if (!row || key.quotaMode !== "probe") return key;
         if (!row.isCurrent()) return { ...key, quota: null, quotaUnavailable: true };
+        const { codexCredits, ...otherQuota } = row.quota ?? {};
+        const credits = shownCodexCredits(config, codexCredits);
         // Internal identity/epoch checks never enter the JSON DTO.
-        return { ...key, quota: row.quota, quotaUnavailable: row.unavailable === true };
+        return { ...key, quota: row.quota && (credits ? { ...otherQuota, codexCredits: credits } : otherQuota), quotaUnavailable: row.unavailable === true };
       }),
     });
   }

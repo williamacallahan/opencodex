@@ -8,6 +8,9 @@
  * pin the busy state and the reported outcome to a handler that settles independently.
  */
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Window } from "happy-dom";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -17,6 +20,9 @@ import { LanguageProvider } from "../src/i18n/provider";
 import { en } from "../src/i18n/en";
 import type { WorkspaceItem } from "../src/provider-workspace/catalog";
 import type { ProviderAuthHandlers } from "../src/components/provider-workspace/types";
+import { handleOauthAccountRoutes } from "../../src/server/management/oauth-account-routes";
+import { clearProviderQuotaCache } from "../../src/providers/quota";
+import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 
 const globals = ["document", "window", "navigator", "localStorage", "sessionStorage", "IS_REACT_ACT_ENVIRONMENT"] as const;
 let previous: Record<(typeof globals)[number], unknown>;
@@ -238,6 +244,44 @@ test("API-key rows use independent shared credit readings and the same awaited r
   expect(host.textContent).not.toContain("Quota check completed");
   await act(async () => { settle(false); });
   expect(host.textContent).toContain("Failed to refresh quotas");
+});
+
+test("relay key rows obey the credits setting returned by the actual key endpoint", async () => {
+  const previousHome = process.env.OPENCODEX_HOME;
+  const home = mkdtempSync(join(tmpdir(), "ocx-relay-key-ui-"));
+  process.env.OPENCODEX_HOME = home;
+  clearProviderQuotaCache();
+  let probes = 0;
+  const provider = { adapter: "openai-responses", authMode: "key", baseUrl: "https://lb.example.com/backend-api/codex",
+    apiKey: "fixture-first", apiKeyPool: [{ id: "first", key: "fixture-first" }],
+    fetch: (async () => {
+      probes++;
+      return Response.json({ limits: [], account_pool_usage: { secondary: 60 },
+        purchased_credits: { balance: 1234, unlimited: false, is_partial: false } });
+    }) as typeof fetch,
+  } as OcxProviderConfig;
+  const config = { port: 0, defaultProvider: "relay", providers: { relay: provider } } as OcxConfig;
+  try {
+    for (const visible of [false, true, false]) {
+      config.showCodexCredits = visible;
+      const url = new URL("http://localhost/api/providers/keys?name=relay&quota=1");
+      const response = await handleOauthAccountRoutes({ req: new Request(url), url, config, version: "test", deps: {},
+        convergeCodexCatalog: async () => ({ status: "failed", reason: "disk" }), syncClaudeAgentDefsBestEffort: async () => {} });
+      expect(response?.status).toBe(200);
+      const body = await response!.json();
+      await render(<ProviderAuthPanel item={{ ...oauthItem, name: "relay", authMode: "key", hasApiKey: true }} apiBase=""
+        keys={body.keys} authHandlers={authHandlers()} />);
+      expect(host.querySelectorAll(".quota-row--codex-credits")).toHaveLength(visible ? 1 : 0);
+      expect(host.textContent).toContain("40%");
+      if (visible) expect(host.textContent).toContain("1,234");
+    }
+    expect(probes).toBe(1);
+  } finally {
+    clearProviderQuotaCache();
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("unsupported credentials omit refresh; passive absence is unobserved and only explicit probes are pending", async () => {

@@ -20,6 +20,7 @@ test.each([
   [{ balance: "62500" }, "62,500", "1"],
   [{ balance: "62498.725" }, "62,498.73", "1"],
   [{ balance: "0" }, "0", "0"],
+  [{ balance: "-5" }, "-5", "0"],
   [{ balance: "0.001" }, "0", "1"],
   [{ unlimited: true }, "Unlimited", "1"],
   [{ unlimited: true, balance: "10" }, "Unlimited", "1"],

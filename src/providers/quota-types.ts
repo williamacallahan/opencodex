@@ -9,6 +9,8 @@
  */
 
 export const PROVIDER_QUOTA_MAX_AGE_MS = 30 * 60_000;
+/** codex-lb pool usage is a display-only observation, not per-key routing evidence. */
+export const CODEX_LB_USAGE_SOURCE = "codex-lb:usage";
 
 /** Management-only eligibility evidence; private credential binding never leaves the server. */
 export type ProviderRoutingQuota =

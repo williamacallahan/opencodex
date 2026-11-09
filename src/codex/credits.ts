@@ -15,7 +15,7 @@ function messageRange(raw: unknown): [number, number] | undefined {
 }
 
 /** Undefined keeps the prior observation; null or unusable input clears it. */
-export function parseCodexCredits(raw: unknown): CodexCredits | null | undefined {
+export function parseCodexCredits(raw: unknown, options?: { allowNegative?: boolean }): CodexCredits | null | undefined {
   if (raw === undefined) return undefined;
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
   const value = raw as Record<string, unknown>;
@@ -23,8 +23,10 @@ export function parseCodexCredits(raw: unknown): CodexCredits | null | undefined
   if (typeof value.has_credits === "boolean") credits.hasCredits = value.has_credits;
   if (typeof value.unlimited === "boolean") credits.unlimited = value.unlimited;
   if (typeof value.overage_limit_reached === "boolean") credits.overageLimitReached = value.overage_limit_reached;
-  if (typeof value.balance === "string" && /^\d+(\.\d+)?$/.test(value.balance)) credits.balance = value.balance;
-  else if (typeof value.balance === "number" && Number.isFinite(value.balance) && value.balance >= 0) {
+  if (typeof value.balance === "string" && /^-?\d+(\.\d+)?$/.test(value.balance)
+    && (options?.allowNegative === true || !value.balance.startsWith("-"))) credits.balance = value.balance;
+  else if (typeof value.balance === "number" && Number.isFinite(value.balance)
+    && (options?.allowNegative === true || value.balance >= 0)) {
     // String(1e-7) is "1e-7"; the DTO promises a plain decimal string, which the GUI validates.
     credits.balance = value.balance.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 20 });
   }

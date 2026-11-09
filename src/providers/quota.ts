@@ -18,7 +18,7 @@ import {
 import { mapQuotaRoster, readProviderApiKeyQuotas, type ProviderApiKeyQuota } from "./quota-key-accounts";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { isPassiveRead } from "../lib/passive-read";
-import type { ProviderQuota, QuotaFailureCode } from "./quota-types";
+import { CODEX_LB_USAGE_SOURCE, type ProviderQuota, type QuotaFailureCode } from "./quota-types";
 import {
   accountReportCurrent,
   AUTHORITATIVE_EMPTY_QUOTA,
@@ -108,7 +108,7 @@ export async function fetchProviderApiKeyQuotas(config: OcxConfig, name: string,
     const result = await maybeFetchProviderQuota(name, isolatedProvider, isolatedConfig, false);
     if (result === TERMINAL_QUOTA_FAILURE) return { kind: "terminal" };
     if (result === AUTHORITATIVE_EMPTY_QUOTA) return { kind: "empty" };
-    return result ? { kind: "quota", quota: result.quota } : { kind: "unavailable" };
+    return result ? { kind: "quota", quota: result.quota, source: result.source } : { kind: "unavailable" };
   });
 }
 async function maybeFetchProviderQuota(
@@ -198,14 +198,14 @@ function notifyProviderQuotaSnapshot(
   reports: ReadonlyArray<ProviderQuotaReport>,
   config: OcxConfig,
 ): void {
-  if (reports.length === 0) return;
   // Resolved here, synchronously, while the identity is still the one that produced these
-  // reports.
-  const observations = reports.map(report => ({
+  // reports. codex-lb's deadline is the earliest seat deadline, not a whole-pool reset.
+  const observations = reports.filter(report => report.source !== CODEX_LB_USAGE_SOURCE).map(report => ({
     scope: report.provider,
     accountKey: providerObservationAccountKey(report.provider, config),
     quota: report.quota,
   }));
+  if (observations.length === 0) return;
   pendingProviderObservation = pendingProviderObservation
     .then(async () => {
       const observer = await import("../quota/reset-observer");

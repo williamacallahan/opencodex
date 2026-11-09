@@ -6,7 +6,7 @@ import { handleOauthAccountRoutes } from "../../src/server/management/oauth-acco
 import { clearAccountQuotaCache, clearProviderQuotaCache } from "../../src/providers/quota";
 import * as quotaApi from "../../src/providers/quota";
 import { getAccountSet, saveCredential } from "../../src/oauth/store";
-import type { OcxConfig } from "../../src/types";
+import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const originalFetch = globalThis.fetch;
@@ -121,6 +121,42 @@ test("enriched key rows retain per-key values without activating or exposing cre
   expect(wire).not.toContain("fixture-second");
   expect(wire).not.toContain("isCurrent");
   expect(JSON.stringify(config)).toBe(before);
+});
+
+test("relay key balances follow the credits setting on fresh and cached key-list reads", async () => {
+  const config = keyConfig();
+  const provider = config.providers.openrouter as OcxProviderConfig & { fetch?: typeof fetch };
+  provider.adapter = "openai-responses";
+  provider.baseUrl = "https://lb.example.com/backend-api/codex";
+  let probes = 0;
+  let fail = false;
+  provider.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    probes++;
+    if (fail) return new Response(null, { status: 503 });
+    const amount = new Headers(init?.headers).get("authorization")?.endsWith("first") ? 10 : 20;
+    return Response.json({ limits: [], account_pool_usage: { secondary: 60 },
+      purchased_credits: { balance: amount, unlimited: false, is_partial: false } });
+  }) as typeof fetch;
+  for (const [setting, expected] of [[undefined, false], [false, false], [true, true], [false, false], [true, true]] as const) {
+    config.showCodexCredits = setting;
+    const body = await (await read("/api/providers/keys?name=openrouter&quota=1", config)).json();
+    expect(body.keys.map((row: { quota: { weeklyPercent: number } }) => row.quota.weeklyPercent)).toEqual([40, 40]);
+    expect(body.keys.map((row: { quota: { codexCredits?: unknown } }) => row.quota.codexCredits)).toEqual(
+      expected ? [{ balance: "10", unlimited: false }, { balance: "20", unlimited: false }] : [undefined, undefined],
+    );
+  }
+  expect(probes).toBe(2);
+  fail = true;
+  config.showCodexCredits = false;
+  const failed = await (await read("/api/providers/keys?name=openrouter&quota=1&refresh=1", config)).json();
+  expect(failed.keys.map((row: { quotaUnavailable: boolean }) => row.quotaUnavailable)).toEqual([true, true]);
+  expect(failed.keys.every((row: { quota: { codexCredits?: unknown } }) => row.quota.codexCredits === undefined)).toBe(true);
+  config.showCodexCredits = true;
+  const retained = await (await read("/api/providers/keys?name=openrouter&quota=1", config)).json();
+  expect(retained.keys.map((row: { quota: { codexCredits?: unknown } }) => row.quota.codexCredits)).toEqual([
+    { balance: "10", unlimited: false }, { balance: "20", unlimited: false },
+  ]);
+  expect(probes).toBe(4);
 });
 
 test("a removed key cannot return in an in-flight enrichment response", async () => {

@@ -275,7 +275,7 @@ describe("Direct explicit-account credit renewal", () => {
   });
 
   test.each([
-    { has_credits: true, balance: 0 }, { has_credits: false, balance: 7 },
+    { has_credits: true, balance: 0 }, { has_credits: true, balance: -5 }, { has_credits: false, balance: 7 },
     { has_credits: true, balance: 7, overage_limit_reached: true }, null, "invalid",
   ])("negative WHAM credits %j never release admission", async credits => {
     reply = () => wham(credits);

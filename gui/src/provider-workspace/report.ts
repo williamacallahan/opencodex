@@ -179,7 +179,7 @@ function quotaFromUnknown(quota: unknown, fallbackUpdatedAt?: number): AccountQu
     ? q.codexCredits as Record<string, unknown>
     : null;
   const codexCredits = codexCreditsRaw ? {
-    ...(typeof codexCreditsRaw.balance === "string" && /^\d+(\.\d+)?$/.test(codexCreditsRaw.balance) ? { balance: codexCreditsRaw.balance } : {}),
+    ...(typeof codexCreditsRaw.balance === "string" && /^-?\d+(\.\d+)?$/.test(codexCreditsRaw.balance) ? { balance: codexCreditsRaw.balance } : {}),
     ...(typeof codexCreditsRaw.unlimited === "boolean" ? { unlimited: codexCreditsRaw.unlimited } : {}),
   } : undefined;
   const out: AccountQuota = {
