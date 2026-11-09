@@ -136,7 +136,7 @@ describe("Anthropic fast registry", () => {
     const entry = getProviderRegistryEntry(id)!;
     expect(entry.fastWire).toMatchObject({ kind: "anthropic-speed", canonicalToWire: { priority: "fast" } });
     expect(entry.modelSupportsServiceTier).toEqual({
-      "claude-opus-5-5": true, "claude-opus-5": true, "claude-opus-4-8": true,
+      "claude-fable-5-2": true, "claude-opus-5-5": true, "claude-opus-5": true, "claude-opus-4-8": true,
     });
     const configured = provider(id === "anthropic" ? "oauth" : "key");
     expect(fastPolicyForModel(configured, "claude-opus-5-5", id)).toMatchObject({ capability: true, eligibility: "eligible" });

@@ -141,6 +141,9 @@ const CLAUDE_OPUS_46: Cost4 = { input: 5, output: 25, cacheRead: 0.5, cacheWrite
 // (0.25) on Fable 5.1 — NOT the 0.1x (1.00) that Fable 5 and every other family use;
 // the pricing page footnote calls this out explicitly. Verified 2026-09-02.
 const CLAUDE_FABLE_51: Cost4 = { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 };
+// Claude Fable 5.2: 8 / 40, 5m cache write 10.00, cache hits 0.025x base input (0.20), the same
+// footnote as Fable 5.1. Fast mode bills 2x (16 / 80). Verified 2026-11-09.
+const CLAUDE_FABLE_52: Cost4 = { input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10 };
 // Opus 5 was first priced from the maintainer's confirmation that it matched Opus 4.6. The
 // pricing page now lists it at that same 5 / 25 / 0.50 / 6.25 tuple (re-verified 2026-09-23).
 const CLAUDE_OPUS_5 = CLAUDE_OPUS_46;
@@ -155,6 +158,7 @@ const CLAUDE_SONNET_55: Cost4 = { input: 2, output: 10, cacheRead: 0.1, cacheWri
 // Haiku 5.5 (2026-10-07): <=100K prompt base tuple; every rate is 5x above 100K.
 const CLAUDE_HAIKU_55: Cost4 = { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 };
 const ANTHROPIC_PRICING = "https://platform.claude.com/docs/en/about-claude/pricing (official; 5m cache-write tier)";
+const CLAUDE_FABLE_52_SOURCE = `anthropic official Claude Fable 5.2 ${ANTHROPIC_PRICING}; cache hit = 0.025x base input`;
 const CLAUDE_OPUS_5_SOURCE = `anthropic official Claude Opus 5 ${ANTHROPIC_PRICING}`;
 const CLAUDE_OPUS_55_SOURCE = `anthropic official Claude Opus 5.5 ${ANTHROPIC_PRICING}; cache hit = 0.05x base input`;
 const CLAUDE_SONNET_55_SOURCE = `anthropic official Claude Sonnet 5.5 ${ANTHROPIC_PRICING}; cache hit = 0.05x base input (2026-10-08 cut)`;
@@ -324,6 +328,9 @@ export const EXPECTED_PRICE_OVERLAYS: readonly ExpectedPriceOverlay[] = [
   // anthropic-apikey onto anthropic.
   { provider: "anthropic", modelId: "claude-fable-5-1", cost4: CLAUDE_FABLE_51, source: `anthropic official Claude Fable 5.1 ${ANTHROPIC_PRICING}; cache hit = 0.025x base input`, verifiedAt: "2026-09-02", status: "verified" },
   { provider: "anthropic-apikey", modelId: "claude-fable-5-1", cost4: CLAUDE_FABLE_51, source: `anthropic official Claude Fable 5.1 ${ANTHROPIC_PRICING}; cache hit = 0.025x base input`, verifiedAt: "2026-09-02", status: "verified" },
+  // Fable 5.2 has no generated jawcode row yet, so these overlays are its only price source.
+  { provider: "anthropic", modelId: "claude-fable-5-2", cost4: CLAUDE_FABLE_52, source: CLAUDE_FABLE_52_SOURCE, verifiedAt: "2026-11-09", status: "verified" },
+  { provider: "anthropic-apikey", modelId: "claude-fable-5-2", cost4: CLAUDE_FABLE_52, source: CLAUDE_FABLE_52_SOURCE, verifiedAt: "2026-11-09", status: "verified" },
   // Cursor canonicalizes every Fable 5.1 spelling onto this sole overlay row.
   { provider: "cursor", modelId: "claude-fable-5-1", cost4: CLAUDE_FABLE_51, source: `anthropic official Claude Fable 5.1 ${ANTHROPIC_PRICING}; cache hit = 0.025x base input; vendor list price applied to the Cursor surface`, verifiedAt: "2026-09-02", status: "verified-derived" },
   // claude-opus-5 is exposed by three providers but absent from the jawcode bundle, so
@@ -724,13 +731,13 @@ export const PRIORITY_PRICING_RULES: readonly PriorityPricingRule[] = [
   })),
   // Claude Code subscription fast draws usage credits at API fast rates, so OAuth is included.
   ...["anthropic", "anthropic-apikey"].flatMap(provider =>
-    ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"].map((modelId): PriorityPricingRule => ({
+    ["claude-fable-5-2", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"].map((modelId): PriorityPricingRule => ({
       provider,
       modelId,
       multiplier: 2,
       requiresResponseConfirmation: true,
       source: ANTHROPIC_FAST_PRICING,
-      verifiedAt: "2026-09-23",
+      verifiedAt: modelId === "claude-fable-5-2" ? "2026-11-09" : "2026-09-23",
     })),
   ),
   ...[

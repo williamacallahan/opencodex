@@ -325,6 +325,15 @@ describe("resolveMatchedPrice", () => {
     expect(resolveMatchedPrice("anthropic", "claude-fable-5")?.cost4.cacheRead).toBe(1);
   });
 
+  test("claude-fable-5-2 resolves to the official Fable 5.2 price on both Anthropic surfaces and account labels", () => {
+    const COST4 = { input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10 };
+    for (const provider of ["anthropic", "anthropic-apikey", "anthropic-pb51d9b"]) {
+      expect(resolveMatchedPrice(provider, "claude-fable-5-2")?.cost4, provider).toEqual(COST4);
+    }
+    // Fable 5.1 keeps its own, higher price.
+    expect(resolveMatchedPrice("anthropic", "claude-fable-5-1")?.cost4.input).toBe(10);
+  });
+
   test("17b. model-level fallback: openai provider gets gpt prices from the openai bundle", () => {
     const price = resolveMatchedPrice("openai", "gpt-5.5");
     expect(price).not.toBeNull();
@@ -513,6 +522,8 @@ describe("resolveMatchedPrice", () => {
       "anthropic/claude-fable-5-1",
       "anthropic-apikey/claude-fable-5-1",
       "cursor/claude-fable-5-1",
+      "anthropic/claude-fable-5-2",
+      "anthropic-apikey/claude-fable-5-2",
       "anthropic/claude-opus-5",
       "cursor/claude-opus-5",
       "kiro/claude-opus-5",

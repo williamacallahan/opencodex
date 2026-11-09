@@ -102,9 +102,10 @@ import {
 /**
  * Claude fast mode (`speed: "fast"` + beta), shared by the OAuth and API-key Anthropic entries.
  * Only the models Anthropic documents for the lane are classified; Opus 4.6 silently runs
- * standard and Opus 4.7, Sonnet, Haiku and Fable reject `speed`, so they and future ids stay
- * unclassified. Source: https://platform.claude.com/docs/en/build-with-claude/fast-mode
- * (2026-09-23) and the live probe in devlog/_fin/260923_anthropic_fast_speed.
+ * standard and Opus 4.7, Sonnet, Haiku and Fable before 5.2 reject `speed`, so they and future
+ * ids stay unclassified. Source: https://platform.claude.com/docs/en/build-with-claude/fast-mode
+ * (2026-09-23; Fable 5.2 added 2026-11-09, which needs no beta but accepts it) and the live
+ * probe in devlog/_fin/260923_anthropic_fast_speed.
  */
 const ANTHROPIC_FAST_WIRE = Object.freeze({
   kind: "anthropic-speed" as const,
@@ -113,6 +114,7 @@ const ANTHROPIC_FAST_WIRE = Object.freeze({
   betas: Object.freeze([ANTHROPIC_FAST_MODE_BETA]),
 });
 const ANTHROPIC_FAST_MODELS: Readonly<Record<string, boolean>> = Object.freeze({
+  "claude-fable-5-2": true,
   "claude-opus-5-5": true,
   "claude-opus-5": true,
   "claude-opus-4-8": true,
