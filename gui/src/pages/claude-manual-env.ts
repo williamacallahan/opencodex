@@ -3,6 +3,7 @@
  * 260720_claude_authmode_persist/020): extracted from ClaudeCode.tsx so the
  * copy-paste shell block is directly unit-testable (tests/gui/claude-manual-env.test.ts).
  */
+import { CLAUDE_CODE_NATIVE_TIERS } from "../../../src/claude/long-context";
 import { AUTO_COMPACT_WINDOW_DEFAULT } from "./claude-code-types";
 
 export type SidecarBackend = "openai" | "anthropic";
@@ -57,11 +58,11 @@ export const MODEL_ENV_NAMES = [
 
 const ONE_M_MARKER = /\[1m\]$/i;
 
-/** Unset tier slots the server fills only while automatic 1M marking is on. */
+/** Unset tier slots the server fills only while automatic 1M marking is on, by the server's own ids. */
 const NATIVE_TIER_FILL: Partial<Record<(typeof MODEL_ENV_NAMES)[number], string>> = {
-  ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-5-5",
-  ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-5",
-  ANTHROPIC_DEFAULT_FABLE_MODEL: "claude-fable-5-1",
+  ANTHROPIC_DEFAULT_OPUS_MODEL: CLAUDE_CODE_NATIVE_TIERS.opus,
+  ANTHROPIC_DEFAULT_SONNET_MODEL: CLAUDE_CODE_NATIVE_TIERS.sonnet,
+  ANTHROPIC_DEFAULT_FABLE_MODEL: CLAUDE_CODE_NATIVE_TIERS.fable,
 };
 
 function stripOneMillionMarker(value: string): string {
