@@ -64,6 +64,11 @@ export function providerForwardClientHeadersConfigError(value: unknown): string 
   return null;
 }
 
+// The hub's own launchers send `<launcher>:<label>` (`claude-av:<session>`, `pi-av:<session>`,
+// `claude-code:codeAgent`). Anything else is a caller choosing its own gateway identity.
+const GATEWAY_IDENTITY_VALUE = /^(?:claude|pi)[a-z0-9-]*:[A-Za-z0-9._:-]{1,128}$/;
+const GATEWAY_IDENTITY_HEADERS = new Set(["x-lgw-cache-key", "x-user-id"]);
+
 /** Copy the provider's opted-in caller metadata onto outbound headers it has not already set. */
 export function copyForwardedClientHeaders(
   forwardClientHeaders: readonly string[] | undefined, headers: Record<string, string>, incoming: Headers,
@@ -73,6 +78,7 @@ export function copyForwardedClientHeaders(
     const name = normalizeForwardedClientHeaderName(rawName);
     if (name === null || Object.keys(headers).some(existing => existing.toLowerCase() === name)) continue;
     const value = incoming.get(name);
-    if (value) headers[name] = value;
+    if (!value || (GATEWAY_IDENTITY_HEADERS.has(name) && !GATEWAY_IDENTITY_VALUE.test(value))) continue;
+    headers[name] = value;
   }
 }

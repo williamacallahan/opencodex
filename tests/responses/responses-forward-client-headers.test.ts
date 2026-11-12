@@ -173,6 +173,13 @@ describe("openai-chat forwardClientHeaders carries the session identity to a gat
     expect(headers.authorization).toBe("Bearer gateway-key");
     expect(headers["x-other"]).toBeUndefined();
   });
+  test("drops a gateway identity that is not a hub launcher's", () => {
+    const headers = chatHeaders(gateway, { "x-lgw-cache-key": "someone-else:session", "x-user-id": "admin" });
+    expect(headers["x-lgw-cache-key"]).toBeUndefined();
+    expect(headers["x-user-id"]).toBeUndefined();
+    expect(chatHeaders(gateway, { "x-user-id": "claude-code:codeAgent", "x-lgw-cache-key": "pi-av:019e-abc" })["x-user-id"])
+      .toBe("claude-code:codeAgent");
+  });
   test("forwards nothing unless the provider opts in, and the provider's own header wins", () => {
     const { forwardClientHeaders: _optedIn, ...closed } = gateway;
     expect(chatHeaders(closed, { "x-lgw-cache-key": "k", "x-user-id": "u" })["x-lgw-cache-key"]).toBeUndefined();
