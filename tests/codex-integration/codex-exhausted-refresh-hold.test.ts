@@ -21,6 +21,7 @@ import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests, flushWindowsSecr
 import { resetLifecycleDrainStateForTests } from "../../src/server/lifecycle";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import type { OcxConfig } from "../../src/types";
+import type { ManagementPrincipal } from "../../src/server/management-auth";
 
 const MIN = 60_000;
 let TEST_DIR = "";
@@ -105,7 +106,7 @@ describe("quota refresh sweep and credit renewal hold exhausted seats", () => {
 
   /** Seeds readings taken five minutes ago, then POSTs the refresh route now; returns the account ids WHAM read. */
   async function refreshRead(
-    exhaustedIds: string[], options: { reserveIds?: string[]; principal?: "gui-session"; query?: string; body?: string } = {},
+    exhaustedIds: string[], options: { reserveIds?: string[]; principal?: ManagementPrincipal; query?: string; body?: string } = {},
   ): Promise<string[]> {
     const now = Date.now();
     const clock = spyOn(Date, "now").mockImplementation(() => now - 5 * MIN);
@@ -142,7 +143,8 @@ describe("quota refresh sweep and credit renewal hold exhausted seats", () => {
   });
 
   test("an explicit force flag in the query or body reads every account", async () => {
-    expect(await refreshRead(EXHAUSTED, { query: "?force=1" })).toEqual(["active", ...EXHAUSTED]);
+    // management-api.ts hands a remembered-device session to the route as "admin-token".
+    expect(await refreshRead(EXHAUSTED, { principal: "admin-token", query: "?force=1" })).toEqual(["active", ...EXHAUSTED]);
     clearAccountQuota(); resetPoolQuotaAttemptsForTests();
     expect(await refreshRead(EXHAUSTED, { body: JSON.stringify({ force: true }) })).toEqual(["active", ...EXHAUSTED]);
   });
@@ -151,13 +153,22 @@ describe("quota refresh sweep and credit renewal hold exhausted seats", () => {
     expect(await refreshRead(EXHAUSTED, { principal: "gui-session" })).toEqual(["active", ...EXHAUSTED]);
   });
 
+  test("a remembered-device dashboard session carries the force flag and reads every account", async () => {
+    // management-api.ts hands a remembered-device session to the route as "admin-token".
+    expect(await refreshRead(EXHAUSTED, { principal: "admin-token", query: "?force=1" })).toEqual(["active", ...EXHAUSTED]);
+  });
+
+  test("a JSON null body is no force flag", async () => {
+    expect(await refreshRead(EXHAUSTED, { body: "null" })).toEqual(["active"]);
+  });
+
   test("an exhausted account holding a Luna Reserve window is read on the ordinary cadence", async () => {
     expect(await refreshRead(["x1", "x2"], { reserveIds: ["x2"] })).toEqual(["active", "x2"]);
   });
 
   describe("credit renewal", () => {
     /** Renewal sweep now for an account with or without a known reset whose credits were observed `ageMs` ago; returns WHAM request count. */
-    async function renewalRequests(knownReset: boolean, ageMs: number): Promise<number> {
+    async function renewalRequests(knownReset: boolean, ageMs: number, balance = 0): Promise<number> {
       const now = Date.now();
       const config = makeConfig(["p1"], { creditCodexAccountIds: ["p1"] });
       saveCredential("p1");
@@ -168,7 +179,7 @@ describe("quota refresh sweep and credit renewal hold exhausted seats", () => {
           // Without a known reset the seat has no proven hold, so it keeps the ordinary renewal age.
           ...(knownReset ? { weeklyPercent: 100, weeklyResetAt: now + 3 * 24 * 60 * MIN, weeklyObservedAt: seeded }
             : { shortPercent: 100, shortObservedAt: now }),
-          credits: { hasCredits: true, balance: 5, allowed: true, observedAt: seeded },
+          credits: { hasCredits: balance > 0, balance, allowed: true, observedAt: seeded },
         });
         let requests = 0;
         globalThis.fetch = (async () => { requests++; return usageBody(100); }) as typeof fetch;
@@ -177,11 +188,15 @@ describe("quota refresh sweep and credit renewal hold exhausted seats", () => {
       } finally { clock.mockRestore(); }
     }
 
-    test("an exhausted account renewed 5 minutes ago is not read", async () => {
+    test("an exhausted account with spendable credits renewed 4 minutes ago is read", async () => {
+      expect(await renewalRequests(true, 4 * MIN, 5)).toBe(1);
+    });
+
+    test("an exhausted account with no credits renewed 5 minutes ago is not read", async () => {
       expect(await renewalRequests(true, 5 * MIN)).toBe(0);
     });
 
-    test("an exhausted account renewed 16 minutes ago is read once", async () => {
+    test("an exhausted account with no credits renewed 16 minutes ago is read once", async () => {
       expect(await renewalRequests(true, 16 * MIN)).toBe(1);
     });
 
