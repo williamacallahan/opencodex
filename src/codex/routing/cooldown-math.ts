@@ -44,6 +44,8 @@ export function codexQuotaProbeIntervalMs(
   quota: ExhaustedProbeQuota | null | undefined,
   now: number,
   plan?: unknown,
+  /** Latest read attempt, success or failure; a reset at or before it is already acted on. */
+  readAt: number = quota?.updatedAt ?? 0,
 ): number {
   if (!quota || !isCodexQuotaExhausted(quota, plan)) return CODEX_QUOTA_PROBE_INTERVAL_MS;
   const windows: Array<[number | undefined, number | undefined]> = [
@@ -55,7 +57,7 @@ export function codexQuotaProbeIntervalMs(
     if (typeof percent !== "number" || !Number.isFinite(percent) || percent < CODEX_EXHAUSTED_USAGE_PERCENT) continue;
     if (typeof resetAt !== "number" || !Number.isFinite(resetAt) || resetAt <= 0) return CODEX_QUOTA_PROBE_INTERVAL_MS;
     const resetMs = resetAtToMs(resetAt);
-    if (resetMs <= now) return resetMs > quota.updatedAt ? 0 : CODEX_QUOTA_PROBE_INTERVAL_MS;
+    if (resetMs <= now) return resetMs > readAt ? 0 : CODEX_QUOTA_PROBE_INTERVAL_MS;
   }
   return CODEX_EXHAUSTED_QUOTA_PROBE_INTERVAL_MS;
 }

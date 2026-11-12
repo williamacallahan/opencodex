@@ -3,10 +3,9 @@ import { isCodexAccountGenerationLive, readCodexAccountRecord, type CodexRefresh
 import { isCodexAccountPaused } from "../account-pause";
 import { isSelectableCodexPoolAccount } from "../account-id";
 import { isAccountNeedsReauth } from "../account-runtime-state";
-import { getAccountQuota } from "../quota";
 import { MAIN_CODEX_ACCOUNT_ID } from "../main-account";
 import type { OcxConfig } from "../../types";
-import { codexQuotaProbeIntervalMs, type CodexUpstreamOutcomeMeta } from "./cooldown-math";
+import { CODEX_QUOTA_PROBE_INTERVAL_MS, type CodexUpstreamOutcomeMeta } from "./cooldown-math";
 import {
   deleteScopedHealth,
   getAccountHealth,
@@ -58,17 +57,17 @@ export function tryAcquireCodexQuotaProbeLease(accountId: string, now = Date.now
 
 /** Side-effect-free check mirroring {@link tryAcquireCodexQuotaProbeLease} eligibility. */
 export function canAcquireCodexQuotaProbeLease(accountId: string, now = Date.now()): boolean {
-  return canAcquireQuotaProbeLease(getAccountHealth(accountId), now, accountId);
+  return canAcquireQuotaProbeLease(getAccountHealth(accountId), now);
 }
 
-function canAcquireQuotaProbeLease(health: CodexUpstreamHealth | undefined, now: number, accountId: string): boolean {
+function canAcquireQuotaProbeLease(health: CodexUpstreamHealth | undefined, now: number): boolean {
   if (!health) return false;
   const cooldownUntil = health.cooldownUntil;
   if (typeof cooldownUntil !== "number" || !Number.isFinite(cooldownUntil) || cooldownUntil <= now) return false;
   if (health.cooldownSource === "retry-after") return false;
   if (health.probeLeaseId !== undefined) return false;
   const origin = health.lastProbeAt ?? health.cooldownSince ?? cooldownUntil;
-  return now - origin >= codexQuotaProbeIntervalMs(getAccountQuota(accountId), now);
+  return now - origin >= CODEX_QUOTA_PROBE_INTERVAL_MS;
 }
 
 /**
@@ -105,7 +104,7 @@ export function claimDueCodexQuotaRecoveryProbes(
       // delay the shared scope that the response can actually recover.
       (entry.scope === undefined || entry.scope === "shared")
       && entry.health?.cooldownSource === "reset-derived"
-      && canAcquireQuotaProbeLease(entry.health, now, account.id))
+      && canAcquireQuotaProbeLease(entry.health, now))
       .sort((a, b) =>
         (a.health.lastProbeAt ?? a.health.cooldownSince ?? 0)
         - (b.health.lastProbeAt ?? b.health.cooldownSince ?? 0));
@@ -291,7 +290,7 @@ export function tryAcquireCodexQuotaScopeProbeLease(
   now = Date.now(),
 ): string | null {
   const health = scopedHealthFor(accountId, scope);
-  if (!canAcquireQuotaProbeLease(health, now, accountId)) return null;
+  if (!canAcquireQuotaProbeLease(health, now)) return null;
   const probeLeaseId = randomUUID();
   setScopedHealth(accountId, scope, {
     ...health!,
@@ -308,7 +307,7 @@ export function canAcquireCodexQuotaScopeProbeLease(
   scope: CodexQuotaScope,
   now = Date.now(),
 ): boolean {
-  return canAcquireQuotaProbeLease(scopedHealthFor(accountId, scope), now, accountId);
+  return canAcquireQuotaProbeLease(scopedHealthFor(accountId, scope), now);
 }
 
 /**

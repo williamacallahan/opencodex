@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fetchPoolAccountQuota } from "../../src/codex/auth-api/pool-quota-probe";
+import { fetchPoolAccountQuota, resetPoolQuotaAttemptsForTests } from "../../src/codex/auth-api/pool-quota-probe";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { clearAccountQuota } from "../../src/codex/quota";
 import { fetchCodexUsage, nextCodexUsageQueryAt, resetQuotaQueryBackoffForTests } from "../../src/codex/quota-query-backoff";
@@ -28,7 +28,7 @@ beforeEach(() => {
   originalFetch = globalThis.fetch;
   home = mkdtempSync(join(tmpdir(), "quota-query-backoff-"));
   process.env.OPENCODEX_HOME = home;
-  clearAccountQuota(); resetQuotaQueryBackoffForTests(); save();
+  clearAccountQuota(); resetQuotaQueryBackoffForTests(); resetPoolQuotaAttemptsForTests(); save();
 });
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -229,4 +229,20 @@ test.each([
     { preconnect: originalFetch.preconnect });
   await fetchPoolAccountQuota("backoff-pool");
   expect(sent).toBe(requests);
+});
+
+test("a failed read after the reset ends the due-now window: the next read 60 s later sends nothing", async () => {
+  globalThis.fetch = Object.assign(async () => usage(100, now + 30_000), { preconnect: originalFetch.preconnect });
+  await fetchPoolAccountQuota("backoff-pool", true);
+  now += 60_000; // reset passed after the read
+  let sent = 0;
+  globalThis.fetch = Object.assign(async () => { sent++; return new Response("{}", { status: 500 }); },
+    { preconnect: originalFetch.preconnect });
+  await fetchPoolAccountQuota("backoff-pool");
+  expect(sent).toBe(1);
+  // The hold must come from the attempt record itself, not from transport-failure pacing.
+  resetQuotaQueryBackoffForTests();
+  now += 60_000;
+  await fetchPoolAccountQuota("backoff-pool");
+  expect(sent).toBe(1);
 });
