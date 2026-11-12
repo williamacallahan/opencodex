@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { baseProviderLabel } from "../providers/label";
 import { classifyCacheTelemetryProvenance, type CacheTelemetryProvenance, type UsageStatus } from "../usage/log";
 import type { OcxUsage } from "../types";
 
@@ -29,9 +30,9 @@ export function minimumCacheablePromptTokens(model: string): number {
   return DEFAULT_MIN_CACHEABLE_PROMPT_TOKENS;
 }
 
-/** `anthropic-pf2cf1b` and `codex-lb` name provider rows or seats; the family is what the rate groups by. */
+/** Pool dispatch logs `anthropic-<seat>` / `openai-main`; the existing label owner maps them to the family. */
 export function providerFamily(provider: string): string {
-  return /^(anthropic|openai)-[0-9a-z]+$/.test(provider) ? provider.slice(0, provider.indexOf("-")) : provider;
+  return baseProviderLabel(provider);
 }
 
 const TELEMETRY: Record<CacheTelemetryProvenance, "reported" | "missing" | "unavailable"> = {
@@ -45,6 +46,8 @@ export interface PromptCacheOutcomeInput {
   usage: OcxUsage | undefined;
   usageStatus: UsageStatus;
   wireParsed: boolean;
+  /** The serving adapter's wire carries the cache fields natively (Anthropic Messages, OpenAI Responses). */
+  nativeCacheWire: boolean;
   succeeded: boolean;
   locallyAnswered: boolean;
   comboParent: boolean;
@@ -65,7 +68,11 @@ function logfmtValue(value: string | number | boolean): string {
 }
 
 export function promptCacheOutcomeLine(input: PromptCacheOutcomeInput): string {
-  const telemetry = TELEMETRY[classifyCacheTelemetryProvenance(input.usage, { wireParsed: input.wireParsed })];
+  const provenance = classifyCacheTelemetryProvenance(input.usage, { wireParsed: input.wireParsed });
+  // An all-zero detail read off a wire is ambiguous only where a bridge could have written zero
+  // defaults. A native wire's own cached field of 0 is a measured miss: leaving it out of the
+  // denominator would let a total cache collapse silence the hit-rate alert.
+  const telemetry = provenance === "synthesized" && input.nativeCacheWire ? "reported" : TELEMETRY[provenance];
   const prompt = promptTokens(input.usage);
   const family = providerFamily(input.provider);
   const cached = input.usage?.cacheReadInputTokens ?? input.usage?.cachedInputTokens;
@@ -82,7 +89,7 @@ export function promptCacheOutcomeLine(input: PromptCacheOutcomeInput): string {
     ["telemetry", telemetry],
     ["cache_eligible", eligible],
     ["prompt_tokens", prompt],
-    ["cached_tokens", cached],
+    ["cached_tokens", cached ?? 0],
     ["cache_write_tokens", input.usage?.cacheCreationInputTokens ?? 0],
     ["key_hash", input.conversationId
       ? createHash("sha256").update(input.conversationId).digest("hex").slice(0, 16) : undefined],

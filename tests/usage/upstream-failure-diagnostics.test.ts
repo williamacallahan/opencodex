@@ -1010,7 +1010,7 @@ describe("prompt_cache.outcome line", () => {
     require("../../src/server/prompt-cache-outcome") as typeof import("../../src/server/prompt-cache-outcome");
   const base = {
     provider: "codex-lb", requestedModel: "gpt-6.1-sol", servedModel: "gpt-6.1-sol", usageStatus: "reported" as const,
-    wireParsed: false, succeeded: true, locallyAnswered: false, comboParent: false,
+    wireParsed: false, nativeCacheWire: false, succeeded: true, locallyAnswered: false, comboParent: false,
   };
   test("an OpenAI-style hit counts the cached reads as a subset of the prompt", () => {
     const line = promptCacheOutcomeLine({ ...base, conversationId: "conv-1",
@@ -1036,13 +1036,25 @@ describe("prompt_cache.outcome line", () => {
     expect(promptCacheOutcomeLine({ ...base, usage, wireParsed: true })).toContain("telemetry=unavailable cache_eligible=false");
     const missing = promptCacheOutcomeLine({ ...base, usage: { inputTokens: 5000, outputTokens: 1 } });
     expect(missing).toContain("telemetry=missing cache_eligible=false");
-    expect(missing).not.toContain("cached_tokens=");
+    expect(missing).toContain("cached_tokens=0");
+  });
+  test("a native wire's own zero is a measured miss that stays in the denominator", () => {
+    const usage = { inputTokens: 5000, outputTokens: 1, cachedInputTokens: 0 };
+    const collapse = promptCacheOutcomeLine({ ...base, usage, wireParsed: true, nativeCacheWire: true });
+    expect(collapse).toContain("telemetry=reported cache_eligible=true prompt_tokens=5000 cached_tokens=0");
+    expect(promptCacheOutcomeLine({ ...base, usage: { inputTokens: 5000, outputTokens: 1 }, wireParsed: true, nativeCacheWire: true }))
+      .toContain("telemetry=missing cache_eligible=false");
+  });
+  test("provider seats group by the label owner's family", () => {
+    expect(providerFamily("anthropic-pf2cf1b")).toBe("anthropic");
+    expect(providerFamily("openai-main")).toBe("openai");
+    expect(providerFamily("chatgpt")).toBe("openai");
   });
   test("minimums and families follow the gateway's table", () => {
     expect(minimumCacheablePromptTokens("claude-opus-5-5-20260101")).toBe(512);
     expect(minimumCacheablePromptTokens("anthropic/claude-haiku-4.5")).toBe(4096);
     expect(minimumCacheablePromptTokens("gpt-6-luna")).toBe(1024);
-    expect(providerFamily("openai-abc12")).toBe("openai");
+    expect(providerFamily("openai-p2e22d0")).toBe("openai");
     expect(providerFamily("llm-gateway")).toBe("llm-gateway");
   });
   test("the final request log prints exactly one line for the request", () => {

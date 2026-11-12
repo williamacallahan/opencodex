@@ -1631,11 +1631,16 @@ function writeFinalRequestLog(
     ...(protocolTrace ? { protocolTrace } : {}),
     ...attribution,
   }));
+  // A retry's failed sends were also billed prompts but could never hit the cache: the rate reads the
+  // attempt that answered, not the sum.
+  const answeringUsage = (attempts?.length ?? 0) > 1
+    ? attempts!.filter(attempt => attempt.status < 400 && attempt.usage).at(-1)?.usage ?? loggedUsage : loggedUsage;
   console.info(promptCacheOutcomeLine({
     provider: isCombo ? "combo" : logCtx.provider,
     requestedModel: logCtx.requestedModel ?? logCtx.model,
     servedModel: logCtx.model,
-    usage: loggedUsage,
+    nativeCacheWire: logCtx.providerAdapter === "anthropic" || logCtx.providerAdapter === "openai-responses",
+    usage: answeringUsage,
     usageStatus,
     wireParsed: logCtx.usageWireParsed === true,
     succeeded: effectiveStatus < 400 && meta?.terminalStatus !== "failed" && meta?.terminalStatus !== "incomplete",
