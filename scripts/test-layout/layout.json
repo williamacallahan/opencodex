@@ -1214,6 +1214,8 @@
     "management-provider-atomicity.test.ts": "server",
     "disabled-model-refusal.test.ts": "server",
     "muse-code-models.test.ts": "server",
+    "selected-models-hub-named.test.ts": "server",
+    "messages-disabled-model.test.ts": "claude-integration",
     "management-provider-patch-fields.test.ts": "server",
     "management-provider-pinsless-validation.test.ts": "server",
     "management-provider-proto-override.test.ts": "server",

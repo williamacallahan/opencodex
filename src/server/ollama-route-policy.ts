@@ -1,4 +1,5 @@
 import type { OcxConfig } from "../types";
+import { routedRowHidden } from "./admission-model-scope";
 import { captureRouteStaticPolicy, previewRouteModel, type RouteResult } from "../router";
 import { POLICY_NAMESPACE, resolvePolicyProfileId } from "../routing/profile";
 import { isShadowSourceModel } from "../lib/shadow-call";
@@ -35,7 +36,8 @@ export function preflightOllamaRoute(config: OcxConfig, selector: string, req: R
   const wireProvider = resolveWireProtocolOverride(route.providerName, route.modelId, routedProvider, "chat", route.staticPolicy);
   route.provider = resolveOpenCodeGoTransport(wireProvider, getOrAllocateRequestSessionLane(req), routedProvider);
   if (route.combo || route.routeKind === "combo" || route.routeKind === "policy" || route.credentialDomainRewrite || providerConsumesCallerAuthorization(route.provider)) return credentialError();
-  if (!Object.hasOwn(config.providers, route.providerName) || config.providers[route.providerName]?.disabled === true) {
+  if (!Object.hasOwn(config.providers, route.providerName) || config.providers[route.providerName]?.disabled === true
+    || routedRowHidden(config, route.providerName, route.modelId)) {
     return fail({ status: 404, code: "model_not_found", message: "Model route not found" });
   }
   return { ok: true, route };

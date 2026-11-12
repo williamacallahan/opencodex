@@ -7,6 +7,12 @@ import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { handleChatCompletions } from "../../src/server/chat-completions";
 import { handleResponses } from "../../src/server/responses";
+import { filterCatalogVisibleModels } from "../../src/codex/catalog/model-visibility";
+import { internalCallCapability } from "../../src/lib/local-internal-call-capability";
+import { registerAdvisorAdmissionPolicy, SIDECAR_ADMISSION_POLICY_HEADER, SIDECAR_INTERNAL_CAPABILITY_HEADER } from "../../src/server/advisor-admission-scope";
+import { captureAdmissionPolicy } from "../../src/server/capture-admission-policy";
+import { clearModelCache, setCached } from "../../src/codex/model-cache";
+import { routedRowHidden } from "../../src/server/admission-model-scope";
 import { clearComboSelectionState, clearComboTargetCooldowns } from "../../src/combos";
 import type { OcxConfig } from "../../src/types";
 
@@ -107,5 +113,69 @@ describe("client-named disabled model", () => {
     const response = await responses(config, "gpt-5.6-luna", { "x-codex-turn-metadata": metadata });
     expect(response.status).toBe(200);
     expect(sends).toEqual(["off"]);
+  });
+
+  test("a client-named disabled combo is refused by its alias or canonical id; an enabled combo is served", async () => {
+    const combos = { pool: { alias: "pool-alias", strategy: "failover" as const, targets: [{ provider: "fix", model: "on" }] } };
+    for (const stored of ["combo/pool", "pool-alias"]) {
+      const refused = await responses(fixtureConfig({ combos, disabledModels: [stored] }), "combo/pool");
+      expect(refused.status, stored).toBe(404);
+      expect(await refused.json()).toMatchObject({ error: { code: "model_disabled" } });
+    }
+    expect(sends).toEqual([]);
+    expect((await responses(fixtureConfig({ combos }), "combo/pool")).status).toBe(200);
+  });
+
+  test("a row outside the provider's selectedModels allowlist is hidden by the catalog and refused by name", async () => {
+    const config = fixtureConfig({ disabledModels: [] });
+    config.providers.fix!.selectedModels = ["on"];
+    const rows = [{ provider: "fix", id: "on" }, { provider: "fix", id: "other" }] as never[];
+    expect(filterCatalogVisibleModels(rows, config).map(row => (row as { id: string }).id)).toEqual(["on"]);
+    const refused = await chat(config, "fix/other");
+    expect(refused.status).toBe(404);
+    expect(await refused.json()).toMatchObject({ error: { code: "model_disabled" } });
+    expect((await chat(config, "fix/on")).status).toBe(200);
+    expect(sends).toEqual(["on"]);
+  });
+
+  test("a legacy encoded disabledModels slug refuses the same row the catalog hides", async () => {
+    const config = fixtureConfig({ disabledModels: ["fix/vendor-off2"] });
+    const rows = [{ provider: "fix", id: "vendor/off2" }] as never[];
+    expect(filterCatalogVisibleModels(rows, config)).toEqual([]);
+    expect((await chat(config, "fix/vendor/off2")).status).toBe(404);
+  });
+
+  test("a sidecar call carrying the internal capability may name a disabled row (vision and role-sizing models)", async () => {
+    const config = fixtureConfig();
+    const registration = registerAdvisorAdmissionPolicy(captureAdmissionPolicy(config));
+    try {
+      const response = await handleChatCompletions(new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [SIDECAR_ADMISSION_POLICY_HEADER]: registration.token,
+          [SIDECAR_INTERNAL_CAPABILITY_HEADER]: internalCallCapability(),
+        },
+        body: JSON.stringify({ model: "fix/off", messages: [{ role: "user", content: "hi" }] }),
+      }), config, ctx());
+      expect(response.status).toBe(200);
+      expect(sends).toEqual(["off"]);
+    } finally { registration.release(); }
+    // The same request without the capability is an ordinary client and is refused.
+    expect((await chat(config, "fix/off")).status).toBe(404);
+  });
+
+  test("a route is judged against the provider's cached roster, as the catalog is (Antigravity effort family)", () => {
+    const provider = "google-antigravity";
+    const tiers = ["claude-opus-5-5-low", "claude-opus-5-5-medium", "claude-opus-5-5-high"];
+    const family = { provider, id: "claude-opus-5-5", antigravityEffortWireModelIds: { low: tiers[0], medium: tiers[1], high: tiers[2] } };
+    const config = { providers: { [provider]: { selectedModels: [tiers[2]] } } } as unknown as OcxConfig;
+    // With no roster the family base is outside the saved selection; the roster is what projects it in.
+    expect(routedRowHidden(config, provider, "claude-opus-5-5")).toBe(true);
+    setCached(provider, [family, ...tiers.map(id => ({ provider, id }))] as never[]);
+    try {
+      expect(routedRowHidden(config, provider, "claude-opus-5-5")).toBe(false);
+      expect(routedRowHidden(config, provider, "unrelated")).toBe(true);
+    } finally { clearModelCache(provider); }
   });
 });

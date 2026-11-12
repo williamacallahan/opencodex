@@ -92,6 +92,11 @@ export function ownedAnthropicErrorResponse(options: OwnedAnthropicErrorOptions,
   const response = Response.json(ownedAnthropicErrorPayload(options), { status: options.status, headers: { "Content-Type": "application/json" } });
   return legacy === undefined ? response : attachComboFailureEvidence(response, JSON.stringify(legacy));
 }
+/** The Messages-shaped 404 for a client-named model whose row is switched off, owned like its sibling local refusals. */
+export function ownedDisabledModelResponse(message: string): Response {
+  return markProxyError(ownedAnthropicErrorResponse({ status: 404, type: "invalid_request_error", evidence: { status: 404 },
+    localError: markProxyError({ message }) }));
+}
 /** Admission and presentation use separate numbers; this bounds display only. */
 export function boundedMessagesDisplayCount(value: number): string | undefined {
   return Number.isSafeInteger(value) && value >= 0 && value <= 1e12 ? String(value) : undefined;

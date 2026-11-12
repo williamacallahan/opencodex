@@ -30,7 +30,11 @@ import { isCodexReserveRequestEligible } from "../codex/loopback-target";
 import type { DataPlaneAdmission } from "./auth-cors";
 import {
   admissionScopeDenial,
+  assertClientNamedModelEnabled,
+  DisabledModelError,
+  disabledModelResponse,
 } from "./admission-model-scope";
+import { clientFacingModelLabel } from "../lib/error-destination";
 import { formatCodexProviderForLog } from "../codex/routing";
 import { signalWithTimeout } from "../lib/abort";
 import { readBoundedResponseBytes } from "../lib/bounded-body";
@@ -81,6 +85,8 @@ export async function handleSearch(
     try {
       const route = previewRouteModel(config, model);
       if (route.providerName === "devin" || route.staticPolicy.model.adapter === "devin") {
+        // A model the catalog hides is not served by name on the search relay either.
+        assertClientNamedModelEnabled(config, clientFacingModelLabel(model), route, model);
         const denial = admissionScopeDenial(config, admission, model, route);
         if (denial) return denial;
         logCtx.provider = route.providerName;
@@ -92,7 +98,8 @@ export async function handleSearch(
           req.signal,
         );
       }
-    } catch {
+    } catch (err) {
+      if (err instanceof DisabledModelError) return disabledModelResponse(err);
       // Preview is advisory: existing relay/fallback still owns unsupported or unroutable models.
     }
   }

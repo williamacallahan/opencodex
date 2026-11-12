@@ -159,7 +159,7 @@ function fixture(options: { pauseRefusal?: boolean; chatOnly?: boolean; nativeEx
   const config: OcxConfig = { port: 0, defaultProvider: "github-copilot", providers: { "github-copilot": {
     adapter: "openai-chat", authMode: options.key ? "key" : "oauth",
     ...(options.key ? { apiKey: "synthetic-access-a", apiKeyPool: [{ id: "a", key: "synthetic-access-a" }, { id: "b", key: "synthetic-access-b" }] } : {}), baseUrl: "https://api.githubcopilot.com", models: ["gpt-4o"],
-    defaultModel: "gpt-4o", selectedModels: ["gpt-4o"], fetch: executor,
+    defaultModel: "gpt-4o", selectedModels: ["gpt-4o", "auto", "gpt-5.4"], fetch: executor,
   } }, oauthAccountFailover: { enabled: true } } as OcxConfig;
   if (options.key || options.negotiationRefusal || options.nativeFirst || options.nativeExpiry || options.chatRefresh) globalThis.fetch = executor;
   return { config, sent, get cancelledNativeBodies() { return cancelledNativeBodies; }, get refreshCount() { return refreshCount; } };
@@ -974,7 +974,8 @@ describe("Copilot Auto through the Responses pipeline", () => {
     const models = await fetchProviderModels("github-copilot", provider, 1000);
     expect(models.map(model => model.id)).toEqual(["auto"]);
     expect(provider.defaultModel).toBe("gpt-4o");
-    expect(provider.selectedModels).toEqual(["gpt-4o"]);
+    // The fixture lists Auto and gpt-5.4 so routing tests can name them; this catalog case selects only gpt-4o.
+    provider.selectedModels = ["gpt-4o"];
     expect(filterCatalogVisibleModels(models, config)).toEqual([]);
     provider.selectedModels = ["auto"];
     expect(filterCatalogVisibleModels(models, config).map(model => model.id)).toEqual(["auto"]);

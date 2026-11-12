@@ -19,6 +19,9 @@ import { readBoundedResponseBytes } from "./bounded-body";
 import { redactSecretString } from "./redact";
 import { sidecarEnter } from "./sidecar-tracker";
 import { configuredPort } from "../server/auth-cors";
+import { registerAdvisorAdmissionPolicy, SIDECAR_ADMISSION_POLICY_HEADER, SIDECAR_INTERNAL_CAPABILITY_HEADER } from "../server/advisor-admission-scope";
+import type { CapturedAdmissionPolicy } from "../types/admission-policy";
+import { internalCallCapability } from "./local-internal-call-capability";
 
 export type LocalChatConfig = Pick<OcxConfig, "port" | "hostname" | "apiKeys" | "unauthenticatedLoopbackListener">;
 
@@ -37,6 +40,11 @@ export interface LocalChatCompletionRequest {
    */
   readonly boundWhileStreaming?: boolean;
   readonly headers?: Record<string, string>;
+  /**
+   * The caller's admission snapshot. The call carries the process-owned internal capability with it,
+   * because the model is the operator's own setting and may name a row switched off for clients.
+   */
+  readonly admissionPolicy: CapturedAdmissionPolicy;
   readonly abortSignal?: AbortSignal;
   /** Test seam; production always self-fetches the resolved local destination. */
   readonly baseUrlOverride?: string;
@@ -64,7 +72,13 @@ export function localChatCompletionBaseUrl(
 
 export async function postLocalChatCompletion(request: LocalChatCompletionRequest): Promise<LocalChatCompletionOutcome> {
   const { config, label, logTag } = request;
-  const headers: Record<string, string> = { "Content-Type": "application/json", ...request.headers };
+  const registration = registerAdvisorAdmissionPolicy(request.admissionPolicy, request.abortSignal);
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...request.headers,
+    [SIDECAR_ADMISSION_POLICY_HEADER]: registration.token,
+    [SIDECAR_INTERNAL_CAPABILITY_HEADER]: internalCallCapability(),
+  };
   const target = destination(config);
   const admission = selfFetchAdmissionToken(config, target);
   if (admission) headers["x-opencodex-api-key"] = admission;
@@ -122,6 +136,7 @@ export async function postLocalChatCompletion(request: LocalChatCompletionReques
   } finally {
     sidecarExit();
     linkedSignal.cleanup();
+    registration.release();
   }
 }
 

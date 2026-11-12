@@ -39,8 +39,10 @@ export function publicSizingError(error: string): string {
 
 async function completeThroughProxy(call: RoleSizingCall, config: OcxConfig) {
   const { postLocalChatCompletion } = await import("../../lib/local-chat-completion");
+  const { captureAdmissionPolicy } = await import("../capture-admission-policy");
   return postLocalChatCompletion({
     config,
+    admissionPolicy: captureAdmissionPolicy(config),
     label: "role sizing",
     logTag: "role-sizing",
     timeoutMs: SIZING_TIMEOUT_MS,

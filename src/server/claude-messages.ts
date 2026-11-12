@@ -1,7 +1,7 @@
 import { projectLocalModelRefusalLog } from "./request-log-failure-detail";
 import { MessagesSseFrameContext } from "../lib/messages-sse-error-presentation";
 import { createMessagesSseErrorFilter } from "./messages-sse-error-filter";
-import { normalizeMessagesProxyRefusal, ownedAnthropicErrorPayload, ownedAnthropicErrorResponse, boundedMessagesDisplayCount, messagesOverflowPresentation, messagesRelayedOverflowPresentation } from "../lib/messages-error-body";
+import { ownedDisabledModelResponse, normalizeMessagesProxyRefusal, ownedAnthropicErrorPayload, ownedAnthropicErrorResponse, boundedMessagesDisplayCount, messagesOverflowPresentation, messagesRelayedOverflowPresentation } from "../lib/messages-error-body";
 import { CLAUDE_CONTEXT_OVERFLOW_MESSAGE, isProxyError, markProxyError, carryProxyError, attachComboFailureEvidence, comboFailureEvidence } from "../lib/client-error-body";
 import type { MessagesFailureVerdictSink } from "../claude/failure-verdict";
 import { clientFacingModelLabel, clientFacingModelText } from "../lib/error-destination";
@@ -23,7 +23,6 @@ import {
   admissionModelDeniedResponse, projectAdmissionModelDeniedLog,
   AdmissionModelDeniedError,
   DisabledModelError,
-  MODEL_DISABLED,
   assertClientNamedModelEnabled,
   assertRouteAllowedByScope,
   resolveAdmissionModelScope,
@@ -1040,7 +1039,7 @@ async function handleClaudeMessagesWithBudget(
     );
     // The direct and native lanes never reach the Responses admission, so a switched-off row is
     // refused here for the model the client named.
-    assertClientNamedModelEnabled(config, clientModelLabel, route);
+    assertClientNamedModelEnabled(config, clientModelLabel, route, internalBody.model as string);
     // Keep native dispatch scoped while translated xAI OAuth requests preview
     // the same billed Fast lane as their final Responses scope check.
     assertRouteAllowedByScope(
@@ -1099,7 +1098,7 @@ async function handleClaudeMessagesWithBudget(
       logCtx.requestedModel = requestedModel;
       projectLocalModelRefusalLog(logCtx, clientModelLabel);
       if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 404, { closeReason: "non_stream" });
-      return anthropicErrorResponse(404, err.message, "invalid_request_error", MODEL_DISABLED);
+      return ownedDisabledModelResponse(err.message);
     }
     if (err instanceof UnknownRoutingPolicyError) {
       logCtx.requestedModel = requestedModel;

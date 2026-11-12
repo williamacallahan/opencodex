@@ -26,7 +26,7 @@ test("Chat preserves the local Claude image refusal across direct and combo disp
     "claude-cli": { adapter: "claude-cli", baseUrl: "https://api.anthropic.com", authMode: "key", selectedModels: ["claude-sonnet-5-5"] },
   }, combos: { pair: { strategy: "failover", targets: [{ provider: "claude-cli", model: "claude-sonnet-5-5" }] } } } as OcxConfig;
   try {
-    for (const model of ["claude-cli/claude-sonnet-5-5", "pair"]) {
+    for (const model of ["claude-cli/claude-sonnet-5-5", "combo/pair"]) {
       const response = await handleChatCompletions(new Request("http://localhost/v1/chat/completions", {
         method: "POST", body: JSON.stringify({ model, messages: [
           { role: "developer", content: [{ type: "image_url", image_url: { url: "https://fixture.invalid/private-image" } }] },
@@ -210,7 +210,7 @@ test("instruction images are refused at both HTTP routes before CLI launch", asy
       { provider: "claude-cli", model: "claude-sonnet-5-5" },
     ] } } } as OcxConfig;
     const comboResponse = await handleChatCompletions(new Request("http://localhost/v1/chat/completions", {
-      method: "POST", body: JSON.stringify({ model: "pair", messages: [
+      method: "POST", body: JSON.stringify({ model: "combo/pair", messages: [
         { role: "developer", content: [chatImage] }, { role: "user", content: "hello" },
       ] }),
     }), comboConfig, { model: "", provider: "" });
@@ -221,7 +221,7 @@ test("instruction images are refused at both HTTP routes before CLI launch", asy
     const textOnlyConfig = { ...comboConfig, visionSidecar: { enabled: false }, providers: {
       "claude-cli": { ...config.providers["claude-cli"], noVisionModels: ["claude-sonnet-5-5"] },
     } } as OcxConfig;
-    for (const target of [model, "pair"]) {
+    for (const target of [model, "combo/pair"]) {
       const response = await handleResponses(new Request("http://localhost/v1/responses", {
         method: "POST", body: JSON.stringify({ model: target, input: [
           { role: "developer", content: [responseImage] }, { role: "user", content: "hello" },
@@ -242,7 +242,7 @@ test("instruction images are refused at both HTTP routes before CLI launch", asy
           apiKey: "fixture-key", modelInputModalities: { vision: ["text", "image"] } } },
         visionSidecar: { enabled: true, backend: "routed", model: "helper/vision" },
       } as OcxConfig;
-      for (const target of [model, "pair"]) {
+      for (const target of [model, "combo/pair"]) {
         const response = await handleResponses(new Request("http://localhost/v1/responses", {
           method: "POST", body: JSON.stringify({ model: target, input: [
             { role: "developer", content: [{ type: "input_image", image_url: "data:image/png;base64,QUFB" }] },
@@ -336,7 +336,7 @@ test("Responses file-backed images are refused before Claude CLI launch", async 
   }, combos: { pair: { strategy: "failover", targets: [{ provider: "claude-cli", model: "claude-sonnet-5-5" }] } } } as OcxConfig;
   const image = { type: "input_image", file_id: "file-private-fixture" };
   try {
-    for (const model of ["claude-cli/claude-sonnet-5-5", "pair"]) for (const input of [
+    for (const model of ["claude-cli/claude-sonnet-5-5", "combo/pair"]) for (const input of [
       [{ type: "agent_message", content: [{ type: "input_text", text: "before" }, image] }],
       [{ role: "user", content: [{ type: "input_text", text: "before" }, image] }],
       [{ type: "function_call", call_id: "call_1", name: "view", arguments: "{}" },
@@ -355,7 +355,7 @@ test("Responses file-backed images are refused before Claude CLI launch", async 
     expect(launches).toBe(0);
     rememberResponseState({ input: [{ type: "agent_message", content: [image] }] },
       { id: "resp_agent_file_fixture", status: "completed", output: [] });
-    for (const model of ["claude-cli/claude-sonnet-5-5", "pair"]) {
+    for (const model of ["claude-cli/claude-sonnet-5-5", "combo/pair"]) {
       const response = await handleResponses(new Request("http://localhost/v1/responses", {
         method: "POST", body: JSON.stringify({ model, previous_response_id: "resp_agent_file_fixture", input: "continue" }),
       }), config, { model: "", provider: "" });
