@@ -1177,7 +1177,8 @@ produce about a 99.9% cache hit rate.
 
 **Native OpenAI/ChatGPT routing:** derives a session-scoped `prompt_cache_key` (from
 `metadata.user_id` when present, falling back to a system-content hash) and `session_id` header
-for cache affinity. The cache key includes model and full tool schemas.
+for cache affinity. Each Claude Code subagent, which sends `x-claude-code-agent-id`, gets a key
+of its own, so subagents never share their session's key. The cache key includes model and full tool schemas.
 
 **Token math:** Anthropic output subtracts `cached_tokens` and `cache_write_tokens` from
 `input_tokens`, exposing them as `cache_read_input_tokens` and `cache_creation_input_tokens`.

@@ -432,19 +432,31 @@ export function anthropicToResponsesTranslation(
   raw: unknown,
   cc?: OcxClaudeCodeConfig,
   budget?: TranslatorBudget,
+  claudeAgentId?: string,
 ): ClaudeInboundTranslation {
   const activeBudget = budget ?? createTranslatorBudget();
   try {
-    return translateAnthropicRequest(raw, cc, activeBudget);
+    return translateAnthropicRequest(raw, cc, activeBudget, claudeAgentId);
   } finally {
     if (!budget) activeBudget.dispose();
   }
+}
+
+/**
+ * The subagent a Claude Code request comes from. Claude Code sends `x-claude-code-agent-id` on
+ * every subagent turn and none on the main loop; the value is an opaque short id, so anything
+ * outside that shape is ignored rather than hashed into a key.
+ */
+export function claudeCodeAgentId(headers: Headers): string | undefined {
+  const value = headers.get("x-claude-code-agent-id")?.trim();
+  return value && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : undefined;
 }
 
 function translateAnthropicRequest(
   raw: unknown,
   cc: OcxClaudeCodeConfig | undefined,
   budget: TranslatorBudget,
+  claudeAgentId: string | undefined,
 ): ClaudeInboundTranslation {
   assertAnthropicRequestShape(raw);
 
@@ -490,7 +502,7 @@ function translateAnthropicRequest(
 
   const tools = toolsToResponses(raw.tools);
   if (tools) body.tools = tools;
-  const cacheKeySource = applyAnthropicSettings(raw, body, system.cacheSystem, tools);
+  const cacheKeySource = applyAnthropicSettings(raw, body, system.cacheSystem, tools, claudeAgentId);
   return { body, cacheKeySource, nativeReasoningReplay };
 }
 
@@ -570,6 +582,7 @@ function applyAnthropicSettings(
   body: Rec,
   cacheSystem: string | string[],
   tools: Rec[] | undefined,
+  claudeAgentId?: string,
 ): ClaudeCacheKeySource {
   toolChoiceToResponses(raw.tool_choice, body);
 
@@ -592,8 +605,16 @@ function applyAnthropicSettings(
     // their session id; without it consecutive /v1/messages turns reported
     // cached_tokens: 0 on the ChatGPT backend — devlog 090). Claude Code's
     // metadata.user_id embeds the session uuid, so hashing it yields a stable
-    // per-session key with a bounded length/charset.
-    body.prompt_cache_key = userIdHash.slice(0, 32);
+    // per-session key with a bounded length/charset. Every subagent of the session
+    // carries the same user_id, so a session-only key gave the main loop and all its
+    // subagents (of any model) one key: OpenAI overflowed that key's routing budget,
+    // codex-lb pinned the whole tree to one seat, and the LLM gateway's rendezvous put
+    // it on one account. A subagent therefore keys apart by its agent id; the main
+    // loop keeps the session key.
+    body.prompt_cache_key = (claudeAgentId === undefined
+      ? userIdHash
+      : createHash("sha256").update(`${userIdHash}:agent:${claudeAgentId}`).digest("hex")
+    ).slice(0, 32);
     cacheKeySource = "metadata";
   } else if (typeof cacheSystem === "string" || cacheSystem.length > 0) {
     // Claude Desktop sends no metadata.user_id (H1, devlog 130): without any key the

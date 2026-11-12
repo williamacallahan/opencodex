@@ -368,7 +368,8 @@ request's `prompt_cache_key` to Kimi's Chat Completions body. Kimi Code Plan doc
 session/task key as required to improve cache hit rates. The chat adapter never invents a key of
 its own: it forwards what the request already carries — Codex's session key on
 `/v1/responses`, or the session-scoped key the Claude `/v1/messages` inbound derives
-(metadata.user_id hash, else the system+tools cohort hash) — and a request with no key stays
+(metadata.user_id hash, keyed apart per Claude Code subagent by `x-claude-code-agent-id`, else
+the system+tools cohort hash) — and a request with no key stays
 keyless. An explicit provider-level `promptCacheKey: false` continues to opt out, and the flag is
 persisted through `providerConfigSeed`/`enrichProviderFromRegistry` for new configs; key-pool 429
 rotation keeps it — along with every other registry backfill — because the retry starts from the
