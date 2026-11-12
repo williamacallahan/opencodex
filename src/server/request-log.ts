@@ -29,6 +29,7 @@ import type { AttemptTierOutcome, OcxProviderConfig, OcxUsage } from "../types";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import { parseProtocolTraceV1, type ProtocolTraceV1 } from "../protocols/dto";
 import { protocolTraceForRequest } from "../protocols/trace";
+import type { ClaudeRequestShape } from "./claude-request-shape";
 import type { AdapterRequest } from "../adapters/base";
 import type { RequestSpendSettlement } from "./responses/request-spend";
 import type { AdapterTierMetadata } from "../providers/fastwire";
@@ -184,6 +185,8 @@ export interface RequestLogContext extends UpstreamErrorDiagnostics {
   localTerminalReason?: string;
   /** Stable non-PII Codex Pool account identity for durable usage attribution. */
   accountLogLabel?: string;
+  /** Hash-only prefix shape of a Claude Code Messages request (src/server/claude-request-shape.ts). */
+  claudeRequestShape?: ClaudeRequestShape;
   requestedModel?: string;
   /** User-facing alias selector when routing resolved one; native model remains `model`. */
   requestedAlias?: string;
@@ -347,6 +350,7 @@ export interface RequestLogEntry extends UpstreamErrorDiagnostics {
   accountTag?: `p${string}`;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
+  claudeRequestShape?: ClaudeRequestShape;
   requestedModel?: string;
   requestedAlias?: string;
   /** Original bare helper model when the opt-in shadow-call route rewrote this request. */
@@ -491,6 +495,7 @@ function asCloseReason(value: string | undefined): RequestLogEntry["closeReason"
 function requestDescriptorLogFields(source: RequestLogContext | RequestLogEntry | PersistedUsageEntry) {
   return {
     ...(source.requestedModel ? { requestedModel: source.requestedModel } : {}),
+    ...(source.claudeRequestShape ? { claudeRequestShape: source.claudeRequestShape } : {}),
     ...(source.requestedAlias ? { requestedAlias: source.requestedAlias } : {}),
     ...(source.requestedEffort ? { requestedEffort: source.requestedEffort } : {}),
     ...(source.effectiveEffort ? { effectiveEffort: source.effectiveEffort } : {}),
