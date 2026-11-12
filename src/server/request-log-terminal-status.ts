@@ -130,7 +130,6 @@ export function warnUpstreamFailures(input: {
   diagnostics: UpstreamErrorDiagnostics;
 }): void {
   const terminalFailed = input.terminalStatus === "failed" || input.terminalStatus === "incomplete";
-  if (input.finalStatus === 499) return;
   const snapshot: DiagnosticSources = { registry: outboundCredentials(), configured: configuredCredentials() };
   const attempts = input.attempts?.length
     ? input.attempts

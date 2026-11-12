@@ -105,6 +105,15 @@ test("a client abort (499) is not an upstream failure", () => {
   expect(solo).toEqual([]);
   const withAttempt: RequestLogContext = { ...context(), attempts: [attemptRow(1, "prov-a", "model-a", 499)] };
   expect(finalWarnings(withAttempt, 499)).toEqual([]);
+  // A cancellation after failover still reports the attempt that failed before it.
+  const afterFailover: RequestLogContext = {
+    ...context(),
+    attempts: [attemptRow(1, "prov-a", "model-a", 503), attemptRow(2, "prov-b", "model-b", 499)],
+  };
+  const lines = finalWarnings(afterFailover, 499);
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("attempt=1 provider=prov-a model=model-a status=503");
+  expect(lines[0]).toContain("final=499");
 });
 
 test("a credential-shaped or unsafe attribution value prints as unknown", () => {
