@@ -94,8 +94,13 @@ function poolCreditRenewalDue(config: OcxConfig, accountId: string, now = Date.n
     || isCodexAccountPaused(config, accountId) || isAccountNeedsReauth(accountId)) return false;
   const quota = getAccountQuota(accountId);
   if (codexUsageLimitResetAt(quota, account.plan, now) === undefined) return false;
-  // An exhausted seat with a known future reset cannot change sooner than its 15 minute usage hold.
-  const renewalAgeMs = Math.max(MAIN_CREDIT_RENEWAL_AGE_MS, quota ? poolExhaustedHoldMs(accountId, quota, now) : 0);
+  // An exhausted seat with a known future reset and nothing spendable cannot change sooner than its
+  // 15 minute usage hold. Spendable credits go stale after 5 minutes (CODEX_CREDITS_FRESHNESS_MS), so a
+  // seat last seen holding them keeps the 3 minute renewal or it would leave rotation between reads.
+  const hadSpendableCredits = quota?.credits != null
+    && hasSpendableCodexCredits(quota, quota.credits.observedAt);
+  const renewalAgeMs = Math.max(MAIN_CREDIT_RENEWAL_AGE_MS,
+    quota && !hadSpendableCredits ? poolExhaustedHoldMs(accountId, quota, now) : 0);
   const observedAt = quota?.credits?.observedAt;
   if (observedAt !== undefined && Number.isFinite(observedAt)
     && now - observedAt >= 0 && now - observedAt < renewalAgeMs) return false;

@@ -421,7 +421,7 @@ export function useCodexAccountPool(apiBase: string, enabled = true, targetKey?:
 
       const accountsTask = (async (): Promise<boolean> => {
         try {
-          const response = await targetFetch(capture, `${apiBase}/api/codex-auth/accounts${validatePending ? "/refresh" : refreshQuota ? "?refresh=1" : ""}`, {
+          const response = await targetFetch(capture, `${apiBase}/api/codex-auth/accounts${validatePending ? "/refresh?force=1" : refreshQuota ? "?refresh=1" : ""}`, {
             method: validatePending ? "POST" : "GET",
             signal: bounded.signal,
           });

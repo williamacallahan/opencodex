@@ -145,7 +145,7 @@ describe("primeCodexPoolQuotas", () => {
     if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
   });
 
-  test.each([960_000, 1_200_000])("credit renewal at %d ms reads WHAM despite fresh traffic headers and never touches native main (#7377)", async age => {
+  test.each([180_000, 360_000])("credit renewal at %d ms reads WHAM despite fresh traffic headers and never touches native main (#7377)", async age => {
     const config = makeConfig({ creditCodexAccountIds: ["p1"] });
     seedPoolAccount(config, "p1", "plus");
     const now = Date.now();
@@ -190,7 +190,6 @@ describe("primeCodexPoolQuotas", () => {
     } finally { globalThis.fetch = originalFetch; }
   });
 
-  // The ages above exceed the 15 minute hold an exhausted seat with a known reset keeps (codex-exhausted-refresh-hold.test.ts).
   test("credit renewal excludes non-opted-in, paused, reauth, below-limit and fresh-credit accounts", async () => {
     const config = makeConfig({ creditCodexAccountIds: ["paused", "reauth", "below", "fresh"], pausedCodexAccountIds: ["paused"] });
     const now = Date.now();
@@ -215,7 +214,7 @@ describe("primeCodexPoolQuotas", () => {
     seedPoolAccount(config, "p1", "plus");
     const now = Date.now();
     setAccountQuotaFromParsed("p1", { shortPercent: 100, shortResetAt: now + 3_600_000,
-      shortObservedAt: now, credits: { hasCredits: true, balance: 5, allowed: true, observedAt: now - 960_000 } });
+      shortObservedAt: now, credits: { hasCredits: true, balance: 5, allowed: true, observedAt: now - 360_000 } });
     const originalFetch = globalThis.fetch;
     let calls = 0;
     try {
@@ -223,7 +222,7 @@ describe("primeCodexPoolQuotas", () => {
       await primeCodexPoolQuotas(config, "credit-renewal");
       await primeCodexPoolQuotas(config, "credit-renewal");
       expect(calls).toBe(1);
-      expect(getAccountQuota("p1")?.credits?.observedAt).toBe(now - 960_000);
+      expect(getAccountQuota("p1")?.credits?.observedAt).toBe(now - 360_000);
     } finally { globalThis.fetch = originalFetch; }
   });
 
@@ -232,7 +231,7 @@ describe("primeCodexPoolQuotas", () => {
     seedPoolAccount(config, "p1", "plus");
     const now = Date.now();
     setAccountQuotaFromParsed("p1", { shortPercent: 100, shortResetAt: now + 3_600_000,
-      shortObservedAt: now, credits: { hasCredits: true, balance: 5, allowed: true, observedAt: now - 960_000 } });
+      shortObservedAt: now, credits: { hasCredits: true, balance: 5, allowed: true, observedAt: now - 360_000 } });
     const originalFetch = globalThis.fetch;
     const tokens: string[] = [];
     try {

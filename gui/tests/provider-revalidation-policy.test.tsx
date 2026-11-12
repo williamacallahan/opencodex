@@ -264,7 +264,7 @@ for (const kind of ["oauth", "key", "codex"] as const) {
     seen.length = 0;
     await act(async () => { refresh!.click(); });
     await act(async () => { await reportReady; });
-    const expected = kind === "codex" ? "/api/codex-auth/accounts/refresh"
+    const expected = kind === "codex" ? "/api/codex-auth/accounts/refresh?force=1"
       : kind === "oauth" ? `/api/oauth/accounts?provider=${name}&quota=1&refresh=1`
         : `/api/providers/keys?name=${name}&quota=1&refresh=1`;
     expect(seen).toContain(expected);
