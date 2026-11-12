@@ -128,7 +128,7 @@ test("a usage-limit refusal from the pool logs its type and code instead of unkn
     message: "Rate limit exceeded. Try again in 300s" } }));
   const lines = finalWarnings(log, 429);
   expect(lines).toHaveLength(1);
-  expect(lines[0]).toContain("status=429 type=usage_limit_reached code=usage_limit_reached final=429");
+  expect(lines[0]).toContain("status=429 type=usage_limit_reached code=usage_limit_reached cause=rate-limit final=429");
 });
 
 test("each failed attempt prints one line and a successful attempt prints none", () => {
