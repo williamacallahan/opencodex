@@ -43,12 +43,15 @@ function finalWarnings(log: RequestLogContext, status: number, terminalStatus?: 
   const home = mkdtempSync(join(tmpdir(), "ocx-final-warn-"));
   const previousHome = process.env.OPENCODEX_HOME;
   process.env.OPENCODEX_HOME = home;
+  // An earlier test in the same process may have sent "fixture-model" as a header value.
+  const restoreRegistry = setOutboundCredentialRegistryForTests(new OutboundCredentialRegistry());
   try {
     return captureWarnings(() => addFinalRequestLog(
       "req-final-1", Date.now(), log, status,
       terminalStatus ? { terminalStatus, closeReason: "terminal" } : undefined, () => {},
     )).warnings;
   } finally {
+    restoreRegistry();
     if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousHome;
     removeTreeWithRetry(home);
