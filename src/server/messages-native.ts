@@ -190,7 +190,9 @@ export interface HandleNativeMessagesOptions {
 
 /** Enter the same managed lifecycle before any Messages transformation, for either endpoint. */
 export async function handleStrictNativeMessages(
-  options: Pick<HandleNativeMessagesOptions, "req" | "config" | "logCtx" | "logIds" | "translatorBudget" | "modelScope">,
+  options: Pick<HandleNativeMessagesOptions, "req" | "config" | "logCtx" | "logIds" | "translatorBudget" | "modelScope"> & {
+    preRead?: { wire: Uint8Array; body: unknown };
+  },
 ): Promise<Response> {
   const { req, config, translatorBudget } = options;
   const refuse = (response: Response) => {
@@ -199,8 +201,8 @@ export async function handleStrictNativeMessages(
   };
   try {
     if (config.claudeCode?.strictPassthrough !== true) throw new MessagesIntegrityError();
-    let wire: Uint8Array | undefined;
-    const body = await readBoundedJsonRequestBody(req, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes), translatorBudget, {
+    let wire: Uint8Array | undefined = options.preRead?.wire;
+    const body = options.preRead ? options.preRead.body : await readBoundedJsonRequestBody(req, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes), translatorBudget, {
       retainWire(bytes) { translatorBudget.chargeRetained(bytes.byteLength, { kind: "request_copies" }); wire = bytes; },
     });
     if (!wire || !isRec(body) || typeof body.model !== "string" || !body.model) {
