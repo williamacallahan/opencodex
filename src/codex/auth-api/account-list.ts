@@ -405,7 +405,10 @@ export async function listCodexAuthAccountsSnapshot(
     const hasMainCredential = mainSnapshotLive && mainResult.credentialChecked
       ? mainResult.hasCredential
       : getMainAccountCredentialPresence() ?? false;
-    const mainMissingCredential = mainSnapshotLive && mainResult.credentialChecked && !hasMainCredential;
+    // A read that could not check (Codex never answered) keeps the last observed absence, so one
+    // unanswered probe does not turn a login-less main account "healthy" and hide its sign-in.
+    const mainMissingCredential = mainSnapshotLive
+      && (mainResult.credentialChecked ? !hasMainCredential : getMainAccountCredentialPresence() === false);
     const liveQuotaRefresh = mainSnapshotLive && mainResult.quotaRefreshGeneration !== undefined
       && isMainAccountIdentityGenerationLive(mainResult.quotaRefreshGeneration)
       ? mainResult.quotaRefresh : undefined;

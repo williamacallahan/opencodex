@@ -17,6 +17,7 @@ import {
   NativeMainReauthUnavailableError,
   setMainAuthJsonBeforeRenameHookForTests,
 } from "../../src/codex/main-account";
+import { setMainAccountCredentialPresence } from "../../src/codex/main-account-cache";
 import type { NativeDeviceLogin } from "../../src/oauth/chatgpt-device";
 import type { OAuthController } from "../../src/oauth/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -415,6 +416,16 @@ describe("beginNativeMainReauth first login", () => {
     symlinkSync(join(home, "no-such-target.json"), authPath);
     expect(() => beginNativeMainReauth()).toThrow(NativeMainReauthUnavailableError);
     expect(lstatSync(authPath).isSymbolicLink()).toBe(true);
+  });
+
+  test("a home whose credential check saw a keyring login is never given a file login", () => {
+    setMainAccountCredentialPresence(true);
+    try {
+      expect(() => beginNativeMainReauth()).toThrow(NativeMainReauthUnavailableError);
+      expect(existsSync(authPath)).toBe(false);
+    } finally {
+      setMainAccountCredentialPresence(false);
+    }
   });
 
   test("a keyring credential store is never given a file login", () => {

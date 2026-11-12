@@ -1,5 +1,5 @@
 import { publishCredentialSync } from "../local-credentials/generation";
-import { captureMainAccountIdentityGeneration, getMainQuotaCredentialGeneration, isMainAccountIdentityGenerationLive, isMainQuotaWriterLive, matchesMainQuotaCredential, observeMainDecisionCredentialUsable, type MainQuotaWriter } from "./main-account-cache";
+import { captureMainAccountIdentityGeneration, getMainAccountCredentialPresence, getMainQuotaCredentialGeneration, isMainAccountIdentityGenerationLive, isMainQuotaWriterLive, matchesMainQuotaCredential, observeMainDecisionCredentialUsable, type MainQuotaWriter } from "./main-account-cache";
 import { classifyChatgptRefreshFailure, noteChatgptRefreshFailure } from "./chatgpt-refresh-failure";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 import { createHash } from "node:crypto";
@@ -32,7 +32,7 @@ import {
 } from "./account-runtime-state";
 import { advanceCodexCredentialMutationEpoch, codexCredentialMutationEpoch } from "./credential-mutation-epoch";
 import { withNativeMainExclusiveClaim } from "./native-main-claim";
-import { readNativeEnvelopeResult, requireFileCredentialStore, resolveNativeProfileContext } from "./native-profile-store";
+import { OsNativeProfileKeyProvider, readNativeEnvelopeResult, requireFileCredentialStore, resolveNativeProfileContext } from "./native-profile-store";
 import { NativeProfileError } from "./native-profile-types";
 import { isNativeMainTrafficBlocked } from "./native-profile-startup";
 import { loadConfig } from "../config";
@@ -449,7 +449,31 @@ function persistNativeMainReauthTokens(
  * credential and is never replaced here, and under a keyring store a missing file says nothing
  * about whether a login exists.
  */
+/**
+ * True when this home provably holds no native login without asking Codex: a file store, no
+ * auth.json, and no readable OS keyring for a keyring-only login to live in. The account list
+ * falls back to it when the Codex binary does not answer who is signed in, which is the standing
+ * state of a container hub; without it that hub's main account reads "healthy" and its sign-in
+ * is never offered.
+ */
+export async function nativeMainLoginProvablyAbsent(): Promise<boolean> {
+  try {
+    nativeMainFirstLoginPath();
+    await new OsNativeProfileKeyProvider().get(resolveNativeProfileContext().homeId);
+    return false;
+  } catch (error) {
+    return error instanceof NativeProfileError && error.code === "KEYRING_UNAVAILABLE";
+  }
+}
+
 function nativeMainFirstLoginPath(): string {
+  // Codex can hold a login in the OS keyring with no auth.json and no store key in config.toml.
+  // A credential check that saw one means this home is signed in, whatever the file says.
+  if (getMainAccountCredentialPresence() === true) {
+    throw new NativeMainReauthUnavailableError(
+      "The native main credential can be neither reauthenticated nor created in this state",
+    );
+  }
   const path = join(resolveCodexHomeDir(), "auth.json");
   try {
     requireFileCredentialStore(resolveNativeProfileContext());
