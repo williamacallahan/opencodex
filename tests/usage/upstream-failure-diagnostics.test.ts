@@ -39,10 +39,20 @@ function attemptRow(ordinal: number, provider: string, model: string, status: nu
 }
 
 function finalWarnings(log: RequestLogContext, status: number, terminalStatus?: "failed" | "incomplete"): string[] {
-  return captureWarnings(() => addFinalRequestLog(
-    "req-final-1", Date.now(), log, status,
-    terminalStatus ? { terminalStatus, closeReason: "terminal" } : undefined, () => {},
-  )).warnings;
+  // A private config home gives the credential check a fresh, complete source whatever ran before.
+  const home = mkdtempSync(join(tmpdir(), "ocx-final-warn-"));
+  const previousHome = process.env.OPENCODEX_HOME;
+  process.env.OPENCODEX_HOME = home;
+  try {
+    return captureWarnings(() => addFinalRequestLog(
+      "req-final-1", Date.now(), log, status,
+      terminalStatus ? { terminalStatus, closeReason: "terminal" } : undefined, () => {},
+    )).warnings;
+  } finally {
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+    removeTreeWithRetry(home);
+  }
 }
 
 test("upstream failures record the error code and request id without the body", () => {
