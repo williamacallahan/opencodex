@@ -113,13 +113,20 @@ export type PoolUnavailableHorizon =
   | { kind: "credit-recheck"; accountId: string; resetAt: number; retryAt: number }
   | { kind: "exhausted"; accountId: string; resetAt: number; mainNeedsSignIn: boolean };
 
-/** Explain the existing no-capacity decision without depending on authentication error classes. */
+/**
+ * Explain the existing no-capacity decision without depending on authentication error classes.
+ * `isUsable` names the seats whose credential can actually serve a turn: a seat that needs
+ * sign-in is not "held for credits", so it must answer the credential 401 rather than a quota
+ * 429 whose reset would not help. `main.recoveryAt` is the usable main login's own hold end, so
+ * a shorter main hold is not hidden behind a pool seat's later reset.
+ */
 export function poolUnavailableUntilKnownHorizon(
   policy: PoolCreditPolicyConfig & Pick<OcxConfig, "pausedCodexAccountIds">,
   catalog: OcxConfig,
   now: number,
-  main: { candidate: boolean; needsSignIn: boolean },
+  main: { candidate: boolean; needsSignIn: boolean; recoveryAt?: number },
   quotaScope?: CodexQuotaScope,
+  isUsable?: (accountId: string) => boolean,
 ): PoolUnavailableHorizon | undefined {
   let hold: { accountId: string; resetAt: number } | undefined;
   let lapse: { accountId: string; lapsesAt: number } | undefined;
@@ -133,6 +140,10 @@ export function poolUnavailableUntilKnownHorizon(
   };
   for (const account of catalog.codexAccounts ?? []) {
     if (!isSelectableCodexPoolAccount(account) || policy.pausedCodexAccountIds?.includes(account.id)) continue;
+    // A seat whose credential is unusable is not held for credits: it must answer the
+    // credential 401, not the quota 429. Treat it as unheld so the caller falls through to
+    // the credential check instead of reporting a reset that will not help.
+    if (isUsable && !isUsable(account.id)) { unheld = true; continue; }
     const resetAt = poolCreditHoldResetAt(policy, account.id, catalog);
     if (resetAt !== undefined) {
       if (!hold || resetAt < hold.resetAt) hold = { accountId: account.id, resetAt };
@@ -154,6 +165,13 @@ export function poolUnavailableUntilKnownHorizon(
   if (recheck && !unheld && !main.needsSignIn && hold && recheck.retryAt < hold.resetAt) {
     return { kind: "credit-recheck", ...recheck };
   }
-  if (hold && !unheld) return { kind: "exhausted", ...hold, mainNeedsSignIn: main.needsSignIn };
+  if (hold && !unheld) {
+    // A usable main login's own hold can end before the pool seat's reset; report the sooner
+    // one so the client is not told to wait past a seat that will serve again first.
+    if (main.recoveryAt !== undefined && main.recoveryAt < hold.resetAt) {
+      return { kind: "exhausted", accountId: MAIN_CODEX_ACCOUNT_ID, resetAt: main.recoveryAt, mainNeedsSignIn: main.needsSignIn };
+    }
+    return { kind: "exhausted", ...hold, mainNeedsSignIn: main.needsSignIn };
+  }
   return undefined;
 }

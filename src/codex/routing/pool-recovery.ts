@@ -39,7 +39,7 @@ import {
 } from "./selection";
 
 /** When every temporary hold on one stored pool account ends; undefined when unknown or never. */
-function poolAccountRecoveryAt(
+export function poolAccountRecoveryAt(
   config: OcxConfig,
   id: string,
   now: number,
