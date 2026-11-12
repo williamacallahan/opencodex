@@ -19,6 +19,10 @@ export interface UpstreamErrorDiagnostics {
 }
 
 interface TerminalStatusContext extends UpstreamErrorDiagnostics {
+  /** Attribution for the one-line failure warning; each value prints only if it is a plain label. */
+  provider?: string;
+  model?: string;
+  logicalRequestId?: string;
   terminalHttpStatus?: number;
   terminalErrorCode?: typeof CYBER_POLICY_ERROR_CODE;
 }
@@ -82,13 +86,6 @@ function noteBoundedDiagnostic(
   if (field === "upstreamErrorType" && !KNOWN_UPSTREAM_ERROR_TYPES.has(value)) return;
   if (!diagnosticValueAllowed(value)) return;
   logCtx[field] = value;
-  const status = logCtx.terminalHttpStatus;
-  if (status === undefined || status >= 500) {
-    // Service logs persist too: print only closed-vocabulary values, never an upstream id or code.
-    const { upstreamErrorCode: rawCode, upstreamErrorType: type } = upstreamDiagnosticLogFields(logCtx);
-    const code = rawCode !== undefined && KNOWN_BARE_ERROR_CODES.has(rawCode) ? rawCode : undefined;
-    console.warn(`[opencodex] upstream failure${status ? ` status=${status}` : ""}${type ? ` type=${type}` : ""}${code ? ` code=${code}` : ""}`);
-  }
 }
 
 /**
@@ -111,6 +108,26 @@ export function noteUpstreamRequestId(logCtx: TerminalStatusContext, headers: He
   noteBoundedDiagnostic(logCtx, "upstreamRequestId", headers.get("openai-request-id") ?? headers.get("x-request-id"));
 }
 
+const ATTRIBUTION_LABEL = /^[A-Za-z0-9_.:@+/-]{1,160}$/;
+
+function attributionLabel(value: unknown): string {
+  return typeof value === "string" && ATTRIBUTION_LABEL.test(value) && redactSecretString(value) === value ? value : "unknown";
+}
+
+function isFailurePayload(json: UpstreamErrorPayload): boolean {
+  return json.type === "error" || json.type === "response.failed"
+    || json.error !== undefined || json.last_error !== undefined || json.response?.error !== undefined;
+}
+
+/** One line per failure payload, after type and code are captured. Prints no upstream request id or body. */
+function warnUpstreamFailure(logCtx: TerminalStatusContext): void {
+  const status = logCtx.terminalHttpStatus;
+  if (status !== undefined && status < 500) return;
+  const { upstreamErrorCode: rawCode, upstreamErrorType: type } = upstreamDiagnosticLogFields(logCtx);
+  const code = rawCode !== undefined && KNOWN_BARE_ERROR_CODES.has(rawCode) ? rawCode : undefined;
+  console.warn(`[opencodex] level=warn upstream failure request=${attributionLabel(logCtx.logicalRequestId)} provider=${attributionLabel(logCtx.provider)} model=${attributionLabel(logCtx.model)} status=${status ?? "unknown"} type=${type ?? "unknown"} code=${code ?? "unknown"}`);
+}
+
 export function captureUpstreamTerminalDiagnostics(logCtx: TerminalStatusContext, json: UpstreamErrorPayload): void {
   captureTerminalHttpStatus(logCtx, json);
   noteBoundedDiagnostic(logCtx, "upstreamErrorCode",
@@ -119,6 +136,7 @@ export function captureUpstreamTerminalDiagnostics(logCtx: TerminalStatusContext
       ?? (typeof json.code === "string" && KNOWN_BARE_ERROR_CODES.has(json.code) ? json.code : undefined));
   noteBoundedDiagnostic(logCtx, "upstreamErrorType",
     json.error?.type ?? json.last_error?.type ?? json.response?.error?.type);
+  if (isFailurePayload(json)) warnUpstreamFailure(logCtx);
 }
 
 export function upstreamDiagnosticLogFields(logCtx: UpstreamErrorDiagnostics): UpstreamErrorDiagnostics {

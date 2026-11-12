@@ -20,10 +20,11 @@ const nativeModel = "claude-sonnet-4-5";
 const routedModel = "ocx-claude-gpt-pool--gpt-fixture";
 const hubKey = `ocx_data_${"h".repeat(40)}`;
 const poolToken = "synthetic-hybrid-pool-access-1";
-const callerToken = "sk-ant-synthetic-hybrid-caller";
+const bridgePoolKey = "bridge-pool-key";
+const callerToken = "sk-ant-hybrid-caller";
 const callerBearer = `Bearer ${callerToken}`;
-const callerApiKey = "sk-ant-synthetic-hybrid-api-key";
-const callerCookie = "hybrid-session=synthetic-caller-cookie";
+const callerApiKey = "sk-ant-hybrid-apikey";
+const callerCookie = "hybrid-session=caller-cookie";
 const query = "?beta=true&future=a%2Fb&future=a+b";
 const raw = String.raw`{
  "model":"claude-sonnet-4-5", "max_tokens":64, "stream":false,
@@ -137,7 +138,7 @@ describe("hybrid Messages public HTTP transport", () => {
       apiKeys: [{ id: "hybrid", name: "fixture-hybrid", key: hubKey, createdAt: "2026-01-01T00:00:00.000Z" }],
       providers: {
         anthropic: { adapter: "anthropic", baseUrl: "https://api.anthropic.com", authMode: "oauth", models: [nativeModel], liveModels: false },
-        "gpt-pool": { adapter: "openai-chat", baseUrl: `${bridge.url.origin}/v1`, authMode: "key", apiKey: "synthetic-bridge-pool-key",
+        "gpt-pool": { adapter: "openai-chat", baseUrl: `${bridge.url.origin}/v1`, authMode: "key", apiKey: bridgePoolKey,
           allowPrivateNetwork: true, models: ["gpt-fixture", "vendor/gpt-fixture"], liveModels: false },
       },
       protocols: { rollout: { managedMessagesNative: true, managedMessagesNativeOAuth: true } },
@@ -208,7 +209,7 @@ describe("hybrid Messages public HTTP transport", () => {
       expect(translated.stream).toBe(true);
       expect(translated.model).toBe(alias.includes("claude2-") || alias.includes("ocx2-") ? "vendor/gpt-fixture" : "gpt-fixture");
       expect(translated.messages.some((message: { role: string; content: string }) => message.role === "user" && message.content.includes("café"))).toBe(true);
-      expect(captured.headers.get("authorization")).toBe("Bearer synthetic-bridge-pool-key");
+      expect(captured.headers.get("authorization")).toBe(`Bearer ${bridgePoolKey}`);
       const upstreamRequest = JSON.stringify({ path: captured.path, query: captured.query,
         headers: [...captured.headers], body: new TextDecoder().decode(captured.bytes) });
       for (const credential of [callerToken, callerApiKey, callerCookie]) expect(upstreamRequest).not.toContain(credential);

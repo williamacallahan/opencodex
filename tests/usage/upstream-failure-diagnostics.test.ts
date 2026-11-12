@@ -47,6 +47,41 @@ test("upstream failures record the error code and request id without the body", 
   expect(warnings.join("\n")).not.toContain("req_abc123");
 });
 
+test("one failure payload prints exactly one attributed line", () => {
+  const log: RequestLogContext = { model: "fixture-model", provider: "openai", logicalRequestId: "lr_test_1" };
+  const warnings: string[] = [];
+  const warn = console.warn;
+  console.warn = ((line: string) => { warnings.push(String(line)); }) as typeof console.warn;
+  try {
+    noteUpstreamRequestId(log, new Headers({ "x-request-id": "req_abc123" }));
+    inspectResponseLogJson(log, JSON.stringify({
+      error: { type: "server_error", code: "server_error", message: "secret upstream body" },
+    }));
+  } finally {
+    console.warn = warn;
+  }
+  expect(warnings).toEqual([
+    "[opencodex] level=warn upstream failure request=lr_test_1 provider=openai model=fixture-model status=unknown type=server_error code=server_error",
+  ]);
+  expect(warnings.join("\n")).not.toContain("req_abc123");
+  expect(warnings.join("\n")).not.toContain("secret upstream body");
+});
+
+test("attribution values that are not plain labels print as unknown", () => {
+  const log: RequestLogContext = { model: "has space\nnewline", provider: "openai" };
+  const warnings: string[] = [];
+  const warn = console.warn;
+  console.warn = ((line: string) => { warnings.push(String(line)); }) as typeof console.warn;
+  try {
+    inspectResponseLogJson(log, JSON.stringify({ error: { type: "server_error", code: "server_error" } }));
+  } finally {
+    console.warn = warn;
+  }
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]).toContain("model=unknown");
+  expect(warnings[0]).toContain("request=unknown");
+});
+
 
 for (const shape of ["error", "last_error", "response"] as const) {
   test.each([

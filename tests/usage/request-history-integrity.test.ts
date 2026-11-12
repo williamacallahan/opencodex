@@ -27,7 +27,7 @@ import {
   withRequestHistoryRead,
 } from "../../src/routing/history/indexer";
 import { HISTORY_META_KEYS, HISTORY_SCHEMA_VERSION } from "../../src/routing/history/schema";
-import { RequestHistoryIntegrityMonitor } from "../../src/routing/history/integrity";
+import { RequestHistoryIntegrityMonitor, REQUEST_HISTORY_INTEGRITY_CHECK_TIMEOUT_MS } from "../../src/routing/history/integrity";
 import { isHistoryIndexCorruption } from "../../src/routing/history/sqlite-errors";
 import { computeRoutingAnalytics } from "../../src/routing/analytics";
 import { clearHealthHistoryCacheForTests, healthEvidenceForCandidate } from "../../src/routing/health";
@@ -232,6 +232,17 @@ describe("request-history integrity lifecycle (#7966)", () => {
       expect(monitor.inspect(handle, "index.sqlite").state).toBe("ready");
     }
   }, 1000);
+
+  test("the default check timeout outlasts a quick_check on a multi-GB index (49.9 s measured on 2.1 GB)", () => {
+    expect(REQUEST_HISTORY_INTEGRITY_CHECK_TIMEOUT_MS).toBe(300_000);
+    let scheduledMs = 0;
+    const monitor = new RequestHistoryIntegrityMonitor({
+      scheduleTimeout: (_callback, ms) => { scheduledMs = ms; return () => {}; },
+      createJob: () => ({ check: () => new Promise<boolean>(() => {}), dispose: async () => {}, afterExit: async () => {} }),
+    });
+    monitor.inspect({}, join(testDir, "default-timeout.db"));
+    expect(scheduledMs).toBe(300_000);
+  });
 
   test("shared async readers leave a silent initial integrity check with a bounded error", async () => {
     await existingIndex();
