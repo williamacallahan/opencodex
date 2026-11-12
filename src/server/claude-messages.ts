@@ -41,6 +41,7 @@ import {
   type MessagesDirectPlan,
 } from "./messages-antigravity-direct";
 import { claudeRequestShape } from "./claude-request-shape";
+import { claudeForkSessionKey, resolveClaudeFork } from "./claude-fork-session";
 import { AnthropicRequestError, callerCacheRetention, claudeCodeAgentId, claudeSessionCacheKey, DesktopModelMappingUnavailableError, extractOcxEffortDirective, extractOcxRouteDirective, nativeAnthropicProjection, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
 import { nativeReasoningTag, type NativeReasoningOwner } from "../responses/reasoning-replay-cache";
 import { isKnownDesktop3pModelId, resolveDesktop3pAlias } from "../claude/desktop-3p";
@@ -753,7 +754,8 @@ async function handleClaudeMessagesWithBudget(
   let anthropicBody: unknown;
   let internalBody: Rec;
   let cacheKeySource: ClaudeCacheKeySource = null;
-  const claudeAgentId = claudeCodeAgentId(req.headers);
+  // A forked subagent collapses to the main loop below, once the body is read.
+  let claudeAgentId = claudeCodeAgentId(req.headers);
   let nativeReasoningReplay: ReadonlyMap<string, string> | undefined;
   const nativeReasoningMint: { owner?: NativeReasoningOwner } = {};
   let nativeProjectionOnlyError: AnthropicRequestError | undefined;
@@ -774,7 +776,15 @@ async function handleClaudeMessagesWithBudget(
   const advisorAdmissionPolicy = logIds?.advisorAdmissionPolicy ?? captureAdmissionPolicy(config, logIds?.admission);
   try {
     anthropicBody = hybridBody ?? await readAnthropicBody(req, translatorBudget, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));
-    if (isRec(anthropicBody)) logCtx.claudeRequestShape = claudeRequestShape(req.headers, anthropicBody);
+    if (isRec(anthropicBody)) {
+      const shape = claudeRequestShape(req.headers, anthropicBody);
+      shape.fork = resolveClaudeFork({
+        sessionKey: claudeForkSessionKey(anthropicBody), hasAgentId: claudeAgentId !== undefined, firstMessageDigest: shape.messagesPrefix?.[0],
+      });
+      // A fork replays its parent's conversation: it keys, pools and fingerprints as its parent does.
+      if (shape.fork === "true") claudeAgentId = undefined;
+      logCtx.claudeRequestShape = shape;
+    }
     clientModelLabel = clientFacingModelLabel(isRec(anthropicBody) ? anthropicBody.model : undefined);
     // Defensive [1m] strip (devlog 138): clients normally remove the context-variant
     // marker themselves; the 1M signal we act on is the anthropic-beta header.

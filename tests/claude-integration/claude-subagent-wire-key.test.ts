@@ -58,7 +58,7 @@ async function turn(agentId?: string): Promise<void> {
   try {
     const response = await handleClaudeMessages(new Request("http://localhost/v1/messages", { method: "POST",
       headers: { "content-type": "application/json", ...(agentId ? { "x-claude-code-agent-id": agentId } : {}) },
-      body: JSON.stringify({ model: "openai/gpt-5.4", max_tokens: 32, stream: false, metadata: { user_id: userId }, messages: [{ role: "user", content: "ping" }] }),
+      body: JSON.stringify({ model: "openai/gpt-5.4", max_tokens: 32, stream: false, metadata: { user_id: userId }, messages: [{ role: "user", content: agentId ? "a fresh subagent brief" : "ping" }] }),
     }), config, { model: "", provider: "" }, { requestId: "fixture", start: Date.now(), turnAdmissionLease: lease!, admission: { kind: "loopback", source: "loopback" } });
     await response.text();
     expect(response.status).toBe(200);

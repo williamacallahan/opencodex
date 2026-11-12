@@ -729,7 +729,8 @@ test("each Claude Code subagent reaches the upstream with its own prompt_cache_k
       body: JSON.stringify({
         model: "native/gpt-test",
         max_tokens: 128,
-        messages: [{ role: "user", content: "hi" }],
+        // A fresh subagent's first message differs from the main loop's (an equal one is a fork).
+        messages: [{ role: "user", content: agentId ? `brief for ${agentId}` : "hi" }],
         metadata: { user_id: userId },
       }),
     });

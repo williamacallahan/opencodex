@@ -30,6 +30,8 @@ export interface ClaudeRequestShape {
   systemLastBlock?: ClaudeRequestShapeDigest;
   /** Hashes of the first {@link MESSAGES_PREFIX} messages' content, in order. */
   messagesPrefix?: ClaudeRequestShapeDigest[];
+  /** `true`: an agent-id request treated as its parent's fork; `false`: agent id, not a fork; `absent`: no agent id. */
+  fork?: "true" | "false" | "absent";
 }
 
 const DIGEST = new RegExp(`^[0-9a-f]{${LOG_CONVERSATION_ID_LEN}}$`);
@@ -92,12 +94,15 @@ export function parseClaudeRequestShape(value: unknown): ClaudeRequestShape | un
   if (!digest(agentId) || !digest(parentAgentId) || !digest(system) || !digest(tools) || !digest(firstMessage)) return undefined;
   if (typeof messageCount !== "number" || !Number.isInteger(messageCount) || messageCount < 0 || messageCount > MAX_MESSAGE_COUNT) return undefined;
   const base = { agentId, parentAgentId, system, tools, messageCount, firstMessage };
-  const { systemBlockCount, systemBlocks, systemLastBlock, messagesPrefix } = row;
+  const { systemBlockCount, systemBlocks, systemLastBlock, messagesPrefix, fork } = row;
+  if (fork !== undefined && fork !== "true" && fork !== "false" && fork !== "absent") return undefined;
+  const forkField: Pick<ClaudeRequestShape, "fork"> = fork === undefined ? {} : { fork };
   // A row stored before the block fields existed carries none of them.
-  if (systemBlockCount === undefined && systemBlocks === undefined && systemLastBlock === undefined && messagesPrefix === undefined) return base;
+  const withFork: ClaudeRequestShape = { ...base, ...forkField };
+  if (systemBlockCount === undefined && systemBlocks === undefined && systemLastBlock === undefined && messagesPrefix === undefined) return withFork;
   const digests = (field: unknown, max: number): field is string[] =>
     Array.isArray(field) && field.length <= max && field.every(digest);
   if (typeof systemBlockCount !== "number" || !Number.isInteger(systemBlockCount) || systemBlockCount < 0 || systemBlockCount > MAX_MESSAGE_COUNT) return undefined;
   if (!digests(systemBlocks, MAX_SYSTEM_BLOCKS) || !digest(systemLastBlock) || !digests(messagesPrefix, MESSAGES_PREFIX)) return undefined;
-  return { ...base, systemBlockCount, systemBlocks, systemLastBlock, messagesPrefix };
+  return { ...withFork, systemBlockCount, systemBlocks, systemLastBlock, messagesPrefix };
 }

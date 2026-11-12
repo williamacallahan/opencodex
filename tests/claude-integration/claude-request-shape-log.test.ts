@@ -69,6 +69,7 @@ test("a subagent request's row carries hashes of its ids and prefix, joinable to
     agentId: idHash(AGENT), parentAgentId: idHash(PARENT), system: sha32(SYSTEM_TEXT), tools: sha32(TOOLS),
     messageCount: 3, firstMessage: sha32({ role: "user", content: FIRST_MESSAGE_TEXT }),
     systemBlockCount: 1, systemBlocks: [text32(SYSTEM_TEXT)], systemLastBlock: "absent",
+    fork: "false",
     messagesPrefix: [sha32(FIRST_MESSAGE_TEXT), sha32("a"), sha32("b")],
   });
   expect(entry.usage).toBeDefined();
@@ -118,4 +119,10 @@ test("a stored shape keeps accepting rows from before the block fields and rejec
   for (const bad of [{ ...full, systemBlocks: [SYSTEM_TEXT] }, { ...full, systemBlocks: Array(13).fill("absent") },
     { ...full, messagesPrefix: Array(4).fill("absent") }, { ...full, systemBlockCount: -1 }, { ...full, systemLastBlock: undefined }])
     expect(parseClaudeRequestShape(bad)).toBeUndefined();
+});
+
+test("a stored shape accepts only the three fork values", () => {
+  const base = { agentId: "absent", parentAgentId: "absent", system: "absent", tools: "absent", messageCount: 1, firstMessage: "absent" };
+  for (const fork of ["true", "false", "absent"] as const) expect(parseClaudeRequestShape({ ...base, fork })).toEqual({ ...base, fork });
+  for (const fork of [true, "maybe", "", null]) expect(parseClaudeRequestShape({ ...base, fork })).toBeUndefined();
 });

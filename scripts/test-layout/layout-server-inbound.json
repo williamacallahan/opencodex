@@ -9,6 +9,7 @@
   "claude-bridge-pool-dispatch.test.ts": "claude-integration",
   "claude-subagent-cache-key.test.ts": "claude-integration",
   "claude-request-shape-log.test.ts": "claude-integration",
+  "claude-fork-rule.test.ts": "claude-integration",
   "claude-subagent-direct-lane.test.ts": "claude-integration",
   "claude-subagent-wire-key.test.ts": "claude-integration",
   "admitted-http-turn.test.ts": "server",

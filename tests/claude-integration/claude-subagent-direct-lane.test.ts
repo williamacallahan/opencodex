@@ -92,7 +92,7 @@ async function promptCacheKeyFor(direct: boolean, agentId: string | undefined): 
     const response = await handleClaudeMessages(new Request("http://localhost/v1/messages", { method: "POST",
       headers: { "content-type": "application/json", ...(agentId ? { "x-claude-code-agent-id": agentId } : {}) },
       body: JSON.stringify({ model: "google-antigravity/gemini-3.8-flash", max_tokens: 64, stream: false, metadata: { user_id: userId },
-        messages: [{ role: "user", content: "ping" }] }),
+        messages: [{ role: "user", content: agentId ? "a fresh subagent brief" : "ping" }] }),
     }), antigravityConfig(direct), { model: "", provider: "" }, { requestId: `fixture-${crypto.randomUUID()}`, start: Date.now(), turnAdmissionLease: lease!,
       admission: { kind: "loopback", source: "loopback" } });
     await response.text();
