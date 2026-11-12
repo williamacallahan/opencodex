@@ -324,6 +324,15 @@ async function runWebSocketTurn(server: ReturnType<typeof startServer>): Promise
 }
 
 describe("request metrics aggregation", () => {
+  test("a 200 stream whose terminal failed counts as a failed logical request", () => {
+    const metrics = createRequestMetricsOwner(123);
+    const logCtx: RequestLogContext = { model: "m", provider: "p", inboundProtocol: "messages", requestMetricsRecorder: metrics };
+    addFinalRequestLog("req-stream-error", Date.now() - 10, logCtx, 200, { terminalStatus: "failed", closeReason: "terminal" }, () => {});
+    const output = metrics.snapshot();
+    expect(sampleValue(output, 'opencodex_logical_requests_total{protocol="messages",result="failed"}')).toBe(1);
+    expect(sampleValue(output, 'opencodex_logical_requests_total{protocol="messages",result="completed"}')).toBe(0);
+  });
+
   test("one finalized logical request counts once while attempts preserve physical sends and distinct recovery kinds", () => {
     const metrics = createRequestMetricsOwner(123);
     const logCtx: RequestLogContext = {

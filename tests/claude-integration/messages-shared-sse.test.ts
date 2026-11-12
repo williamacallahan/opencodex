@@ -122,3 +122,16 @@ test("client cancellation still settles once and cancels the source", async () =
   expect(result.calls).toEqual([{ status: 499, meta: { closeReason: "client_cancel" } }]);
   expect(result.cancelled()).toBe(true);
 });
+
+for (const verbatim of [false, true]) {
+  test(`a 200 stream with event: error finalizes failed and relays the bytes unchanged (verbatim=${verbatim})`, async () => {
+    const errorFrame = 'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"x"}}';
+    const bytes = encoder.encode([start, errorFrame, ""].join("\n\n"));
+    const guard: PassthroughBodyGuard | undefined = verbatim
+      ? { verbatim: { status: 200, inspectSse: true } } as PassthroughBodyGuard
+      : undefined;
+    const result = tap(bytes, 64, "close", guard);
+    expect(new Uint8Array(await new Response(result.stream).arrayBuffer())).toEqual(bytes);
+    expect(result.calls).toEqual([{ status: 200, meta: { terminalStatus: "failed", closeReason: "terminal" } }]);
+  });
+}
