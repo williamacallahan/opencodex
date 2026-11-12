@@ -207,3 +207,26 @@ test("a full cache never evicts an active read", async () => {
   expect((await fetchCodexUsage("active", {}))?.kind).toBe("owner");
   expect(calls).toBe(258);
 });
+
+function usage(percent: number, resetAtMs: number) {
+  return Response.json({ plan_type: "plus", rate_limit: { primary_window: {
+    used_percent: percent, limit_window_seconds: 604_800, reset_at: Math.floor(resetAtMs / 1000),
+  } } });
+}
+
+test.each([
+  { name: "exhausted, read 5 minutes ago", percent: 100, ageMin: 5, resetInMin: 3 * 24 * 60, requests: 0 },
+  { name: "exhausted, read 16 minutes ago", percent: 100, ageMin: 16, resetInMin: 3 * 24 * 60, requests: 1 },
+  { name: "exhausted, reset passed, read 1 minute ago", percent: 100, ageMin: 1, resetInMin: 0.5, requests: 1 },
+  { name: "not exhausted, read 6 minutes ago", percent: 50, ageMin: 6, resetInMin: 3 * 24 * 60, requests: 1 },
+])("pool cache sends $requests usage requests: $name", async ({ percent, ageMin, resetInMin, requests }) => {
+  globalThis.fetch = Object.assign(async () => usage(percent, now + resetInMin * 60_000), { preconnect: originalFetch.preconnect });
+  await fetchPoolAccountQuota("backoff-pool", true);
+  // The reset is fixed at the first read; the passed-reset case advances beyond it.
+  now += ageMin * 60_000;
+  let sent = 0;
+  globalThis.fetch = Object.assign(async () => { sent++; return usage(percent, now + 3 * 24 * 60 * 60_000); },
+    { preconnect: originalFetch.preconnect });
+  await fetchPoolAccountQuota("backoff-pool");
+  expect(sent).toBe(requests);
+});

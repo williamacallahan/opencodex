@@ -5,6 +5,7 @@ import { capturePoolQuotaWriter, getValidCodexToken, isCodexAccountGenerationLiv
 import type { PoolQuotaWriter } from "../quota-types";
 import { isValidWhamHistoryObservation, getAccountQuota, isCompleteCodexQuotaRecoverySnapshot, parseUsageQuota, poolWhamPolicyObservation, setAccountQuotaFromParsed } from "../quota";
 import type { StoredAccountQuota, WhamUsageResponse } from "../quota";
+import { codexQuotaProbeIntervalMs } from "../routing/cooldown-math";
 import type { ManualResetRefreshLineage } from "../routing";
 import { clearAccountNeedsReauth, markAccountNeedsReauth } from "../account-runtime-state";
 import { captureConfigGeneration } from "../../lib/state-store-sweeper";
@@ -18,6 +19,12 @@ import { nonEmptyPlan } from "./runtime-config";
 import { CODEX_TERMINAL_AUTH_CODES } from "../quota-refresh-outcome";
 
 export const POOL_CACHE_TTL = 5 * 60_000;
+
+/** Exhausted accounts with a future reset are re-read at most every 15 minutes. */
+function poolQuotaCacheTtlMs(quota: StoredAccountQuota): number {
+  const interval = codexQuotaProbeIntervalMs(quota, Date.now());
+  return interval === 0 ? 0 : Math.max(POOL_CACHE_TTL, interval);
+}
 export const POOL_QUOTA_REFRESH_CONCURRENCY = 4;
 
 export const MAIN_TERMINAL_AUTH_CODES: ReadonlySet<string> = new Set(CODEX_TERMINAL_AUTH_CODES);
@@ -509,7 +516,7 @@ export async function fetchPoolAccountQuota(
   mayDispatch?: PoolQuotaProbeEvidence["mayDispatch"],
 ): Promise<PoolQuotaResult> {
   const existing = getAccountQuota(accountId);
-  if (afterDispatchSequence === undefined && !forceRefresh && existing && Date.now() - existing.updatedAt < POOL_CACHE_TTL) {
+  if (afterDispatchSequence === undefined && !forceRefresh && existing && Date.now() - existing.updatedAt < poolQuotaCacheTtlMs(existing)) {
     return {
       quota: existing,
       needsReauth: false,

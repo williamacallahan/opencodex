@@ -30,6 +30,7 @@ import {
   recordCodexUpstreamOutcome,
   resolveCodexAccountForThread,
 } from "../../src/codex/routing";
+import { codexQuotaProbeIntervalMs } from "../../src/codex/routing/cooldown-math";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { resetQuotaQueryBackoffForTests } from "../../src/codex/quota-query-backoff";
@@ -581,5 +582,54 @@ describe("Codex cooldown recovery worker", () => {
     // The two that waited must be served before any account gets a second turn.
     expect(secondPass.slice(0, 2).sort()).toEqual(starved.sort());
     expect(new Set(seen)).toEqual(new Set(ids));
+  });
+
+  describe("exhausted accounts are read at most every 15 minutes", () => {
+    const MIN = 60_000;
+    function storeExhausted(id: string, resetAtMs: number, percent = 100): void {
+      setAccountQuotaFromParsed(id, parseUsageQuota({
+        plan_type: "team",
+        rate_limit: { allowed: false, primary_window: {
+          used_percent: percent, limit_window_seconds: 604_800, reset_at: Math.floor(resetAtMs / 1000),
+        } },
+      }));
+    }
+    async function usageRequestsAt(at: number, id: string, percent: number, resetAtMs: number): Promise<number> {
+      const config = makeConfig([id]);
+      saveCredential(id);
+      // Cooled 14 minutes ago: the 15 minute cap leaves the cooldown open, so the interval decides.
+      cool(config, id, "shared", at - 14 * MIN);
+      storeExhausted(id, resetAtMs, percent);
+      let requests = 0;
+      globalThis.fetch = async () => { requests++; return usageResponse(12); };
+      await runCodexCooldownRecoveryProbes(config, at);
+      return requests;
+    }
+
+    test("an exhausted account with a future reset is not re-read after 14 minutes (over the 5 minute cadence, under 15)", async () => {
+      const at = START + 6 * MIN;
+      expect(await usageRequestsAt(at, "a", 100, at + 3 * 24 * 60 * MIN)).toBe(0);
+    });
+
+    test("the shared interval is 15 minutes only while every exhausted window resets in the future", () => {
+      const now = START;
+      const quota = (percent: number, resetAt?: number) => ({ weeklyPercent: percent, weeklyResetAt: resetAt, updatedAt: now - MIN });
+      expect(codexQuotaProbeIntervalMs(quota(100, now + MIN), now)).toBe(15 * MIN);
+      expect(codexQuotaProbeIntervalMs(quota(100, now - 1), now)).toBe(0);
+      expect(codexQuotaProbeIntervalMs(quota(100, now - 2 * MIN), now)).toBe(CODEX_QUOTA_PROBE_INTERVAL_MS);
+      expect(codexQuotaProbeIntervalMs(quota(100), now)).toBe(CODEX_QUOTA_PROBE_INTERVAL_MS);
+      expect(codexQuotaProbeIntervalMs(quota(99, now + MIN), now)).toBe(CODEX_QUOTA_PROBE_INTERVAL_MS);
+      expect(codexQuotaProbeIntervalMs(null, now)).toBe(CODEX_QUOTA_PROBE_INTERVAL_MS);
+    });
+
+    test("a non-exhausted cooled account keeps the 5 minute cadence", async () => {
+      const at = START + 6 * MIN;
+      expect(await usageRequestsAt(at, "a", 50, at + 3 * 24 * 60 * MIN)).toBe(1);
+    });
+
+    test("an exhausted account whose reset has passed is read promptly", async () => {
+      const at = START + 6 * MIN;
+      expect(await usageRequestsAt(at, "a", 100, at - 1000)).toBe(1);
+    });
   });
 });
