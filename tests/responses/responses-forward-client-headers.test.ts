@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createOpenAIChatAdapter } from "../../src/adapters/openai-chat";
 import { createResponsesPassthroughAdapter } from "../../src/adapters/openai-responses/passthrough";
 import { providerForwardClientHeadersConfigError } from "../../src/config/provider-validation";
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
@@ -146,4 +147,38 @@ test("additional metadata forwarding is disabled by default", () => {
     { originator: "codex_cli_rs", "x-codex-app-version": "0.159.3" });
   expect(headers.originator).toBeUndefined();
   expect(headers["x-codex-app-version"]).toBeUndefined();
+});
+
+describe("openai-chat forwardClientHeaders carries the session identity to a gateway", () => {
+  const gateway: OcxProviderConfig = {
+    adapter: "openai-chat", baseUrl: "https://gateway.example.com/v1", authMode: "key", apiKey: "gateway-key",
+    forwardClientHeaders: ["x-lgw-cache-key", "x-user-id"],
+  };
+  function chatHeaders(provider: OcxProviderConfig, incoming: Record<string, string>): Record<string, string> {
+    const budget = createTranslatorBudget();
+    try {
+      const request = createOpenAIChatAdapter(provider).buildRequest({
+        modelId: "m", context: { messages: [{ role: "user", content: "hi", timestamp: 0 }] }, stream: true, options: {},
+      }, { headers: new Headers(incoming), translatorBudget: budget, providerName: "llm-gateway" });
+      request.releaseBodyObservation?.();
+      return Object.fromEntries(Object.entries(request.headers).map(([name, value]) => [name.toLowerCase(), value]));
+    } finally { budget.dispose(); }
+  }
+  test("forwards the per-session cache key and user id, never the caller's credential", () => {
+    const headers = chatHeaders(gateway, {
+      authorization: "Bearer caller-secret", "x-lgw-cache-key": "claude-av:abc", "x-user-id": "claude-av:abc", "x-other": "stay",
+    });
+    expect(headers["x-lgw-cache-key"]).toBe("claude-av:abc");
+    expect(headers["x-user-id"]).toBe("claude-av:abc");
+    expect(headers.authorization).toBe("Bearer gateway-key");
+    expect(headers["x-other"]).toBeUndefined();
+  });
+  test("forwards nothing unless the provider opts in, and the provider's own header wins", () => {
+    const { forwardClientHeaders: _optedIn, ...closed } = gateway;
+    expect(chatHeaders(closed, { "x-lgw-cache-key": "k", "x-user-id": "u" })["x-lgw-cache-key"]).toBeUndefined();
+    expect(chatHeaders({ ...gateway, headers: { "X-User-ID": "provider-owned" } }, { "x-user-id": "u" })["x-user-id"]).toBe("provider-owned");
+  });
+  test("validation accepts the two gateway identity headers", () => {
+    expect(providerForwardClientHeadersConfigError(["x-lgw-cache-key", "x-user-id"])).toBeNull();
+  });
 });

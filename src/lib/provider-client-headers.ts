@@ -24,8 +24,10 @@ const BLOCKED_FORWARDED_CLIENT_HEADERS = new Set([
   "x-openai-agent-assertion",
 ]);
 
+// The last two are the LLM gateway's per-session cost and Langfuse identity: the hub cannot
+// derive them from the body, so an opted-in gateway provider receives the client's own.
 const ALLOWED_FORWARDED_CLIENT_HEADERS = new Set([
-  "originator", "x-client-request-id", "x-codex-app-version", "user-agent",
+  "originator", "x-client-request-id", "x-codex-app-version", "user-agent", "x-lgw-cache-key", "x-user-id",
 ]);
 const MAX_FORWARDED_CLIENT_HEADERS = 64;
 
@@ -60,4 +62,17 @@ export function providerForwardClientHeadersConfigError(value: unknown): string 
     seen.add(name);
   }
   return null;
+}
+
+/** Copy the provider's opted-in caller metadata onto outbound headers it has not already set. */
+export function copyForwardedClientHeaders(
+  forwardClientHeaders: readonly string[] | undefined, headers: Record<string, string>, incoming: Headers,
+): void {
+  if (!Array.isArray(forwardClientHeaders)) return;
+  for (const rawName of forwardClientHeaders.slice(0, MAX_FORWARDED_CLIENT_HEADERS)) {
+    const name = normalizeForwardedClientHeaderName(rawName);
+    if (name === null || Object.keys(headers).some(existing => existing.toLowerCase() === name)) continue;
+    const value = incoming.get(name);
+    if (value) headers[name] = value;
+  }
 }
