@@ -637,6 +637,19 @@ describe("prompt cache key provenance (devlog 130 B3)", () => {
     expect(body.prompt_cache_key).toBe(createHash("sha256").update(userId).digest("hex").slice(0, 32));
   });
 
+  test("a Claude Code subagent keys apart from its session; the main loop keeps the session key", () => {
+    const userId = JSON.stringify({ device_id: "d".repeat(64), account_uuid: "", session_id: "s".repeat(36) });
+    const key = (agentId?: string) => anthropicToResponsesTranslation({
+      model: "m", max_tokens: 1, messages, metadata: { user_id: userId },
+    }, undefined, undefined, agentId).body.prompt_cache_key;
+    const sessionKey = createHash("sha256").update(userId).digest("hex").slice(0, 32);
+    expect(key()).toBe(sessionKey);
+    expect(key("a1b2c3")).toMatch(/^[0-9a-f]{32}$/);
+    expect(key("a1b2c3")).toBe(key("a1b2c3") as string);
+    expect(key("a1b2c3")).not.toBe(sessionKey);
+    expect(key("a1b2c3")).not.toBe(key("d4e5f6") as string);
+  });
+
   test("metadata.user_id boundary: exactly 64 chars forwarded, 65 chars hashed", () => {
     const atLimit = "u".repeat(64);
     const overLimit = "u".repeat(65);

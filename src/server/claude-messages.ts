@@ -32,7 +32,7 @@ import {
   planMessagesAntigravityDirect,
   type MessagesDirectPlan,
 } from "./messages-antigravity-direct";
-import { AnthropicRequestError, callerCacheRetention, DesktopModelMappingUnavailableError, extractOcxEffortDirective, extractOcxRouteDirective, nativeAnthropicProjection, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
+import { AnthropicRequestError, callerCacheRetention, claudeCodeAgentId, DesktopModelMappingUnavailableError, extractOcxEffortDirective, extractOcxRouteDirective, nativeAnthropicProjection, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
 import { nativeReasoningTag, type NativeReasoningOwner } from "../responses/reasoning-replay-cache";
 import { isKnownDesktop3pModelId, resolveDesktop3pAlias } from "../claude/desktop-3p";
 import { resolveAlias, claudeCodeNativeAlias, legacyAliasForNative } from "../claude/alias";
@@ -718,6 +718,7 @@ async function handleClaudeMessagesWithBudget(
   let anthropicBody: unknown;
   let internalBody: Rec;
   let cacheKeySource: ClaudeCacheKeySource = null;
+  const claudeAgentId = claudeCodeAgentId(req.headers);
   let nativeReasoningReplay: ReadonlyMap<string, string> | undefined;
   const nativeReasoningMint: { owner?: NativeReasoningOwner } = {};
   let nativeProjectionOnlyError: AnthropicRequestError | undefined;
@@ -892,7 +893,7 @@ async function handleClaudeMessagesWithBudget(
       nativeReasoningReplay: directPlan.conversation.nativeReasoningReplay,
     };
     try {
-      translation ??= messagesToResponsesTranslation(anthropicBody, cc, translatorBudget);
+      translation ??= messagesToResponsesTranslation(anthropicBody, cc, translatorBudget, claudeAgentId);
     } catch (err) {
       // A native Messages route can discard an undecodable proxy envelope. Keep the
       // original error for any route that ultimately translates to Responses.
@@ -900,7 +901,7 @@ async function handleClaudeMessagesWithBudget(
         || !isRec(anthropicBody)) throw err;
       const projected = nativeAnthropicProjection(anthropicBody, translatorBudget);
       if (projected === anthropicBody) throw err;
-      translation = messagesToResponsesTranslation(projected, cc, translatorBudget);
+      translation = messagesToResponsesTranslation(projected, cc, translatorBudget, claudeAgentId);
       nativeProjectionOnlyError = err;
     }
     internalBody = translation.body;
@@ -977,7 +978,7 @@ async function handleClaudeMessagesWithBudget(
     translatorBudget.releaseRetained(directSettingsBodyBytes, { kind: "request_copies" });
     directSettingsBodyBytes = 0;
     try {
-      const translation = messagesToResponsesTranslation(anthropicBody, cc, translatorBudget);
+      const translation = messagesToResponsesTranslation(anthropicBody, cc, translatorBudget, claudeAgentId);
       internalBody = translation.body;
       if (fastRow) internalBody.service_tier = "priority";
       internalBody.stream = true;
