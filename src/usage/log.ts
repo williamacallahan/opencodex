@@ -30,6 +30,7 @@ import { ACCOUNT_LOG_LABEL_RE, CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/accou
 import { claudeCompatibilityReason, normalizeClaudeFeatureCodes, type ClaudeFeatureCode } from "../claude/compatibility";
 import type { UpstreamCondition } from "../lib/upstream-condition";
 import { errorDetailFor, normalizeLogErrorCode } from "./error-detail";
+import { parseClaudeRequestShape, type ClaudeRequestShape } from "../server/claude-request-shape";
 import type { CodexWsStageRecord, CodexWsTerminalEvent } from "../server/responses/codex-ws-wire";
 import {
   ATTEMPT_RECOVERY_KIND_ROSTER,
@@ -345,6 +346,8 @@ export interface PersistedUsageEntry extends UpstreamErrorDiagnostics {
   /** The exact model id sent upstream when it differs from the client-facing `model`. */
   wireModel?: string;
   requestedModel?: string;
+  /** Hash-only prefix shape of a Claude Code Messages request. */
+  claudeRequestShape?: ClaudeRequestShape;
   /** Original bare helper model when the opt-in shadow-call route rewrote this request. */
   shadowCallRewrittenFrom?: string;
   /** Reasoning effort / service-tier metadata for GUI Logs after restart. */
@@ -1049,6 +1052,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry, projectDiagnostics = up
   const jevDecision = normalizePersistedJevDecision(entry.jevDecision);
   const spend = normalizeRequestSpend(entry.spend);
   const protocolTrace = parseProtocolTraceV1(entry.protocolTrace);
+  const claudeRequestShape = parseClaudeRequestShape(entry.claudeRequestShape);
   const normalized: PersistedUsageEntry = {
     requestId: entry.requestId,
     ...(Object.hasOwn(entry, "client") ? { client: normalizeRecordedClient(entry.client) ?? "unknown" } : {}),
@@ -1097,6 +1101,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry, projectDiagnostics = up
         : { reasoningWireValue: entry.reasoningWireValue }
       : {}),
     ...(callerServiceTier ? { callerServiceTier } : {}),
+    ...(claudeRequestShape ? { claudeRequestShape } : {}),
     ...(typeof entry.requestedServiceTier === "string" && entry.requestedServiceTier
       ? { requestedServiceTier: capMetadataString(entry.requestedServiceTier) }
       : {}),
