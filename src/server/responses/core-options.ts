@@ -282,6 +282,12 @@ export interface HandleResponsesOptions {
    */
   advisorInternal?: boolean;
   /**
+   * True when the Chat ingress verified the internal-call capability of a sidecar's own loopback
+   * request (vision describe). Its model is the operator's sidecar setting, not a client choice,
+   * so it may name a model that is switched off.
+   */
+  sidecarInternal?: boolean;
+  /**
    * Set only by the Chat and Messages ingresses when `protocols.rollout.directEncoders` is on and
    * the settled route is one non-Responses target. Adapter delivery then encodes the adapter
    * events straight into the client's wire and returns a response marked with `markClientWire`.

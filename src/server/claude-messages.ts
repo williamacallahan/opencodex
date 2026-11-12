@@ -1,3 +1,4 @@
+import { projectLocalModelRefusalLog } from "./request-log-failure-detail";
 import { clientFacingModelLabel, clientFacingModelText } from "../lib/error-destination";
 import { GATEWAY_IDENTITY_HEADERS, forwardedClientHeaderValueAllowed } from "../lib/provider-client-headers";
 import { classifyUpstreamCondition } from "../lib/upstream-condition";
@@ -16,6 +17,9 @@ import { resolveClaudeBridgePoolSession } from "./claude-bridge-pool-session";
 import {
   admissionModelDeniedResponse, projectAdmissionModelDeniedLog,
   AdmissionModelDeniedError,
+  DisabledModelError,
+  MODEL_DISABLED,
+  assertClientNamedModelEnabled,
   assertRouteAllowedByScope,
   resolveAdmissionModelScope,
 } from "./admission-model-scope";
@@ -998,6 +1002,9 @@ async function handleClaudeMessagesWithBudget(
     route.staticPolicy = captureRouteStaticPolicy(
       route.providerName, route.modelId, route.provider, route.staticPolicy.effectiveAlias, "anthropic",
     );
+    // The direct and native lanes never reach the Responses admission, so a switched-off row is
+    // refused here for the model the client named.
+    assertClientNamedModelEnabled(config, clientModelLabel, route);
     // Keep native dispatch scoped while translated xAI OAuth requests preview
     // the same billed Fast lane as their final Responses scope check.
     assertRouteAllowedByScope(
@@ -1051,6 +1058,12 @@ async function handleClaudeMessagesWithBudget(
       const response = admissionModelDeniedResponse(err);
       if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 403, { closeReason: "non_stream" });
       return response;
+    }
+    if (err instanceof DisabledModelError) {
+      logCtx.requestedModel = requestedModel;
+      projectLocalModelRefusalLog(logCtx, clientModelLabel);
+      if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 404, { closeReason: "non_stream" });
+      return anthropicErrorResponse(404, err.message, "invalid_request_error", MODEL_DISABLED);
     }
     if (err instanceof UnknownRoutingPolicyError) {
       logCtx.requestedModel = requestedModel;
