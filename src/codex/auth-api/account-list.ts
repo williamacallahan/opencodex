@@ -2,8 +2,8 @@ import { getMainAccountExternalUsageWarning, type MainAccountExternalUsageWarnin
 import { codexCreditsDtoField, hasCodexCreditsObservation, pruneCodexCredits } from "../credits";
 import type { CodexCredits } from "../quota-types";
 import { codexAccountLogLabel } from "../account-label";
-import { poolQuotaHistoryIdentity, getCodexAccountCredential, getValidCodexToken, isCodexAccountGenerationLive, readCodexAccountRecord } from "../account-store";
-import { getAccountQuota, isCodexQuotaExhausted, setAccountQuotaFromParsed, withoutRetiredCodexQuota } from "../quota";
+import { codexAccountRecordFromSnapshot, loadCodexAccountRecordSnapshot, poolQuotaHistoryIdentity, poolQuotaHistoryIdentityOf, getCodexAccountCredential, getValidCodexToken, isCodexAccountGenerationLive, readCodexAccountRecord } from "../account-store";
+import { getAccountQuota, getAccountWeeklyQuotaConflicts, isCodexQuotaExhausted, setAccountQuotaFromParsed, withoutRetiredCodexQuota } from "../quota";
 import type { StoredAccountQuota } from "../quota";
 import { ConfigMutationLockError, mutatePersistedConfig } from "../../config";
 import { reconcileMainCodexAccountRuntimeState } from "../account-lifecycle";
@@ -23,6 +23,7 @@ import { getMainAccountHardLockStatus } from "../main-account-hard-lock";
 import type { MainAccountHardLockStatus } from "../main-account-hard-lock";
 import { emailMaskingEnabled, projectEmail } from "../../lib/privacy";
 import type { CodexAccount, OcxConfig } from "../../types";
+import type { CodexAccountCredentialRecord } from "../../types";
 import { oauthAccountHealthFields, projectCodexAccountHealth } from "../../oauth/health";
 import type { OAuthAccountHealth, OAuthHealthLabel } from "../../oauth/health";
 import { isSelectableCodexPoolAccount } from "../account-id";
@@ -30,7 +31,7 @@ import type { AdmissionLease } from "../../lib/admission";
 import { tryAcquireNativeMainProfileClaim } from "../native-main-admission";
 import { withNativeMainCredentialClaim, isNativeMainClaimUnavailable, isNativeMainObservationUnavailable } from "./http";
 import { fetchMainAccountInfoAttempt, EMPTY_MAIN_ACCOUNT_INFO, mainResetCreditsForCurrentIdentity } from "./main-account-probe";
-import { fetchPoolAccountQuota, PoolQuotaProbeBusyError, POOL_QUOTA_REFRESH_CONCURRENCY } from "./pool-quota-probe";
+import { fetchPoolAccountQuota, isExhaustedPoolQuotaReadHeld, PoolQuotaProbeBusyError, POOL_QUOTA_REFRESH_CONCURRENCY } from "./pool-quota-probe";
 import type { PoolQuotaResult } from "./pool-quota-probe";
 import { getRuntimeConfig, configuredPoolAccount, mapWithConcurrency } from "./runtime-config";
 import { isPassiveRead } from "../../lib/passive-read";
@@ -105,6 +106,15 @@ export type CodexAccountReauthReason =
   | "unauthorized"
   | "forbidden";
 
+/** One store read for a lone row; same fail-closed shape as `poolQuotaHistoryIdentity`. */
+function readPoolRecordOnce(accountId: string): CodexAccountCredentialRecord | null {
+  try {
+    return codexAccountRecordFromSnapshot(loadCodexAccountRecordSnapshot(), accountId);
+  } catch {
+    return null;
+  }
+}
+
 export function poolAccountDto(
   config: OcxConfig,
   account: CodexAccount,
@@ -114,6 +124,11 @@ export function poolAccountDto(
   priority: number,
   maskEmails: boolean,
   upstreamAccountKey?: string,
+  /**
+   * This account's credential record from the caller's one store snapshot. A roster listing
+   * passes it so the row costs no store read; a lone caller omits it and the row reads once.
+   */
+  storeRecord?: CodexAccountCredentialRecord | null,
 ): CodexAuthAccountDto {
   const plan = codexPlanValue(account.plan);
   const quota = quotaForPlan(quotaResult.quota, plan);
@@ -139,6 +154,8 @@ export function poolAccountDto(
   // account took their model away and why, so name the cause they actually have to act on.
   const reauthReason: CodexAccountReauthReason | undefined = rawReauthReason ?? (health.status === "reauth_required" ? health.reason : undefined);
   const duplicateMain = configuredCodexMainDuplicate(config, account.id);
+  const record = storeRecord !== undefined ? storeRecord : readPoolRecordOnce(account.id);
+  const weeklyQuotaConflicts = getAccountWeeklyQuotaConflicts(account.id, record);
   return {
     id: account.id,
     slotId: account.id,
@@ -156,7 +173,8 @@ export function poolAccountDto(
     creditsAfterLimit: codexAccountUsesCreditsAfterLimit(config, account.id),
     useRemainingQuota: codexAccountUsesRemainingQuota(config, account.id),
     quota: quota ? { ...quota } : null,
-    ...codexCreditsDtoField(config, account.id, poolQuotaHistoryIdentity(account.id) ?? null),
+    ...(weeklyQuotaConflicts.length > 0 ? { weeklyQuotaConflicts } : {}),
+    ...codexCreditsDtoField(config, account.id, poolQuotaHistoryIdentityOf(record) ?? null),
     needsReauth: needsReauth || health.status === "reauth_required",
     ...(reauthReason !== undefined ? { reauthReason } : {}),
     ...(duplicateMain ? {
@@ -194,6 +212,8 @@ export interface CodexAuthAccountDto {
   creditsAfterLimit?: boolean;
   useRemainingQuota?: boolean;
   quota: (StoredAccountQuota | (Omit<StoredAccountQuota, "updatedAt"> & { updatedAt: number })) | null;
+  /** Live weekly windows this account reported in contradiction (#8574); display only. */
+  weeklyQuotaConflicts?: import("../quota-window-conflict").WeeklyWindowConflict[];
   credits?: CodexCredits;
   needsReauth?: boolean;
   /**
@@ -281,6 +301,8 @@ export interface CodexAuthAccountsListOptions {
   validatePending?: boolean;
   /** An operator's explicit refresh command, which may retry a grant already recorded as dead. */
   explicitRefresh?: boolean;
+  /** A forced listing still answers an exhausted seat inside its read hold from the stored reading. */
+  holdExhausted?: boolean;
 }
 
 export interface CodexAuthAccountsSnapshot {
@@ -326,7 +348,8 @@ export async function listCodexAuthAccountsSnapshot(
         // identity when the switch is on and nothing has been observed yet.
         const creditsIdentity = runtimeConfig.showCodexCredits === true ? poolQuotaHistoryIdentity(account.id) ?? null : null;
         const creditsUnobserved = creditsIdentity !== null && !hasCodexCreditsObservation(account.id, creditsIdentity);
-        quotaResult = await fetchPoolAccountQuota(account.id, forceRefresh || creditsUnobserved, account.plan, getValidCodexToken,
+        const held = options.holdExhausted === true && isExhaustedPoolQuotaReadHeld(account.id, Date.now());
+        quotaResult = await fetchPoolAccountQuota(account.id, (forceRefresh && !held) || creditsUnobserved, account.plan, getValidCodexToken,
           options.validatePending === true, undefined, undefined, options.explicitRefresh === true);
       } catch (error) {
         if (!(error instanceof PoolQuotaProbeBusyError)) throw error;
@@ -352,6 +375,9 @@ export async function listCodexAuthAccountsSnapshot(
   });
   reconcileFreshPoolAccountPlans(runtimeConfig, planUpdates);
 
+  // One store snapshot for every row's history identity and credential generation, read after
+  // the probes settle so a refresh during them is already visible.
+  const storeRecords = loadCodexAccountRecordSnapshot();
   const withQuota = refreshedPool.flatMap(({ accountId, quotaResult }) => {
     const currentAccount = configuredPoolAccount(runtimeConfig, accountId);
     if (!currentAccount) return [];
@@ -365,6 +391,8 @@ export async function listCodexAuthAccountsSnapshot(
         isCodexAccountPaused(runtimeConfig, accountId),
         getCodexAccountPriority(runtimeConfig, accountId),
         maskEmails,
+        undefined,
+        codexAccountRecordFromSnapshot(storeRecords, accountId),
       )];
     }
     const resultGeneration = quotaResult.credentialGeneration ?? quotaResult.freshCredentialGeneration;
@@ -392,6 +420,7 @@ export async function listCodexAuthAccountsSnapshot(
       maskEmails,
       codexUpstreamAccountKey(identitySecret, verifiedAccountId,
         user.conflict ? undefined : user.userId),
+      codexAccountRecordFromSnapshot(storeRecords, accountId),
     )];
   });
   const projectSnapshot = (mainRefreshRefused = false): CodexAuthAccountsSnapshot => {

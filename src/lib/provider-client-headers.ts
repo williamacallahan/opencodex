@@ -28,6 +28,9 @@ const BLOCKED_FORWARDED_CLIENT_HEADERS = new Set([
 // derive them from the body, so an opted-in gateway provider receives the client's own.
 const ALLOWED_FORWARDED_CLIENT_HEADERS = new Set([
   "originator", "x-client-request-id", "x-codex-app-version", "user-agent", "x-lgw-cache-key", "x-user-id",
+  // Preserve caller-supplied identifiers only when the provider explicitly opts in.
+  // Do not admit arbitrary x-codex-* fields or authentication evidence.
+  "x-codex-window-id", "x-codex-installation-id",
 ]);
 const MAX_FORWARDED_CLIENT_HEADERS = 64;
 

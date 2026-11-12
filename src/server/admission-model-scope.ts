@@ -208,7 +208,7 @@ export function admissionModelDeniedResponse(error: AdmissionModelDeniedError): 
     headers: { "Content-Type": "application/json" },
   });
   markResponseNonReplayable(response);
-  return markProxyError(response);
+  return markProxyError(response, "scope");
 }
 
 /**

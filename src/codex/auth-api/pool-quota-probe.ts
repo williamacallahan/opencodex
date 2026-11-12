@@ -3,8 +3,9 @@ import { fetchCodexUsage } from "../quota-query-backoff";
 import type { CodexUsageOwner } from "../quota-query-backoff";
 import { capturePoolQuotaWriter, getValidCodexToken, isCodexAccountGenerationLive, forceRefreshCodexPoolToken, markCodexAccountValidated, markCodexAccountValidationFailed, readCodexAccountRecord, isTerminalCodexPoolRefreshFailure, CodexCredentialGenerationConflictError, CodexCredentialRefreshLockTimeoutError, CodexCredentialRefreshBusyError, CodexCredentialRefreshStaleError, TokenRefreshError } from "../account-store";
 import type { PoolQuotaWriter } from "../quota-types";
-import { isValidWhamHistoryObservation, getAccountQuota, isCompleteCodexQuotaRecoverySnapshot, parseUsageQuota, poolWhamPolicyObservation, setAccountQuotaFromParsed } from "../quota";
+import { isValidWhamHistoryObservation, getAccountQuota, isCodexQuotaExhausted, isCompleteCodexQuotaRecoverySnapshot, parseUsageQuota, poolWhamPolicyObservation, setAccountQuotaFromParsed } from "../quota";
 import type { StoredAccountQuota, WhamUsageResponse } from "../quota";
+import { CODEX_EXHAUSTED_QUOTA_PROBE_INTERVAL_MS, codexQuotaProbeIntervalMs } from "../routing/cooldown-math";
 import type { ManualResetRefreshLineage } from "../routing";
 import { clearAccountNeedsReauth, markAccountNeedsReauth } from "../account-runtime-state";
 import { captureConfigGeneration } from "../../lib/state-store-sweeper";
@@ -16,9 +17,56 @@ import { claimQuotaRecovery, fencePropagatedQuotaRecovery, quotaRecoveryTerminal
 import { seedLoginRowsForTests } from "./login-state";
 import { nonEmptyPlan } from "./runtime-config";
 import { CODEX_TERMINAL_AUTH_CODES } from "../quota-refresh-outcome";
-import { withPoolReserveQuota } from "../pool-reserve";
+import { holdsPoolReserveWindow, withPoolReserveQuota } from "../pool-reserve";
 
 export const POOL_CACHE_TTL = 5 * 60_000;
+
+/** Last time a fresh read was dispatched per account, success or failure. */
+const poolQuotaAttemptAt = new Map<string, number>();
+const MAX_TRACKED_POOL_QUOTA_ATTEMPTS = 512;
+
+export function resetPoolQuotaAttemptsForTests(): void { poolQuotaAttemptAt.clear(); }
+
+function notePoolQuotaAttempt(accountId: string, at: number): void {
+  poolQuotaAttemptAt.delete(accountId);
+  poolQuotaAttemptAt.set(accountId, at);
+  if (poolQuotaAttemptAt.size > MAX_TRACKED_POOL_QUOTA_ATTEMPTS) {
+    poolQuotaAttemptAt.delete(poolQuotaAttemptAt.keys().next().value as string);
+  }
+}
+
+/**
+ * The exhausted-seat hold: 15 minutes while every exhausted window has a known future reset,
+ * 0 otherwise. A seat holding a Luna Reserve window never holds, because its Reserve evidence
+ * expires after POOL_RESERVE_FRESHNESS_MS (15 minutes) and must be re-read on the ordinary cadence.
+ */
+export function poolExhaustedHoldMs(
+  accountId: string, quota: StoredAccountQuota, now: number, readAt: number = quota.updatedAt,
+): number {
+  if (!isCodexQuotaExhausted(quota) || holdsPoolReserveWindow(accountId)) return 0;
+  const interval = codexQuotaProbeIntervalMs(quota, now, undefined, readAt);
+  return interval === CODEX_EXHAUSTED_QUOTA_PROBE_INTERVAL_MS ? interval : 0;
+}
+
+/**
+ * Whether the stored reading still answers a passive read. Exhausted accounts with a future
+ * reset hold for 15 minutes; a reset that passed after the last attempt is due once, and an
+ * attempt at or after it (even a failed one) restores the ordinary 5 minute hold.
+ */
+function poolQuotaReadHeld(accountId: string, quota: StoredAccountQuota, now: number): boolean {
+  const attemptAt = poolQuotaAttemptAt.get(accountId);
+  const readAt = Math.max(quota.updatedAt, attemptAt ?? 0);
+  if (codexQuotaProbeIntervalMs(quota, now, undefined, readAt) === 0) return false;
+  return now - quota.updatedAt < Math.max(POOL_CACHE_TTL, poolExhaustedHoldMs(accountId, quota, now, readAt))
+    || (attemptAt !== undefined && attemptAt > quota.updatedAt && isCodexQuotaExhausted(quota)
+      && now - attemptAt < POOL_CACHE_TTL);
+}
+
+/** Recovery sweeps and the quota-refresh route use this to honor the exhausted interval instead of forcing a read. */
+export function isExhaustedPoolQuotaReadHeld(accountId: string, now: number): boolean {
+  const quota = getAccountQuota(accountId);
+  return !!quota && isCodexQuotaExhausted(quota) && poolQuotaReadHeld(accountId, quota, now);
+}
 export const POOL_QUOTA_REFRESH_CONCURRENCY = 4;
 
 export const MAIN_TERMINAL_AUTH_CODES: ReadonlySet<string> = new Set(CODEX_TERMINAL_AUTH_CODES);
@@ -512,7 +560,7 @@ export async function fetchPoolAccountQuota(
   mayDispatch?: PoolQuotaProbeEvidence["mayDispatch"],
 ): Promise<PoolQuotaResult> {
   const existing = getAccountQuota(accountId);
-  if (afterDispatchSequence === undefined && !forceRefresh && existing && Date.now() - existing.updatedAt < POOL_CACHE_TTL) {
+  if (afterDispatchSequence === undefined && !forceRefresh && existing && poolQuotaReadHeld(accountId, existing, Date.now())) {
     return {
       quota: existing,
       needsReauth: false,
@@ -563,6 +611,7 @@ export async function fetchPoolAccountQuota(
     startCredentialGeneration: record?.generation,
     validatePending,
   };
+  notePoolQuotaAttempt(accountId, Date.now());
   const refresh = fetchFreshPoolAccountQuota(
     accountId,
     existing,

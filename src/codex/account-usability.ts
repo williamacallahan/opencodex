@@ -50,6 +50,12 @@ export interface CodexAccountUsabilityOptions {
    * owns the cooled subscription -- follow a main the operator never chose.
    */
   requestOwnedMainCredential?: boolean;
+  /**
+   * The caller named this account explicitly (an account-qualified route). Explicit selectors are
+   * an operator choice outside the pool-only policy; every automatic path omits this, so a path
+   * that forgets it still keeps native main out of Pool rotation.
+   */
+  explicitAccountSelector?: boolean;
 }
 
 /**
@@ -59,6 +65,7 @@ export interface CodexAccountUsabilityOptions {
  */
 export type CodexAccountUnusableReason =
   | "model_not_entitled"
+  | "pool_only"
   | "main_hard_locked"
   | "main_traffic_blocked"
   | "legacy_pool_sentinel"
@@ -69,6 +76,11 @@ export type CodexAccountUnusableReason =
   | "deleted"
   | "validation_pending"
   | "duplicate_main";
+
+/** `codexPool.poolOnly` (#7410): automatic Pool resolution never serves native main. */
+export function codexPoolOnlyExcludesMain(config: Pick<OcxConfig, "codexPool"> | undefined): boolean {
+  return config?.codexPool?.poolOnly === true;
+}
 
 /**
  * The single source of truth for both selection and its explanation. `isCodexAccountUsable()` is
@@ -84,6 +96,7 @@ export function codexAccountUnusableReason(
     return "model_not_entitled";
   }
   if (accountId === MAIN_CODEX_ACCOUNT_ID) {
+    if (codexPoolOnlyExcludesMain(config) && options.explicitAccountSelector !== true) return "pool_only";
     if (isMainAccountHardLocked(config)) return "main_hard_locked";
     // Startup recovery owns the physical auth/vault boundary. Never parse or select
     // native __main__ while an encrypted switch journal is pending or inconclusive.

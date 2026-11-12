@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fetchPoolAccountQuota } from "../../src/codex/auth-api/pool-quota-probe";
+import { fetchPoolAccountQuota, resetPoolQuotaAttemptsForTests } from "../../src/codex/auth-api/pool-quota-probe";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { clearAccountQuota } from "../../src/codex/quota";
 import { fetchCodexUsage, nextCodexUsageQueryAt, resetQuotaQueryBackoffForTests } from "../../src/codex/quota-query-backoff";
@@ -28,7 +28,7 @@ beforeEach(() => {
   originalFetch = globalThis.fetch;
   home = mkdtempSync(join(tmpdir(), "quota-query-backoff-"));
   process.env.OPENCODEX_HOME = home;
-  clearAccountQuota(); resetQuotaQueryBackoffForTests(); save();
+  clearAccountQuota(); resetQuotaQueryBackoffForTests(); resetPoolQuotaAttemptsForTests(); save();
 });
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -206,4 +206,43 @@ test("a full cache never evicts an active read", async () => {
   expect(await joined).toEqual({ kind: "joined", result: { proof: "active" } });
   expect((await fetchCodexUsage("active", {}))?.kind).toBe("owner");
   expect(calls).toBe(258);
+});
+
+function usage(percent: number, resetAtMs: number) {
+  return Response.json({ plan_type: "plus", rate_limit: { primary_window: {
+    used_percent: percent, limit_window_seconds: 604_800, reset_at: Math.floor(resetAtMs / 1000),
+  } } });
+}
+
+test.each([
+  { name: "exhausted, read 5 minutes ago", percent: 100, ageMin: 5, resetInMin: 3 * 24 * 60, requests: 0 },
+  { name: "exhausted, read 16 minutes ago", percent: 100, ageMin: 16, resetInMin: 3 * 24 * 60, requests: 1 },
+  { name: "exhausted, reset passed, read 1 minute ago", percent: 100, ageMin: 1, resetInMin: 0.5, requests: 1 },
+  { name: "not exhausted, read 6 minutes ago", percent: 50, ageMin: 6, resetInMin: 3 * 24 * 60, requests: 1 },
+])("pool cache sends $requests usage requests: $name", async ({ percent, ageMin, resetInMin, requests }) => {
+  globalThis.fetch = Object.assign(async () => usage(percent, now + resetInMin * 60_000), { preconnect: originalFetch.preconnect });
+  await fetchPoolAccountQuota("backoff-pool", true);
+  // The reset is fixed at the first read; the passed-reset case advances beyond it.
+  now += ageMin * 60_000;
+  let sent = 0;
+  globalThis.fetch = Object.assign(async () => { sent++; return usage(percent, now + 3 * 24 * 60 * 60_000); },
+    { preconnect: originalFetch.preconnect });
+  await fetchPoolAccountQuota("backoff-pool");
+  expect(sent).toBe(requests);
+});
+
+test("a failed read after the reset ends the due-now window: the next read 60 s later sends nothing", async () => {
+  globalThis.fetch = Object.assign(async () => usage(100, now + 30_000), { preconnect: originalFetch.preconnect });
+  await fetchPoolAccountQuota("backoff-pool", true);
+  now += 60_000; // reset passed after the read
+  let sent = 0;
+  globalThis.fetch = Object.assign(async () => { sent++; return new Response("{}", { status: 500 }); },
+    { preconnect: originalFetch.preconnect });
+  await fetchPoolAccountQuota("backoff-pool");
+  expect(sent).toBe(1);
+  // The hold must come from the attempt record itself, not from transport-failure pacing.
+  resetQuotaQueryBackoffForTests();
+  now += 60_000;
+  await fetchPoolAccountQuota("backoff-pool");
+  expect(sent).toBe(1);
 });

@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 import { createScanner, LanguageVariant, SyntaxKind } from "typescript/unstable/ast";
 import { fetchWithHeaderTimeout, physicalSendCommitInit, physicalSendIntegrityInit, providerFetch, sendWithConnectionPolicy, storedPoolReplayDispatchNotifier } from "../../src/server/responses/fetch-helpers";
 import { repoRoot as resolveRepoRoot } from "../helpers/repo-root";
+import { createPhysicalSendReporter, createRequestExecutionBudget } from "../../src/lib/request-execution-budget";
+import { errorDestinationLabel, SendBudgetExhaustedError } from "../../src/lib/upstream-retry";
+import { physicalSendAccounting } from "../../src/server/responses/deferred-send-reporter";
 
 const repoRoot = resolveRepoRoot();
 const helperPath = resolve(repoRoot, "src/server/responses/fetch-helpers.ts");
@@ -26,6 +29,24 @@ test("strict nested dispatch commits only after the final credential check", asy
     expect(commits).toBe(stale ? 0 : 1);
     expect(sends).toBe(stale ? 0 : 1);
   }
+});
+
+test("deferred accounting rejects reuse before counting an already consumed reservation", () => {
+  const budget = createRequestExecutionBudget();
+  const reservation = budget.reserveDispatch({ sendClass: "initial", targetKey: "fixture", countedExternally: true });
+  if (!reservation.allowed) throw new Error("fixture reservation was refused");
+  const accounting = physicalSendAccounting(createPhysicalSendReporter(budget, () => ({ poolId: "fixture" }), reservation.permit), {
+    permit: reservation.permit, destination: () => errorDestinationLabel("https://fixture.example/v1"),
+  });
+  try {
+    accounting.onPhysicalDispatch!();
+    accounting.report(1);
+    expect(budget.used).toBe(1);
+    expect(() => accounting.onPhysicalDispatch!()).toThrow(SendBudgetExhaustedError);
+    accounting.report(1);
+    expect(budget.used).toBe(1);
+  } finally { accounting.report.close?.(); reservation.permit.release(); }
+  expect(budget.used).toBe(1);
 });
 
 test("an unpaced physical send does not yield after its caller's credential validation", async () => {

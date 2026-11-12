@@ -10,8 +10,9 @@
  *
  * Model access is gated on it too: Anthropic answers claude-fable-5-2 with
  * "Claude Code 2.1.280 does not support this model; version 2.1.290 or newer is required".
- * The three values below are one coherent client: Claude Code 2.1.321 sends @anthropic-ai/sdk
- * 0.128.0 on runtime v26.12.1, and the installed 2.1.321 binary carries the same two strings.
+ * The three values below are one coherent client: Claude Code 2.1.321 sends @anthropic-ai/sdk 0.128.0 on
+ * runtime v26.12.1 (mitmproxy capture in router-for-me/CLIProxyAPI#7392; the locally installed 2.1.319
+ * binary carries the same SDK and runtime strings).
  */
 export const CLAUDE_CLI_VERSION = "2.1.321";
 export const CLAUDE_CLI_USER_AGENT = `claude-cli/${CLAUDE_CLI_VERSION} (external, cli)`;
