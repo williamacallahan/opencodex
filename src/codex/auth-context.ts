@@ -6,7 +6,7 @@ import type { OcxRuntimeProviderConfig } from "./auth-context-provider";
 export type { OcxRuntimeProviderConfig } from "./auth-context-provider";
 export { stripCodexRuntimeProviderFields } from "./auth-context-provider";
 import { bindPoolCreditPolicy, poolCreditHoldResetAt, poolContextCreditHoldResetAt, poolCreditRecoveryNeeded, poolContextCreditRecoveryNeeded, poolCreditRecoveryRetryAt, poolUnavailableUntilKnownHorizon } from "./pool-credit-policy";
-import { poolLunaReserveSelection } from "./pool-reserve";
+import { poolLunaReserveSelection, poolReserveEvidenceStale, refreshStalePoolReserveEvidence } from "./pool-reserve";
 import { adoptLegacyLineageAffinity } from "./routing/thread-affinity";
 import { nextQuotaQueryDelay } from "./quota-query-backoff";
 import { noteMainAccountActivity } from "./main-account-external-usage";
@@ -1414,9 +1414,15 @@ async function resolveCodexAuthContextUnannotated(
       // conversation's attachments say nothing about where unrelated threads should be served.
       retainAccountForUploadedFiles: options.retainAccountForUploadedFiles === true,
     };
-    const poolSelection = poolLunaReserveSelection(config,
-      fixedAccountId === undefined && !requestScopedMainCredential ? options.modelId : undefined,
-      quotaScope, selectionOptions, options.excludeAccountId, affinityKey);
+    // The native main login keeps its own per-request Reserve authorization, so only stored seats take part here.
+    const reserveModelId = !requestScopedMainCredential && fixedAccountId !== MAIN_CODEX_ACCOUNT_ID ? options.modelId : undefined;
+    if (poolReserveEvidenceStale(config, reserveModelId, options.excludeAccountId, fixedAccountId)) {
+      await refreshStalePoolReserveEvidence(options.primeCodexPoolQuotas
+        ? () => options.primeCodexPoolQuotas!(config, "luna-reserve")
+        : () => import("./auth-api").then(({ primeCodexPoolQuotas }) => primeCodexPoolQuotas(config, "luna-reserve")));
+    }
+    const poolSelection = poolLunaReserveSelection(config, reserveModelId,
+      quotaScope, selectionOptions, options.excludeAccountId, affinityKey, Date.now(), fixedAccountId);
     selectionOptions = poolSelection.options;
     quotaScope = poolSelection.quotaScope;
     poolReserve = poolSelection.reserve;

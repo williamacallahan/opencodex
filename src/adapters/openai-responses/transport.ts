@@ -7,7 +7,7 @@ import {
   isolateCodexPoolAccountHeaders,
 } from "../../codex/forward-transport-headers";
 import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers-destination";
-import { normalizeForwardedClientHeaderName } from "../../lib/provider-client-headers";
+import { copyForwardedClientHeaders, normalizeForwardedClientHeaderName } from "../../lib/provider-client-headers";
 import { AGENT_ASSERTION_HEADER } from "../../lib/authorization-scheme";
 import { openaiResponsesUrl } from "../openai-responses-url";
 
@@ -92,14 +92,7 @@ export function buildResponsesTransport(provider: OcxProviderConfig, incoming: P
     if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
     if (provider.headers) Object.assign(headers, provider.headers);
   }
-  if (Array.isArray(provider.forwardClientHeaders)) {
-    for (const rawName of provider.forwardClientHeaders.slice(0, 64)) {
-      const name = normalizeForwardedClientHeaderName(rawName);
-      if (name === null || Object.keys(headers).some(existing => existing.toLowerCase() === name)) continue;
-      const value = incoming.headers.get(name);
-      if (value) headers[name] = value;
-    }
-  }
+  copyForwardedClientHeaders(provider.forwardClientHeaders, headers, incoming.headers);
   if (!Object.keys(headers).some(name => name.toLowerCase() === "user-agent")) {
     const userAgent = incoming.headers.get("user-agent");
     if (userAgent) headers["User-Agent"] = userAgent;
