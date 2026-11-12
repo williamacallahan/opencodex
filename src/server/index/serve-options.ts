@@ -1,3 +1,4 @@
+import { messagesUnknownEndpointMessage } from "../../lib/messages-error-body";
 import type { Server, ServerWebSocket } from "bun";
 import { modelAliasIdPromoter } from "./model-alias-id";
 import type { StartServerDeps } from "./startup-warnings";
@@ -98,6 +99,7 @@ import {
   isAllowedManagementOrigin,
   isApiAuthRequired,
   isLoopbackHostname,
+  markDashboardProxyPeer,
   markTrustedHubManagementRequest,
   jsonResponse,
   admissionFields,
@@ -200,6 +202,7 @@ import {
   expandFastRow,
 } from "../fast-row";
 import type { OcxConfig } from "../../types";
+import { classifyUsageClient } from "../../usage/client";
 import type { PackageTreeIntegrityGuard } from "../../lib/package-tree-integrity";
 import type { ReadinessGate } from "../readiness";
 import type { WorkflowRefusalLog } from "../workflow-refusal";
@@ -218,10 +221,10 @@ import { withCallerSessionIdentity } from "../caller-session-identity";
 import { agentAssertionUnsupportedResponse, hasAgentAssertionAuthorization } from "../../lib/authorization-scheme";
 import { runTurnStateCallerScope } from "../turn-state-handles";
 
-export type ServerIngress = "public" | "unauthenticated-loopback" | "hub-management" | "hub-management-container" | "claude-intercept" | "hub-link";
+export type ServerIngress = "public" | "unauthenticated-loopback" | "hub-management" | "hub-management-container" | "claude-intercept" | "hub-link" | "local-control";
 
 export function trustedLoopbackForIngress(ingress: ServerIngress, hostname: string): boolean {
-  return ingress === "unauthenticated-loopback"
+  return ingress === "unauthenticated-loopback" || ingress === "local-control"
     || (ingress === "public" && isLoopbackHostname(hostname));
 }
 
@@ -331,6 +334,9 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       // Neither Host nor any X-Forwarded-* header can manufacture this process-local mark.
       if (managementIngress && config.runtimeRole === "hub") {
         markTrustedHubManagementRequest(req);
+      } else if (ingress === "public" && config.dashboardTrustedProxy !== undefined) {
+        // #8338: the kernel-observed peer, so the configured standalone dashboard proxy can be verified.
+        markDashboardProxyPeer(req, requestServer.requestIP(req)?.address);
       }
       const requestUrl = codexCompatibleUrl(req.url);
       const linkPolicyView = ingress === "hub-link" ? linkPolicy() : undefined;
@@ -339,14 +345,14 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       // silently when a route is added below.
       if (ingress === "unauthenticated-loopback" && !loopbackRouteAllowed(codexCompatibleUrl(req.url), req)) {
         return withCors(
-          formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${new URL(req.url).pathname}`),
+          formatErrorResponse(404, "not_found", messagesUnknownEndpointMessage(req)),
           req,
           loopbackPolicy(),
         );
       }
       if (ingress === "hub-link" && !linkRouteAllowed(requestUrl, req)) {
         return withCors(
-          formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${new URL(req.url).pathname}`),
+          formatErrorResponse(404, "not_found", messagesUnknownEndpointMessage(req)),
           req,
           linkPolicyView!,
         );
@@ -354,14 +360,14 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       // Management sockets reject before dispatch: no data, readiness, health, WebSocket, or static handler runs.
       if (managementIngress && !managementIngressRouteAllowed(codexCompatibleUrl(req.url), req)) {
         return withCors(
-          formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${new URL(req.url).pathname}`),
+          formatErrorResponse(404, "not_found", messagesUnknownEndpointMessage(req)),
           req,
           config,
         );
       }
       if (ingress === "claude-intercept" && !claudeInterceptRouteAllowed(codexCompatibleUrl(req.url), req)) {
         return withCors(
-          formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${new URL(req.url).pathname}`),
+          formatErrorResponse(404, "not_found", messagesUnknownEndpointMessage(req)),
           req,
           loopbackPolicy(),
         );
@@ -376,7 +382,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       // Anthropic credentials, not opencodex admission tokens — so it takes the loopback view too.
       const policy: RequestPolicyView = ingress === "hub-link"
         ? linkPolicyView!
-        : ingress === "unauthenticated-loopback" || ingress === "claude-intercept"
+        : ingress === "unauthenticated-loopback" || ingress === "claude-intercept" || ingress === "local-control"
           ? loopbackPolicy()
           : config;
       // Codex runtime agent assertion_only (Authorization: AgentAssertion) is refused before
@@ -460,7 +466,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         // path) must answer the deterministic JSON 404, never the generic 204
         // preflight response that the SPA fallback would otherwise allow.
         if (readyzPath !== undefined) {
-          return withCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, policy);
+          return withCors(formatErrorResponse(404, "not_found", messagesUnknownEndpointMessage(req)), req, policy);
         }
         // The exact Ollama-compatible paths are data-plane routes and take data-plane CORS.
         const managementPreflight = url.pathname.startsWith("/api/") && !isOllamaNativePath(url.pathname);
@@ -636,6 +642,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             admission,
             websocketLease,
             sessionLaneIdFromRequest(req.headers),
+            classifyUsageClient(req.headers),
           ),
         })) return undefined as unknown as Response;
         websocketLease.release();
@@ -677,7 +684,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       // fallback (which would serve index.html with HTTP 200 once gui/dist exists).
       if (readyzPath !== undefined) {
         if (readyzPath !== "/readyz" || req.method !== "GET") {
-          return withCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, policy);
+          return withCors(formatErrorResponse(404, "not_found", messagesUnknownEndpointMessage(req)), req, policy);
         }
         // A draining proxy must never advertise ready: every data-plane branch
         // answers drainingResponse while isDraining() is set, but the one-shot
@@ -759,7 +766,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           return withManagementCors(signed, req, config);
         }
         if (mgmtResponse) return withManagementCors(mgmtResponse, req, config);
-        return withManagementCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, config);
+        return withManagementCors(formatErrorResponse(404, "not_found", messagesUnknownEndpointMessage(req)), req, config);
       }
 
       if (url.pathname === "/v1/catalog" && (req.method === "GET" || req.method === "HEAD")) {
@@ -875,13 +882,13 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         }
         // Role gate AFTER admission, deliberately: answering an unauthenticated caller would
         // turn this into a free "is that machine a hub?" probe. A standalone or client install
-        // gains no surface at all — the route simply does not exist there.
+        // gains no public surface — only a hub or an active `hub-link` listener serves it.
         //
         // Built, not formatErrorResponse'd, for the same reason /v1/catalog builds its 404: the
         // code has to distinguish "this route exists and this host is not a hub" from "this
         // build has no such route", which is the difference between admission proof and a
         // vacuous pass in tests/server/api-key-attribution.test.ts.
-        if (config.runtimeRole !== "hub") {
+        if (config.runtimeRole !== "hub" && ingress !== "hub-link") {
           return withCors(
             new Response(JSON.stringify({
               error: {
@@ -1267,6 +1274,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
                 config,
                 provider,
                 knownModelIdsForProvider(m.provider, provider, config),
+                m.provider,
               ).get(m.id)
             : undefined;
           const effectiveId = !isCombo && !fastModelId && effective
@@ -1336,7 +1344,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         const logCtx: RequestLogContext = {
           model: "unknown",
           provider: "unknown",
-          ...requestMetricsLogContext,
+          ...requestMetricsLogContext, client: classifyUsageClient(req.headers),
           ...admissionFields(admission),
           inboundProtocol: "responses",
         };
@@ -1376,7 +1384,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         const logCtx: RequestLogContext = {
           model: "image_gen",
           provider: "unknown",
-          ...requestMetricsLogContext,
+          ...requestMetricsLogContext, client: classifyUsageClient(req.headers),
           ...admissionFields(admission),
         };
         const endpoint = url.pathname.endsWith("/edits") ? "edits" as const : "generations" as const;
@@ -1434,7 +1442,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         const logCtx: RequestLogContext = {
           model: "context_history",
           provider: "unknown",
-          ...requestMetricsLogContext,
+          ...requestMetricsLogContext, client: classifyUsageClient(req.headers),
           ...admissionFields(admission),
         };
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
@@ -1461,7 +1469,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         const logCtx: RequestLogContext = {
           model: "web_search",
           provider: "unknown",
-          ...requestMetricsLogContext,
+          ...requestMetricsLogContext, client: classifyUsageClient(req.headers),
           ...admissionFields(admission),
         };
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
@@ -1486,7 +1494,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         const logCtx: RequestLogContext = {
           model: "unknown",
           provider: "unknown",
-          ...requestMetricsLogContext,
+          ...requestMetricsLogContext, client: classifyUsageClient(req.headers),
           ...admissionFields(admission),
           inboundProtocol: "responses",
         };
@@ -1591,7 +1599,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         const logCtx: RequestLogContext = {
           model: "unknown",
           provider: "unknown",
-          ...requestMetricsLogContext,
+          ...requestMetricsLogContext, client: classifyUsageClient(req.headers),
           ...admissionFields(admission),
           inboundProtocol: "messages",
         };
@@ -1637,7 +1645,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         const logCtx: RequestLogContext = {
           model: "unknown",
           provider: "unknown",
-          ...requestMetricsLogContext,
+          ...requestMetricsLogContext, client: classifyUsageClient(req.headers),
           ...admissionFields(admission),
           inboundProtocol: "chat",
         };
@@ -1675,7 +1683,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         const logCtx: RequestLogContext = {
           model: TRANSCRIPTION_MODEL,
           provider: "unknown",
-          ...requestMetricsLogContext,
+          ...requestMetricsLogContext, client: classifyUsageClient(req.headers),
           ...admissionFields(admission),
         };
         return runAdmittedHttpTurn(req, policy, async lease => {
@@ -1708,7 +1716,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         const logCtx: RequestLogContext = {
           model: "gpt-live",
           provider: "unknown",
-          ...requestMetricsLogContext,
+          ...requestMetricsLogContext, client: classifyUsageClient(req.headers),
           ...admissionFields(admission),
         };
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
@@ -1756,7 +1764,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         const logCtx: RequestLogContext = {
           model: "gpt-live",
           provider: "unknown",
-          ...requestMetricsLogContext,
+          ...requestMetricsLogContext, client: classifyUsageClient(req.headers),
           ...admissionFields(admission),
         };
         let liveRequestFinalized = false;
@@ -1881,6 +1889,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
               liveUpstreamProtocols: audio?.protocols,
               liveValidateFrame: audio?.validateFrame,
               liveMaxSessionMs: audio?.maxSessionMs,
+              liveFinalizationMs: audio?.finalizationMs,
               liveFinish: finish,
               liveAbortSignal: audioController?.signal,
               livePending: [],
@@ -1919,7 +1928,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       // endpoint clients — memories/*, realtime/* — would surface confusing
       // serde decode errors instead of a clean not-found).
       if (url.pathname.startsWith("/v1/")) {
-        return withCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, policy);
+        return withCors(formatErrorResponse(404, "not_found", messagesUnknownEndpointMessage(req)), req, policy);
       }
 
       if (url.pathname === "/opencodex-session") {
@@ -1980,7 +1989,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             ? withManagementCors(serveSessionBootstrap(pairing), req, config)
             : withManagementCors(new Response(null, { status: 401, headers: { "Cache-Control": "no-store" } }), req, config);
         }
-        return withCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, policy);
+        return withCors(formatErrorResponse(404, "not_found", messagesUnknownEndpointMessage(req)), req, policy);
       }
       const guiSessionCandidate = req.method === "GET" && (url.pathname === "/" || !url.pathname.includes("."))
         ? issueGuiSession(req, config, managementAuth, {
@@ -1999,7 +2008,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         return jsonResponse(rootFallbackPayload());
       }
 
-      return withCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, config);
+      return withCors(formatErrorResponse(404, "not_found", messagesUnknownEndpointMessage(req)), req, config);
     },
     websocket: createWebsocketHandler(ctx, requestMetrics),
   } as const;

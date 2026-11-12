@@ -1,9 +1,10 @@
 import {
   CODEX_EXHAUSTED_USAGE_PERCENT,
   CODEX_UNKNOWN_USAGE_SCORE,
+  isCodexQuotaExhausted,
 } from "../quota";
 import { isThirtyDayOnlyCodexPlan } from "../plan";
-import { hasElapsedShortWindow, hasSpendableCodexCredits, isTerminalShortWindow, type CodexSpendableCredits } from "../quota-types";
+import { resetAtToMs, hasElapsedShortWindow, hasSpendableCodexCredits, isTerminalShortWindow, type CodexSpendableCredits, type StoredAccountQuota } from "../quota-types";
 import type { CodexQuotaScope } from "./health-store";
 import type { TransientProbeGrant } from "./thread-affinity";
 import type { MainQuotaDispatch } from "../main-account-cache";
@@ -27,6 +28,39 @@ export const CODEX_MAX_RESET_DERIVED_COOLDOWN_MS = 15 * 60_000;
 export const CODEX_MAX_QUOTA_AVOID_MS = 6 * 60 * 60_000;
 /** Minimum gap between probe leases for one cooled-down account. */
 export const CODEX_QUOTA_PROBE_INTERVAL_MS = 5 * 60_000;
+/** Minimum gap between ChatGPT usage reads for an account whose exhausted window resets later. */
+export const CODEX_EXHAUSTED_QUOTA_PROBE_INTERVAL_MS = 15 * 60_000;
+
+type ExhaustedProbeQuota = Pick<StoredAccountQuota,
+  "weeklyPercent" | "monthlyPercent" | "shortPercent" | "weeklyResetAt" | "monthlyResetAt" | "shortResetAt" | "credits" | "updatedAt">;
+
+/**
+ * The one read cadence for an account's ChatGPT usage: 15 minutes while its stored quota is
+ * exhausted and every exhausted window still has a known future reset (nothing can change
+ * sooner), otherwise the ordinary 5 minutes. An exhausted window whose reset passed after the last
+ * read is due immediately (0); an unknown reset keeps the short interval.
+ */
+export function codexQuotaProbeIntervalMs(
+  quota: ExhaustedProbeQuota | null | undefined,
+  now: number,
+  plan?: unknown,
+  /** Latest read attempt, success or failure; a reset at or before it is already acted on. */
+  readAt: number = quota?.updatedAt ?? 0,
+): number {
+  if (!quota || !isCodexQuotaExhausted(quota, plan)) return CODEX_QUOTA_PROBE_INTERVAL_MS;
+  const windows: Array<[number | undefined, number | undefined]> = [
+    [quota.weeklyPercent, quota.weeklyResetAt],
+    [quota.monthlyPercent, quota.monthlyResetAt],
+    [quota.shortPercent, quota.shortResetAt],
+  ];
+  for (const [percent, resetAt] of windows) {
+    if (typeof percent !== "number" || !Number.isFinite(percent) || percent < CODEX_EXHAUSTED_USAGE_PERCENT) continue;
+    if (typeof resetAt !== "number" || !Number.isFinite(resetAt) || resetAt <= 0) return CODEX_QUOTA_PROBE_INTERVAL_MS;
+    const resetMs = resetAtToMs(resetAt);
+    if (resetMs <= now) return resetMs > readAt ? 0 : CODEX_QUOTA_PROBE_INTERVAL_MS;
+  }
+  return CODEX_EXHAUSTED_QUOTA_PROBE_INTERVAL_MS;
+}
 export const CODEX_FAILURE_WINDOW_MS = 5 * 60_000;
 /** How long a transient failure keeps the account out of pool selection. */
 export const CODEX_TRANSIENT_SOFT_AVOID_MS = 30_000;

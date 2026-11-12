@@ -42,6 +42,11 @@ export function withPoolReserveQuota(
   return { ...quota, customWindows };
 }
 
+/** Any stored Luna Reserve window, fresh or stale: its freshness lapses after 15 minutes, so the seat is read on the ordinary cadence. */
+export function holdsPoolReserveWindow(accountId: string): boolean {
+  return getAccountQuota(accountId)?.customWindows?.some(window => window.label === LABEL) === true;
+}
+
 function hasFreshPoolReserve(accountId: string, now = Date.now()): boolean {
   return getAccountQuota(accountId)?.customWindows?.some(window => window.label === LABEL
     && Number.isFinite(window.percent) && window.percent >= 0 && window.percent < 100

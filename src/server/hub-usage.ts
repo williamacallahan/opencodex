@@ -2,6 +2,7 @@ import type { OcxConfig } from "../types";
 import { MAX_HUB_USAGE_BYTES, parseHubUsage } from "../remote/hub-usage";
 import { parseRange, parseUsageSurface, USAGE_RANGES, USAGE_SURFACES } from "../usage/summary";
 import { parseUsageTimeWindow } from "../usage/time-range";
+import { USAGE_SOURCE_CLIENTS, type UsageSourceClient } from "../usage/source-filter";
 import { getFilteredUsageAggregate } from "./management/usage-aggregate-cache";
 import { authorizationCredential } from "../lib/authorization-scheme";
 import { resolveAdmissionModelScope } from "./admission-model-scope";
@@ -25,15 +26,17 @@ export async function handleHubUsage(req: Request, config: OcxConfig, policy: Re
   // this authenticated identity into another configured key (or no filter).
   if (!keyId || keyId.trim() !== keyId) return error("hub_usage_key_id_invalid", "Client key identity needs repair on the hub", 403);
   const query = new URL(req.url).searchParams;
-  const allowed = new Set(["range", "surface", "provider", "model", "since", "until", "include"]);
+  const allowed = new Set(["range", "surface", "provider", "model", "since", "until", "client", "include"]);
   for (const key of query.keys()) {
     if (!allowed.has(key) || query.getAll(key).length !== 1) return error("hub_usage_query_invalid", "Unknown or repeated usage option", 400);
   }
   if (query.has("include") && query.get("include") !== "capacity") return error("hub_usage_query_invalid", "Invalid usage inclusion", 400);
   const rangeInput = query.get("range") ?? "30d";
   const surfaceInput = query.get("surface") ?? "all";
+  const client = query.get("client");
   if (!(rangeInput === "1d" || (USAGE_RANGES as readonly string[]).includes(rangeInput))
-    || !(USAGE_SURFACES as readonly string[]).includes(surfaceInput)) {
+    || !(USAGE_SURFACES as readonly string[]).includes(surfaceInput)
+    || (client !== null && (!(USAGE_SOURCE_CLIENTS as readonly string[]).includes(client) || surfaceInput !== "all"))) {
     return error("hub_usage_query_invalid", "Invalid usage range or surface", 400);
   }
   let window;
@@ -43,6 +46,7 @@ export async function handleHubUsage(req: Request, config: OcxConfig, policy: Re
   try {
     const aggregate = await getFilteredUsageAggregate({
       apiKeyId: keyId, provider: query.get("provider"), model: query.get("model"),
+      ...(client !== null ? { sourceFilter: { client: client as UsageSourceClient, device: { kind: "key", id: keyId } } } : {}),
     }, window);
     const capacity = query.get("include") === "capacity"
       ? await (await import("../quota-pool/client")).readClientCapacity(config, admission) : undefined;
@@ -55,6 +59,7 @@ export async function handleHubUsage(req: Request, config: OcxConfig, policy: Re
     }
     const summary = aggregate.accumulator.summarize(parseRange(rangeInput), Date.now(), parseUsageSurface(surfaceInput));
     const body = parseHubUsage({ ...summary, schemaVersion: 1, source: "hub", scope: "client",
+      ...(client !== null ? { sourceFilter: { client, scope: "authenticated-key" } } : {}),
       ...(aggregate.usageIncomplete ? { usageIncomplete: true, usageIncompleteReason: "oversized_rows" } : {}),
     });
     if (!body) return error("hub_usage_unavailable", "Usage could not be represented; narrow the requested range", 503);

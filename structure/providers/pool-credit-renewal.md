@@ -9,11 +9,11 @@ included window qualify. In Direct mode, a stored account must also be a current
 `codexAccountNamespaces`; duplicate aliases still produce one account read. Unqualified Direct
 requests do not enable general pool priming. Startup, pre-route and priority-failback reasons
 remain Pool-only. Paused, reauthentication-required, below-limit and non-opted-in accounts
-are skipped. A credit observation younger than three minutes is retained; due or missing evidence
+are skipped. A credit observation younger than three minutes is retained (fifteen while the seat is exhausted with a known future reset and holds no Luna Reserve window, the shared exhausted read hold in `pool-quota-probe.ts`); due or missing evidence
 uses the existing bounded-concurrency quota reader with cache bypass, because traffic headers can
 keep aggregate usage fresh while the independent credit clock expires.
 
-The existing per-credential attempt map bounds retries to at least three minutes. Query backoff,
+The existing per-credential attempt map bounds retries to at least that same age. Query backoff,
 request admission and generation/configuration publication fences remain owned by the quota reader.
 Only actual WHAM evidence advances the credit clock. A failed read leaves stale evidence unusable;
 no credit freshness limit or spending consent is relaxed. Negative evidence remains discoverable.
