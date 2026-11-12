@@ -54,7 +54,7 @@ import { parseAntigravityAvailableModels } from "../../providers/antigravity-mod
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
 import {
   applyProviderCompatPatchFields,
-  carryProviderCompatFields,
+  carryProviderCompatFields, unrecognizedProviderPatchFields,
   providerCompatFieldConfigError,
   providerOverwriteKeepsDestination,
   sampleProviderOverwrite,
@@ -1506,6 +1506,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (name === "openai" && (Object.hasOwn(rawBody, "autoReviewModel") || Object.hasOwn(rawBody, "autoReviewModelOverrides"))) {
       return jsonResponse({ error: "provider openai must not include autoReviewModel or autoReviewModelOverrides" }, 400);
     }
+    const unrecognized = unrecognizedProviderPatchFields(keys); if (unrecognized) return jsonResponse({ error: unrecognized }, 400);
     const applied = applyProviderPatchFields(name, config.providers[name]!, rawBody, keys, config);
     if ("error" in applied) return jsonResponse({ error: applied.error }, 400);
     const next = applied.next;

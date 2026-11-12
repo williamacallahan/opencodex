@@ -1362,7 +1362,9 @@ function providerEditorProviderDTO(name: string, provider: OcxProviderConfig): P
     .map(([field, value]) => [field, structuredClone(value)])) as Record<string, unknown>;
   dto.baseUrl = publicProviderBaseUrl(provider.baseUrl);
   const modelCosts = sanitizeModelCostsForDisplay(provider.modelCosts);
-  if (modelCosts) dto.modelCosts = modelCosts;
+  // The sanitizer's null-prototype result never equals a parsed JSON baseline under isDeepStrictEqual, so every
+  // PUT for a provider with a manual price answered 409 stale_provider_editor_baseline.
+  if (modelCosts) dto.modelCosts = Object.fromEntries(Object.entries(modelCosts));
   else delete dto.modelCosts;
 
   const registryNote = (providerMatchesRegistryTransport(name, provider)

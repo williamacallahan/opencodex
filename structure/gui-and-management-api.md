@@ -578,7 +578,7 @@ Provider editor snapshots and management writes validate provider-wide `inputMod
 `src/server/management/provider-patch-transaction.ts`, including standalone default-provider
 and account-mode changes. The synchronous mutation lock encloses snapshot, mutation, save,
 and pre-publication failure restoration. Field masks are replayed against the latest provider under that same
-lock after asynchronous destination validation; rollback retains previously committed siblings.
+lock after asynchronous destination validation; rollback retains previously committed siblings. A PATCH naming a field no branch stores answers 400 `unrecognized provider fields` (`unrecognizedProviderPatchFields`; a new branch adds its field there). The editor baseline holds plain objects only, since a null-prototype value fails `isDeepStrictEqual` against a client's JSON and answers PUT 409.
 
 Persistence can rebase the whole live configuration before a write. Rollback therefore restores
 the original plain-object/array graph in place, including property descriptors, symbols, absent
