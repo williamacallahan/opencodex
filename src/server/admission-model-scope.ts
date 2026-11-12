@@ -4,6 +4,8 @@ import { markProxyError } from "../lib/client-error-body";
 import type { DataPlaneAdmission } from "./auth-cors";
 import { isApiAuthRequired } from "./auth-cors";
 import type { OcxApiKeyEntry, OcxConfig } from "../types";
+import type { RouteResult } from "../router";
+import { slugEquals } from "../providers/slug-codec";
 import { markResponseNonReplayable } from "../lib/upstream-retry";
 
 /**
@@ -264,4 +266,49 @@ export function admissionScopeDenial(
       modelId: destination.modelId ?? UNNAMED_DESTINATION_MODEL,
     },
   ));
+}
+
+/**
+ * A client named a model whose catalog row is switched off.
+ *
+ * Switching a row off hides it from the model lists; without this refusal the router still
+ * served it when a client named it (a disabled gateway row answered 200 on /v1/chat/completions).
+ * The refusal applies only to the route a client's own selector resolved to. A combo child, policy
+ * or subagent fallback, compaction target, memory phase, shadow-call target, decision-model call
+ * and advisor or vision sidecar call are hub-chosen destinations that may name a disabled row on
+ * purpose, so those entry points never call the assertion.
+ */
+export class DisabledModelError extends Error {
+  readonly requestedModel: string;
+  constructor(requestedModel: ClientFacingModelLabel) {
+    const label = clientFacingModelText(requestedModel);
+    super("model " + label + " is disabled on this hub");
+    this.name = "DisabledModelError";
+    this.requestedModel = label;
+  }
+}
+
+/** Stable wire code for a refusal of a disabled model. */
+export const MODEL_DISABLED = "model_disabled";
+
+/** Throws when the route a client's own selector resolved to is a switched-off catalog row. */
+export function assertClientNamedModelEnabled(
+  config: Pick<OcxConfig, "disabledModels">,
+  requestedModel: ClientFacingModelLabel,
+  route: Pick<RouteResult, "providerName" | "modelId" | "combo" | "routeKind">,
+): void {
+  // A combo or policy parent resolves to its children later, and those are judged as hub-chosen.
+  if (route.combo !== undefined || route.routeKind === "policy" || route.routeKind === "combo") return;
+  if ((config.disabledModels ?? []).some(stored => slugEquals(stored, route.providerName, route.modelId))) {
+    throw new DisabledModelError(requestedModel);
+  }
+}
+
+/** 404 with the stable `model_disabled` code, so a client can tell a switched-off row from a typo. */
+export function disabledModelResponse(error: DisabledModelError): Response {
+  const response = new Response(JSON.stringify({
+    error: { type: "invalid_request_error", code: MODEL_DISABLED, message: error.message },
+  }), { status: 404, headers: { "Content-Type": "application/json" } });
+  markResponseNonReplayable(response);
+  return markProxyError(response);
 }

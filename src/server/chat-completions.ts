@@ -83,7 +83,10 @@ import type { AdmissionLease } from "../lib/admission";
 import {
   admissionModelDeniedResponse, projectAdmissionModelDeniedLog,
   AdmissionModelDeniedError,
+  DisabledModelError,
+  MODEL_DISABLED,
   MODEL_NOT_ALLOWED_FOR_KEY,
+  assertClientNamedModelEnabled,
   assertRouteAllowedByScope,
   resolveAdmissionModelScope,
 } from "./admission-model-scope";
@@ -257,6 +260,9 @@ async function handleChatCompletionsWithBudget(
     route.staticPolicy = captureRouteStaticPolicy(
       route.providerName, route.modelId, routedProvider, route.staticPolicy.effectiveAlias, "chat",
     );
+    // The native Chat lane never reaches the Responses admission, so a switched-off row is refused
+    // here. Advisor and sidecar calls carry a verified capability and name the operator's own model.
+    if (!advisorInternal && !sidecarInternal) assertClientNamedModelEnabled(config, clientFacingModelLabel(requestedModel), route);
     // Native Chat must check its own destination; translated xAI OAuth turns
     // preview the billed Fast lane before their final Responses scope check.
     assertRouteAllowedByScope(inheritedAdmissionScope ?? resolveAdmissionModelScope(config, logIds?.admission), clientFacingModelLabel(requestedModel), {
@@ -321,6 +327,12 @@ async function handleChatCompletionsWithBudget(
       projectAdmissionModelDeniedLog(err, logCtx);
       if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 403, { closeReason: "non_stream" });
       return admissionModelDeniedResponse(err);
+    }
+    if (err instanceof DisabledModelError) {
+      logCtx.requestedModel = requestedModel;
+      projectLocalModelRefusalLog(logCtx, clientFacingModelLabel(requestedModel));
+      if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 404, { closeReason: "non_stream" });
+      return chatCompletionsErrorResponse(404, err.message, "invalid_request_error", MODEL_DISABLED);
     }
     if (err instanceof UnknownRoutingPolicyError) {
       logCtx.requestedModel = requestedModel;
@@ -601,6 +613,7 @@ async function handleChatCompletionsWithBudget(
     // header — so the fact is detected here and carried as an option flag.
     ...(visionDescribeTerminal ? { visionDescribeTerminal: true } : {}),
     ...(advisorInternal ? { advisorInternal: true } : {}),
+    ...(sidecarInternal ? { sidecarInternal: true } : {}),
     ...(inheritedAdmissionScope ? { admissionScope: inheritedAdmissionScope } : {}),
     translatorBudget,
     ...(logIds ? { onFirstOutput: () => recordFirstOutput(logCtx, logIds.start) } : {}),
