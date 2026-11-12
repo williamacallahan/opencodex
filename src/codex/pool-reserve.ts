@@ -60,29 +60,49 @@ export function poolReserveHoldResetAt(accountId: string, now = Date.now()): num
 /** How long a request waits for a Reserve re-read before it falls back to the evidence it has. */
 export const POOL_RESERVE_REFRESH_WAIT_MS = 3_000;
 
+/** A seat whose re-read was already waited on is not waited on again for this long (the prime pass's own cache TTL). */
+export const POOL_RESERVE_REREAD_BACKOFF_MS = 5 * 60_000;
+const rereadWaitedAt = new Map<string, number>();
+
+/** Forget the per-seat wait markers. Test isolation only. */
+export function resetPoolReserveRereadMarkers(): void { rereadWaitedAt.clear(); }
+
 /**
  * An exhausted seat is the only place Luna Reserve can be, so its reading going stale (or never
  * having been taken, as after a restart) would silently turn the preference off. A seat that
- * still has included usage cannot hold a Reserve, so it never triggers a re-read.
+ * still has included usage cannot hold a Reserve, so it never triggers a re-read. Each seat is
+ * waited on at most once per backoff window, so a seat whose read keeps failing cannot make
+ * every Luna request pay the wait. Returns whether a wait is due and marks the seats it covers.
  */
-export function poolReserveEvidenceStale(
+export function takeStalePoolReserveSeats(
   config: OcxConfig, modelId: string | undefined, excludeId?: string, pinnedAccountId?: string, now = Date.now(),
 ): boolean {
   if (modelId !== "gpt-6-luna") return false;
-  return (config.codexAccounts ?? []).some(account => {
+  const due = (config.codexAccounts ?? []).filter(account => {
     if (account.id === excludeId || (pinnedAccountId !== undefined && account.id !== pinnedAccountId)
       || !isSelectableCodexPoolAccount(account) || config.pausedCodexAccountIds?.includes(account.id)) return false;
+    const waited = rereadWaitedAt.get(account.id);
+    if (waited !== undefined && now - waited < POOL_RESERVE_REREAD_BACKOFF_MS) return false;
     const quota = getAccountQuota(account.id);
     if (!quota) return true;
     return codexUsageLimitResetAt(quota, account.plan, now) !== undefined && now - quota.updatedAt > POOL_RESERVE_FRESHNESS_MS;
   });
+  for (const account of due) rereadWaitedAt.set(account.id, now);
+  return due.length > 0;
 }
 
-/** One bounded wait for the shared single-flight quota read; a slow or failed read never fails the request. */
-export async function refreshStalePoolReserveEvidence(prime: () => Promise<void>): Promise<void> {
+/** One bounded wait for the shared single-flight quota read; a slow or failed read, or a caller abort, never fails the request. */
+export async function refreshStalePoolReserveEvidence(prime: () => Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const bound = new Promise<void>(resolve => { timer = setTimeout(resolve, POOL_RESERVE_REFRESH_WAIT_MS); });
-  try { await Promise.race([prime().catch(() => {}), bound]); } finally { clearTimeout(timer); }
+  let onAbort: (() => void) | undefined;
+  const bound = new Promise<void>(resolve => {
+    timer = setTimeout(resolve, POOL_RESERVE_REFRESH_WAIT_MS);
+    onAbort = () => resolve();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+  try { await Promise.race([prime().catch(() => {}), bound]); }
+  finally { clearTimeout(timer); if (onAbort) signal?.removeEventListener("abort", onAbort); }
 }
 
 /**

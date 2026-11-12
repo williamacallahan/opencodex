@@ -10,7 +10,7 @@ import { poolAccountDto } from "../../src/codex/auth-api/account-list";
 import { handleCodexAuthAPI } from "../../src/codex/auth-api/routes";
 import { applyAccountQuotaFromUpstreamHeaders, clearAccountQuota, getAccountQuota, setAccountQuotaFromParsed, updateAccountQuota } from "../../src/codex/quota";
 import { resetQuotaQueryBackoffForTests } from "../../src/codex/quota-query-backoff";
-import { POOL_RESERVE_FRESHNESS_MS, poolLunaReserveSelection } from "../../src/codex/pool-reserve";
+import { POOL_RESERVE_FRESHNESS_MS, POOL_RESERVE_REREAD_BACKOFF_MS, poolLunaReserveSelection, resetPoolReserveRereadMarkers } from "../../src/codex/pool-reserve";
 import { clearAccountNeedsReauth } from "../../src/codex/account-runtime-state";
 import { clearCodexUpstreamHealth, clearThreadAccountMap, getCodexQuotaHealthSnapshot, recordCodexUpstreamOutcome } from "../../src/codex/routing";
 import { bindThreadAffinity, deleteThreadAffinity, getThreadAffinity } from "../../src/codex/routing/thread-affinity";
@@ -74,7 +74,7 @@ beforeEach(() => {
   now = Date.now(); spyOn(Date, "now").mockImplementation(() => now);
   const acl = { success: true, exitCode: 0, timedOut: false, stdout: "" };
   setIcaclsRunnerForTests(() => acl); setAsyncIcaclsRunnerForTests(async () => acl);
-  clearAccountQuota(); clearCodexUpstreamHealth(); clearThreadAccountMap(); clearPoolRotationState(); resetQuotaQueryBackoffForTests();
+  clearAccountQuota(); clearCodexUpstreamHealth(); clearThreadAccountMap(); clearPoolRotationState(); resetQuotaQueryBackoffForTests(); resetPoolReserveRereadMarkers();
   for (const id of [A, B]) {
     clearAccountNeedsReauth(id);
     saveCodexAccountCredential(id, { accessToken: `fixture-access-${id}`, refreshToken: `fixture-refresh-${id}`,
@@ -155,6 +155,31 @@ describe("Luna Reserve where selection used to skip it", () => {
     const cfg = config();
     const ctx = await resolveCodexAuthContext(new Headers(), cfg, "pool", { modelId: "gpt-6-luna", primeCodexPoolQuotas });
     expect(primed).toBe(1); expect(ctx.accountId).toBe(B); expect(ctx.quotaScope).toBe("reserve");
+  });
+  test("a seat whose read keeps failing is waited on once per backoff window, not per request", async () => {
+    ordinary(A, 40);
+    const staleAt = now - POOL_RESERVE_FRESHNESS_MS - 60_000;
+    now = staleAt; ordinary(B); now = staleAt + POOL_RESERVE_FRESHNESS_MS + 120_000;
+    let primed = 0;
+    const primeCodexPoolQuotas = async () => { primed++; };
+    for (let request = 0; request < 3; request++) {
+      await resolveCodexAuthContext(new Headers(), config(), "pool", { modelId: "gpt-6-luna", primeCodexPoolQuotas });
+    }
+    expect(primed).toBe(1);
+    now += POOL_RESERVE_REREAD_BACKOFF_MS + 1;
+    await resolveCodexAuthContext(new Headers(), config(), "pool", { modelId: "gpt-6-luna", primeCodexPoolQuotas });
+    expect(primed).toBe(2);
+  });
+  test("an aborted caller does not sit out the re-read wait", async () => {
+    ordinary(A, 40);
+    const staleAt = now - POOL_RESERVE_FRESHNESS_MS - 60_000;
+    now = staleAt; ordinary(B); now = staleAt + POOL_RESERVE_FRESHNESS_MS + 120_000;
+    const abort = new AbortController();
+    setTimeout(() => abort.abort(), 20);
+    const started = performance.now();
+    await resolveCodexAuthContext(new Headers(), config(), "pool", { modelId: "gpt-6-luna", signal: abort.signal,
+      primeCodexPoolQuotas: () => new Promise<void>(() => {}) }).catch(() => {});
+    expect(performance.now() - started).toBeLessThan(1500);
   });
   test("fresh evidence never waits on a re-read", async () => {
     ordinary(A, 40);
