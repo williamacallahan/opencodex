@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveConfig } from "../../src/config";
+import { buildDesktop3pRegistry, desktop3pAlias } from "../../src/claude/desktop-3p";
 import { clearAnthropicAccountPoolState, forgetAnthropicFailoverQuorum } from "../../src/oauth/anthropic-routing";
 import { getAccountSet, saveCredential, setActiveAccount, setAccountPaused } from "../../src/oauth/store";
 import { handleClaudeMessages } from "../../src/server/claude-messages";
@@ -20,7 +21,10 @@ const routedModel = "ocx-claude-gpt-pool--gpt-fixture";
 const hubKey = `ocx_data_${"h".repeat(40)}`;
 const poolToken = "synthetic-hybrid-pool-access-1";
 const bridgePoolKey = "bridge-pool-key";
-const callerBearer = "Bearer sk-ant-hybrid-caller";
+const callerToken = "sk-ant-hybrid-caller";
+const callerBearer = `Bearer ${callerToken}`;
+const callerApiKey = "sk-ant-hybrid-apikey";
+const callerCookie = "hybrid-session=caller-cookie";
 const query = "?beta=true&future=a%2Fb&future=a+b";
 const raw = String.raw`{
  "model":"claude-sonnet-4-5", "max_tokens":64, "stream":false,
@@ -57,6 +61,7 @@ describe("hybrid Messages public HTTP transport", () => {
       accessToken: "synthetic-unused-cli-access", refreshToken: "synthetic-unused-cli-refresh", expiresAt: Date.now() + 3_600_000,
     } }));
     nativeCalls = []; bridgeCalls = []; unexpectedFetches = 0;
+    buildDesktop3pRegistry([], []);
     clearAnthropicAccountPoolState();
     forgetAnthropicFailoverQuorum();
     releaseSpendHome = acquireOwnedSpendHome();
@@ -97,6 +102,7 @@ describe("hybrid Messages public HTTP transport", () => {
       expect(unexpectedFetches).toBe(0);
     } finally {
       globalThis.fetch = savedFetch;
+      buildDesktop3pRegistry([], []);
       clearAnthropicAccountPoolState();
       forgetAnthropicFailoverQuorum();
       releaseSpendHome?.(); releaseSpendHome = undefined;
@@ -185,10 +191,13 @@ describe("hybrid Messages public HTTP transport", () => {
     expect(nativeCalls).toHaveLength(0);
   });
 
-  for (const alias of [routedModel, "ocx-claude2-gpt-pool--vendor~sgpt-fixture"]) {
-    test(`routed alias uses translation and excludes caller bearer: ${alias}`, async () => {
+  for (const alias of [routedModel, "ocx-claude2-gpt-pool--vendor~sgpt-fixture",
+    "claude-ocx-gpt-pool--gpt-fixture", "claude-ocx2-gpt-pool--vendor~sgpt-fixture"]) {
+    test(`routed alias uses translation and excludes caller credentials: ${alias}`, async () => {
       await launch(true);
-      const response = await post("/hybrid/v1/messages", encode(raw.replace(nativeModel, alias)));
+      const response = await post("/hybrid/v1/messages", encode(raw.replace(nativeModel, alias)), {
+        "x-api-key": callerApiKey, cookie: callerCookie,
+      });
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ content: [{ type: "text", text: "bridge reply" }] });
       expect(response.headers.get("request-id")).not.toBe("req_hybrid_native");
@@ -198,10 +207,12 @@ describe("hybrid Messages public HTTP transport", () => {
       const translated = JSON.parse(new TextDecoder().decode(captured.bytes));
       expect(captured.path).toBe("/v1/chat/completions");
       expect(translated.stream).toBe(true);
-      expect(translated.model).toBe(alias === routedModel ? "gpt-fixture" : "vendor/gpt-fixture");
+      expect(translated.model).toBe(alias.includes("claude2-") || alias.includes("ocx2-") ? "vendor/gpt-fixture" : "gpt-fixture");
       expect(translated.messages.some((message: { role: string; content: string }) => message.role === "user" && message.content.includes("café"))).toBe(true);
       expect(captured.headers.get("authorization")).toBe(`Bearer ${bridgePoolKey}`);
-      expect(JSON.stringify({ path: captured.path, query: captured.query, headers: [...captured.headers], translated })).not.toContain(callerBearer);
+      const upstreamRequest = JSON.stringify({ path: captured.path, query: captured.query,
+        headers: [...captured.headers], body: new TextDecoder().decode(captured.bytes) });
+      for (const credential of [callerToken, callerApiKey, callerCookie]) expect(upstreamRequest).not.toContain(credential);
       expect(response.headers.get("x-opencodex-request-id")).toBeTruthy();
     });
   }
@@ -241,10 +252,65 @@ describe("hybrid Messages public HTTP transport", () => {
       expect(refusal.error.message).toContain(model);
       expect(refusal.error.message).toContain("native Claude ids");
       expect(refusal.error.message).toContain("ocx-claude-");
+      expect(response.headers.get("x-opencodex-request-id")).toBeTruthy();
       expect(nativeCalls).toHaveLength(0);
       expect(bridgeCalls).toHaveLength(0);
     });
   }
+
+  for (const endpoint of ["messages", "messages/count_tokens"]) {
+    test(`${endpoint} refuses a registered Desktop 3P alias`, async () => {
+      await launch();
+      buildDesktop3pRegistry([], [{ provider: "gpt-pool", id: "gpt-fixture" }]);
+      const model = desktop3pAlias("gpt-pool", "gpt-fixture");
+      const response = await post(`/hybrid/v1/${endpoint}`, encode(raw.replace(nativeModel, model)));
+      expect(response.status).toBe(400);
+      expect(response.headers.get("x-opencodex-request-id")).toBeTruthy();
+      expect((await response.json()).error.message).toContain(model);
+      expect(nativeCalls).toHaveLength(0);
+      expect(bridgeCalls).toHaveLength(0);
+    });
+
+    for (const dated of [false, true]) for (const mapped of [nativeModel, "gpt-pool/gpt-fixture"]) {
+      test(`${endpoint} refuses a modelMap claim (dated=${dated}, target=${mapped})`, async () => {
+        await launch(false, config => { config.claudeCode!.modelMap = { [nativeModel]: mapped }; });
+        const model = dated ? `${nativeModel}-20260101` : nativeModel;
+        const response = await post(`/hybrid/v1/${endpoint}`, encode(raw.replace(nativeModel, model)));
+        expect(response.status).toBe(400);
+        expect((await response.json()).error.message).toContain(model);
+        expect(nativeCalls).toHaveLength(0);
+        expect(bridgeCalls).toHaveLength(0);
+      });
+    }
+
+    for (const encoding of [undefined, "unsupported-fixture"]) {
+      test(`${endpoint} reports an invalid body (encoding=${encoding})`, async () => {
+        await launch();
+        const response = await post(`/hybrid/v1/${endpoint}`, encode("{invalid json"),
+          encoding ? { "content-encoding": encoding } : {});
+        expect(response.status).toBe(400);
+        expect(await response.json()).toMatchObject({ type: "error", error: {
+          type: "invalid_request_error",
+          message: "Hybrid Messages body is invalid; expected supported content encoding and a JSON object with a non-empty model",
+        } });
+        expect(response.headers.get("x-opencodex-request-id")).toBeTruthy();
+        expect(nativeCalls).toHaveLength(0);
+        expect(bridgeCalls).toHaveLength(0);
+      });
+    }
+  }
+
+  test("a refusal echoes at most 200 model characters", async () => {
+    await launch();
+    const model = "unknown-" + "z".repeat(240);
+    const response = await post("/hybrid/v1/messages", encode(raw.replace(nativeModel, model)));
+    expect(response.status).toBe(400);
+    const refusal = await response.json();
+    expect(refusal.error.message).toContain(`model ${model.slice(0, 200)} is incompatible`);
+    expect(refusal.error.message).not.toContain(model.slice(0, 201));
+    expect(nativeCalls).toHaveLength(0);
+    expect(bridgeCalls).toHaveLength(0);
+  });
 
   test("a routed selector stays authoritative over an embedded Anthropic route directive", async () => {
     await launch();
@@ -324,13 +390,35 @@ describe("hybrid Messages public HTTP transport", () => {
     expect(nativeCalls).toHaveLength(0);
   });
 
-  test("hybrid refuses a combo that could later choose an Anthropic subscription", async () => {
-    await launch(false, config => { config.combos = { hybrid: { strategy: "round-robin", targets: [
-      { provider: "gpt-pool", model: "gpt-fixture" }, { provider: "anthropic", model: nativeModel },
-    ] } }; });
+  for (const provider of ["anthropic", "commandcode"]) test(`hybrid refuses a combo with an Anthropic wire target (${provider})`, async () => {
+    await launch(false, config => {
+      if (provider === "commandcode") config.providers.commandcode = {
+        adapter: "openai-chat", baseUrl: "https://api.commandcode.ai/provider/v1", authMode: "key",
+        apiKey: "synthetic-commandcode-key", models: [nativeModel], liveModels: false,
+      };
+      config.combos = { hybrid: { strategy: "round-robin", targets: [
+        { provider: "gpt-pool", model: "gpt-fixture" }, { provider, model: nativeModel },
+      ] } };
+    });
     const response = await post("/hybrid/v1/messages", encode(raw.replace(nativeModel, "ocx-claude-combo--hybrid")));
     expect(response.status).toBe(400);
     await response.arrayBuffer();
+    expect(nativeCalls).toHaveLength(0);
+    expect(bridgeCalls).toHaveLength(0);
+  });
+
+  test("hybrid rechecks a fast-row base combo before dispatch", async () => {
+    await launch(false, config => {
+      config.fastRows = true;
+      config.combos = { hybrid: { alias: "gpt-pool/hybrid-mixed", strategy: "round-robin", targets: [
+        { provider: "gpt-pool", model: "gpt-fixture" }, { provider: "anthropic", model: nativeModel },
+      ] } };
+    });
+    const model = "ocx-claude-gpt-pool--hybrid-mixed--fast";
+    const response = await post("/hybrid/v1/messages", encode(raw.replace(nativeModel, model)));
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toContain(model);
+    expect(response.headers.get("x-opencodex-request-id")).toBeTruthy();
     expect(nativeCalls).toHaveLength(0);
     expect(bridgeCalls).toHaveLength(0);
   });

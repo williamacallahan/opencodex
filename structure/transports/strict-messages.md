@@ -16,12 +16,16 @@ It needs no separate native-rollout flag.
 The public listener also exposes `/hybrid/v1/messages` and `/hybrid/v1/messages/count_tokens`.
 `src/server/claude-messages.ts` reads each body once with the bounded reader and retains the wire
 bytes. An unchanged `claude-` model accepted by the strict route predicate enters the strict handler
-with those bytes. A current `ocx-claude-` or `ocx-claude2-` alias resolving outside Anthropic enters
+with those bytes, unless a Desktop 3P registry entry or a nonempty exact/date-stripped `modelMap`
+entry claims it. Those claimed selectors receive 400. A current `ocx-claude-` or `ocx-claude2-`
+alias, or a decoded legacy `claude-ocx-` or `claude-ocx2-` alias, resolving outside Anthropic enters
 the existing bridge; its caller-credential passthrough, managed native and Antigravity direct lanes
 are disabled. Every combo candidate must resolve outside Anthropic; policy or nested combo
-candidates are refused. Other selectors receive a local 400 before any upstream request.
+candidates are refused. The same route predicate checks the settled bridge route after fast/effort
+row rewrites. Other selectors receive a local 400 before any upstream request.
 Native counts forward the original bytes; routed counts use the root endpoint's local estimate.
-Only the bridge promotes the caller session header and adds the request-log response header.
+Only the bridge promotes the caller session header. Bridge responses and logged refusals before
+lane selection carry the request-log response header; strict responses do not.
 The hybrid turn defers its session-lane capacity check until lane selection, then claims the
 selected lane through its existing lease. The strict lane keeps the original session identity and headers. Cancelling the bounded read returns 499.
 `tests/claude-integration/messages-hybrid.test.ts` exercises these public HTTP boundaries with
