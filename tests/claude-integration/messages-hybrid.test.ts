@@ -19,7 +19,8 @@ const nativeModel = "claude-sonnet-4-5";
 const routedModel = "ocx-claude-gpt-pool--gpt-fixture";
 const hubKey = `ocx_data_${"h".repeat(40)}`;
 const poolToken = "synthetic-hybrid-pool-access-1";
-const callerBearer = "Bearer sk-ant-synthetic-hybrid-caller";
+const bridgePoolKey = "bridge-pool-key";
+const callerBearer = "Bearer sk-ant-hybrid-caller";
 const query = "?beta=true&future=a%2Fb&future=a+b";
 const raw = String.raw`{
  "model":"claude-sonnet-4-5", "max_tokens":64, "stream":false,
@@ -131,7 +132,7 @@ describe("hybrid Messages public HTTP transport", () => {
       apiKeys: [{ id: "hybrid", name: "fixture-hybrid", key: hubKey, createdAt: "2026-01-01T00:00:00.000Z" }],
       providers: {
         anthropic: { adapter: "anthropic", baseUrl: "https://api.anthropic.com", authMode: "oauth", models: [nativeModel], liveModels: false },
-        "gpt-pool": { adapter: "openai-chat", baseUrl: `${bridge.url.origin}/v1`, authMode: "key", apiKey: "synthetic-bridge-pool-key",
+        "gpt-pool": { adapter: "openai-chat", baseUrl: `${bridge.url.origin}/v1`, authMode: "key", apiKey: bridgePoolKey,
           allowPrivateNetwork: true, models: ["gpt-fixture", "vendor/gpt-fixture"], liveModels: false },
       },
       protocols: { rollout: { managedMessagesNative: true, managedMessagesNativeOAuth: true } },
@@ -199,7 +200,7 @@ describe("hybrid Messages public HTTP transport", () => {
       expect(translated.stream).toBe(true);
       expect(translated.model).toBe(alias === routedModel ? "gpt-fixture" : "vendor/gpt-fixture");
       expect(translated.messages.some((message: { role: string; content: string }) => message.role === "user" && message.content.includes("café"))).toBe(true);
-      expect(captured.headers.get("authorization")).toBe("Bearer synthetic-bridge-pool-key");
+      expect(captured.headers.get("authorization")).toBe(`Bearer ${bridgePoolKey}`);
       expect(JSON.stringify({ path: captured.path, query: captured.query, headers: [...captured.headers], translated })).not.toContain(callerBearer);
       expect(response.headers.get("x-opencodex-request-id")).toBeTruthy();
     });
