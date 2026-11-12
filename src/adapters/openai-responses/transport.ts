@@ -7,7 +7,7 @@ import {
   isolateCodexPoolAccountHeaders,
 } from "../../codex/forward-transport-headers";
 import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers-destination";
-import { copyForwardedClientHeaders, forwardedClientHeaderValueAllowed, normalizeForwardedClientHeaderName } from "../../lib/provider-client-headers";
+import { copyForwardedClientHeaders, forwardableClientHeaders } from "../../lib/provider-client-headers";
 import { AGENT_ASSERTION_HEADER } from "../../lib/authorization-scheme";
 import { openaiResponsesUrl } from "../openai-responses-url";
 
@@ -15,11 +15,8 @@ export { FORWARD_HEADERS } from "../../codex/forward-transport-headers";
 
 /** Copy the provider's opted-in client metadata onto already-materialized auth headers, never credentials. */
 export function copyConfiguredClientHeaders(target: Headers, incoming: Headers, provider: OcxProviderConfig): void {
-  const configured = Array.isArray(provider.forwardClientHeaders) ? provider.forwardClientHeaders.slice(0, 64) : [];
-  for (const rawName of configured) {
-    const name = normalizeForwardedClientHeaderName(rawName);
-    const value = name === null ? null : incoming.get(name);
-    if (name !== null && value && forwardedClientHeaderValueAllowed(name, value) && !target.has(name)) target.set(name, value);
+  for (const [name, value] of forwardableClientHeaders(provider.forwardClientHeaders, incoming)) {
+    if (!target.has(name)) target.set(name, value);
   }
 }
 

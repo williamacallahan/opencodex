@@ -74,16 +74,25 @@ export function forwardedClientHeaderValueAllowed(name: string, value: string): 
   return !GATEWAY_IDENTITY_HEADERS.has(name) || GATEWAY_IDENTITY_VALUE.test(value);
 }
 
+/** The provider's opted-in caller metadata that passes the name allowlist and the value gate, in configured order. */
+export function forwardableClientHeaders(
+  forwardClientHeaders: readonly string[] | undefined, incoming: Headers,
+): Array<[name: string, value: string]> {
+  if (!Array.isArray(forwardClientHeaders)) return [];
+  const forwardable: Array<[string, string]> = [];
+  for (const rawName of forwardClientHeaders.slice(0, MAX_FORWARDED_CLIENT_HEADERS)) {
+    const name = normalizeForwardedClientHeaderName(rawName);
+    const value = name === null ? null : incoming.get(name);
+    if (name !== null && value && forwardedClientHeaderValueAllowed(name, value)) forwardable.push([name, value]);
+  }
+  return forwardable;
+}
+
 /** Copy the provider's opted-in caller metadata onto outbound headers it has not already set. */
 export function copyForwardedClientHeaders(
   forwardClientHeaders: readonly string[] | undefined, headers: Record<string, string>, incoming: Headers,
 ): void {
-  if (!Array.isArray(forwardClientHeaders)) return;
-  for (const rawName of forwardClientHeaders.slice(0, MAX_FORWARDED_CLIENT_HEADERS)) {
-    const name = normalizeForwardedClientHeaderName(rawName);
-    if (name === null || Object.keys(headers).some(existing => existing.toLowerCase() === name)) continue;
-    const value = incoming.get(name);
-    if (!value || !forwardedClientHeaderValueAllowed(name, value)) continue;
-    headers[name] = value;
+  for (const [name, value] of forwardableClientHeaders(forwardClientHeaders, incoming)) {
+    if (!Object.keys(headers).some(existing => existing.toLowerCase() === name)) headers[name] = value;
   }
 }
