@@ -2815,6 +2815,9 @@ export const ja: Record<TKey, string> = {
   "codexAuth.mainReauthOpen": "開く",
   "codexAuth.mainReauthPending": "サインインを待っています…",
   "codexAuth.mainReauthDevice": "デバイスコードで再ログイン",
+  "codexAuth.mainNotSignedIn": "未ログイン",
+  "codexAuth.mainSignInHint": "このサーバーにはまだ Codex のログインがありません — 下のデバイスコードでログインしてください",
+  "codexAuth.mainSignInDevice": "デバイスコードでログイン",
   "codexAuth.emailCollision": "このアカウントはメインの Codex ログインと一致します。別のアカウントを使用してください。",
 
   "codexAuth.resetCreditsTitle": "リセットクレジット",

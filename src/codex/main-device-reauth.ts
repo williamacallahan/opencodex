@@ -144,8 +144,9 @@ export function startMainDeviceReauth(deps: MainDeviceReauthDeps = {}): MainDevi
   // other already began polling.
   activeFlow = flow;
   try {
-    // Prepare NOW: the existing credential snapshot is captured at start (080),
-    // so a hub with no reauthenticatable main credential fails fast with
+    // Prepare NOW: the existing credential snapshot, or its absence for a first
+    // login, is captured at start (080), so a hub whose main credential can be
+    // neither reauthenticated nor created fails fast with
     // native_main_unavailable instead of after the human completes the page.
     flow.prepared = (deps.beginCommit ?? beginNativeMainReauth)();
   } catch (error) {

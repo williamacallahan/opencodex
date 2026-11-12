@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { NativeMainProfilesView } from "../src/components/native-main-profiles-view";
 import { nativeMainTranslator } from "../src/i18n/native-main-copy";
 import { NativeMainProfileSession } from "../src/native-main-profile-session";
-import type { NativeMainErrorCode } from "../src/native-main-profiles";
+import type { NativeMainDoctor, NativeMainErrorCode } from "../src/native-main-profiles";
 
 const home = "/srv/fixture/.codex";
 const a = { id: "profile-a", label: "Example A", identityHint: "native:11111111" };
@@ -51,6 +51,47 @@ function fixture() {
     accountRefresh: (callback: typeof accountRefresh) => { accountRefresh = callback; },
     async close() { stop(); await window.happyDOM.close(); } };
 }
+
+test("a server with no login, or no key store, says so and offers no save it could never perform", async () => {
+  const window = new Window();
+  try {
+    const t = nativeMainTranslator("en");
+    const render = (doctor: Partial<NativeMainDoctor>) => {
+      window.document.body.innerHTML = renderToStaticMarkup(<NativeMainProfilesView t={t} id="fixture"
+        open busy={false} blocked={false} label="" action={null} confirmedStopped={false} previousId={null}
+        error={null} result={null} refreshFailed={false}
+        snapshot={{
+          doctor: { effectiveCodexHome: home, activeProfileId: null, supported: true, authStatus: "ok",
+            keyStore: "available", vaultStatus: "missing", recoveryPending: false, ...doctor },
+          list: { effectiveCodexHome: home, activeProfileId: null, profiles: [] },
+        }}
+        onToggle={() => {}} onRefresh={() => {}} onLabel={() => {}} onRegister={() => {}}
+        onSelect={() => {}} onStopped={() => {}} onConfirm={() => {}} />);
+      return window.document.body;
+    };
+
+    const noLogin = render({ authStatus: "missing", keyStore: "unavailable" });
+    expect(noLogin.textContent).toContain(t("nativeMain.signInFirst"));
+    expect(noLogin.textContent).not.toContain("AUTH_MISSING");
+    expect(noLogin.textContent).not.toContain(t("nativeMain.empty"));
+    expect(noLogin.querySelector("form")).toBeNull();
+
+    const noKeyStore = render({ keyStore: "unavailable" });
+    expect(noKeyStore.textContent).toContain(t("nativeMain.noKeyStore"));
+    expect(noKeyStore.textContent).not.toContain("KEYRING_UNAVAILABLE");
+    expect(noKeyStore.querySelector("form")).toBeNull();
+
+    // Every other unavailable state keeps its diagnostic code and the (disabled) save form.
+    const missingKey = render({ keyStore: "missing-key" });
+    expect(missingKey.textContent).toContain(t("nativeMain.unavailable"));
+    expect(missingKey.textContent).toContain("KEYRING_KEY_MISSING");
+    expect(missingKey.querySelector<HTMLButtonElement>('form button[type="submit"]')!.disabled).toBe(true);
+
+    const ready = render({});
+    expect(ready.textContent).toContain(t("nativeMain.empty"));
+    expect(ready.querySelector("form")).not.toBeNull();
+  } finally { await window.happyDOM.close(); }
+});
 
 test("CODEX_BUSY guides a status read and fresh stopped confirmation, without replaying the write", async () => {
   const f = fixture();

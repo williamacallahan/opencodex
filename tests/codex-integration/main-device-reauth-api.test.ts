@@ -81,11 +81,24 @@ describe("native main device reauth route (#3898)", () => {
     expect(handled).toBeNull();
   });
 
-  test("start without a native credential answers 503 native_main_unavailable", async () => {
+  test("start against an auth.json that holds no ChatGPT login answers 503 native_main_unavailable", async () => {
+    writeFileSync(join(home, "auth.json"), JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: "placeholder" }));
     const response = await call("POST");
     expect(response?.status).toBe(503);
     const body = await response!.json() as { code: string };
     expect(body.code).toBe("native_main_unavailable");
+  });
+
+  test("start on a home with no login begins its first sign-in", async () => {
+    stubPendingDevice();
+    const started = await call("POST");
+    expect(started?.status).toBe(200);
+    const pending = await started!.json() as { flowId: string; status: string };
+    expect(pending.status).toBe("pending");
+    await Bun.sleep(20);
+    const polled = await (await call("GET", `?flowId=${pending.flowId}`))!.json() as Record<string, unknown>;
+    expect(polled.deviceCode).toBe("ABCD-1234");
+    expect((await call("DELETE", `?flowId=${pending.flowId}`))?.status).toBe(200);
   });
 
   test("start rejects an unexpected body", async () => {

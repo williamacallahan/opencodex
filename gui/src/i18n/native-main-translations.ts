@@ -51,7 +51,9 @@ export const NATIVE_MAIN_EN = {
   "nativeMain.stopped": "I have stopped native Codex using this CODEX_HOME and understand that a restart may be required.",
   "nativeMain.cancel": "Cancel",
   "nativeMain.confirm": "Confirm native-login change",
-  "nativeMain.unavailable": "Profile changes are unavailable. Check the diagnostic code before continuing."
+  "nativeMain.unavailable": "Profile changes are unavailable. Check the diagnostic code before continuing.",
+  "nativeMain.signInFirst": "This server has no Codex login yet. Sign in from the Main Account card above first.",
+  "nativeMain.noKeyStore": "This server has no usable operating-system key store, so login profiles cannot be saved or switched here. The main login itself works without one."
 } as const;
 export type NativeMainTKey = keyof typeof NATIVE_MAIN_EN;
 export const NATIVE_MAIN_TRANSLATIONS = {
@@ -108,7 +110,9 @@ export const NATIVE_MAIN_TRANSLATIONS = {
   "nativeMain.stopped": "이 CODEX_HOME을 사용하는 Codex를 종료했으며, 변경 후 재시작이 필요할 수 있음을 확인했습니다.",
   "nativeMain.cancel": "취소",
   "nativeMain.confirm": "메인 로그인 변경 확인",
-  "nativeMain.unavailable": "프로필을 변경할 수 없습니다. 계속하기 전에 진단 코드를 확인하세요."
+  "nativeMain.unavailable": "프로필을 변경할 수 없습니다. 계속하기 전에 진단 코드를 확인하세요.",
+  "nativeMain.signInFirst": "이 서버에는 아직 Codex 로그인이 없습니다. 먼저 위의 메인 계정 카드에서 로그인하세요.",
+  "nativeMain.noKeyStore": "이 서버에는 사용할 수 있는 운영체제 키 저장소가 없어 로그인 프로필을 저장하거나 전환할 수 없습니다. 메인 로그인 자체는 키 저장소 없이도 동작합니다."
 },
   "de": {
   "nativeMain.title": "Native Codex-Hauptanmeldung",
@@ -162,7 +166,9 @@ export const NATIVE_MAIN_TRANSLATIONS = {
   "nativeMain.stopped": "Ich habe natives Codex für dieses CODEX_HOME beendet und weiß, dass ein Neustart nötig sein kann.",
   "nativeMain.cancel": "Abbrechen",
   "nativeMain.confirm": "Änderung der Hauptanmeldung bestätigen",
-  "nativeMain.unavailable": "Profiländerungen sind nicht verfügbar. Prüfen Sie zuerst den Diagnosecode."
+  "nativeMain.unavailable": "Profiländerungen sind nicht verfügbar. Prüfen Sie zuerst den Diagnosecode.",
+  "nativeMain.signInFirst": "Auf diesem Server gibt es noch keine Codex-Anmeldung. Melden Sie sich zuerst oben in der Karte des Hauptkontos an.",
+  "nativeMain.noKeyStore": "Dieser Server hat keinen nutzbaren Schlüsselspeicher des Betriebssystems, daher können Anmeldeprofile hier weder gespeichert noch gewechselt werden. Die Hauptanmeldung selbst funktioniert ohne ihn."
 },
   "fr": {
   "nativeMain.title": "Connexion principale native Codex",
@@ -216,7 +222,9 @@ export const NATIVE_MAIN_TRANSLATIONS = {
   "nativeMain.stopped": "J’ai arrêté Codex natif utilisant ce CODEX_HOME et comprends qu’un redémarrage peut être nécessaire.",
   "nativeMain.cancel": "Annuler",
   "nativeMain.confirm": "Confirmer le changement de connexion",
-  "nativeMain.unavailable": "La modification des profils est indisponible. Vérifiez le code de diagnostic avant de continuer."
+  "nativeMain.unavailable": "La modification des profils est indisponible. Vérifiez le code de diagnostic avant de continuer.",
+  "nativeMain.signInFirst": "Ce serveur n’a pas encore de connexion Codex. Connectez-vous d’abord depuis la carte du compte principal ci-dessus.",
+  "nativeMain.noKeyStore": "Ce serveur n’a pas de trousseau système utilisable : les profils de connexion ne peuvent donc être ni enregistrés ni changés ici. La connexion principale fonctionne sans lui."
 },
   "zh": {
   "nativeMain.title": "原生 Codex 主登录",
@@ -270,7 +278,9 @@ export const NATIVE_MAIN_TRANSLATIONS = {
   "nativeMain.stopped": "我已停止使用此 CODEX_HOME 的原生 Codex，并了解之后可能需要重新启动。",
   "nativeMain.cancel": "取消",
   "nativeMain.confirm": "确认更改原生登录",
-  "nativeMain.unavailable": "目前无法更改配置档案。请先检查诊断代码。"
+  "nativeMain.unavailable": "目前无法更改配置档案。请先检查诊断代码。",
+  "nativeMain.signInFirst": "此服务器尚无 Codex 登录。请先在上方的主账号卡片中登录。",
+  "nativeMain.noKeyStore": "此服务器没有可用的操作系统密钥存储，因此无法在此保存或切换登录配置。主登录本身不需要它即可使用。"
 },
   "zh-TW": {
   "nativeMain.title": "原生 Codex 主登入",
@@ -324,7 +334,9 @@ export const NATIVE_MAIN_TRANSLATIONS = {
   "nativeMain.stopped": "我已停止使用此 CODEX_HOME 的原生 Codex，並了解之後可能需要重新啟動。",
   "nativeMain.cancel": "取消",
   "nativeMain.confirm": "確認變更原生登入",
-  "nativeMain.unavailable": "目前無法變更設定檔。請先檢查診斷代碼。"
+  "nativeMain.unavailable": "目前無法變更設定檔。請先檢查診斷代碼。",
+  "nativeMain.signInFirst": "此伺服器尚無 Codex 登入。請先在上方的主帳號卡片中登入。",
+  "nativeMain.noKeyStore": "此伺服器沒有可用的作業系統金鑰儲存區，因此無法在此儲存或切換登入設定檔。主登入本身不需要它即可使用。"
 },
   "ru": {
   "nativeMain.title": "Основной вход в Codex",
@@ -378,7 +390,9 @@ export const NATIVE_MAIN_TRANSLATIONS = {
   "nativeMain.stopped": "Я остановил Codex, использующий этот CODEX_HOME, и понимаю, что может потребоваться перезапуск.",
   "nativeMain.cancel": "Отмена",
   "nativeMain.confirm": "Подтвердить изменение входа",
-  "nativeMain.unavailable": "Изменение профилей недоступно. Перед продолжением проверьте диагностический код."
+  "nativeMain.unavailable": "Изменение профилей недоступно. Перед продолжением проверьте диагностический код.",
+  "nativeMain.signInFirst": "На этом сервере ещё нет входа в Codex. Сначала войдите в карточке основного аккаунта выше.",
+  "nativeMain.noKeyStore": "На этом сервере нет доступного системного хранилища ключей, поэтому профили входа здесь нельзя сохранять или переключать. Сам основной вход работает без него."
 },
   "ja": {
   "nativeMain.title": "ネイティブ Codex メインログイン",
@@ -432,7 +446,9 @@ export const NATIVE_MAIN_TRANSLATIONS = {
   "nativeMain.stopped": "この CODEX_HOME を使う Codex を終了し、変更後に再起動が必要な場合があることを確認しました。",
   "nativeMain.cancel": "キャンセル",
   "nativeMain.confirm": "ログインの変更を確認",
-  "nativeMain.unavailable": "プロファイルを変更できません。続行する前に診断コードを確認してください。"
+  "nativeMain.unavailable": "プロファイルを変更できません。続行する前に診断コードを確認してください。",
+  "nativeMain.signInFirst": "このサーバーにはまだ Codex のログインがありません。まず上のメインアカウントのカードからログインしてください。",
+  "nativeMain.noKeyStore": "このサーバーには利用できる OS のキーストアがないため、ログインプロファイルの保存や切り替えはできません。メインログイン自体はキーストアなしで動作します。"
 },
   "tr": {
   "nativeMain.title": "Yerel Codex ana oturumu",
@@ -486,7 +502,9 @@ export const NATIVE_MAIN_TRANSLATIONS = {
   "nativeMain.stopped": "Bu CODEX_HOME ile çalışan Codex uygulamasını durdurdum ve yeniden başlatma gerekebileceğini anlıyorum.",
   "nativeMain.cancel": "İptal",
   "nativeMain.confirm": "Yerel oturum değişikliğini onayla",
-  "nativeMain.unavailable": "Profil değişiklikleri kullanılamıyor. Devam etmeden önce tanılama kodunu kontrol edin."
+  "nativeMain.unavailable": "Profil değişiklikleri kullanılamıyor. Devam etmeden önce tanılama kodunu kontrol edin.",
+  "nativeMain.signInFirst": "Bu sunucuda henüz Codex girişi yok. Önce yukarıdaki ana hesap kartından giriş yapın.",
+  "nativeMain.noKeyStore": "Bu sunucuda kullanılabilir bir işletim sistemi anahtar deposu yok; bu yüzden giriş profilleri burada kaydedilemez veya değiştirilemez. Ana giriş ise anahtar deposu olmadan çalışır."
 },
   "vi": {
   "nativeMain.title": "Đăng nhập Codex gốc",
@@ -540,7 +558,9 @@ export const NATIVE_MAIN_TRANSLATIONS = {
   "nativeMain.stopped": "Tôi đã dừng Codex gốc đang dùng CODEX_HOME này và hiểu rằng có thể cần khởi động lại.",
   "nativeMain.cancel": "Hủy",
   "nativeMain.confirm": "Xác nhận thay đổi đăng nhập gốc",
-  "nativeMain.unavailable": "Không thể thay đổi hồ sơ. Hãy kiểm tra mã chẩn đoán trước khi tiếp tục."
+  "nativeMain.unavailable": "Không thể thay đổi hồ sơ. Hãy kiểm tra mã chẩn đoán trước khi tiếp tục.",
+  "nativeMain.signInFirst": "Máy chủ này chưa có đăng nhập Codex. Trước tiên hãy đăng nhập từ thẻ tài khoản chính ở trên.",
+  "nativeMain.noKeyStore": "Máy chủ này không có kho khóa hệ điều hành dùng được, nên không thể lưu hoặc chuyển đổi hồ sơ đăng nhập tại đây. Bản thân đăng nhập chính vẫn hoạt động mà không cần kho khóa."
 },
   "pt": {
   "nativeMain.title": "Login principal do Codex nativo",
@@ -594,6 +614,8 @@ export const NATIVE_MAIN_TRANSLATIONS = {
   "nativeMain.stopped": "Parei o Codex nativo que usa este CODEX_HOME e entendo que pode ser necessário reiniciá-lo.",
   "nativeMain.cancel": "Cancelar",
   "nativeMain.confirm": "Confirmar alteração do login nativo",
-  "nativeMain.unavailable": "As alterações de perfil estão indisponíveis. Verifique o código de diagnóstico antes de continuar."
+  "nativeMain.unavailable": "As alterações de perfil estão indisponíveis. Verifique o código de diagnóstico antes de continuar.",
+  "nativeMain.signInFirst": "Este servidor ainda não tem um login do Codex. Primeiro faça login no cartão da conta principal acima.",
+  "nativeMain.noKeyStore": "Este servidor não tem um armazenamento de chaves do sistema utilizável, então perfis de login não podem ser salvos nem trocados aqui. O login principal funciona sem ele."
 },
 } satisfies Record<"en" | "de" | "fr" | "ko" | "zh" | "zh-TW" | "ru" | "ja" | "tr" | "vi" | "pt", Record<NativeMainTKey, string>>;
