@@ -76,8 +76,8 @@ export function poolLunaReserveSelection(
   const includedOnly: CodexAccountUsabilityOptions = { ...options, poolCapacity: "included" };
   const included = getEligiblePoolAccounts(config, excludeId, now, quotaScope, includedOnly);
   const reserveOptions: CodexAccountUsabilityOptions = { ...options, modelEligibleAccountIds: reserveIds, poolCapacity: "reserve" };
+  const shared = affinityKey === undefined ? undefined : getThreadAffinity(affinityKey, quotaScope);
   if (affinityKey !== undefined) {
-    const shared = getThreadAffinity(affinityKey, quotaScope);
     const serving = getThreadAffinity(affinityKey, "reserve");
     if (serving && (!shared || serving.lastUsedAt > shared.lastUsedAt)
       && !isThreadAffinityExpired(serving, now) && isThreadAffinityGenerationLive(serving)
@@ -86,9 +86,13 @@ export function poolLunaReserveSelection(
     }
   }
   // The resolver's bound-reuse rule, not new-thread placement: a bound thread is never
-  // steered away by the failure window that only shapes where new threads land.
-  const boundId = affinityKey === undefined ? undefined : getThreadAffinity(affinityKey, quotaScope)?.accountId;
-  if (boundId !== undefined && boundId !== excludeId && isCodexAccountSelectable(config, boundId, now, quotaScope, includedOnly)) {
+  // steered away by the failure window that only shapes where new threads land. A binding
+  // whose credential generation is stale is not a live owner — the resolver releases it —
+  // so taking the included-owner exception here would spend included quota while Reserve
+  // exists on another seat.
+  if (shared !== undefined && !isThreadAffinityExpired(shared, now) && isThreadAffinityGenerationLive(shared)
+    && shared.accountId !== excludeId
+    && isCodexAccountSelectable(config, shared.accountId, now, quotaScope, includedOnly)) {
     return { ...unchanged, options: includedOnly };
   }
   if (getEligiblePoolAccounts(config, excludeId, now, "reserve", reserveOptions).length > 0) {

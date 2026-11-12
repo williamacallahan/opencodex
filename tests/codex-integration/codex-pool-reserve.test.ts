@@ -162,6 +162,18 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     const moved = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", {}, undefined, "luna-on-held", now);
     expect(moved.reserve).toBe(true); expect(moved.quotaScope).toBe("reserve");
   });
+  test("a stale included-owner binding does not suppress Reserve", () => {
+    reserve(); ordinary(A, 40);
+    bindThreadAffinity("stale-included-owner", A, now, "shared");
+    // Replacing A's credential advances its generation, so the resolver will release this
+    // binding. The planner must not treat it as a live included owner and spend included
+    // quota while B's Reserve is available.
+    saveCodexAccountCredential(A, { accessToken: "replacement-access-a", refreshToken: "replacement-refresh-a",
+      chatgptAccountId: `fixture-workspace-${A}`, expiresAt: now + 86_400_000 });
+    const selected = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", {}, undefined, "stale-included-owner", now);
+    expect(selected.reserve).toBe(true);
+    expect(selected.quotaScope).toBe("reserve");
+  });
   test("an excluded included owner does not steer a retry onto another shared seat", () => {
     reserve(); ordinary(A, 40);
     bindThreadAffinity("excluded-luna-owner", A, now, "shared");
