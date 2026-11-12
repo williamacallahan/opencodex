@@ -85,14 +85,15 @@ function observeDiagnosticsAfterPlanning(): () => void {
   return () => { slot[CACHE_DIAGNOSTIC_HOOK] = real; };
 }
 
-async function promptCacheKeyFor(direct: boolean, agentId: string | undefined): Promise<unknown> {
+async function promptCacheKeyFor(direct: boolean, agentId: string | undefined, firstMessage?: string): Promise<unknown> {
   const lease = tryAdmitTurn();
   expect(lease).not.toBeNull();
   try {
     const response = await handleClaudeMessages(new Request("http://localhost/v1/messages", { method: "POST",
       headers: { "content-type": "application/json", ...(agentId ? { "x-claude-code-agent-id": agentId } : {}) },
       body: JSON.stringify({ model: "google-antigravity/gemini-3.8-flash", max_tokens: 64, stream: false, metadata: { user_id: userId },
-        messages: [{ role: "user", content: agentId ? "a fresh subagent brief" : "ping" }] }),
+        tools: [{ name: "lookup", description: "find", input_schema: { type: "object" } }],
+        messages: [{ role: "user", content: firstMessage ?? (agentId ? "a fresh subagent brief" : "ping") }] }),
     }), antigravityConfig(direct), { model: "", provider: "" }, { requestId: `fixture-${crypto.randomUUID()}`, start: Date.now(), turnAdmissionLease: lease!,
       admission: { kind: "loopback", source: "loopback" } });
     await response.text();
@@ -113,5 +114,23 @@ test("a subagent keeps its own prompt_cache_key when the ingress leaves the dire
   const restore = observeDiagnosticsAfterPlanning();
   try {
     expect(await promptCacheKeyFor(true, AGENT_ID)).toBe(SUBAGENT_KEY);
+  } finally { restore(); }
+});
+
+// A fork carries its parent's first message and tools, so it takes the main loop's key on every translation call.
+for (const direct of [true, false]) {
+  test(`a fork keeps the main loop's prompt_cache_key (direct lane ${direct ? "on" : "off"})`, async () => {
+    expect(await promptCacheKeyFor(direct, undefined, "the shared task")).toBe(MAIN_KEY);
+    captured.length = 0;
+    expect(await promptCacheKeyFor(direct, AGENT_ID, "the shared task")).toBe(MAIN_KEY);
+  });
+}
+
+test("a fork keeps the main loop's prompt_cache_key when the ingress leaves the direct plan for the bridge translation", async () => {
+  expect(await promptCacheKeyFor(true, undefined, "the shared task")).toBe(MAIN_KEY);
+  captured.length = 0;
+  const restore = observeDiagnosticsAfterPlanning();
+  try {
+    expect(await promptCacheKeyFor(true, AGENT_ID, "the shared task")).toBe(MAIN_KEY);
   } finally { restore(); }
 });

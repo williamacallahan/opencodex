@@ -778,8 +778,11 @@ async function handleClaudeMessagesWithBudget(
     anthropicBody = hybridBody ?? await readAnthropicBody(req, translatorBudget, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));
     if (isRec(anthropicBody)) {
       const shape = claudeRequestShape(req.headers, anthropicBody);
+      // Only a truly absent header marks the main loop; an empty, oversized or repeated one is neither main loop nor agent.
       shape.fork = resolveClaudeFork({
-        sessionKey: claudeForkSessionKey(anthropicBody), hasAgentId: claudeAgentId !== undefined, firstMessageDigest: shape.messagesPrefix?.[0],
+        sessionKey: claudeForkSessionKey(anthropicBody, logIds?.admission ?? ingress.admission),
+        kind: claudeAgentId !== undefined ? "agent" : shape.agentId === "absent" ? "absent" : "ignored",
+        firstMessageDigest: shape.messagesPrefix?.[0], toolsDigest: shape.tools,
       });
       // A fork replays its parent's conversation: it keys, pools and fingerprints as its parent does.
       if (shape.fork === "true") claudeAgentId = undefined;

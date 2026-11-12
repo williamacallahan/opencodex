@@ -14,6 +14,13 @@ import type { HandleResponsesOptions } from "./responses/core-options";
  */
 const BRIDGE_POOL_KEY = randomBytes(32);
 
+/** The admission scope a Claude session identity is bound to; undefined when a non-loopback caller has no principal. */
+export function claudeAdmissionScope(admission: DataPlaneAdmission): unknown {
+  if (admission.kind === "loopback") return "loopback";
+  const principal = contextPrincipalIdOf(admission);
+  return principal ? ["principal", principal] : undefined;
+}
+
 export function resolveClaudeBridgePoolSession(args: {
   ingress: Headers; replay: Headers; metadataSessionId?: string; admission?: DataPlaneAdmission;
 }): string | undefined {
@@ -33,12 +40,8 @@ export function resolveClaudeBridgePoolSession(args: {
   if (!value) return undefined;
   // Every identity this bridge names, caller aliases included, is bound to its admission scope:
   // a shared or guessed value must never select another principal's conversation key.
-  let scope: unknown = "loopback";
-  if (admission.kind !== "loopback") {
-    const principal = contextPrincipalIdOf(admission);
-    if (!principal) return undefined;
-    scope = ["principal", principal];
-  }
+  const scope = claudeAdmissionScope(admission);
+  if (scope === undefined) return undefined;
   return createHmac("sha256", BRIDGE_POOL_KEY)
     .update(JSON.stringify(["opencodex-claude-bridge-pool-v1", scope, value])).digest("hex");
 }

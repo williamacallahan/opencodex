@@ -12,6 +12,9 @@ import { LOG_CONVERSATION_ID_LEN, normalizeLogConversationId } from "./request-l
  */
 export type ClaudeRequestShapeDigest = string;
 
+/** `true`: an agent-id request treated as its parent's fork; `false`: agent id, not a fork; `absent`: no valid agent id. */
+export type ClaudeRequestShapeFork = "true" | "false" | "absent";
+
 export interface ClaudeRequestShape {
   agentId: ClaudeRequestShapeDigest;
   parentAgentId: ClaudeRequestShapeDigest;
@@ -31,7 +34,7 @@ export interface ClaudeRequestShape {
   /** Hashes of the first {@link MESSAGES_PREFIX} messages' content, in order. */
   messagesPrefix?: ClaudeRequestShapeDigest[];
   /** `true`: an agent-id request treated as its parent's fork; `false`: agent id, not a fork; `absent`: no agent id. */
-  fork?: "true" | "false" | "absent";
+  fork?: ClaudeRequestShapeFork;
 }
 
 const DIGEST = new RegExp(`^[0-9a-f]{${LOG_CONVERSATION_ID_LEN}}$`);
@@ -48,9 +51,26 @@ function headerDigest(headers: Headers, name: string): ClaudeRequestShapeDigest 
   return normalizeLogConversationId(value) ?? "invalid";
 }
 
+/** A real digest, not a marker: the only values the fork memory may remember or compare. */
+export function isClaudeRequestShapeHash(value: unknown): value is string {
+  return typeof value === "string" && DIGEST.test(value);
+}
+
+/**
+ * The value without any `cache_control` key at any depth. Claude Code moves its cache breakpoints
+ * between turns and the translated lanes drop them, so they must not change a content hash.
+ */
+function withoutCacheControl(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutCacheControl);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "cache_control").map(([key, item]) => [key, withoutCacheControl(item)]));
+  }
+  return value;
+}
+
 function contentDigest(value: unknown): ClaudeRequestShapeDigest {
   if (value === undefined || value === null) return "absent";
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, LOG_CONVERSATION_ID_LEN);
+  return createHash("sha256").update(JSON.stringify(withoutCacheControl(value))).digest("hex").slice(0, LOG_CONVERSATION_ID_LEN);
 }
 
 function textDigest(text: string): ClaudeRequestShapeDigest {
@@ -89,7 +109,7 @@ export function claudeRequestShape(headers: Headers, body: Record<string, unknow
 export function parseClaudeRequestShape(value: unknown): ClaudeRequestShape | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const row = value as Record<string, unknown>;
-  const digest = (field: unknown): field is string => typeof field === "string" && (DIGEST.test(field) || MARKERS.has(field));
+  const digest = (field: unknown): field is string => isClaudeRequestShapeHash(field) || (typeof field === "string" && MARKERS.has(field));
   const { agentId, parentAgentId, system, tools, messageCount, firstMessage } = row;
   if (!digest(agentId) || !digest(parentAgentId) || !digest(system) || !digest(tools) || !digest(firstMessage)) return undefined;
   if (typeof messageCount !== "number" || !Number.isInteger(messageCount) || messageCount < 0 || messageCount > MAX_MESSAGE_COUNT) return undefined;
