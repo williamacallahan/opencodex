@@ -23,7 +23,7 @@ import { tryAcquireNativeMainProfileClaim } from "../native-main-admission";
 import { withNativeMainCredentialClaim, isNativeMainClaimUnavailable } from "./http";
 import type { PoolQuotaResult } from "./pool-quota-probe";
 import { fetchMainAccountInfoAttempt, fetchMainAccountInfo, prepareMainAccountInfoToken, MAIN_CACHE_TTL } from "./main-account-probe";
-import { fetchPoolAccountQuota, PoolQuotaProbeBusyError, POOL_CACHE_TTL, POOL_QUOTA_REFRESH_CONCURRENCY } from "./pool-quota-probe";
+import { fetchPoolAccountQuota, isExhaustedPoolQuotaReadHeld, PoolQuotaProbeBusyError, POOL_CACHE_TTL, POOL_QUOTA_REFRESH_CONCURRENCY } from "./pool-quota-probe";
 import { getRuntimeConfig, configuredPoolAccount, mapWithConcurrency } from "./runtime-config";
 import { trackBackgroundWork } from "../../lib/background-work";
 
@@ -57,7 +57,9 @@ export async function runCodexCooldownRecoveryProbes(config: OcxConfig, now = Da
         return;
       }
       try {
-        const result = await fetchPoolAccountQuota(claim.accountId, true, account.plan,
+        // An exhausted account inside its 15 minute hold is answered from the stored reading.
+        const result = await fetchPoolAccountQuota(claim.accountId,
+          !isExhaustedPoolQuotaReadHeld(claim.accountId, now), account.plan,
           undefined, false, undefined, now);
         // Defence in depth: independent scopes are already excluded at the claim site.
         // Generic WHAM must never clear Reserve even if claim selection changes.

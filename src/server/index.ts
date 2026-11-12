@@ -50,6 +50,7 @@ import {
 } from "../codex/auth-api";
 import { activateResetCreditAutoRedeem } from "../codex/reset-credit-auto-redeem";
 import { registerCodexQuotaAutoRefreshWorker } from "../codex/quota-auto-refresh";
+import { registerAnthropicCooldownRecoveryProbeWorker } from "../providers/quota/anthropic-cooldown-recovery-worker";
 import {
   reconcileLiveStateStores,
   setLiveStateStoreConfig,
@@ -613,6 +614,7 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
   const linkPolicy = (): RequestPolicyView => requestPolicyView(config, LINK_INGRESS_HOSTNAME, { allowedKeyIds: optionalListeners.linkAdmissionKeyIds() });
   let backgroundLifecycle: ReturnType<typeof acquireServerBackgroundLifecycle> | null = null;
   let unregisterQuotaAutoRefresh: (() => void) | null = null;
+  let unregisterAnthropicCooldownRecovery: (() => void) | null = null;
   let remoteWorkspaceStopping = false;
   let remoteWorkspaceShutdown: (() => Promise<void>) | undefined;
   let desktopCompatibilityStartup: ReturnType<typeof scheduleDesktopCompatibilityStartup> | undefined;
@@ -639,6 +641,7 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
     backgroundLifecycle = acquireServerBackgroundLifecycle(applyPolicy, config);
     unregisterQuotaAutoRefresh = (deps.registerCodexQuotaAutoRefreshWorker
       ?? registerCodexQuotaAutoRefreshWorker)(config);
+    unregisterAnthropicCooldownRecovery = registerAnthropicCooldownRecoveryProbeWorker(config);
     // Poll external pricing edits; the startup catch releases this owner-scoped lease.
     userCostOverlayReconciler = startUserCostOverlayReconciler({ liveConfig: config });
     const serveOptions = createServeOptions({
@@ -716,9 +719,13 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
       maxRequestBodySize: inboundBodyLimitBytes, dispatch: (req, requestServer) => serveOptions.fetch(req, requestServer) });
   } catch (error) {
     unregisterQuotaAutoRefresh?.();
+    unregisterAnthropicCooldownRecovery?.();
     userCostOverlayReconciler?.stop();
     backgroundLifecycle?.releaseAfterFailedStart();
     void nativeMainLifecycle.release();
+    // A later optional listener can still throw after the local control socket started. Its lease
+    // is live state, so it has to go synchronously before the startup error propagates.
+    optionalListeners.abortStart();
     throw error;
   }
 
@@ -758,6 +765,7 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
               userCostOverlayReconciler?.stop();
             } finally {
               unregisterQuotaAutoRefresh?.();
+              unregisterAnthropicCooldownRecovery?.();
             }
           },
         ],

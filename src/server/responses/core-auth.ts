@@ -74,6 +74,29 @@ export type CodexCredentialOwnershipOptions = Pick<HandleResponsesOptions,
   "admission" | "callerDirectAuth" | "stripClaudeMainAuthForNoncanonicalForward" | "trustedClaudeMainAuth">;
 
 /**
+ * Restore the provider's permitted caller metadata onto a header set rebuilt from a credential
+ * allowlist. Every physical send of one Responses turn goes through this rule: the first send,
+ * the 401 refresh replay and the alternate-account retry. The copier fills only names the target
+ * does not already carry, so a selected Pool installation identity and configured provider
+ * headers keep precedence over the caller's values. Chat providers get only their configured
+ * names (the gateway session identity), never the compact-handoff user-agent.
+ */
+export function restoreResponsesClientMetadata(
+  headers: Headers,
+  incoming: Headers,
+  provider: OcxProviderConfig,
+  compactionRecoveryKind?: HandleResponsesOptions["compactionRecoveryKind"],
+): void {
+  if (provider.adapter === "openai-responses" || compactionRecoveryKind === "compaction-v1") {
+    copyResponsesClientMetadata(headers, incoming, provider);
+  } else {
+    // Auth materialization also drops the gateway session identity an opted-in openai-chat
+    // provider asked for, so every physical send into a chat provider restores it here.
+    copyConfiguredClientHeaders(headers, incoming, provider);
+  }
+}
+
+/**
  * The caller credential the final Codex auth resolution will be given, as far as the ROUTE
  * decides it: a route change that may cross a credential domain drops the raw caller credential,
  * and a trusted Claude-main handoff replaces it.
@@ -360,15 +383,9 @@ export async function resolveResponsesCodexAuth(
         headers.delete("chatgpt-account-id");
       }
     }
-    // Codex auth materialization keeps only its credential allowlist. A compact-v1 handoff
-    // must also retain the permitted client fingerprint for its routed summarizer send.
-    if (options.compactionRecoveryKind === "compaction-v1") {
-      copyResponsesClientMetadata(headers, authInputHeaders, route.provider);
-    } else if (!isCanonicalOpenAiForwardProvider(route.provider)) {
-      // The same materialization drops every non-credential header, including the gateway
-      // session identity an opted-in openai-chat or openai-responses provider asked for.
-      copyConfiguredClientHeaders(headers, authInputHeaders, route.provider);
-    }
+    // Auth materialization keeps only its credential allowlist. Responses turns and compact
+    // handoffs also need the provider's permitted metadata, without replacing selected identity.
+    restoreResponsesClientMetadata(headers, authInputHeaders, route.provider, options.compactionRecoveryKind);
     // dual_header: the assertion is first-party only and travels only beside the caller's own
     // unchanged Bearer, compared with the ORIGINAL request (injected credentials do not count).
     if (isCanonicalOpenAiForwardProvider(route.provider) && authCtx?.kind === "main" && !substituteMainCredential) {
@@ -468,7 +485,7 @@ export function poolCredentialRefreshIncompleteResponse(args: {
   ));
   const headers = new Headers(response.headers);
   headers.set("Retry-After", "1");
-  return markProxyError(new Response(response.body, { status: response.status, headers }));
+  return markProxyError(new Response(response.body, { status: response.status, headers }), "pool_refresh");
 }
 
 
@@ -538,6 +555,9 @@ export async function refreshPoolForwardAuth(args: {
       signal: options.abortSignal,
       nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
     });
+    // The replay is a second physical send of the same turn: it keeps the caller metadata the
+    // first send carried instead of reverting to the credential-only allowlist.
+    restoreResponsesClientMetadata(headers, req.headers, provider, options.compactionRecoveryKind);
     return { ok: true, authCtx: refreshedAuthCtx, provider, headers };
   } catch (error) {
     if (isTerminalPoolRefreshFailure(error)) {
@@ -615,6 +635,8 @@ export async function refreshNativeMainForwardAuth(args: {
       signal: options.abortSignal,
       nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
     });
+    // Same rule as the stored Pool refresh: the replay keeps permitted caller metadata.
+    restoreResponsesClientMetadata(headers, req.headers, provider, options.compactionRecoveryKind);
     return { ok: true, authCtx: refreshedAuthCtx, provider, headers };
   } catch (error) {
     if (options.abortSignal?.aborted || req.signal.aborted) {

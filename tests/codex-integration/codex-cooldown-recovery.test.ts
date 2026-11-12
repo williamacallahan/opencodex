@@ -1,5 +1,5 @@
 // Reserve fixtures here exercise routing state only; they do not authorize or dispatch Reserve.
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync} from "node:fs";
 import { join } from "node:path";
 import {
@@ -30,8 +30,10 @@ import {
   recordCodexUpstreamOutcome,
   resolveCodexAccountForThread,
 } from "../../src/codex/routing";
+import { codexQuotaProbeIntervalMs } from "../../src/codex/routing/cooldown-math";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { resetPoolQuotaAttemptsForTests } from "../../src/codex/auth-api/pool-quota-probe";
 import { resetQuotaQueryBackoffForTests } from "../../src/codex/quota-query-backoff";
 
 const TEST_DIR = join(import.meta.dir, ".tmp-codex-cooldown-recovery-test");
@@ -99,6 +101,7 @@ describe("Codex cooldown recovery worker", () => {
     clearCodexUpstreamHealth();
     clearCodexCooldownRecoveryProbeState();
     resetQuotaQueryBackoffForTests();
+    resetPoolQuotaAttemptsForTests();
   });
 
   afterEach(() => {
@@ -581,5 +584,56 @@ describe("Codex cooldown recovery worker", () => {
     // The two that waited must be served before any account gets a second turn.
     expect(secondPass.slice(0, 2).sort()).toEqual(starved.sort());
     expect(new Set(seen)).toEqual(new Set(ids));
+  });
+
+  describe("exhausted accounts are read at most every 15 minutes", () => {
+    const MIN = 60_000;
+    function storeExhausted(id: string, resetAtMs: number, percent = 100): void {
+      setAccountQuotaFromParsed(id, parseUsageQuota({
+        plan_type: "team",
+        rate_limit: { allowed: false, primary_window: {
+          used_percent: percent, limit_window_seconds: 604_800, reset_at: Math.floor(resetAtMs / 1000),
+        } },
+      }));
+    }
+    /** Sweep at `at` for an account whose quota was read 5 minutes earlier (clock-controlled). */
+    async function sweepRequests(percent: number, resetAfterReadMs: number): Promise<number> {
+      const at = START + 6 * MIN;
+      const clock = spyOn(Date, "now").mockImplementation(() => at - 5 * MIN);
+      try {
+        const config = makeConfig(["a"]);
+        saveCredential("a");
+        cool(config, "a", "shared", at - 14 * MIN);
+        storeExhausted("a", at - 5 * MIN + resetAfterReadMs, percent);
+        let requests = 0;
+        globalThis.fetch = async () => { requests++; return usageResponse(12); };
+        clock.mockImplementation(() => at);
+        await runCodexCooldownRecoveryProbes(config, at);
+        return requests;
+      } finally { clock.mockRestore(); }
+    }
+
+    test("a sweep sends no request for an exhausted account read 5 minutes ago", async () => {
+      expect(await sweepRequests(100, 3 * 24 * 60 * MIN)).toBe(0);
+    });
+
+    test("a sweep reads an exhausted account once its reset has passed", async () => {
+      expect(await sweepRequests(100, 2 * MIN)).toBe(1);
+    });
+
+    test("a sweep still reads a non-exhausted cooled account on the 5 minute cadence", async () => {
+      expect(await sweepRequests(50, 3 * 24 * 60 * MIN)).toBe(1);
+    });
+
+    test("the shared interval is 15 minutes only while every exhausted window resets in the future", () => {
+      const now = START;
+      const quota = (percent: number, resetAt?: number) => ({ weeklyPercent: percent, weeklyResetAt: resetAt, updatedAt: now - MIN });
+      expect(codexQuotaProbeIntervalMs(quota(100, now + MIN), now)).toBe(15 * MIN);
+      expect(codexQuotaProbeIntervalMs(quota(100, now - 1), now)).toBe(0);
+      expect(codexQuotaProbeIntervalMs(quota(100, now - 2 * MIN), now)).toBe(CODEX_QUOTA_PROBE_INTERVAL_MS);
+      expect(codexQuotaProbeIntervalMs(quota(100), now)).toBe(CODEX_QUOTA_PROBE_INTERVAL_MS);
+      expect(codexQuotaProbeIntervalMs(quota(99, now + MIN), now)).toBe(CODEX_QUOTA_PROBE_INTERVAL_MS);
+      expect(codexQuotaProbeIntervalMs(null, now)).toBe(CODEX_QUOTA_PROBE_INTERVAL_MS);
+    });
   });
 });

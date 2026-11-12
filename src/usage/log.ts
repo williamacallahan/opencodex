@@ -11,6 +11,7 @@ import { recordOwnedConfigPath } from "../lib/config-ownership";
 import { redactSecretString, sanitizeLogMetadataString } from "../lib/redact";
 import { upstreamDiagnosticLogFields, upstreamDiagnosticLogProjection, type UpstreamErrorDiagnostics } from "../server/request-log-terminal-status";
 import { usageDisplayTotalTokens } from "./totals";
+import { normalizeRecordedClient, type UsageClient } from "./client";
 import {
   normalizePersistedJevDecision,
   type PersistedJevDecisionV1,
@@ -94,6 +95,11 @@ export function isCodexPoolAccountLogLabel(value: unknown): value is "main" | `p
   return value === "main" || (typeof value === "string" && CODEX_ACCOUNT_LOG_LABEL_RE.test(value));
 }
 
+/** Anthropic pool account tag (#8383): exactly the `p<hex6>` label of its logged provider, nothing else. */
+export function isAnthropicAccountTag(value: unknown): value is `p${string}` {
+  return typeof value === "string" && CODEX_ACCOUNT_LOG_LABEL_RE.test(value);
+}
+
 /** Request-time upstream credential class, never a credential or account identifier. */
 export type UsageCredentialSource = "grok-oauth" | "xai-api-key";
 
@@ -171,6 +177,8 @@ export interface PersistedUsageAttempt {
   locallyAnswered?: boolean;
   /** Stable non-PII identity for the Codex pool account that served this attempt. */
   accountLogLabel?: CodexUsageAccountLogLabel;
+  /** Anthropic pool account that served this attempt: the p-label of its provider (#8383). */
+  accountTag?: `p${string}`;
   inputTokenEstimate?: number;
   usage?: OcxUsage;
   totalTokens?: number;
@@ -305,6 +313,8 @@ export function normalizeRequestSpend(value: unknown): PersistedRequestSpend | u
 export interface PersistedUsageEntry extends UpstreamErrorDiagnostics {
   requestedAlias?: string;
   requestId: string;
+  /** Best-effort classified client; absent only for records predating attribution. */
+  client?: UsageClient;
   /**
    * Identity of the ONE logical request this row belongs to (#4546), minted by
    * `createRequestExecutionBudget` at ingress. `requestId` identifies a log row; a retry layer,
@@ -325,6 +335,8 @@ export interface PersistedUsageEntry extends UpstreamErrorDiagnostics {
   localTerminalReason?: string;
   /** Stable non-PII identity for Codex Pool usage; absent for Direct/non-Codex traffic. */
   accountLogLabel?: CodexUsageAccountLogLabel;
+  /** Anthropic pool account of the row's provider (#8383); never read by account summaries. */
+  accountTag?: `p${string}`;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
   resolvedModel?: string;
@@ -792,6 +804,7 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
     ...(isCodexUsageAccountLogLabel(attempt.accountLogLabel)
       ? { accountLogLabel: attempt.accountLogLabel }
       : {}),
+    ...(isAnthropicAccountTag(attempt.accountTag) ? { accountTag: attempt.accountTag } : {}),
     ...(isNonNegativeFiniteNumber(attempt.inputTokenEstimate)
       ? { inputTokenEstimate: attempt.inputTokenEstimate }
       : {}),
@@ -1038,6 +1051,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry, projectDiagnostics = up
   const protocolTrace = parseProtocolTraceV1(entry.protocolTrace);
   const normalized: PersistedUsageEntry = {
     requestId: entry.requestId,
+    ...(Object.hasOwn(entry, "client") ? { client: normalizeRecordedClient(entry.client) ?? "unknown" } : {}),
     ...(isLogicalRequestId(entry.logicalRequestId) ? { logicalRequestId: entry.logicalRequestId } : {}),
     timestamp: entry.timestamp,
     provider: entry.provider,
@@ -1057,6 +1071,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry, projectDiagnostics = up
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
       : {}),
+    ...(isAnthropicAccountTag(entry.accountTag) ? { accountTag: entry.accountTag } : {}),
     ...(typeof entry.conversationId === "string" && entry.conversationId.trim()
       ? { conversationId: entry.conversationId.trim().slice(0, 128) }
       : {}),
