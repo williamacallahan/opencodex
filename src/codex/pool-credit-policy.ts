@@ -125,8 +125,8 @@ export function poolUnavailableUntilKnownHorizon(
   catalog: OcxConfig,
   now: number,
   main: { candidate: boolean; needsSignIn: boolean; recoveryAt?: number },
+  isUsable: (accountId: string) => boolean,
   quotaScope?: CodexQuotaScope,
-  isUsable?: (accountId: string) => boolean,
 ): PoolUnavailableHorizon | undefined {
   let hold: { accountId: string; resetAt: number } | undefined;
   let lapse: { accountId: string; lapsesAt: number } | undefined;
@@ -143,7 +143,7 @@ export function poolUnavailableUntilKnownHorizon(
     // A seat whose credential is unusable is not held for credits: it must answer the
     // credential 401, not the quota 429. Treat it as unheld so the caller falls through to
     // the credential check instead of reporting a reset that will not help.
-    if (isUsable && !isUsable(account.id)) { unheld = true; continue; }
+    if (!isUsable(account.id)) { unheld = true; continue; }
     const resetAt = poolCreditHoldResetAt(policy, account.id, catalog);
     if (resetAt !== undefined) {
       if (!hold || resetAt < hold.resetAt) hold = { accountId: account.id, resetAt };
@@ -163,6 +163,11 @@ export function poolUnavailableUntilKnownHorizon(
   // Only when the recheck is the soonest way back: another seat's earlier reset, or a recheck
   // held to its own reset by a cooldown, keeps the usage_limit_reached answer.
   if (recheck && !unheld && !main.needsSignIn && hold && recheck.retryAt < hold.resetAt) {
+    // A usable main login's own hold can end before the stale-credit recheck; report the sooner
+    // recovery so the client is not told to wait past a seat that will serve again first.
+    if (main.recoveryAt !== undefined && main.recoveryAt < recheck.retryAt) {
+      return { kind: "exhausted", accountId: MAIN_CODEX_ACCOUNT_ID, resetAt: main.recoveryAt, mainNeedsSignIn: main.needsSignIn };
+    }
     return { kind: "credit-recheck", ...recheck };
   }
   if (hold && !unheld) {

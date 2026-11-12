@@ -112,6 +112,19 @@ describe("stored-account credit policy at authentication", () => {
     const body = await cooldownErrorResponse(error as CodexPoolExhaustedError).json() as { error: { resets_at: number } };
     expect(body.error.resets_at).toBe(Math.ceil(mainReset / 1000));
   });
+  test("a stale-credit recheck reports a usable main login's sooner hold", async () => {
+    const cfg = config(); cfg.creditCodexAccountIds = [ID];
+    const mainReset = Date.now() + 60_000;
+    updateAccountQuota(ID, 100, Date.now() + 2 * 86_400_000);
+    setAccountQuotaFromParsed(ID, { credits: { hasCredits: true, balance: 42.5, observedAt: Date.now() - 6 * 60_000 } });
+    writeFileSync(join(dir, "auth.json"), JSON.stringify({ tokens: { access_token: "main_access", account_id: "main_acct" } }));
+    updateAccountQuota(MAIN_CODEX_ACCOUNT_ID, 100, mainReset);
+    const error = await resolveCodexAuthContext(new Headers(), cfg, "pool", { modelId: "gpt-5.5" })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CodexPoolExhaustedError);
+    const body = await cooldownErrorResponse(error as CodexPoolExhaustedError).json() as { error: { resets_at: number } };
+    expect(body.error.resets_at).toBe(Math.ceil(mainReset / 1000));
+  });
   test("a spent pool whose main login needs sign-in answers usage_limit_reached that names `codex login`", async () => {
     quota(100, Date.now() + 2 * 86_400_000);
     markAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);

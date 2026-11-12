@@ -71,6 +71,15 @@ export function poolAccountRecoveryAt(
   return recoveryAt > now ? recoveryAt : undefined;
 }
 
+/** The usable main login's own hold end, for a no-capacity answer that must not wait past it. */
+export function poolMainRecoveryAt(
+  config: OcxConfig,
+  quotaScope?: CodexQuotaScope,
+  selectionOptions?: CodexAccountUsabilityOptions,
+): number | undefined {
+  return poolAccountRecoveryAt(config, MAIN_CODEX_ACCOUNT_ID, Date.now(), quotaScope, selectionOptions);
+}
+
 export function nextCodexPoolRecoveryAt(
   config: OcxConfig,
   now: number,

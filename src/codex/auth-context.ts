@@ -28,7 +28,6 @@ import { isAccountNeedsReauth, markAccountNeedsReauth } from "./account-runtime-
 import { ConfigMutationLockError } from "../config";
 import { NativeProfileError } from "./native-profile-types";
 import { codexAccountUnusableReason, isCodexAccountUsable, type CodexAccountUsabilityOptions } from "./account-usability";
-import { isSelectableCodexPoolAccount } from "./account-id";
 import { reconcileMainCodexAccountRuntimeState } from "./account-lifecycle";
 import {
   MAIN_CODEX_ACCOUNT_ID,
@@ -77,7 +76,7 @@ import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS, NATIVE_RESERVE_MODEL } from "./cata
 import type { CodexCooldownSource, CodexQuotaScope } from "./routing";
 import { maskAccountId } from "../lib/privacy";
 import { formatErrorResponse, formatUsageLimitReachedResponse } from "../bridge";
-import { exhaustedCodexPoolRecovery, nextCodexPoolRecoveryAt, poolAccountRecoveryAt } from "./routing/pool-recovery";
+import { exhaustedCodexPoolRecovery, nextCodexPoolRecoveryAt, poolMainRecoveryAt } from "./routing/pool-recovery";
 import { getAccountQuota, isValidWhamHistoryObservation, parseUsageQuota, parseMainPolicyUsageQuota, setAccountQuotaFromParsed } from "./quota";
 import { codexAccountUsesCreditsAfterLimit } from "./account-credit-use";
 import type { CodexAccountMode, OcxConfig, OcxProviderConfig } from "../types";
@@ -1538,16 +1537,11 @@ async function resolveCodexAuthContextUnannotated(
       const mainCandidate = !nativeMainReadsForbidden
         && options.excludeAccountId !== MAIN_CODEX_ACCOUNT_ID
         && !policy.pausedCodexAccountIds?.includes(MAIN_CODEX_ACCOUNT_ID);
-      const quarantinedMain = mainCandidate
-        && codexAccountUnusableReason(config, MAIN_CODEX_ACCOUNT_ID, selectionOptions) === "needs_reauth";
-      // A usable main login's own hold can end before a pool seat's reset; pass it so the
-      // exhausted answer names the sooner recovery instead of the later pool reset.
-      const mainRecoveryAt = mainCandidate && !quarantinedMain
-        ? poolAccountRecoveryAt(config, MAIN_CODEX_ACCOUNT_ID, Date.now(), quotaScope, selectionOptions)
-        : undefined;
+      const quarantinedMain = mainCandidate && codexAccountUnusableReason(config, MAIN_CODEX_ACCOUNT_ID, selectionOptions) === "needs_reauth";
+      const mainRecoveryAt = mainCandidate && !quarantinedMain ? poolMainRecoveryAt(config, quotaScope, selectionOptions) : undefined;
       const unavailable = poolUnavailableUntilKnownHorizon(policy, config, Date.now(),
-        { candidate: mainCandidate, needsSignIn: quarantinedMain, recoveryAt: mainRecoveryAt }, quotaScope,
-        (id) => codexAccountUnusableReason(config, id, selectionOptions) === undefined);
+        { candidate: mainCandidate, needsSignIn: quarantinedMain, recoveryAt: mainRecoveryAt },
+        (id) => isCodexAccountUsable(config, id, selectionOptions), quotaScope);
       switch (unavailable?.kind) {
         case "failure-window": throw new CodexPoolFailureWindowError(unavailable.accountId, unavailable.lapsesAt, quotaScope);
         case "credit-recheck": throw new CodexPoolAccountCreditsOffError(unavailable.accountId, unavailable.resetAt, true, quotaScope);
