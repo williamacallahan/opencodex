@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { AnthropicRequestError as LeafAnthropicRequestError } from "../../src/claude/inbound-records";
 import { repoPath } from "../helpers/repo-root";
-import { AnthropicRequestError, anthropicToResponsesBody, anthropicToResponsesTranslation, effortForThinkingBudget, extractOcxEffortDirective, resolveInboundModel } from "../../src/claude/inbound";
+import { AnthropicRequestError, anthropicSettingsTranslation, anthropicToResponsesBody, anthropicToResponsesTranslation, claudeCodeAgentId, effortForThinkingBudget, extractOcxEffortDirective, resolveInboundModel } from "../../src/claude/inbound";
 import { parseRequest } from "../../src/responses/parser";
 import { inlineDocumentMarker } from "../../src/responses/inline-document";
 import { responsesRequestSchema } from "../../src/responses/schema";
@@ -648,6 +648,25 @@ describe("prompt cache key provenance (devlog 130 B3)", () => {
     expect(key("a1b2c3")).toBe(key("a1b2c3") as string);
     expect(key("a1b2c3")).not.toBe(sessionKey);
     expect(key("a1b2c3")).not.toBe(key("d4e5f6") as string);
+    expect(key("researcher@team")).toMatch(/^[0-9a-f]{32}$/);
+    // Same agent id under another session is another key: the subagent key is bound to its session.
+    const otherSession = anthropicToResponsesTranslation({
+      model: "m", max_tokens: 1, messages, metadata: { user_id: `${userId}-other` },
+    }, undefined, undefined, "a1b2c3").body.prompt_cache_key;
+    expect(otherSession).not.toBe(key("a1b2c3") as string);
+    // The direct lane's settings translation derives the same subagent key as the bridge.
+    expect(anthropicSettingsTranslation({ model: "m", max_tokens: 1, messages, metadata: { user_id: userId } }, undefined, "a1b2c3")
+      .body.prompt_cache_key).toBe(key("a1b2c3") as string);
+  });
+
+  test("claudeCodeAgentId accepts bounded printable ids and drops anything else", () => {
+    const id = (value?: string) => claudeCodeAgentId(new Headers(value === undefined ? {} : { "x-claude-code-agent-id": value }));
+    expect(id()).toBeUndefined();
+    expect(id("  a1b2c3d4e5f60718  ")).toBe("a1b2c3d4e5f60718");
+    expect(id("researcher@team")).toBe("researcher@team");
+    expect(id("   ")).toBeUndefined();
+    expect(id("a, b")).toBeUndefined();
+    expect(id("x".repeat(257))).toBeUndefined();
   });
 
   test("metadata.user_id boundary: exactly 64 chars forwarded, 65 chars hashed", () => {

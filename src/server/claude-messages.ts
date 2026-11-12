@@ -886,7 +886,7 @@ async function handleClaudeMessagesWithBudget(
     }
     // On the direct lane the core receives only the request settings; the conversation is
     // already decoded into the IR. Without a plan the translation below runs as before.
-    directPlan = ingress.hybridMessages ? undefined : planMessagesAntigravityDirect(anthropicBody, cc, config, translatorBudget);
+    directPlan = ingress.hybridMessages ? undefined : planMessagesAntigravityDirect(anthropicBody, cc, config, translatorBudget, claudeAgentId);
     let translation = directPlan && {
       body: directPlan.settingsBody,
       cacheKeySource: directPlan.cacheKeySource,

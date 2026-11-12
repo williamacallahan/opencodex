@@ -444,12 +444,13 @@ export function anthropicToResponsesTranslation(
 
 /**
  * The subagent a Claude Code request comes from. Claude Code sends `x-claude-code-agent-id` on
- * every subagent turn and none on the main loop; the value is an opaque short id, so anything
- * outside that shape is ignored rather than hashed into a key.
+ * every subagent turn and none on the main loop. The value is only hashed, so any bounded
+ * printable-ASCII id is accepted (agent-team teammates send `name@team`); an empty, oversized,
+ * or repeated header (joined with ", ") falls back to the session key.
  */
 export function claudeCodeAgentId(headers: Headers): string | undefined {
   const value = headers.get("x-claude-code-agent-id")?.trim();
-  return value && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : undefined;
+  return value && /^[\x21-\x7e]{1,256}$/.test(value) ? value : undefined;
 }
 
 function translateAnthropicRequest(
@@ -563,6 +564,7 @@ export function anthropicSystemLayout(system: unknown, cc: OcxClaudeCodeConfig |
 export function anthropicSettingsTranslation(
   raw: unknown,
   cc?: OcxClaudeCodeConfig,
+  claudeAgentId?: string,
 ): { body: Rec; cacheKeySource: ClaudeCacheKeySource } {
   assertAnthropicRequestShape(raw);
   const body: Rec = {
@@ -572,7 +574,7 @@ export function anthropicSettingsTranslation(
     stream: raw.stream === true,
   };
   const system = anthropicSystemLayout(raw.system, cc);
-  const cacheKeySource = applyAnthropicSettings(raw, body, system.cacheSystem, toolsToResponses(raw.tools));
+  const cacheKeySource = applyAnthropicSettings(raw, body, system.cacheSystem, toolsToResponses(raw.tools), claudeAgentId);
   return { body, cacheKeySource };
 }
 

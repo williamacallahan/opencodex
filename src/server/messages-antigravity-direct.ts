@@ -94,13 +94,14 @@ export function planMessagesAntigravityDirect(
   cc: OcxClaudeCodeConfig | undefined,
   config: OcxConfig,
   budget: TranslatorBudget,
+  claudeAgentId?: string,
 ): MessagesDirectPlan | undefined {
   if (!resolveProtocolSettings(config).rollout.antigravityDirect) return undefined;
   if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
   let settings: ReturnType<typeof anthropicSettingsTranslation>;
   let route: RouteResult;
   try {
-    settings = anthropicSettingsTranslation(body, cc);
+    settings = anthropicSettingsTranslation(body, cc, claudeAgentId);
     route = previewRouteModel(config, settings.body.model as string);
   } catch {
     return undefined;

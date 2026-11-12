@@ -238,7 +238,8 @@ export function conversationIdFromClaudeCacheKey(
   promptCacheKey: string | undefined,
 ): string | undefined {
   if (cacheKeySource !== "metadata") return undefined;
-  // prompt_cache_key is already sha256(user_id)[:32] from inbound — persist as-is
+  // A main-loop prompt_cache_key is sha256(user_id)[:32] from inbound (a subagent's also
+  // hashes its agent id, so pass the metadata preimage for those) — persist as-is
   // (do not re-hash) so native and translated paths stay aligned when callers pass
   // the preimage via conversationIdFromClaudeMetadata instead.
   const trimmed = sanitizeConversationIdInput(promptCacheKey);
