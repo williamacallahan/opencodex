@@ -88,6 +88,15 @@ test("a rate limit (429) logs one line, with provider and model", () => {
   expect(lines[0]).toContain("provider=openai model=fixture-model status=429 type=rate_limit_error code=rate_limit_exceeded final=429");
 });
 
+test("a usage-limit refusal from the pool logs its type and code instead of unknown", () => {
+  const log = context();
+  inspectResponseLogJson(log, JSON.stringify({ error: { type: "usage_limit_reached", code: "usage_limit_reached",
+    message: "Rate limit exceeded. Try again in 300s" } }));
+  const lines = finalWarnings(log, 429);
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("status=429 type=usage_limit_reached code=usage_limit_reached final=429");
+});
+
 test("each failed attempt prints one line and a successful attempt prints none", () => {
   const log: RequestLogContext = {
     ...context(),

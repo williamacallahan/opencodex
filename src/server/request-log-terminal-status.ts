@@ -62,7 +62,7 @@ function isSafeDiagnosticToken(value: unknown): value is string {
 const KNOWN_UPSTREAM_ERROR_TYPES: ReadonlySet<string> = new Set([
   "api_error", "authentication_error", "billing_error", "insufficient_quota", "invalid_request_error",
   "not_found_error", "overloaded_error", "permission_error", "rate_limit_error", "request_too_large",
-  "requests", "server_error", "timeout_error", "tokens",
+  "requests", "server_error", "timeout_error", "tokens", "usage_limit_reached",
   "INVALID_ARGUMENT", "FAILED_PRECONDITION", "PERMISSION_DENIED", "UNAUTHENTICATED", "NOT_FOUND",
   "RESOURCE_EXHAUSTED", "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED",
 ]);
@@ -70,6 +70,8 @@ const KNOWN_UPSTREAM_ERROR_TYPES: ReadonlySet<string> = new Set([
 /** Bare top-level error codes worth keeping: the rate-limit and overload classes recognizedUpstreamError maps, plus server_error. */
 const KNOWN_BARE_ERROR_CODES: ReadonlySet<string> = new Set([
   "rate_limit_exceeded", "rate_limit_error", "server_is_overloaded", "overloaded_error", "server_error",
+  // codex-lb's refusal when every seat is out of included usage: type and code are both this value.
+  "usage_limit_reached",
 ]);
 
 function noteBoundedDiagnostic(
