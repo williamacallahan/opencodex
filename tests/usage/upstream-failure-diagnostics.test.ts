@@ -1004,3 +1004,64 @@ describe("configured credential source", () => {
     }
   });
 });
+
+describe("prompt_cache.outcome line", () => {
+  const { promptCacheOutcomeLine, minimumCacheablePromptTokens, providerFamily } =
+    require("../../src/server/prompt-cache-outcome") as typeof import("../../src/server/prompt-cache-outcome");
+  const base = {
+    provider: "codex-lb", requestedModel: "gpt-6.1-sol", servedModel: "gpt-6.1-sol", usageStatus: "reported" as const,
+    wireParsed: false, succeeded: true, locallyAnswered: false, comboParent: false,
+  };
+  test("an OpenAI-style hit counts the cached reads as a subset of the prompt", () => {
+    const line = promptCacheOutcomeLine({ ...base, conversationId: "conv-1",
+      usage: { inputTokens: 5000, outputTokens: 10, cachedInputTokens: 4608 } });
+    expect(line).toContain("event=prompt_cache.outcome provider_name=codex-lb provider_id=codex-lb namespace=codex-lb");
+    expect(line).toContain("telemetry=reported cache_eligible=true prompt_tokens=5000 cached_tokens=4608 cache_write_tokens=0");
+    expect(line).toMatch(/key_hash=[0-9a-f]{16}$/);
+    expect(line).not.toContain("conv-1");
+  });
+  test("an Anthropic-style report adds reads and writes to the uncached input and groups seats into the family", () => {
+    const line = promptCacheOutcomeLine({ ...base, provider: "anthropic-pf2cf1b", servedModel: "claude-opus-5-5",
+      requestedModel: "claude-opus-5-5",
+      usage: { inputTokens: 100, outputTokens: 5, cacheReadInputTokens: 4000, cacheCreationInputTokens: 900 } });
+    expect(line).toContain("provider_name=anthropic provider_id=anthropic-pf2cf1b namespace=anthropic");
+    expect(line).toContain("cache_eligible=true prompt_tokens=5000 cached_tokens=4000 cache_write_tokens=900");
+  });
+  test("turns that cannot hit are not eligible, and unreported or synthesized detail is labeled", () => {
+    const usage = { inputTokens: 5000, outputTokens: 1, cachedInputTokens: 0 };
+    expect(promptCacheOutcomeLine({ ...base, usage: { ...usage, inputTokens: 100 } })).toContain("cache_eligible=false");
+    expect(promptCacheOutcomeLine({ ...base, usage, succeeded: false })).toContain("cache_eligible=false");
+    expect(promptCacheOutcomeLine({ ...base, usage, locallyAnswered: true })).toContain("cache_eligible=false");
+    expect(promptCacheOutcomeLine({ ...base, usage, comboParent: true })).toContain("cache_eligible=false");
+    expect(promptCacheOutcomeLine({ ...base, usage, wireParsed: true })).toContain("telemetry=unavailable cache_eligible=false");
+    const missing = promptCacheOutcomeLine({ ...base, usage: { inputTokens: 5000, outputTokens: 1 } });
+    expect(missing).toContain("telemetry=missing cache_eligible=false");
+    expect(missing).not.toContain("cached_tokens=");
+  });
+  test("minimums and families follow the gateway's table", () => {
+    expect(minimumCacheablePromptTokens("claude-opus-5-5-20260101")).toBe(512);
+    expect(minimumCacheablePromptTokens("anthropic/claude-haiku-4.5")).toBe(4096);
+    expect(minimumCacheablePromptTokens("gpt-6-luna")).toBe(1024);
+    expect(providerFamily("openai-abc12")).toBe("openai");
+    expect(providerFamily("llm-gateway")).toBe("llm-gateway");
+  });
+  test("the final request log prints exactly one line for the request", () => {
+    const log = context();
+    log.usage = { inputTokens: 2000, outputTokens: 3, cachedInputTokens: 1536 };
+    const home = mkdtempSync(join(tmpdir(), "ocx-final-cache-"));
+    const previousHome = process.env.OPENCODEX_HOME;
+    process.env.OPENCODEX_HOME = home;
+    const info = console.info; const lines: string[] = [];
+    console.info = ((line: string) => { lines.push(String(line)); }) as typeof console.info;
+    try { addFinalRequestLog("req-cache-1", Date.now(), log, 200, undefined, () => {}); }
+    finally {
+      console.info = info;
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = previousHome;
+      removeTreeWithRetry(home);
+    }
+    const outcome = lines.filter(line => line.includes("event=prompt_cache.outcome"));
+    expect(outcome).toHaveLength(1);
+    expect(outcome[0]).toContain("provider_name=openai provider_id=openai namespace=openai requested_model=fixture-model served_model=fixture-model");
+    expect(outcome[0]).toContain("telemetry=reported cache_eligible=true prompt_tokens=2000 cached_tokens=1536");
+  });
+});

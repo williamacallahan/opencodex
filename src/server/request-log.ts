@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { promptCacheOutcomeLine } from "./prompt-cache-outcome";
 import { stampApiKeyAccountLabel, usesApiKeyAccount } from "../providers/label";
 import { KEY_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
 import { attemptAccountChanged, sealRequestAttemptIdentity } from "./request-log-account-rotation";
@@ -1629,6 +1630,18 @@ function writeFinalRequestLog(
     ...(claudeCompatibility ? { claudeCompatibility } : {}),
     ...(protocolTrace ? { protocolTrace } : {}),
     ...attribution,
+  }));
+  console.info(promptCacheOutcomeLine({
+    provider: isCombo ? "combo" : logCtx.provider,
+    requestedModel: logCtx.requestedModel ?? logCtx.model,
+    servedModel: logCtx.model,
+    usage: loggedUsage,
+    usageStatus,
+    wireParsed: logCtx.usageWireParsed === true,
+    succeeded: effectiveStatus < 400 && meta?.terminalStatus !== "failed" && meta?.terminalStatus !== "incomplete",
+    locallyAnswered: logCtx.localTerminalReason !== undefined,
+    comboParent: isCombo,
+    ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
   }));
   // Formatted from the finalized snapshot, so the ring shows exactly what the ledger holds.
   for (const attempt of attempts ?? []) debugAttemptDeliverySummary(requestId, attempt);
