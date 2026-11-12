@@ -305,8 +305,15 @@ function assertNoDuplicateTopLevelKey(text: string): void {
   for (let i = 0; i < text.length; i++) {
     const ch = text[i]!;
     if (ch === '"') {
-      let end = i + 1;
-      while (end < text.length && text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
+      let end = text.indexOf('"', i + 1);
+      // A quote is escaped when an odd run of backslashes precedes it.
+      while (end !== -1) {
+        let slashes = 0;
+        while (text[end - 1 - slashes] === "\\") slashes++;
+        if (slashes % 2 === 0) break;
+        end = text.indexOf('"', end + 1);
+      }
+      if (end === -1) end = text.length;
       if (depth === 1 && expectKey) {
         const key = JSON.parse(text.slice(i, end + 1)) as string;
         if (seen.has(key)) throw new DuplicateJsonKeyError(key);

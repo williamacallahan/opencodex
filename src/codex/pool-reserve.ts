@@ -5,7 +5,6 @@ import { codexUsageLimitResetAt } from "./account-credit-use";
 import { NATIVE_RESERVE_MODEL } from "./catalog/native-models";
 import { getAccountQuota } from "./quota";
 import { resetAtToMs, type StoredAccountQuota, type WhamUsageResponse } from "./quota-types";
-import { isSelectableCodexPoolAccount } from "./account-id";
 import { grantsReserve, reserveLimits } from "./reserve-availability";
 import { getEligiblePoolAccounts, isCodexAccountSelectable } from "./routing/selection";
 import { getThreadAffinity, isThreadAffinityExpired, isThreadAffinityGenerationLive } from "./routing/thread-affinity";
@@ -57,53 +56,11 @@ export function poolReserveHoldResetAt(accountId: string, now = Date.now()): num
   return now + 60_000;
 }
 
-/** How long a request waits for a Reserve re-read before it falls back to the evidence it has. */
-export const POOL_RESERVE_REFRESH_WAIT_MS = 3_000;
-
-/** A seat whose re-read was already waited on is not waited on again for this long (the prime pass's own cache TTL). */
-export const POOL_RESERVE_REREAD_BACKOFF_MS = 5 * 60_000;
-const rereadWaitedAt = new Map<string, number>();
-
-/** Forget the per-seat wait markers. Test isolation only. */
-export function resetPoolReserveRereadMarkers(): void { rereadWaitedAt.clear(); }
-
-/**
- * An exhausted seat is the only place Luna Reserve can be, so its reading going stale (or never
- * having been taken, as after a restart) would silently turn the preference off. A seat that
- * still has included usage cannot hold a Reserve, so it never triggers a re-read. Each seat is
- * waited on at most once per backoff window, so a seat whose read keeps failing cannot make
- * every Luna request pay the wait. Returns whether a wait is due and marks the seats it covers.
- */
-export function takeStalePoolReserveSeats(
-  config: OcxConfig, modelId: string | undefined, excludeId?: string, pinnedAccountId?: string, now = Date.now(),
-): boolean {
-  if (modelId !== "gpt-6-luna") return false;
-  const due = (config.codexAccounts ?? []).filter(account => {
-    if (account.id === excludeId || (pinnedAccountId !== undefined && account.id !== pinnedAccountId)
-      || !isSelectableCodexPoolAccount(account) || config.pausedCodexAccountIds?.includes(account.id)) return false;
-    const waited = rereadWaitedAt.get(account.id);
-    if (waited !== undefined && now - waited < POOL_RESERVE_REREAD_BACKOFF_MS) return false;
-    const quota = getAccountQuota(account.id);
-    if (!quota) return true;
-    return codexUsageLimitResetAt(quota, account.plan, now) !== undefined && now - quota.updatedAt > POOL_RESERVE_FRESHNESS_MS;
-  });
-  for (const account of due) rereadWaitedAt.set(account.id, now);
-  return due.length > 0;
-}
-
-/** One bounded wait for the shared single-flight quota read; a slow or failed read, or a caller abort, never fails the request. */
-export async function refreshStalePoolReserveEvidence(prime: () => Promise<void>, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) return;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let onAbort: (() => void) | undefined;
-  const bound = new Promise<void>(resolve => {
-    timer = setTimeout(resolve, POOL_RESERVE_REFRESH_WAIT_MS);
-    onAbort = () => resolve();
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-  try { await Promise.race([prime().catch(() => {}), bound]); }
-  finally { clearTimeout(timer); if (onAbort) signal?.removeEventListener("abort", onAbort); }
-}
+// Stale evidence is deliberately not re-read on the request path. The hub's `quota-refresh` service
+// force-probes every seat about once a minute, well inside POOL_RESERVE_FRESHNESS_MS, and a seat whose
+// probe keeps failing is not helped by a request waiting on it. A Luna request that meets a cold or
+// stale reading (a restart before the first probe) falls back to the unchanged selection for that
+// request only; a wait here was rejected twice in review for delaying or desynchronizing bursts.
 
 /**
  * Reserve is Luna-only while included quota is shared with Sol and Astra, so a fresh Reserve

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { copyResponsesClientMetadata } from "../../src/adapters/openai-responses/transport";
 import { createOpenAIChatAdapter } from "../../src/adapters/openai-chat";
 import { createResponsesPassthroughAdapter } from "../../src/adapters/openai-responses/passthrough";
 import { providerForwardClientHeadersConfigError } from "../../src/config/provider-validation";
@@ -179,6 +180,12 @@ describe("openai-chat forwardClientHeaders carries the session identity to a gat
     expect(headers["x-user-id"]).toBeUndefined();
     expect(chatHeaders(gateway, { "x-user-id": "claude-code:codeAgent", "x-lgw-cache-key": "pi-av:019e-abc" })["x-user-id"])
       .toBe("claude-code:codeAgent");
+  });
+  test("the compact handoff applies the same identity rule", () => {
+    const target = new Headers();
+    copyResponsesClientMetadata(target, new Headers({ "x-user-id": "admin", "x-lgw-cache-key": "claude-av:abc" }), gateway);
+    expect(target.get("x-user-id")).toBeNull();
+    expect(target.get("x-lgw-cache-key")).toBe("claude-av:abc");
   });
   test("forwards nothing unless the provider opts in, and the provider's own header wins", () => {
     const { forwardClientHeaders: _optedIn, ...closed } = gateway;

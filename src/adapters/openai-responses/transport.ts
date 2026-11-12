@@ -7,7 +7,7 @@ import {
   isolateCodexPoolAccountHeaders,
 } from "../../codex/forward-transport-headers";
 import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers-destination";
-import { copyForwardedClientHeaders, normalizeForwardedClientHeaderName } from "../../lib/provider-client-headers";
+import { copyForwardedClientHeaders, forwardedClientHeaderValueAllowed, normalizeForwardedClientHeaderName } from "../../lib/provider-client-headers";
 import { AGENT_ASSERTION_HEADER } from "../../lib/authorization-scheme";
 import { openaiResponsesUrl } from "../openai-responses-url";
 
@@ -19,7 +19,7 @@ export function copyResponsesClientMetadata(target: Headers, incoming: Headers, 
   for (const rawName of ["user-agent", ...configured]) {
     const name = normalizeForwardedClientHeaderName(rawName);
     const value = name === null ? null : incoming.get(name);
-    if (name !== null && value && !target.has(name)) target.set(name, value);
+    if (name !== null && value && forwardedClientHeaderValueAllowed(name, value) && !target.has(name)) target.set(name, value);
   }
 }
 

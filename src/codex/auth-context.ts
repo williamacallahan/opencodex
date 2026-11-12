@@ -6,7 +6,7 @@ import type { OcxRuntimeProviderConfig } from "./auth-context-provider";
 export type { OcxRuntimeProviderConfig } from "./auth-context-provider";
 export { stripCodexRuntimeProviderFields } from "./auth-context-provider";
 import { bindPoolCreditPolicy, poolCreditHoldResetAt, poolContextCreditHoldResetAt, poolCreditRecoveryNeeded, poolContextCreditRecoveryNeeded, poolCreditRecoveryRetryAt, poolUnavailableUntilKnownHorizon } from "./pool-credit-policy";
-import { poolLunaReserveSelection, takeStalePoolReserveSeats, refreshStalePoolReserveEvidence } from "./pool-reserve";
+import { poolLunaReserveSelection } from "./pool-reserve";
 import { adoptLegacyLineageAffinity } from "./routing/thread-affinity";
 import { nextQuotaQueryDelay } from "./quota-query-backoff";
 import { noteMainAccountActivity } from "./main-account-external-usage";
@@ -1416,11 +1416,6 @@ async function resolveCodexAuthContextUnannotated(
     };
     // The native main login keeps its own per-request Reserve authorization, so only stored seats take part here.
     const reserveModelId = !requestScopedMainCredential && fixedAccountId !== MAIN_CODEX_ACCOUNT_ID ? options.modelId : undefined;
-    if (takeStalePoolReserveSeats(config, reserveModelId, options.excludeAccountId, fixedAccountId)) {
-      await refreshStalePoolReserveEvidence(options.primeCodexPoolQuotas
-        ? () => options.primeCodexPoolQuotas!(config, "luna-reserve")
-        : () => import("./auth-api").then(({ primeCodexPoolQuotas }) => primeCodexPoolQuotas(config, "luna-reserve")), options.signal);
-    }
     const poolSelection = poolLunaReserveSelection(config, reserveModelId,
       quotaScope, selectionOptions, options.excludeAccountId, affinityKey, Date.now(), fixedAccountId);
     selectionOptions = poolSelection.options;
