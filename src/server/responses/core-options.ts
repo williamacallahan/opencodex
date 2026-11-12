@@ -192,6 +192,13 @@ export interface HandleResponsesOptions {
    */
   promptCacheKeyIsSharedCohort?: boolean;
   /**
+   * The Claude Code session's own cache key (main-loop `prompt_cache_key`), set only when
+   * `prompt_cache_key` was derived from `metadata.user_id`. A subagent's body key is per agent;
+   * this stays per session, for Anthropic account affinity, the Claude Code fingerprint session
+   * id, and reasoning-replay scope.
+   */
+  sessionScopedCacheKey?: string;
+  /**
    * Wire protocol the ORIGINAL client spoke. The Chat and Anthropic surfaces translate
    * their body into a Responses shape and replay through this function, so without an
    * explicit value the replay would look like a native Responses request and an

@@ -37,7 +37,7 @@ import {
   planMessagesAntigravityDirect,
   type MessagesDirectPlan,
 } from "./messages-antigravity-direct";
-import { AnthropicRequestError, callerCacheRetention, claudeCodeAgentId, DesktopModelMappingUnavailableError, extractOcxEffortDirective, extractOcxRouteDirective, nativeAnthropicProjection, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
+import { AnthropicRequestError, callerCacheRetention, claudeCodeAgentId, claudeSessionCacheKey, DesktopModelMappingUnavailableError, extractOcxEffortDirective, extractOcxRouteDirective, nativeAnthropicProjection, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
 import { nativeReasoningTag, type NativeReasoningOwner } from "../responses/reasoning-replay-cache";
 import { isKnownDesktop3pModelId, resolveDesktop3pAlias } from "../claude/desktop-3p";
 import { resolveAlias, claudeCodeNativeAlias, legacyAliasForNative } from "../claude/alias";
@@ -1331,6 +1331,12 @@ async function handleClaudeMessagesWithBudget(
     ? uuidFromHex(internalBody.prompt_cache_key)
     : undefined;
   const metadataGoLane = normalizeLogConversationId(claudeNativeSessionId);
+  // The session's key, out of band: a subagent's body `prompt_cache_key` is per agent, while an
+  // Anthropic destination's account affinity and fingerprint session id are per CLI session.
+  const claudeSessionScopedKey = cacheKeySource === "metadata" && isRec(anthropicBody) && isRec(anthropicBody.metadata)
+    && typeof anthropicBody.metadata.user_id === "string"
+    ? claudeSessionCacheKey(anthropicBody.metadata.user_id)
+    : undefined;
   // Without any valid conversation identity, fall back to the request-scoped lane
   // allocated on the admitted client request (#4172): stable across retries and
   // route reconstruction, distinct per request, and never derived from a shared
@@ -1400,6 +1406,7 @@ async function handleClaudeMessagesWithBudget(
     ...(logIds?.turnAdmissionLease ? { turnAdmissionLease: logIds.turnAdmissionLease } : {}),
     abortSignal: req.signal,
     promptCacheKeyIsSharedCohort: cacheKeySource === "system",
+    ...(claudeSessionScopedKey ? { sessionScopedCacheKey: claudeSessionScopedKey } : {}),
     // The body is Responses-shaped by now, but the client spoke Anthropic Messages.
     // Without this the replay would look native and a Responses-scoped wire default
     // would fire, disagreeing with the pre-flight decision above.
