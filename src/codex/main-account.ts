@@ -228,9 +228,12 @@ function statIdentity(path: string): FileIdentity | null {
 }
 
 function readMainAuthJsonCredential(): MainAuthJsonCredential | null {
-  const path = resolveWriteTarget(join(resolveCodexHomeDir(), "auth.json"));
+  let path: string;
   let raw: string;
   try {
+    // Inside the try: a dangling auth.json symlink makes the resolve itself throw, and that is
+    // an unreadable credential like any other, not an unhandled error for the caller's route.
+    path = resolveWriteTarget(join(resolveCodexHomeDir(), "auth.json"));
     raw = readFileSync(path, "utf8");
   } catch {
     return null;
@@ -514,6 +517,11 @@ export function beginNativeMainReauth(): {
     options?: { signal?: AbortSignal },
   ) => Promise<{ chatgptAccountId: string }>;
 } {
+  // The commit rechecks this inside the claim; refusing here keeps a blocked home from handing
+  // out a device code that could only fail after the human has authorized it.
+  if (isNativeMainTrafficBlocked()) {
+    throw new NativeMainReauthUnavailableError("Native main traffic is blocked by startup or recovery state");
+  }
   const expected = readMainAuthJsonCredential();
   if (!expected) {
     const firstLoginPath = nativeMainFirstLoginPath();

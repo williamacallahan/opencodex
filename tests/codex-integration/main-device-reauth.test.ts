@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -408,6 +408,13 @@ describe("beginNativeMainReauth first login", () => {
     writeFileSync(authPath, apiKeyLogin);
     expect(() => beginNativeMainReauth()).toThrow(NativeMainReauthUnavailableError);
     expect(readFileSync(authPath, "utf8")).toBe(apiKeyLogin);
+  });
+
+  test("a dangling auth.json symlink refuses as unavailable and is left in place", () => {
+    if (process.platform === "win32") return;
+    symlinkSync(join(home, "no-such-target.json"), authPath);
+    expect(() => beginNativeMainReauth()).toThrow(NativeMainReauthUnavailableError);
+    expect(lstatSync(authPath).isSymbolicLink()).toBe(true);
   });
 
   test("a keyring credential store is never given a file login", () => {
