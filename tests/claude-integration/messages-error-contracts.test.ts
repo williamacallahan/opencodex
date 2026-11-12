@@ -183,7 +183,7 @@ test("C1/C2 ingress constructors have explicit producer rows and local identity"
 const envelopeWriterRows = [
   ["src/claude/outbound.ts", 6, "shared baseline helpers, original verdict and incomplete/unfinished presentation construction"],
   ["src/protocols/encoders/messages.ts", 4, "original verdict construction and fixed local collection failures"],
-  ["src/server/messages-native.ts", 5, "local/evidence legacy formatters, original combo and fold envelopes, owned workflow refusal projection"],
+  ["src/server/messages-native.ts", 8, "local/evidence legacy formatters, original combo and fold envelopes, owned workflow refusal projection, strict gateway local refusals (non-object body, client cancel, oversized body)"],
   ["src/server/claude-messages.ts", 30, "mapped local ingress/bypass constructors, original combo and defensive JSON presentation envelopes"],
   ["src/server/index/serve-options.ts", 4, "fixed endpoint auth/origin bypasses"],
   ["src/server/messages-native-tool-guard.ts", 1, "deferred local guard terminal"],

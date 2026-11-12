@@ -267,7 +267,7 @@ export function sendWithConnectionPolicy(
   (init as Record<symbol, ((destination: string, headers: Headers) => void) | undefined> | undefined)?.[PHYSICAL_SEND_GUARD]?.(target, headers);
   (init as Record<symbol, ((url: string, init: RequestInit) => void) | undefined> | undefined)?.[PHYSICAL_SEND_INTEGRITY]?.(target, physicalInit);
   // A strict override returning to providerFetch's executor still has its final check ahead.
-  if (!deferDispatchReceipt) (init as Record<symbol, (() => void) | undefined> | undefined)?.[PHYSICAL_DISPATCH]?.();
+  if (!deferDispatchReceipt) (init as Record<symbol, ((body: BodyInit | null | undefined) => void) | undefined> | undefined)?.[PHYSICAL_DISPATCH]?.(body);
   (init as Record<symbol, ((destination: string, headers: Headers) => void) | undefined> | undefined)?.[PHYSICAL_SEND_OBSERVER]?.(target, headers);
   // Remember only credentials that passed the final dispatch invariant.
   outboundCredentials().remember(headers);
@@ -311,7 +311,7 @@ export interface ProviderFetchOptions {
   /** Synchronous admission at actual credential dispatch, after pacing/backoff. */
   beforeDispatch?: (headers: Headers) => void;
   /** One-shot receipt after final local HTTP admission, immediately before executor entry. */
-  onPhysicalDispatch?: () => void;
+  onPhysicalDispatch?: (body?: BodyInit | null) => void;
   /** Repeatable admission for native successor creates, after pacing and auth checks. */
   onContinuationDispatch?: (frame: { body: Record<string, unknown>; text: string }) => void;
   /**
@@ -393,12 +393,12 @@ export function providerFetch(
       options.beforeDispatch?.(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
       // No proxy option is attached here: a `dispatchOverride` may rebuild this request against
       // a different destination, so the route is decided at the physical send instead.
-      const sharedReceipt = (init as Record<symbol, (() => void) | undefined> | undefined)?.[WS_FALLBACK_RECEIPT];
+      const sharedReceipt = (init as Record<symbol, ((body: BodyInit | null | undefined) => void) | undefined> | undefined)?.[WS_FALLBACK_RECEIPT];
       let notified = false;
       const dispatchInit = { ...withUpstreamHttpVersion(input, init, provider), timeout: 0,
-        ...(options.onPhysicalDispatch ? { [PHYSICAL_DISPATCH]: () => {
-          if (sharedReceipt) sharedReceipt();
-          else if (!notified) { options.onPhysicalDispatch!(); notified = true; }
+        ...(options.onPhysicalDispatch ? { [PHYSICAL_DISPATCH]: (body: BodyInit | null | undefined) => {
+          if (sharedReceipt) sharedReceipt(body);
+          else if (!notified) { options.onPhysicalDispatch!(body); notified = true; }
         } } : {}),
       };
       return override
@@ -439,10 +439,10 @@ export function providerFetch(
       // request over HTTP, and dropping the provider's `upstreamHttpVersion`
       // there would silently negotiate a transport the operator ruled out.
       let notified = false;
-      const notifyOnce = (): void => {
+      const notifyOnce = (body: BodyInit | null | undefined): void => {
         if (notified) return;
+        options.onPhysicalDispatch?.(body);
         notified = true;
-        options.onPhysicalDispatch?.();
       };
       const fallback = ((url: Parameters<typeof globalThis.fetch>[0], fallbackInit?: RequestInit) =>
         httpFetch(url, { ...fallbackInit, [WS_FALLBACK_RECEIPT]: notifyOnce } as RequestInit, reacquirePacing, null)) as typeof globalThis.fetch;
