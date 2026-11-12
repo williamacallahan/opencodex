@@ -1259,10 +1259,12 @@ produce about a 99.9% cache hit rate.
 that string and adds a per-turn attribution token (`tk`) to it; when the object has other keys,
 `tk` is dropped before hashing, so every turn of one session keeps one cache key and one
 conversation id. Any other string (not JSON, a JSON array, or a JSON object holding only `tk`) is
-hashed unchanged, and the `user` field is still derived from the raw string. Each Claude Code
-subagent, which sends `x-claude-code-agent-id`, gets a key of its own, so subagents never share
-their session's key. Without a string `metadata.user_id`, and when system content is present, the
-key falls back to a hash of the resolved model, system prompt and full tool schemas: a cohort key
+hashed unchanged, and the `user` field is still derived from the raw string. A Claude Code
+subagent that sends one valid `x-claude-code-agent-id` (1 to 256 printable ASCII characters) gets
+a key of its own; a subagent whose header is empty, oversized or repeated shares its session's key,
+as does the main loop. Anthropic-routed requests use the session key, for account affinity and
+the Claude Code session id, whichever agent sends them. Without a string `metadata.user_id`, and
+when system content is present, the key falls back to a hash of the resolved model, system prompt and full tool schemas: a cohort key
 shared by requests with the same values, not a session key.
 
 **Token math:** Anthropic output subtracts `cached_tokens` and `cache_write_tokens` from

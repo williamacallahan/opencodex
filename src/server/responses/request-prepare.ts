@@ -153,6 +153,9 @@ import {
   admissionMayUseMeteredComboTargets,
   admissionModelDeniedResponse, projectAdmissionModelDeniedLog,
   AdmissionModelDeniedError,
+  DisabledModelError,
+  assertClientNamedModelEnabled,
+  disabledModelResponse,
   assertRouteAllowedByScope,
   resolveAdmissionModelScope,
   routeAllowedByScope,
@@ -591,8 +594,10 @@ export async function prepareResponsesRequest(
       // existing provider session-id derivation (first-user-text fallback) is unchanged.
       // Normalize through anthropicSessionKeyFromParts so overlong keys are hashed and
       // trimming matches the affinity/session-key path exactly (no raw >128-char ids).
+      // A subagent's body key is per agent; its tool-call history, and a fork's replay of its
+      // parent's, is scoped to the session, so the session key binds the scope when present.
       const normalizedCacheKey = anthropicSessionKeyFromParts({
-        promptCacheKey: parsed.options.promptCacheKey,
+        promptCacheKey: options.sessionScopedCacheKey ?? parsed.options.promptCacheKey,
         // The enclosing branch already proves this is not the shared cohort.
         promptCacheKeyIsSharedCohort: false,
       });
@@ -829,6 +834,16 @@ export async function prepareResponsesRequest(
     if (parsed._compactionRequest === true || options.compactionRoutingOverride) parsed._cursorIsolateConversation = true;
     route = memoryRoute ?? shadowRoute ?? resolveRoute(options.policyFallbackCandidate
       ? `${options.policyFallbackCandidate.provider}/${options.policyFallbackCandidate.model}` : parsed.modelId);
+    // Only the route a client's own selector resolved to may not be a switched-off row. Every
+    // flag below is set by this process, never read from a header: combo children, policy and
+    // subagent fallbacks, compaction and hard-lock targets, memory and shadow-call targets,
+    // decision-model calls and capability-authenticated advisor and sidecar calls name
+    // destinations the operator chose, and those may be disabled rows on purpose.
+    if (!memoryRoute && !shadowRoute && !concreteSelection && !options.compactionRoutingOverride
+      && !options.mainHardLockFallbackOverride && !options.internalDecisionCall && !options.memoryModelPhase
+      && !options.advisorInternal && !options.sidecarInternal && !options.shadowCallIntercepted) {
+      assertClientNamedModelEnabled(config, inboundSelector, route);
+    }
     // Selection-free hard-lock preflight grants no hop. Enforce the actual ranked destination
     // against the locked source before admitting this first selection.
     const hardLockProfileTrace = options.mainHardLockFallbackOverride ? route.routeDecision?.profile : undefined;
@@ -885,6 +900,10 @@ export async function prepareResponsesRequest(
     const policyRefusal = policyCandidateRefusalResponse(err);
     if (policyRefusal) return policyRefusal;
     if (err instanceof AdmissionModelDeniedError) return admissionModelDeniedResponse(projectAdmissionModelDeniedLog(err, logCtx));
+    if (err instanceof DisabledModelError) {
+      projectLocalModelRefusalLog(logCtx, inboundSelector);
+      return disabledModelResponse(err);
+    }
     if (err instanceof NoAvailableComboTargetsError) {
       return comboUnavailable(err.comboId, undefined, err.reasons);
     }

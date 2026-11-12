@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { getCodexHome } from "./paths";
 
 export const CONTEXT_BACKEND_PREFIX = "/backend-api/codex";
+/** Muse Code reads its model roster at `<origin>/muse-code/models`, outside `/v1`; it is the `/v1/models` list. */
+export const MUSE_CODE_MODELS_PATH = "/muse-code/models";
 
 /** The single definition of the opt-in, shared by injection and the runtime gate. */
 export function contextExperimentalEnabled(configContent: string): boolean {
@@ -82,6 +84,7 @@ export function contextEndpoint(path: string): string | undefined {
 /** Alias only the data-plane prefix. Existing auth/origin and route gates still run. */
 export function codexCompatibleUrl(rawUrl: string): URL {
   const url = new URL(rawUrl);
+  if (url.pathname === MUSE_CODE_MODELS_PATH) url.pathname = "/v1/models";
   if (url.pathname === CONTEXT_BACKEND_PREFIX || url.pathname.startsWith(CONTEXT_BACKEND_PREFIX + "/")) {
     url.pathname = "/v1" + url.pathname.slice(CONTEXT_BACKEND_PREFIX.length);
   }
