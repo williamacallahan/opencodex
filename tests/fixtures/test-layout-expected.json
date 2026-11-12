@@ -1028,6 +1028,7 @@
   "management-model-roster.test.ts": "server", "model-export-new-model-policy.test.ts": "server",
   "management-origin-tls.test.ts": "server", "management-provider-compat-carry.test.ts": "server",
   "management-provider-hide-raw-reasoning.test.ts": "server",
+  "management-provider-patch-fields.test.ts": "server",
     "management-provider-responses-reasoning.test.ts": "server", "management-provider-atomicity.test.ts": "server",
   "management-provider-pinsless-validation.test.ts": "server", "management-provider-proto-override.test.ts": "server",
   "management-provider-reasoning-lists.test.ts": "server", "management-provider-reset-replay.test.ts": "server",
