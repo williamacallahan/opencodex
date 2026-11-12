@@ -575,6 +575,7 @@ export function applyAnthropicKeyAuth(headers: Record<string, string>, provider:
 export function resolveTranslatedAnthropicSessionKey(parsed: OcxParsedRequest, incoming?: IncomingMeta): string | undefined {
   return parsed._codexOwnThreadId?.trim()
     || parsed._clientThreadId?.trim()
+    || parsed._sessionScopedCacheKey?.trim()
     || (parsed.options.promptCacheKey?.trim() || undefined)
     || incoming?.headers?.get("x-claude-code-session-id")?.trim()
     || incoming?.headers?.get("session_id")?.trim()

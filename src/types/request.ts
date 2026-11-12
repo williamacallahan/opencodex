@@ -119,6 +119,8 @@ export interface OcxParsedRequest {
   _codexOwnThreadId?: string;
   /** True when promptCacheKey identifies a shared cache cohort rather than one conversation. */
   _promptCacheKeyIsSharedCohort?: boolean;
+  /** Per-session key of a Claude Code request whose promptCacheKey is per subagent; see ResponsesOptions. */
+  _sessionScopedCacheKey?: string;
   /** Cursor-only thread owner; may be an opaque process-local Desktop session/thread identity. */
   _cursorClientThreadId?: string;
   /** Conversation/provider/account/model-bound namespace for reasoning replay state. */

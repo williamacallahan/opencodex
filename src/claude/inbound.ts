@@ -456,6 +456,20 @@ export function claudeCodeAgentId(headers: Headers): string | undefined {
   return value && /^[\x21-\x7e]{1,256}$/.test(value) ? value : undefined;
 }
 
+function claudeSessionKeyHash(userId: string): string {
+  return createHash("sha256").update(claudeSessionUserId(userId)).digest("hex");
+}
+
+/**
+ * The key one Claude Code session keeps across its main loop and every subagent: the
+ * `prompt_cache_key` a main-loop turn carries. A subagent's own `prompt_cache_key` splits per
+ * agent for OpenAI-side routing, but Anthropic account affinity and the Claude Code fingerprint
+ * session id are per CLI session, so those read this key instead.
+ */
+export function claudeSessionCacheKey(userId: string): string {
+  return claudeSessionKeyHash(userId).slice(0, 32);
+}
+
 function translateAnthropicRequest(
   raw: unknown,
   cc: OcxClaudeCodeConfig | undefined,
@@ -621,7 +635,7 @@ function applyAnthropicSettings(
     // model) one key: OpenAI overflowed that key's routing budget, codex-lb pinned the whole
     // tree to one seat, and the LLM gateway's rendezvous put it on one account. A subagent
     // therefore keys apart by its agent id; the main loop keeps the session key.
-    const sessionKeyHash = createHash("sha256").update(claudeSessionUserId(raw.metadata.user_id)).digest("hex");
+    const sessionKeyHash = claudeSessionKeyHash(raw.metadata.user_id);
     body.prompt_cache_key = (claudeAgentId === undefined
       ? sessionKeyHash
       : createHash("sha256").update(`${sessionKeyHash}:agent:${claudeAgentId}`).digest("hex")

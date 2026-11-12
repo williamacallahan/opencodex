@@ -1072,7 +1072,9 @@ export async function prepareResponsesTransport(
     ? oauthSessionKeyFromParts({
       sessionIdHeader: sessionIdHeaderFromRequest(req.headers),
       threadIdHeader: req.headers.get("thread-id"),
-      promptCacheKey: typeof parsed.options.promptCacheKey === "string" ? parsed.options.promptCacheKey : null,
+      // A Claude Code subagent's body key is per agent; the pool binds one account per session.
+      promptCacheKey: options.sessionScopedCacheKey
+        ?? (typeof parsed.options.promptCacheKey === "string" ? parsed.options.promptCacheKey : null),
       clientThreadId: typeof parsed._clientThreadId === "string" ? parsed._clientThreadId : null,
       promptCacheKeyIsSharedCohort: options.promptCacheKeyIsSharedCohort === true,
     })

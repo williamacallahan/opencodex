@@ -539,6 +539,7 @@ export async function prepareResponsesRequest(
       if (parsed.options.textFormat?.type === "json_schema") parsed._structuredOutputConformance = true;
     }
     parsed._promptCacheKeyIsSharedCohort = options.promptCacheKeyIsSharedCohort;
+    if (options.sessionScopedCacheKey) parsed._sessionScopedCacheKey = options.sessionScopedCacheKey;
     // The body may have been rebuilt since the inbound observation (previous-response
     // expansion); alias the parsed raw body to the same draft so the outbound
     // observation at the adapter seam still finds it.
@@ -1175,6 +1176,7 @@ export async function prepareResponsesRequest(
             "_clientThreadId",
             "_codexOwnThreadId",
             "_promptCacheKeyIsSharedCohort",
+            "_sessionScopedCacheKey",
             "_cursorClientThreadId",
             "_reasoningReplayScope",
             "_nativeReasoningRetention",
