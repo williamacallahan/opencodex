@@ -75,6 +75,7 @@ function testConfig(): OcxConfig {
 async function drive(options: {
   promptCacheKey?: string;
   promptCacheKeyIsSharedCohort?: boolean;
+  sessionScopedCacheKey?: string;
 }): Promise<OcxParsedRequest> {
   const captured: OcxParsedRequest[] = [];
   adapterFactory = () => captureAdapter(captured);
@@ -99,6 +100,7 @@ async function drive(options: {
       ...(options.promptCacheKeyIsSharedCohort === undefined
         ? {}
         : { promptCacheKeyIsSharedCohort: options.promptCacheKeyIsSharedCohort }),
+      ...(options.sessionScopedCacheKey === undefined ? {} : { sessionScopedCacheKey: options.sessionScopedCacheKey }),
     },
   );
   await response.text();
@@ -112,6 +114,13 @@ describe("Claude Code Anthropic inbound reasoning-replay scope", () => {
     expect(parsed._clientThreadId).toBeUndefined();
     expect(parsed._reasoningReplayScope?.clientThreadId).toBe("session-key-123");
     expect(parsed._promptCacheKeyIsSharedCohort).toBe(false);
+  });
+
+  test("a subagent's replay scope is its session's, so a fork finds its parent's thought signatures", async () => {
+    const parsed = await drive({
+      promptCacheKey: "per-agent-key", promptCacheKeyIsSharedCohort: false, sessionScopedCacheKey: "session-key-123",
+    });
+    expect(parsed._reasoningReplayScope?.clientThreadId).toBe("session-key-123");
   });
 
   test("the shared Desktop prompt_cache_key cohort does not create a scope", async () => {

@@ -594,8 +594,10 @@ export async function prepareResponsesRequest(
       // existing provider session-id derivation (first-user-text fallback) is unchanged.
       // Normalize through anthropicSessionKeyFromParts so overlong keys are hashed and
       // trimming matches the affinity/session-key path exactly (no raw >128-char ids).
+      // A subagent's body key is per agent; its tool-call history, and a fork's replay of its
+      // parent's, is scoped to the session, so the session key binds the scope when present.
       const normalizedCacheKey = anthropicSessionKeyFromParts({
-        promptCacheKey: parsed.options.promptCacheKey,
+        promptCacheKey: options.sessionScopedCacheKey ?? parsed.options.promptCacheKey,
         // The enclosing branch already proves this is not the shared cohort.
         promptCacheKeyIsSharedCohort: false,
       });
