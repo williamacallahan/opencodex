@@ -3,7 +3,7 @@ import { getCodexHome } from "../paths";
 import { withNativeMainSharedClaim } from "../native-main-claim";
 import { resolveNativeProfileContext } from "../native-profile-store";
 import { NativeProfileError } from "../native-profile-types";
-import { isDraining } from "../../server/lifecycle";
+import { isDraining, RESTARTING_HEADER } from "../../server/lifecycle";
 
 export function isNativeMainClaimUnavailable(error: unknown): error is NativeProfileError {
   return error instanceof NativeProfileError
@@ -39,6 +39,7 @@ export function loginRestartingResponse(): Response | null {
     error: { type: "server_error", code: "server_restarting", message: "OpenCodex is restarting; start the login again when it is back." },
   }, 503);
   response.headers.set("Retry-After", "5");
+  response.headers.set(RESTARTING_HEADER, "1");
   return response;
 }
 

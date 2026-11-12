@@ -257,6 +257,7 @@ describe("hub draining during login", () => {
     }), {} as OcxConfig);
     expect(response.status).toBe(503);
     expect(response.headers.get("Retry-After")).toBe("5");
+    expect(response.headers.get("X-OpenCodex-Restarting")).toBe("1");
     expect(await response.json()).toEqual({ error: {
       type: "server_error", code: "server_restarting",
       message: "OpenCodex is restarting; start the login again when it is back.",

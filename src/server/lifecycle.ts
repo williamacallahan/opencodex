@@ -365,6 +365,8 @@ export function unregisterTurn(ac: AbortController): void {
   }
   lease.unbindAbortController(ac);
 }
+/** Marks a 503 sent before the request was read, which a holding gate may safely replay. */
+export const RESTARTING_HEADER = "X-OpenCodex-Restarting";
 export function isDraining(): boolean { return shutdownDraining || temporaryDrainOwners.size > 0; }
 export function getActiveTurnCount(): number { return turnGate.metrics().active; }
 export interface SessionLaneMetrics {

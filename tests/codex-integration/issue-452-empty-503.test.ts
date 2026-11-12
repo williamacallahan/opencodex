@@ -387,6 +387,8 @@ describe("drain 503 JSON (#452)", () => {
           expect(response.status).toBe(503);
           expect(response.headers.get("content-type")).toContain("application/json");
           expect(response.headers.get("retry-after")).toBe("5");
+          // The holding gate replays only responses that carry this marker.
+          expect(response.headers.get("x-opencodex-restarting")).toBe("1");
           expect(response.headers.get("access-control-allow-origin"))
             .toBe(allowed ? origin : `http://localhost:${server.port}`);
           const json = await response.json() as { error?: { type?: string; message?: string; code?: string | null } };
