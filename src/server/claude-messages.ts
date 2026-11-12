@@ -34,7 +34,7 @@ import {
 import { AnthropicRequestError, callerCacheRetention, DesktopModelMappingUnavailableError, extractOcxEffortDirective, extractOcxRouteDirective, nativeAnthropicProjection, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
 import { nativeReasoningTag, type NativeReasoningOwner } from "../responses/reasoning-replay-cache";
 import { isKnownDesktop3pModelId, resolveDesktop3pAlias } from "../claude/desktop-3p";
-import { resolveAlias, claudeCodeNativeAlias, legacyAliasForNative, CLAUDE_ALIAS_PREFIX_CURRENT, CLAUDE_ALIAS_PREFIX_CURRENT_V2 } from "../claude/alias";
+import { resolveAlias, claudeCodeNativeAlias, legacyAliasForNative } from "../claude/alias";
 import { getCombo } from "../combos";
 import { recordDesktopRequest } from "../claude/desktop-health";
 import { stripOneMillionMarker } from "../claude/context-windows";
@@ -632,43 +632,52 @@ async function handleClaudeMessagesWithBudget(
   const cc = claudeCodeForIngress(config.claudeCode, ingress.claudeIntercept === true);
 
   let hybridBody: Rec | undefined;
+  let hybridRefusalMessage = "Hybrid Messages body is invalid; expected supported content encoding and a JSON object with a non-empty model";
+  // A combo may select again or fail over; every candidate must stay off Anthropic.
+  const bridgeRouteAllowed = (candidate: RouteResult): boolean => resolveWireProtocolOverride(
+    candidate.providerName, candidate.modelId, candidate.provider, "anthropic",
+  ).adapter !== "anthropic"
+    && !configuredAnthropicInstance(config, candidate.providerName) && candidate.routeKind !== "policy"
+    && (!candidate.combo || !!getCombo(config, candidate.combo.comboId)?.targets.every(target => {
+      const route = previewRouteModel(config, `${target.provider}/${target.model}`);
+      return !route.combo && bridgeRouteAllowed(route);
+    }));
   if (ingress.hybridMessages) {
     let wire: Uint8Array | undefined;
-    let model = "(missing)";
     let strict = false;
     try {
       const body = await readBoundedJsonRequestBody(req, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes), translatorBudget, {
         retainWire(bytes) { translatorBudget.chargeRetained(bytes.byteLength, { kind: "request_copies" }); wire = bytes; },
       });
       if (!isRec(body) || typeof body.model !== "string" || !body.model || !wire) throw new AnthropicRequestError("model is required");
-      model = body.model;
-      const routedAlias = (model.startsWith(CLAUDE_ALIAS_PREFIX_CURRENT) || model.startsWith(CLAUDE_ALIAS_PREFIX_CURRENT_V2))
-        && resolveAlias(model) !== null;
+      const model = body.model;
+      hybridRefusalMessage = `Hybrid Messages model ${redactSecretString(model).slice(0, 200)} is incompatible; accepted forms are native Claude ids and ocx-claude- or ocx-claude2- routed ids`;
+      const routedAlias = resolveAlias(model) !== null;
       const route = previewRouteModel(config, routedAlias ? resolveInboundModel(model, cc) : model);
-      // A combo may select again or fail over; every candidate must stay off Anthropic.
-      const bridgeRouteAllowed = (candidate: RouteResult) => candidate.provider.adapter !== "anthropic"
-        && !configuredAnthropicInstance(config, candidate.providerName) && candidate.routeKind !== "policy";
-      const combo = route.combo && getCombo(config, route.combo.comboId);
-      const bridgeAllowed = bridgeRouteAllowed(route) && (!route.combo || !!combo?.targets.every(target => {
-        const candidate = previewRouteModel(config, `${target.provider}/${target.model}`);
-        return !candidate.combo && bridgeRouteAllowed(candidate);
-      }));
-      strict = !routedAlias && model.startsWith("claude-") && route.modelId === model
+      const modelMapped = [cc?.modelMap?.[model], cc?.modelMap?.[model.replace(/-\d{8}$/, "")]]
+        .some(mapped => typeof mapped === "string" && mapped.length > 0);
+      strict = !routedAlias && !resolveDesktop3pAlias(model) && !modelMapped
+        && model.startsWith("claude-") && route.modelId === model
         && nativeMessagesDeclineReason(route, body, config, { strict: true }) === undefined;
-      if (!strict && !(routedAlias && bridgeAllowed)) {
+      if (!strict && !(routedAlias && bridgeRouteAllowed(route))) {
         throw new AnthropicRequestError("incompatible model");
       }
       hybridBody = body;
     } catch (error) {
       if (req.signal.aborted) {
         if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 499, { closeReason: "client_cancel" });
-        return anthropicErrorResponse(499, "Client cancelled request", "api_error");
+        const response = anthropicErrorResponse(499, "Client cancelled request", "api_error");
+        if (logIds) response.headers.set("x-opencodex-request-id", logIds.requestId);
+        return response;
       }
       const oversized = error instanceof DecompressedBodyTooLargeError || isTranslatorBudgetExceededError(error);
       const response = anthropicErrorResponse(oversized ? 413 : 400, oversized
         ? "Hybrid Messages request exceeds the body limit"
-        : `Hybrid Messages model ${redactSecretString(model)} is incompatible; accepted forms are native Claude ids and ocx-claude- or ocx-claude2- routed ids`, "invalid_request_error");
-      if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, response.status, { closeReason: "non_stream" });
+        : hybridRefusalMessage, "invalid_request_error");
+      if (logIds) {
+        addFinalRequestLog(logIds.requestId, logIds.start, logCtx, response.status, { closeReason: "non_stream" });
+        response.headers.set("x-opencodex-request-id", logIds.requestId);
+      }
       return response;
     }
     // The body is consumed. Downstream handlers use the parsed body and strict wire snapshot.
@@ -995,6 +1004,10 @@ async function handleClaudeMessagesWithBudget(
       } }, route, config, "anthropic") },
     );
     route.provider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, "anthropic", route.staticPolicy);
+    if (ingress.hybridMessages && !bridgeRouteAllowed(route)) {
+      if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 400, { closeReason: "non_stream" });
+      return anthropicErrorResponse(400, hybridRefusalMessage, "invalid_request_error");
+    }
     logCtx.routeDecision = route.routeDecision;
     settledRoute = route;
     // Before any route-specific shaping, so a request that leaves the lane is shaped as the bridge's.

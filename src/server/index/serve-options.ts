@@ -1598,8 +1598,8 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         // Logging is finalized inside handleClaudeMessages (Responses-vocab tap on the
         // pre-translation stream + native passthrough callbacks) — do not re-wrap the
         // translated Anthropic stream here.
-        let strictMessagesRequest = hybridMessagesPath || !!messagesConfig.claudeCode?.strictPassthrough;
-        const sessionReq = strictMessagesRequest ? messagesReq : withCallerSessionIdentity(messagesReq, admission);
+        let strictMessagesRequest = !hybridMessagesPath && !!messagesConfig.claudeCode?.strictPassthrough;
+        const sessionReq = hybridMessagesPath || strictMessagesRequest ? messagesReq : withCallerSessionIdentity(messagesReq, admission);
         // Entering the handler, or a logged refusal, means the final request log owns requestId.
         let ownsRequestLog = false;
         const claimRequestLog = (work: (lease: ActiveTurnLease) => Promise<Response>) =>
