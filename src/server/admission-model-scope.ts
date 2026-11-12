@@ -7,6 +7,7 @@ import type { OcxApiKeyEntry, OcxConfig } from "../types";
 import type { RouteResult } from "../router";
 import { resolveComboId } from "../combos/identifiers";
 import { comboRowDisabled, modelRowHidden, nativeSelectorDisabled } from "../providers/model-row-visibility";
+import { getStaleCached } from "../codex/model-cache";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
 import { markResponseNonReplayable } from "../lib/upstream-retry";
 
@@ -294,6 +295,17 @@ export class DisabledModelError extends Error {
 export const MODEL_DISABLED = "model_disabled";
 
 /**
+ * `modelRowHidden` with the inputs the catalog gives it: the provider's last-known roster supplies the
+ * row itself (alias, family metadata) and the roster Antigravity effort families and allowlist
+ * projection resolve against. With no roster cached the row is its provider and id alone.
+ */
+export function routedRowHidden(config: Parameters<typeof modelRowHidden>[0], providerName: string, modelId: string): boolean {
+  const roster = getStaleCached(providerName) ?? [];
+  const row = roster.find(candidate => candidate.id === modelId) ?? { provider: providerName, id: modelId };
+  return modelRowHidden(config, row, roster);
+}
+
+/**
  * Throws when the route a client's own selector resolved to is a row the catalog hides: the same
  * predicate (`src/providers/model-row-visibility.ts`) the catalog filters by, so nothing is
  * hidden without also being refused. A combo parent is judged by its own disable; its children
@@ -324,7 +336,7 @@ export function assertClientNamedModelEnabled(
     }
     return;
   }
-  if (modelRowHidden(config, { provider: route.providerName, id: route.modelId })) throw new DisabledModelError(requestedModel);
+  if (routedRowHidden(config, route.providerName, route.modelId)) throw new DisabledModelError(requestedModel);
 }
 
 /** 404 with the stable `model_disabled` code, so a client can tell a switched-off row from a typo. */

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { selectionOmittedHubSelectors } from "../../providers/model-row-visibility";
 import { readFileSync } from "node:fs";
 import { shouldInjectApiAuthHeader } from "../../codex/loopback-target";
 import { isExportModelNames, supportsAliasModelNames } from "../../clients/config-export/model-names";
@@ -1300,6 +1301,8 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
         selected: [...(target.selectedModels ?? [])],
       });
     }
+    const presetOmitted = selectionOmittedHubSelectors(config, provider, presetIds);
+    if (presetOmitted.length > 0) return selectedModelsOmitRoutedResponse(presetOmitted);
     target.selectedModels = presetIds;
     target.modelPreset = {
       mode: "preset",
@@ -1329,6 +1332,8 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     const models = Array.isArray(body.models)
       ? [...new Set(body.models.filter((m): m is string => typeof m === "string"))]
       : [];
+    const omitted = models.length > 0 ? selectionOmittedHubSelectors(config, provider, models) : [];
+    if (omitted.length > 0) return selectedModelsOmitRoutedResponse(omitted);
     // Empty list clears the allowlist (provider reverts to exposing all models).
     if (models.length > 0) config.providers[provider].selectedModels = models;
     else delete config.providers[provider].selectedModels;
@@ -1340,4 +1345,13 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     return jsonResponse({ ok: true, provider, selected: models, ...await convergeVisibleCatalogs() });
   }
   return null;
+}
+
+/** A `selectedModels` write that would hide a model the hub's own settings route clients to is refused. */
+function selectedModelsOmitRoutedResponse(omitted: readonly string[]): Response {
+  return jsonResponse({
+    error: `The selection omits ${omitted.join(", ")}, which the sub-agent, injection or role settings route to this provider; a client naming a model outside the selection is refused. Keep them selected or change those settings first.`,
+    code: "selected_models_omit_routed_ids",
+    omitted,
+  }, 400);
 }

@@ -64,3 +64,30 @@ export function nativeSelectorDisabled(config: Pick<OcxConfig, "disabledModels">
   const disabled = new Set(config.disabledModels ?? []);
   return selectors.some(selector => disabled.has(selector));
 }
+
+/**
+ * Selectors of one provider that the hub's own settings have clients name: the featured sub-agent
+ * roster, the injection model and the role-tier lists. A client naming one is refused when the
+ * provider's `selectedModels` omits it, so a write that omits any is refused up front.
+ */
+export function hubNamedSelectors(
+  config: Pick<OcxConfig, "subagentModels" | "injectionModel" | "codexRoleTiers">,
+  provider: string,
+): string[] {
+  const named = [
+    ...(config.subagentModels ?? []),
+    ...(config.injectionModel ? [config.injectionModel] : []),
+    ...Object.values(config.codexRoleTiers ?? {}).flat(),
+  ];
+  return [...new Set(named.filter((selector): selector is string => typeof selector === "string" && selector.startsWith(provider + "/")))];
+}
+
+/** The hub-named selectors a proposed `selectedModels` list for this provider would leave out. */
+export function selectionOmittedHubSelectors(
+  config: Pick<OcxConfig, "subagentModels" | "injectionModel" | "codexRoleTiers">,
+  provider: string,
+  proposed: readonly string[],
+): string[] {
+  const kept = new Set(proposed.map(id => slugEquivalenceKey(routedSlug(provider, id))));
+  return hubNamedSelectors(config, provider).filter(selector => !kept.has(slugEquivalenceKey(selector)));
+}

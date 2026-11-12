@@ -11,6 +11,8 @@ import { filterCatalogVisibleModels } from "../../src/codex/catalog/model-visibi
 import { internalCallCapability } from "../../src/lib/local-internal-call-capability";
 import { registerAdvisorAdmissionPolicy, SIDECAR_ADMISSION_POLICY_HEADER, SIDECAR_INTERNAL_CAPABILITY_HEADER } from "../../src/server/advisor-admission-scope";
 import { captureAdmissionPolicy } from "../../src/server/capture-admission-policy";
+import { clearModelCache, setCached } from "../../src/codex/model-cache";
+import { routedRowHidden } from "../../src/server/admission-model-scope";
 import { clearComboSelectionState, clearComboTargetCooldowns } from "../../src/combos";
 import type { OcxConfig } from "../../src/types";
 
@@ -161,5 +163,19 @@ describe("client-named disabled model", () => {
     } finally { registration.release(); }
     // The same request without the capability is an ordinary client and is refused.
     expect((await chat(config, "fix/off")).status).toBe(404);
+  });
+
+  test("a route is judged against the provider's cached roster, as the catalog is (Antigravity effort family)", () => {
+    const provider = "google-antigravity";
+    const tiers = ["claude-opus-5-5-low", "claude-opus-5-5-medium", "claude-opus-5-5-high"];
+    const family = { provider, id: "claude-opus-5-5", antigravityEffortWireModelIds: { low: tiers[0], medium: tiers[1], high: tiers[2] } };
+    const config = { providers: { [provider]: { selectedModels: [tiers[2]] } } } as unknown as OcxConfig;
+    // With no roster the family base is outside the saved selection; the roster is what projects it in.
+    expect(routedRowHidden(config, provider, "claude-opus-5-5")).toBe(true);
+    setCached(provider, [family, ...tiers.map(id => ({ provider, id }))] as never[]);
+    try {
+      expect(routedRowHidden(config, provider, "claude-opus-5-5")).toBe(false);
+      expect(routedRowHidden(config, provider, "unrelated")).toBe(true);
+    } finally { clearModelCache(provider); }
   });
 });
