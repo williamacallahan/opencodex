@@ -62,8 +62,10 @@ export function poolReserveHoldResetAt(accountId: string, now = Date.now()): num
 }
 
 // Stale evidence is deliberately not re-read on the request path. The hub's `quota-refresh` service
-// force-probes every seat about once a minute, well inside POOL_RESERVE_FRESHNESS_MS, and a seat whose
-// probe keeps failing is not helped by a request waiting on it. A Luna request that meets a cold or
+// refreshes non-exhausted seats and seats holding a Reserve window on the 5-minute cadence, well inside
+// POOL_RESERVE_FRESHNESS_MS; an exhausted seat without a Reserve window is read every 15 minutes, so a
+// new Reserve grant on it is seen within that hold. A seat whose probe keeps failing is not helped by a
+// request waiting on it. A Luna request that meets a cold or
 // stale reading (a restart before the first probe) falls back to the unchanged selection for that
 // request only; a wait here was rejected twice in review for delaying or desynchronizing bursts.
 

@@ -53,9 +53,10 @@ export async function handleCodexAuthAPI(
     // required by AGENTS_INSTALL.md. Raw-admin/CLI refreshes remain observational.
     // The hub's quota-refresh sidecar posts here every ~50 s with the admin token; only a dashboard
     // session or an explicit `force` flag re-reads an exhausted seat inside its 15 minute hold.
-    const body = await req.json().catch(() => ({})) as { force?: unknown };
+    const body: unknown = await req.json().catch(() => null);
+    const bodyForce = typeof body === "object" && body !== null && (body as { force?: unknown }).force === true;
     const forceParam = url.searchParams.get("force");
-    const forceHeld = principal === "gui-session" || forceParam === "1" || forceParam === "true" || body.force === true;
+    const forceHeld = principal === "gui-session" || forceParam === "1" || forceParam === "true" || bodyForce;
     return jsonResponse({ accounts: await listCodexAuthAccounts(config, true, {
       validatePending: principal === "gui-session",
       explicitRefresh: true,

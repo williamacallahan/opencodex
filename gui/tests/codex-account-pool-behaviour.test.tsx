@@ -337,10 +337,10 @@ test("forced quota reads remain GET unless deferred validation is explicitly req
     nextAccountsResponseGate = new Promise<void>(resolve => { finishValidation = resolve; });
     let validation!: Promise<boolean>;
     await act(async () => { validation = seen.current!.load(true, { validatePending: true }); });
-    expect(calls).toContain("POST codex-auth/accounts/refresh");
+    expect(calls).toContain("POST codex-auth/accounts/refresh?force=1");
     expect(deadlines.at(-1)).toBeGreaterThan(8_000 + 2 * 30_000);
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 400)); });
-    expect(calls.filter(call => call.includes("codex-auth/accounts"))).toEqual(["POST codex-auth/accounts/refresh"]);
+    expect(calls.filter(call => call.includes("codex-auth/accounts"))).toEqual(["POST codex-auth/accounts/refresh?force=1"]);
     await act(async () => { finishValidation(); expect(await validation).toBe(true); });
   } finally {
     AbortSignal.timeout = originalTimeout;
