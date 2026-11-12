@@ -7,6 +7,7 @@ import {
   recognizedUpstreamError,
 } from "../lib/errors";
 import { redactSecretString } from "../lib/redact";
+import { STRUCTURED_QUOTA_CODES } from "../bridge/errors";
 import { outboundCredentials, type OutboundCredentialRegistry } from "../lib/outbound-credential-registry";
 import { configuredCredentials, type ConfiguredCredentials } from "./configured-credentials";
 import { codexWsWrapperStatus } from "./responses/codex-ws-wire";
@@ -148,8 +149,11 @@ export function warnUpstreamFailures(input: {
     // Captured diagnostics describe the terminal, which belongs to the last attempt.
     const { upstreamErrorCode: rawCode, upstreamErrorType: type } = index === lastIndex
       ? upstreamDiagnosticLogFields(input.diagnostics) : {};
-    const code = rawCode !== undefined && KNOWN_BARE_ERROR_CODES.has(rawCode) ? rawCode : undefined;
-    console.warn(`[opencodex] level=warn upstream failure request=${attributionLabel(input.requestId, snapshot)} attempt=${attempt.ordinal} provider=${attributionLabel(attempt.provider, snapshot)} model=${attributionLabel(attempt.model, snapshot)} status=${attempt.status >= 100 ? attempt.status : "unknown"} type=${type ?? "unknown"} code=${code ?? "unknown"} cause=${attempt.failureCause !== undefined && FAILURE_CAUSES.has(attempt.failureCause) ? attempt.failureCause : "unknown"} final=${input.finalStatus}`);
+    // Quota codes print too: cause says rate-limit for every 429, and only the code tells an
+    // operator that the account is spent rather than briefly throttled.
+    const code = rawCode !== undefined && (KNOWN_BARE_ERROR_CODES.has(rawCode) || STRUCTURED_QUOTA_CODES.has(rawCode))
+      ? rawCode : undefined;
+    console.warn(`[opencodex] level=warn upstream failure request=${attributionLabel(input.requestId, snapshot)} attempt=${attempt.ordinal} provider=${attributionLabel(attempt.provider, snapshot)} model=${attributionLabel(attempt.model, snapshot)} status=${attempt.status >= 100 ? attempt.status : "unknown"} type=${type ?? "unknown"} code=${code ?? "unknown"} cause=${FAILURE_CAUSES.has(attempt.failureCause as string) ? attempt.failureCause : "unknown"} final=${input.finalStatus}`);
   });
 }
 

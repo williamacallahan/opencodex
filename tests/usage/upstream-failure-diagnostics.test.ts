@@ -89,8 +89,8 @@ test("a rate limit (429) logs one line, with provider and model", () => {
 });
 
 test("a failure whose upstream code is outside the known set still names the hub's cause", () => {
-  // Production 2026-11-12: codex-lb answered 429 usage_limit_reached, and the line said only
-  // type=unknown code=unknown. The hub's own attribution is a closed set and needs no upstream text.
+  // Production 2026-11-12: a codex-lb 429 line said only type=unknown code=unknown. An upstream
+  // code outside every known set still prints nothing, but the hub's own closed cause does.
   // The final attribution stamps the active attempt, which is the last one the request made.
   const last = attemptRow(3, "prov-c", "model-c", 502);
   const log: RequestLogContext = {
@@ -102,7 +102,7 @@ test("a failure whose upstream code is outside the known set still names the hub
     ],
     activeAttempt: last,
   };
-  inspectResponseLogJson(log, JSON.stringify({ error: { code: "usage_limit_reached", message: "secret upstream body" } }));
+  inspectResponseLogJson(log, JSON.stringify({ error: { code: "opaque_upstream_code", message: "secret upstream body" } }));
   const lines = finalWarnings(log, 502, "failed");
   expect(lines).toHaveLength(3);
   expect(lines[0]).toContain("attempt=1 provider=prov-a model=model-a status=429 type=unknown code=unknown cause=rate-limit final=502");
@@ -110,7 +110,16 @@ test("a failure whose upstream code is outside the known set still names the hub
   expect(lines[1]).toContain("attempt=2 provider=prov-b model=model-b status=503 type=unknown code=unknown cause=unknown final=502");
   // The last attempt carries the cause the final attribution stamped on it.
   expect(lines[2]).toContain("attempt=3 provider=prov-c model=model-c status=502 type=unknown code=unknown cause=upstream-fault final=502");
-  expect(lines.join("\n")).not.toMatch(/usage_limit_reached|secret upstream body/);
+  expect(lines.join("\n")).not.toMatch(/opaque_upstream_code|secret upstream body/);
+});
+
+test("a spent-quota 429 prints its quota code, so it reads differently from a brief throttle", () => {
+  const log = context();
+  inspectResponseLogJson(log, JSON.stringify({ error: { code: "usage_limit_reached", message: "secret upstream body" } }));
+  const lines = finalWarnings(log, 429, "failed");
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("status=429 type=unknown code=usage_limit_reached cause=rate-limit final=429");
+  expect(lines[0]).not.toContain("secret upstream body");
 });
 
 test("each failed attempt prints one line and a successful attempt prints none", () => {
