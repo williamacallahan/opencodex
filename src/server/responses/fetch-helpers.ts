@@ -68,13 +68,21 @@ export function physicalSendCommitInit(commit: () => void): Record<symbol, unkno
     committed = true;
   } };
 }
+const PHYSICAL_SEND_GUARD = Symbol.for("opencodex.physical-send-guard");
 export type AccountAutoPauseObserver = ((response: Response) => Promise<Response>) & {
   physical?: (sameDestination: boolean, headers: Headers) => void;
 };
 /** Init fragment that reports the final send of the observer's attempt; empty when nothing observes. */
-export function physicalSendObserverInit(observer: AccountAutoPauseObserver | undefined, target: string): Record<symbol, unknown> {
+export function physicalSendObserverInit(observer: AccountAutoPauseObserver | undefined, target: string, onPhysicalSend?: () => void): Record<symbol, unknown> {
   const physical = observer?.physical;
-  return physical ? { [PHYSICAL_SEND_OBSERVER]: (destination: string, headers: Headers) => physical(destination === target, headers) } : {};
+  let noted = false;
+  return physical || onPhysicalSend ? { [PHYSICAL_SEND_OBSERVER]: (destination: string, headers: Headers) => {
+    if (onPhysicalSend && !noted) { onPhysicalSend(); noted = true; }
+    physical?.(destination === target, headers);
+  } } : {};
+}
+export function physicalSendGuardInit(guard: (destination: string, headers: Headers) => void): Record<symbol, unknown> {
+  return { [PHYSICAL_SEND_GUARD]: guard };
 }
 // One WS attempt and its HTTP fallback are one logical physical-send receipt.
 const WS_FALLBACK_RECEIPT = Symbol.for("opencodex.ws-fallback-receipt");
@@ -256,6 +264,7 @@ export function sendWithConnectionPolicy(
     ...(decide || redirectedToLoopback ? { [EGRESS_DECIDED]: true } : {}),
     ...{ [UPSTREAM_REWRITTEN]: true },
   };
+  (init as Record<symbol, ((destination: string, headers: Headers) => void) | undefined> | undefined)?.[PHYSICAL_SEND_GUARD]?.(target, headers);
   (init as Record<symbol, ((url: string, init: RequestInit) => void) | undefined> | undefined)?.[PHYSICAL_SEND_INTEGRITY]?.(target, physicalInit);
   // A strict override returning to providerFetch's executor still has its final check ahead.
   if (!deferDispatchReceipt) (init as Record<symbol, (() => void) | undefined> | undefined)?.[PHYSICAL_DISPATCH]?.();
@@ -303,6 +312,8 @@ export interface ProviderFetchOptions {
   beforeDispatch?: (headers: Headers) => void;
   /** One-shot receipt after final local HTTP admission, immediately before executor entry. */
   onPhysicalDispatch?: () => void;
+  /** Repeatable admission for native successor creates, after pacing and auth checks. */
+  onContinuationDispatch?: (frame: { body: Record<string, unknown>; text: string }) => void;
   /**
    * Opt-in (#6969): let a Codex WebSocket send hold empty lifecycle frames so an authoritative
    * upstream refusal before any output settles as a replayable gateway status. Only a caller that
@@ -438,7 +449,7 @@ export function providerFetch(
       const wsSend = codexWsExecutor((url: Parameters<typeof globalThis.fetch>[0], wsInit?: RequestInit) => codexWsUpstreamFetch(String(url),
         { ...(wsInit ?? init), [TURN_STATE_BINDING_INIT]: turnStateBinding(providerName, sendHeaders(wsInit ?? init)) } as RequestInit,
         fallback, runtime, options.onCodexWsQuota, options.beforeDispatch, options.nativeControl,
-        async () => { (await waitForPacing(init.signal ?? undefined))?.release(); }, notifyOnce, options.preOutputRefusalHold),
+        async () => { (await waitForPacing(init.signal ?? undefined))?.release(); }, notifyOnce, options.preOutputRefusalHold, options.onContinuationDispatch),
         { provider, http: markEgressTransparentExecutor(fallback) });
       // A WS frame is a physical send like any other, so it runs the same override: that is where a
       // key-auth send is committed to its attempt row and the send budget is rebound to the

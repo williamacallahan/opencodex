@@ -327,6 +327,23 @@ to restart a Codex app or app-server; use GOAT or `ocx sync --restart-codex` on 
 pinned sync can still restart its own OpenCodex client runtime after applying changed Home settings.
 A Child sync already running can continue after the Home times out its local SSH process.
 
+### Checking Children from the Home (`ocx link check`)
+
+`ocx link check --link-id <id>` (repeatable) or `ocx link check --all` runs one observe job on the
+Home: one SSH call per Home-initiated Child, up to 60 s, three at a time. It runs the Child's gated
+`ocx update --plan`, which only computes, so it changes no install. A POSIX Child older than 2.97.0
+answers with a refusal and costs one more read-only call for its version (item `owner-action`,
+reason `legacy-ocx`); a Windows Child that old reports the version it sent over the link instead.
+Client-initiated links and `ocx-child` Children are reported without SSH. The command polls the job
+every 2 s and prints the final `ocx.link.child-job/1` document
+([02_json_shapes.md](02_json_shapes.md#remote-link-child-block-and-job-document)); `--no-wait` prints the
+queued job. One operation runs per link on a running Home: a single-link request for a link another job
+holds answers 409, and in a multi-link job that link's item ends `busy` (`link-operation-in-progress`).
+
+`ocx link status` asks the Home for each row's `child` block: installed and running versions, the
+update route from the last check, whether the Child last pulled the Home's current catalog, and whether
+a relayed model request is running. An older Home omits the block.
+
 ## Key rotation is a two-step commit
 
 Starting a rotation issues the new key while **the old key stays valid**. The dashboard
@@ -369,6 +386,16 @@ A remote browser logging itself out (`/api/session/logout`) is a third, separate
 It ends a browser session; it does not disconnect a client or revoke a key.
 
 ### When `disconnect` refuses, that is the safety property
+
+When the operator has explicitly authorized recovery of a disconnected installation with a
+leftover token, `ocx disconnect --orphaned-token --yes` preserves the service-token files in a
+private backup. It refuses pending or connected client state, a Hub, admission-token use,
+installed or unverified service definitions, and live or unverified client runtimes. Inspect the
+bind, API keys, token environment and `ocx service status`; manage a Hub credential through the
+Hub service. It does not prove the tokens belonged to a link or restore lost connection settings.
+Report the printed backup location; to restore, stop OpenCodex and move the saved files back only
+if their original names are absent. Never read or print their contents. Do not add `--yes` without
+the operator's explicit authorization.
 
 Do not work around these. Each one means unwinding would damage state that
 `disconnect` cannot prove is safe to touch.
