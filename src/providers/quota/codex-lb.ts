@@ -42,10 +42,30 @@ function usedFromRemaining(value: unknown): number | undefined {
   return remaining === undefined ? undefined : 100 - remaining;
 }
 
+const LUNA_RESERVE_MODEL = "gpt-reserve";
+
+/**
+ * Luna Reserve across the relay's seats. A pool where no seat reports a Reserve bucket shows a
+ * spent "none offered" row, because 0 seats means no Luna capacity beyond ordinary usage. The
+ * Reserve model id keeps the row display-only: windows carrying a model never gate routing.
+ */
+function lunaReserveWindow(value: unknown): ProviderQuota["customWindows"] {
+  const reserve = asRecord(value);
+  const seats = toFiniteNumber(reserve?.seats);
+  if (!reserve || seats === undefined || seats < 0) return undefined;
+  if (seats === 0) return [{ label: "Luna Reserve: none offered", percent: 100, modelId: LUNA_RESERVE_MODEL }];
+  const used = usedFromRemaining(reserve.remaining_percent);
+  if (used === undefined) return undefined;
+  const resetAt = normalizeResetAt(reserve.reset_at);
+  const label = seats === 1 ? "Luna Reserve (1 seat)" : `Luna Reserve (${seats} seats)`;
+  return [{ label, percent: used, ...(resetAt !== undefined ? { resetAt } : {}), modelId: LUNA_RESERVE_MODEL }];
+}
+
 /**
  * codex-lb `V1UsageResponse`: per-window pooled quota (upstream limit rows first, then the
- * remaining-percent pool summary) and the summed purchased credit balance of the key's pool.
- * Null for a body that is not that response, so another relay on the same path shows nothing.
+ * remaining-percent pool summary), pooled Luna Reserve, and the summed purchased credit balance
+ * of the key's pool. Null for a body that is not that response, so another relay on the same path
+ * shows nothing.
  */
 export function parseCodexLbUsage(body: unknown): ProviderQuota | typeof AUTHORITATIVE_EMPTY_QUOTA | null {
   const usage = asRecord(body);
@@ -59,6 +79,7 @@ export function parseCodexLbUsage(body: unknown): ProviderQuota | typeof AUTHORI
   const codexCredits = purchased && purchased.is_partial !== true
     ? parseCodexCredits({ balance: purchased.balance ?? undefined, unlimited: purchased.unlimited }, { allowNegative: true })
     : null;
+  const customWindows = lunaReserveWindow(usage.luna_reserve);
   const quota: ProviderQuota = {
     ...(fiveHourPercent !== undefined ? { fiveHourPercent } : {}),
     ...(fiveHour?.resetAt !== undefined ? { fiveHourResetAt: fiveHour.resetAt } : {}),
@@ -66,6 +87,7 @@ export function parseCodexLbUsage(body: unknown): ProviderQuota | typeof AUTHORI
     ...(weekly?.resetAt !== undefined ? { weeklyResetAt: weekly.resetAt } : {}),
     ...(monthly ? { monthlyPercent: monthly.percent } : {}),
     ...(monthly?.resetAt !== undefined ? { monthlyResetAt: monthly.resetAt } : {}),
+    ...(customWindows ? { customWindows } : {}),
     ...(codexCredits ? { codexCredits } : {}),
     updatedAt: Date.now(),
   };

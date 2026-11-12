@@ -84,6 +84,28 @@ describe("codex-lb pooled usage quota", () => {
     expect(getCachedProviderRoutingQuota("my-pool", poolProvider, Date.now())).toBeNull();
   });
 
+  test("pooled Luna Reserve shows as a display-only row, including when no seat offers it", async () => {
+    let body: unknown = { ...LIVE_USAGE, luna_reserve: { seats: 2, remaining_percent: 30, reset_at: "2026-11-16T02:20:50Z" } };
+    const poolProvider = provider("https://lb.example.com/backend-api/codex", undefined, []);
+    poolProvider.fetch = (async () => Response.json(body)) as typeof fetch;
+    const cfg = config("my-pool", poolProvider);
+
+    const offered = (await fetchProviderQuotaReports(cfg, true)).reports[0]!.quota.customWindows;
+    expect(offered).toEqual([{
+      label: "Luna Reserve (2 seats)", percent: 70, resetAt: Date.parse("2026-11-16T02:20:50Z"), modelId: "gpt-reserve",
+    }]);
+
+    body = { ...LIVE_USAGE, luna_reserve: { seats: 0, remaining_percent: null, reset_at: null } };
+    expect((await fetchProviderQuotaReports(cfg, true)).reports[0]!.quota.customWindows)
+      .toEqual([{ label: "Luna Reserve: none offered", percent: 100, modelId: "gpt-reserve" }]);
+    // A spent or absent Reserve never reads as provider exhaustion.
+    expect(getCachedProviderRoutingQuota("my-pool", poolProvider, Date.now())).toBeNull();
+
+    // An older relay that does not report Reserve shows no Reserve row at all.
+    body = LIVE_USAGE;
+    expect((await fetchProviderQuotaReports(cfg, true)).reports[0]!.quota.customWindows).toBeUndefined();
+  });
+
   test("a credits-only refresh replaces held windows and clears partial credits", async () => {
     const seen: Seen[] = [];
     let body: unknown = LIVE_USAGE;
