@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
-import { checkAccountIdCollisionWithNativeMain as checkAccountIdCollision, CodexCollisionReadBusyError } from "../../src/codex/auth-api/login-collision";
+import { checkAccountIdCollisionWithNativeMain as checkAccountIdCollision, CodexCollisionReadBusyError, CodexLoginRestartingError, warnCodexLoginFailed } from "../../src/codex/auth-api/login-collision";
+import { handleCodexAuthLoginStart } from "../../src/codex/auth-api/login-flow";
+import { resetLifecycleDrainStateForTests, setDraining } from "../../src/server/lifecycle";
 import { saveConfig } from "../../src/config";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -227,4 +229,56 @@ test("conflicting native account claims are retryable rather than collision evid
     access_token: token, account_id: "envelope-account",
   } }));
   await expect(checkAccountIdCollision("candidate")).rejects.toBeInstanceOf(CodexCollisionReadBusyError);
+});
+
+test("each busy collision cause carries its closed token", async () => {
+  writeFileSync(join(TEST_CODEX_HOME, "auth.json"), "{");
+  await expect(checkAccountIdCollision("candidate")).rejects.toMatchObject({ cause: "auth-unreadable" });
+  const token = `header.${Buffer.from(JSON.stringify({ chatgpt_account_id: "token-account" })).toString("base64url")}.fake`;
+  writeFileSync(join(TEST_CODEX_HOME, "auth.json"), JSON.stringify({ tokens: { access_token: token, account_id: "envelope-account" } }));
+  await expect(checkAccountIdCollision("candidate")).rejects.toMatchObject({ cause: "auth-inconsistent" });
+});
+
+describe("hub draining during login", () => {
+  afterEach(() => resetLifecycleDrainStateForTests());
+
+  test("a collision check during drain says the hub restarted, not busy", async () => {
+    setDraining(true);
+    const error = await checkAccountIdCollision("candidate").catch(e => e);
+    expect(error).toBeInstanceOf(CodexLoginRestartingError);
+    expect(error).not.toBeInstanceOf(CodexCollisionReadBusyError);
+    expect(error.message).toBe("OpenCodex restarted during this login; start it again.");
+  });
+
+  test("login start during drain answers 503 server_restarting with Retry-After before any flow opens", async () => {
+    setDraining(true);
+    const response = await handleCodexAuthLoginStart(new Request("http://localhost/api/codex-auth/login", {
+      method: "POST", body: JSON.stringify({ openBrowser: false }),
+    }), {} as OcxConfig);
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Retry-After")).toBe("5");
+    expect(await response.json()).toEqual({ error: {
+      type: "server_error", code: "server_restarting",
+      message: "OpenCodex is restarting; start the login again when it is back.",
+    } });
+  });
+});
+
+describe("login failure log line", () => {
+  const lines = (error: unknown): string[] => {
+    const out: string[] = [];
+    const warn = console.warn;
+    console.warn = ((line: string) => { out.push(String(line)); }) as typeof console.warn;
+    try { warnCodexLoginFailed("chatgpt", error); } finally { console.warn = warn; }
+    return out;
+  };
+
+  test("prints one closed-token line per cause and nothing identifying", () => {
+    for (const cause of ["claim-busy", "claim-unavailable", "codex-home-unreadable", "auth-unreadable", "auth-inconsistent"] as const) {
+      expect(lines(new CodexCollisionReadBusyError(cause))).toEqual([`[opencodex] level=warn codex login failed provider=chatgpt cause=${cause}`]);
+    }
+    expect(lines(new CodexLoginRestartingError())).toEqual(["[opencodex] level=warn codex login failed provider=chatgpt cause=restarting"]);
+    const leaky = lines(new Error("user@example.com acct_123 sk-secret flow-9"));
+    expect(leaky).toEqual(["[opencodex] level=warn codex login failed provider=chatgpt cause=other"]);
+  });
 });
