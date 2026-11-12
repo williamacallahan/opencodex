@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { captureAdmissionPolicy } from "../../src/server/capture-admission-policy";
 import { postLocalChatCompletion } from "../../src/lib/local-chat-completion";
 import { describeImageRouted } from "../../src/vision/routed-describe";
 
@@ -23,6 +24,7 @@ function serve(respond: () => Response): string {
 function send(baseUrlOverride: string, maxResponseBytes: number) {
   return postLocalChatCompletion({
     config: CONFIG,
+    admissionPolicy: captureAdmissionPolicy(CONFIG),
     body: { model: "m", messages: [] },
     label: "role sizing",
     logTag: "role-sizing",

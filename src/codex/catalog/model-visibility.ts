@@ -1,7 +1,7 @@
 import { effectiveProviderAlias, effectiveProviderAliasDecision } from "../../providers/default-aliases";
-import { antigravityFamilyDisabled, collapseAntigravityPublicModels, projectAntigravitySelectedModels } from "../../providers/antigravity-effort-families";
+import { collapseAntigravityPublicModels } from "../../providers/antigravity-effort-families";
 import { XAI_OAUTH_FAST_VARIANT_IDS } from "../../providers/xai-fast-model";
-import { initialModelSelectionPending } from "../../providers/initial-model-selection";
+import { modelRowHidden, selectionAllowSet } from "../../providers/model-row-visibility";
 import { execFileSync } from "node:child_process";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
@@ -273,43 +273,9 @@ export function filterCatalogVisibleModels(
   models: CatalogModel[],
   config: Pick<OcxConfig, "disabledModels" | "providers" | "modelDiscovery">,
 ): CatalogModel[] {
-  const disabled = new Set(config.disabledModels ?? []);
-  const allowByProvider = new Map<string, Set<string>>();
-  for (const [name, prov] of Object.entries(config.providers)) {
-    const sel = prov.selectedModels;
-    // Keyed the way `sync.ts` keys the same list, so a slash-bearing native id and
-    // the encoded slug the Codex picker displays are one entry rather than two. A
-    // bare `Set(sel)` matched only the native form, so an allowlist written from the
-    // displayed slug — which `ocx models remove` also accepts — hid every model it
-    // was meant to keep.
-    //
-    // The key is deliberately lossy: `p/a/b` and `p/a-b` collapse to one entry, so a
-    // provider publishing both spellings has them selected together. That is a real
-    // limitation, pinned by the tests below and tracked as a follow-up; it is NOT
-    // fixed here. Resolving selections against the current roster instead was tried
-    // and rejected — the roster is an incomplete dictionary (live discovery can omit
-    // a published id), so it produces the same over-grant while additionally
-    // disagreeing with the `slugEquivalenceKey` contract `sync.ts` uses at merge time.
-    // Two catalog stages with different equivalence relations is the exact bug class
-    // this change exists to remove.
-    if (Array.isArray(sel) && sel.length > 0) {
-      allowByProvider.set(name, new Set(projectAntigravitySelectedModels(name, sel, models)
-        .map(model => slugEquivalenceKey(routedSlug(name, model)))));
-    }
-  }
-  return collapseAntigravityPublicModels(models).filter(m => {
-    if (initialModelSelectionPending(config.providers[m.provider])) return false;
-    if (config.providers[m.provider]?.disabled === true) return false;
-    if (antigravityFamilyDisabled(config, m, models)) return false;
-    const nativeAlias = m.provider === COMBO_NAMESPACE && m.nativeAlias === true;
-    // disabledModels may be stored raw (canonical) or encoded (legacy UI writes).
-    for (const stored of disabled) {
-      // Combo management stores the public alias, while canonical `combo/<id>` references
-      // remain valid for backward compatibility through slugEquals below.
-      if (m.alias !== undefined && stored === catalogModelSlug(m) && !nativeAlias) return false;
-      if (slugEquals(stored, m.provider, m.id)) return false;
-    }
-    const allow = allowByProvider.get(m.provider);
-    return !allow || allow.has(slugEquivalenceKey(routedSlug(m.provider, m.id)));
-  });
+  // The predicate is the one the data plane refuses by (src/providers/model-row-visibility.ts);
+  // only the per-provider allowlist is built once for the whole list.
+  const allowByProvider = new Map(Object.keys(config.providers).map(name => [name, selectionAllowSet(config, name, models)] as const));
+  return collapseAntigravityPublicModels(models).filter(m =>
+    !modelRowHidden(config, m, models, allowByProvider.get(m.provider)));
 }

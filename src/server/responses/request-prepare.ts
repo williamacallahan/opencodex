@@ -24,6 +24,7 @@ import {
   unreadableEncryptedAgentTaskResponse,
 } from "./core-errors";
 import { parseSyntheticRowId } from "../fast-row";
+import { comboRowDisabled } from "../../providers/model-row-visibility";
 import { resolveComboId, comboIdFromRawBody, comboExclusionReasons, NoAvailableComboTargetsError, pickComboTarget } from "../../combos";
 import { INTERCEPT_TARGET_UNAVAILABLE_CODE, interceptTargetUnavailableResponse, resolveChosenTarget, resolveShadowCallTarget } from "./shadow-target-availability";
 import {
@@ -413,6 +414,16 @@ export async function prepareResponsesRequest(
     return markProxyError(formatErrorResponse(400, "invalid_request_error", "A JEV decision model cannot be a JEV combo"));
   }
   if (comboId && Object.hasOwn(config.combos ?? {}, comboId)) {
+    // A combo the client named is refused by its own disable like any other row; the same server-set
+    // flags as the route check below mark the combos the hub chose (memory phase, shadow call).
+    if (!options.compactionRoutingOverride && !options.mainHardLockFallbackOverride && !options.internalDecisionCall
+      && !options.memoryModelPhase && !options.advisorInternal && !options.sidecarInternal
+      && !options.shadowCallIntercepted && !memoryModelComboRouted && !shadowCallIntercepted
+      && comboRowDisabled(config, comboId)) {
+      const selector = options.clientModelLabel ?? clientFacingModelLabel(originalSelector);
+      projectLocalModelRefusalLog(logCtx, selector);
+      return disabledModelResponse(new DisabledModelError(selector));
+    }
     options.onRequestBodyRead?.();
     // The Antigravity direct lane is decided for one concrete route; a body that reached a combo
     // goes through the combo's own child loop with the full bridge conversation.
@@ -842,7 +853,7 @@ export async function prepareResponsesRequest(
     if (!memoryRoute && !shadowRoute && !concreteSelection && !options.compactionRoutingOverride
       && !options.mainHardLockFallbackOverride && !options.internalDecisionCall && !options.memoryModelPhase
       && !options.advisorInternal && !options.sidecarInternal && !options.shadowCallIntercepted) {
-      assertClientNamedModelEnabled(config, inboundSelector, route);
+      assertClientNamedModelEnabled(config, inboundSelector, route, parsed.modelId);
     }
     // Selection-free hard-lock preflight grants no hop. Enforce the actual ranked destination
     // against the locked source before admitting this first selection.

@@ -23,9 +23,7 @@ import { requestPolicyView } from "../../src/server/auth-cors";
 import { tryAdmitTurn } from "../../src/server/lifecycle";
 import { advisorBaseUrl } from "../../src/advisor/consult";
 import { postLocalChatCompletion } from "../../src/lib/local-chat-completion";
-import { registerAdvisorAdmissionPolicy, SIDECAR_ADMISSION_POLICY_HEADER, SIDECAR_INTERNAL_CAPABILITY_HEADER } from "../../src/server/advisor-admission-scope";
 import { captureAdmissionPolicy } from "../../src/server/capture-admission-policy";
-import { internalCallCapability } from "../../src/lib/local-internal-call-capability";
 import { clearComboSelectionState, clearComboTargetCooldowns } from "../../src/combos";
 import { collectSse } from "../helpers/responses-conformance";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
@@ -242,15 +240,12 @@ describe("the credential a loopback-bind self-fetch presents", () => {
     installHubClientToken();
     const h = harness({ hostname: "127.0.0.1", advisorModel: "expert/gpt-6-astra" });
     const seen = routeSelfFetch(h.config, listener(h.config), false);
-    const registration = registerAdvisorAdmissionPolicy(captureAdmissionPolicy(h.config));
-    try {
-      const outcome = await postLocalChatCompletion({
-        config: h.config, label: "routed describe", logTag: "vision", timeoutMs: 10_000, maxResponseBytes: 64_000,
-        headers: { [SIDECAR_ADMISSION_POLICY_HEADER]: registration.token, [SIDECAR_INTERNAL_CAPABILITY_HEADER]: internalCallCapability() },
-        body: { model: "expert/gpt-6-astra", messages: [{ role: "user", content: "describe" }] },
-      });
-      expect(outcome).toEqual({ text: ADVICE });
-      expect(seen).toEqual([{ status: 200, presented: null }]);
-    } finally { registration.release(); }
+    const outcome = await postLocalChatCompletion({
+      config: h.config, label: "routed describe", logTag: "vision", timeoutMs: 10_000, maxResponseBytes: 64_000,
+      admissionPolicy: captureAdmissionPolicy(h.config),
+      body: { model: "expert/gpt-6-astra", messages: [{ role: "user", content: "describe" }] },
+    });
+    expect(outcome).toEqual({ text: ADVICE });
+    expect(seen).toEqual([{ status: 200, presented: null }]);
   });
 });

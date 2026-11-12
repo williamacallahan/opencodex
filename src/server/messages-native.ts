@@ -2,7 +2,7 @@ import { MessagesSseFrameContext, messagesSseEchoRenamedError, messagesSseFrameH
 import { createMessagesSseErrorFilter } from "./messages-sse-error-filter";
 import type { MessagesFailureVerdictSink } from "../claude/failure-verdict";
 import { upstreamErrorIsLocal } from "./request-log-failure-detail";
-import { boundedMessagesDisplayCount, ownedAnthropicErrorPayload, ownedAnthropicErrorResponse, messagesOverflowPresentation, messagesRelayedOverflowPresentation } from "../lib/messages-error-body";
+import { boundedMessagesDisplayCount, ownedDisabledModelResponse, ownedAnthropicErrorPayload, ownedAnthropicErrorResponse, messagesOverflowPresentation, messagesRelayedOverflowPresentation } from "../lib/messages-error-body";
 import { attachComboFailureEvidence, isProxyError, markProxyError } from "../lib/client-error-body";
 import { captureAccountAutoPauseAttempt, wasAccountAutoPaused } from "../oauth/account-auto-pause";
 import { createPhysicalSendReporter, reportDispatchSends, type RequestExecutionBudget, type SingleUseDispatchPermit } from "../lib/request-execution-budget";
@@ -143,7 +143,7 @@ import { linkAbortSignal } from "./responses/core-lifetime";
 import { attachRequestSpendTracker } from "./responses/request-spend";
 import { carryWorkflowRefusal, workflowRefusalResponse, workflowSendCeilingRefusalResponse } from "./workflow-refusal";
 import { sseFieldValue } from "../lib/sse-decoder";
-import { admissionModelDeniedResponse, assertRouteAllowedByScope, AdmissionModelDeniedError, projectAdmissionModelDeniedLog, type AdmissionModelScope } from "./admission-model-scope";
+import { admissionModelDeniedResponse, assertClientNamedModelEnabled, assertRouteAllowedByScope, AdmissionModelDeniedError, DisabledModelError, projectAdmissionModelDeniedLog, type AdmissionModelScope } from "./admission-model-scope";
 import { clientFacingModelLabel } from "../lib/error-destination";
 import { nativeMessagesToolScopeDenial } from "./messages-native-scope";
 import { retainUpstreamMessagesRequestId } from "./messages-response-headers";
@@ -236,6 +236,7 @@ export async function handleStrictNativeMessages(
     const selector = { strict: true };
     if (route.modelId !== body.model || nativeMessagesDeclineReason(route, body, config, selector)) throw new MessagesIntegrityError();
     assertRouteAllowedByScope(options.modelScope, clientFacingModelLabel(body.model), route);
+    assertClientNamedModelEnabled(config, clientFacingModelLabel(body.model), route, body.model);
     const integrity = new NativeMessagesIntegrity(req, wire, body);
     if (integrity.countTokens) {
       // Counting is a physical request, not generated-token usage.
@@ -246,6 +247,7 @@ export async function handleStrictNativeMessages(
       sessionKey: req.headers.get("session_id") ?? req.headers.get("x-claude-code-session-id") });
   } catch (error) {
     if (error instanceof AdmissionModelDeniedError) return refuse(admissionModelDeniedResponse(error));
+    if (error instanceof DisabledModelError) return refuse(ownedDisabledModelResponse(error.message));
     if (req.signal.aborted) return refuse(anthropicErrorResponse(499, "Client cancelled request", "api_error"));
     const oversized = error instanceof DecompressedBodyTooLargeError || isTranslatorBudgetExceededError(error);
     return refuse(anthropicErrorResponse(oversized ? 413 : 400,

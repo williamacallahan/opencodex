@@ -22,13 +22,13 @@ import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
 import { isCanonicalOpenAiForwardProvider, OPENAI_API_PROVIDER_ID, OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
 import {
   COMBO_NAMESPACE,
-  comboDisabledModelSelectors,
   comboModelId,
   getCombo,
   listComboIds,
   targetKey,
 } from "../../combos";
 import type { NormalizedComboConfig } from "../../combos/types";
+import { comboRowDisabled } from "../../providers/model-row-visibility";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
 import { redactSecretString } from "../../lib/redact";
 import upstreamModelsSnapshot from "../data/upstream-models.json";
@@ -388,7 +388,6 @@ export function warnUncataloguedComboOnce(
 export function exactComboCatalogSlugs(
   config: Pick<OcxConfig, "combos" | "disabledModels">,
 ): Set<string> {
-  const disabled = new Set(config.disabledModels ?? []);
   return new Set(listComboIds(config).flatMap(id => {
     const raw = config.combos?.[id];
     const alias = typeof raw?.alias === "string"
@@ -396,9 +395,7 @@ export function exactComboCatalogSlugs(
       : "";
     const canonical = comboModelId(id);
     const publicSlug = alias || canonical;
-    const comboDisabled = comboDisabledModelSelectors(id, raw ?? {})
-      .some(selector => disabled.has(selector));
-    return comboDisabled ? [] : [publicSlug];
+    return comboRowDisabled(config, id) ? [] : [publicSlug];
   }));
 }
 

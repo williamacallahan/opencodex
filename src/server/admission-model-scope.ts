@@ -5,7 +5,9 @@ import type { DataPlaneAdmission } from "./auth-cors";
 import { isApiAuthRequired } from "./auth-cors";
 import type { OcxApiKeyEntry, OcxConfig } from "../types";
 import type { RouteResult } from "../router";
-import { slugEquals } from "../providers/slug-codec";
+import { resolveComboId } from "../combos/identifiers";
+import { comboRowDisabled, modelRowHidden, nativeSelectorDisabled } from "../providers/model-row-visibility";
+import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
 import { markResponseNonReplayable } from "../lib/upstream-retry";
 
 /**
@@ -291,17 +293,38 @@ export class DisabledModelError extends Error {
 /** Stable wire code for a refusal of a disabled model. */
 export const MODEL_DISABLED = "model_disabled";
 
-/** Throws when the route a client's own selector resolved to is a switched-off catalog row. */
+/**
+ * Throws when the route a client's own selector resolved to is a row the catalog hides: the same
+ * predicate (`src/providers/model-row-visibility.ts`) the catalog filters by, so nothing is
+ * hidden without also being refused. A combo parent is judged by its own disable; its children
+ * are hub-chosen and never reach this check. A policy profile has no disable path.
+ */
 export function assertClientNamedModelEnabled(
-  config: Pick<OcxConfig, "disabledModels">,
+  config: Pick<OcxConfig, "disabledModels" | "providers" | "modelDiscovery" | "combos" | "omitDisabledNativeModels">,
   requestedModel: ClientFacingModelLabel,
-  route: Pick<RouteResult, "providerName" | "modelId" | "combo" | "routeKind">,
+  route: Pick<RouteResult, "providerName" | "provider" | "modelId" | "combo" | "routeKind" | "codexAccountNamespace">,
+  /** The model string the client sent: a combo selector is not resolved by the router until dispatch. */
+  selector: string,
 ): void {
-  // A combo or policy parent resolves to its children later, and those are judged as hub-chosen.
-  if (route.combo !== undefined || route.routeKind === "policy" || route.routeKind === "combo") return;
-  if ((config.disabledModels ?? []).some(stored => slugEquals(stored, route.providerName, route.modelId))) {
-    throw new DisabledModelError(requestedModel);
+  const comboId = resolveComboId(config, selector);
+  if (comboId !== null) {
+    if (comboRowDisabled(config, comboId)) throw new DisabledModelError(requestedModel);
+    return;
   }
+  if (route.routeKind === "policy") return;
+  if (route.combo !== undefined) {
+    if (comboRowDisabled(config, route.combo.comboId)) throw new DisabledModelError(requestedModel);
+    return;
+  }
+  // Native OpenAI rows are stored bare (or account-qualified) and hidden only by the opt-in omission.
+  if (isCanonicalOpenAiForwardProvider(route.provider)) {
+    if (config.omitDisabledNativeModels === true && nativeSelectorDisabled(config, route.modelId,
+      ...(route.codexAccountNamespace ? [`${route.codexAccountNamespace}/${route.modelId}`] : []))) {
+      throw new DisabledModelError(requestedModel);
+    }
+    return;
+  }
+  if (modelRowHidden(config, { provider: route.providerName, id: route.modelId })) throw new DisabledModelError(requestedModel);
 }
 
 /** 404 with the stable `model_disabled` code, so a client can tell a switched-off row from a typo. */
