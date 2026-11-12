@@ -1517,6 +1517,7 @@ function writeFinalRequestLog(
     requestId, finalStatus: effectiveStatus, provider: logCtx.provider, model: logCtx.model,
     ...(meta?.terminalStatus ? { terminalStatus: meta.terminalStatus } : {}),
     attempts, diagnostics: logCtx,
+    ...(attribution.failureCause ? { failureCause: attribution.failureCause } : {}),
   });
   const isCombo = logCtx.comboId !== undefined && (attempts?.length ?? 0) > 0;
   // A key or account rotation splits the attempt and clears `logCtx.usage`, so a multi-attempt

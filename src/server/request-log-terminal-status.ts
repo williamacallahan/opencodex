@@ -7,9 +7,11 @@ import {
   recognizedUpstreamError,
 } from "../lib/errors";
 import { redactSecretString } from "../lib/redact";
+import { STRUCTURED_QUOTA_CODES } from "../bridge/errors";
 import { outboundCredentials, type OutboundCredentialRegistry } from "../lib/outbound-credential-registry";
 import { configuredCredentials, type ConfiguredCredentials } from "./configured-credentials";
 import { codexWsWrapperStatus } from "./responses/codex-ws-wire";
+import { REQUEST_FAILURE_CAUSES, type RequestFailureCause } from "../usage/telemetry-contract";
 
 /** First bounded upstream diagnostics shared by request contexts and final rows. */
 export interface UpstreamErrorDiagnostics {
@@ -115,12 +117,16 @@ function attributionLabel(value: unknown, snapshot: DiagnosticSources): string {
 
 interface DiagnosticSources { registry: OutboundCredentialRegistry; configured: ConfiguredCredentials }
 
-export interface FailedAttemptView { ordinal: number; provider: string; model: string; status: number }
+export interface FailedAttemptView { ordinal: number; provider: string; model: string; status: number; failureCause?: RequestFailureCause | undefined }
+
+const FAILURE_CAUSES: ReadonlySet<string> = new Set(REQUEST_FAILURE_CAUSES);
 
 /**
  * One warning per failed attempt, written by the final request log owner so every transport
  * reaches it. A client abort (499) is not an upstream failure. Prints no upstream request id,
  * body, or credential: type and code come from closed vocabularies, labels pass the credential check.
+ * `cause` is the hub's own attribution (REQUEST_FAILURE_CAUSES), derived without upstream text, so
+ * a failure whose upstream code is outside the known set still says why it failed.
  */
 export function warnUpstreamFailures(input: {
   requestId: string;
@@ -130,12 +136,14 @@ export function warnUpstreamFailures(input: {
   model: string;
   attempts: readonly FailedAttemptView[] | undefined;
   diagnostics: UpstreamErrorDiagnostics;
+  /** The request's attribution, for the synthetic attempt of a request that recorded none. */
+  failureCause?: RequestFailureCause | undefined;
 }): void {
   const terminalFailed = input.terminalStatus === "failed" || input.terminalStatus === "incomplete";
   const snapshot: DiagnosticSources = { registry: outboundCredentials(), configured: configuredCredentials() };
   const attempts = input.attempts?.length
     ? input.attempts
-    : [{ ordinal: 0, provider: input.provider, model: input.model, status: input.finalStatus }];
+    : [{ ordinal: 0, provider: input.provider, model: input.model, status: input.finalStatus, failureCause: input.failureCause }];
   const lastIndex = attempts.length - 1;
   attempts.forEach((attempt, index) => {
     const failed = attempt.status >= 400 || (index === lastIndex && terminalFailed);
@@ -143,8 +151,11 @@ export function warnUpstreamFailures(input: {
     // Captured diagnostics describe the terminal, which belongs to the last attempt.
     const { upstreamErrorCode: rawCode, upstreamErrorType: type } = index === lastIndex
       ? upstreamDiagnosticLogFields(input.diagnostics) : {};
-    const code = rawCode !== undefined && KNOWN_BARE_ERROR_CODES.has(rawCode) ? rawCode : undefined;
-    console.warn(`[opencodex] level=warn upstream failure request=${attributionLabel(input.requestId, snapshot)} attempt=${attempt.ordinal} provider=${attributionLabel(attempt.provider, snapshot)} model=${attributionLabel(attempt.model, snapshot)} status=${attempt.status >= 100 ? attempt.status : "unknown"} type=${type ?? "unknown"} code=${code ?? "unknown"} final=${input.finalStatus}`);
+    // Quota codes print too: cause says rate-limit for every 429, and only the code tells an
+    // operator that the account is spent rather than briefly throttled.
+    const code = rawCode !== undefined && (KNOWN_BARE_ERROR_CODES.has(rawCode) || STRUCTURED_QUOTA_CODES.has(rawCode))
+      ? rawCode : undefined;
+    console.warn(`[opencodex] level=warn upstream failure request=${attributionLabel(input.requestId, snapshot)} attempt=${attempt.ordinal} provider=${attributionLabel(attempt.provider, snapshot)} model=${attributionLabel(attempt.model, snapshot)} status=${attempt.status >= 100 ? attempt.status : "unknown"} type=${type ?? "unknown"} code=${code ?? "unknown"} cause=${FAILURE_CAUSES.has(attempt.failureCause as string) ? attempt.failureCause : "unknown"} final=${input.finalStatus}`);
   });
 }
 

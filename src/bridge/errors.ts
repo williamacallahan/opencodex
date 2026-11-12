@@ -27,7 +27,8 @@ const PINNED_VERDICT_CODES = new Set([CYBER_POLICY_ERROR_CODE, "client_closed_re
 // A serialized classifier verdict is not an upstream code. Keep the original code out of
 // the wire body so a combo cannot mistake prose-derived insufficient_quota for evidence.
 const formattedQuotaSources = new WeakMap<Response, string | null>();
-const STRUCTURED_QUOTA_CODES = new Set(["usage_limit_exceeded", "usage_limit_reached", "1308", "insufficient_quota"]);
+/** Upstream codes that mean the account's quota is spent: the account must change, waiting will not help. */
+export const STRUCTURED_QUOTA_CODES: ReadonlySet<string> = new Set(["usage_limit_exceeded", "usage_limit_reached", "1308", "insufficient_quota"]);
 
 export function upstreamCodeForComboFailure(response: Response, bodyCode: string | undefined): string | undefined {
   return bodyCode === "insufficient_quota" && formattedQuotaSources.has(response)
