@@ -27,7 +27,9 @@ Native counts forward the original bytes; routed counts use the root endpoint's 
 Only the bridge promotes the caller session header. Bridge responses and logged refusals before
 lane selection carry the request-log response header; strict responses do not.
 The hybrid turn defers its session-lane capacity check until lane selection, then claims the
-selected lane through its existing lease. The strict lane keeps the original session identity and headers. Cancelling the bounded read returns 499.
+selected lane through its existing lease, which owns the capacity check and releases the lane at
+settlement: `src/server/admitted-http-turn.ts` defers only that claim and `src/server/lifecycle.ts`
+admits it. The strict lane keeps the original session identity and headers. Cancelling the bounded read returns 499.
 `tests/claude-integration/messages-hybrid.test.ts` exercises these public HTTP boundaries with
 synthetic pooled credentials and a streaming Chat upstream.
 

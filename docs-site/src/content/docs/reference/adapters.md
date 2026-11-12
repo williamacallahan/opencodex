@@ -188,7 +188,7 @@ An explicitly configured provider `User-Agent` remains authoritative regardless 
 if the caller sends none, OpenCodex does not invent one. Additional caller metadata can be selected
 with `forwardClientHeaders`; provider `headers` win for this option, and credential or transport-owned
 names are refused. Canonical ChatGPT forward auth retains its separate fixed header allowlist.
-Only `originator`, `x-client-request-id`, `x-codex-app-version`, and `user-agent` are supported by `forwardClientHeaders`; arbitrary names are rejected on load/write and ignored at runtime.
+Only `originator`, `x-client-request-id`, `x-codex-app-version`, `user-agent`, `x-lgw-cache-key`, and `x-user-id` are supported by `forwardClientHeaders` (the `openai-chat` adapter honours it too, for the last two); arbitrary names are rejected on load/write and ignored at runtime.
 
 ### Native compaction on custom gateways
 

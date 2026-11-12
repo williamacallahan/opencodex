@@ -2934,6 +2934,9 @@ export const tr: Record<TKey, string> = {
   "codexAuth.mainReauthOpen": "Aç",
   "codexAuth.mainReauthPending": "Giriş bekleniyor…",
   "codexAuth.mainReauthDevice": "Cihaz koduyla yeniden giriş yap",
+  "codexAuth.mainNotSignedIn": "Giriş yapılmadı",
+  "codexAuth.mainSignInHint": "Bu sunucuda henüz Codex girişi yok — aşağıdan cihaz koduyla giriş yapın",
+  "codexAuth.mainSignInDevice": "Cihaz koduyla giriş yap",
   "codexAuth.emailCollision": "Bu hesap ana girişinizle eşleşiyor.",
 
   "codexAuth.resetCreditsTitle": "Kredileri Sıfırla",

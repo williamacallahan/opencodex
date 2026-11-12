@@ -1,4 +1,5 @@
 import { withRequiredChatToolResult } from "./openai-chat/required-tool-result";
+import { copyForwardedClientHeaders } from "../lib/provider-client-headers";
 import { hasShrinkableOpenAIChatImages, normalizeOpenAIChatImages } from "./openai-chat-images";
 import { protectGlmSummaryBudget, resolveMaxTokens } from "./openai-chat/summary-budget";
 import { chatParallelToolCallsWireValue } from "./openai-chat/parallel-tool-calls";
@@ -101,6 +102,7 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
       lastRequestedModelId = parsed.modelId;
       const completedToolBlocks = incoming?.completedToolBlocks === true;
       const { url, headers, hasCredential } = openAIChatTransport(provider);
+      if (incoming) copyForwardedClientHeaders(provider.forwardClientHeaders, headers, incoming.headers);
       if (!completedToolBlocks) {
         for (const key of Object.keys(headers)) if (key.toLowerCase() === "x-opencodex-tool-completion") delete headers[key];
       }

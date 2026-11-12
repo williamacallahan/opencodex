@@ -5,6 +5,7 @@ import { codexUsageLimitResetAt } from "./account-credit-use";
 import { NATIVE_RESERVE_MODEL } from "./catalog/native-models";
 import { getAccountQuota } from "./quota";
 import { resetAtToMs, type StoredAccountQuota, type WhamUsageResponse } from "./quota-types";
+import { isSelectableCodexPoolAccount } from "./account-id";
 import { grantsReserve, reserveLimits } from "./reserve-availability";
 import { getEligiblePoolAccounts, isCodexAccountSelectable } from "./routing/selection";
 import { getThreadAffinity, isThreadAffinityExpired, isThreadAffinityGenerationLive } from "./routing/thread-affinity";
@@ -56,6 +57,34 @@ export function poolReserveHoldResetAt(accountId: string, now = Date.now()): num
   return now + 60_000;
 }
 
+/** How long a request waits for a Reserve re-read before it falls back to the evidence it has. */
+export const POOL_RESERVE_REFRESH_WAIT_MS = 3_000;
+
+/**
+ * An exhausted seat is the only place Luna Reserve can be, so its reading going stale (or never
+ * having been taken, as after a restart) would silently turn the preference off. A seat that
+ * still has included usage cannot hold a Reserve, so it never triggers a re-read.
+ */
+export function poolReserveEvidenceStale(
+  config: OcxConfig, modelId: string | undefined, excludeId?: string, pinnedAccountId?: string, now = Date.now(),
+): boolean {
+  if (modelId !== "gpt-6-luna") return false;
+  return (config.codexAccounts ?? []).some(account => {
+    if (account.id === excludeId || (pinnedAccountId !== undefined && account.id !== pinnedAccountId)
+      || !isSelectableCodexPoolAccount(account) || config.pausedCodexAccountIds?.includes(account.id)) return false;
+    const quota = getAccountQuota(account.id);
+    if (!quota) return true;
+    return codexUsageLimitResetAt(quota, account.plan, now) !== undefined && now - quota.updatedAt > POOL_RESERVE_FRESHNESS_MS;
+  });
+}
+
+/** One bounded wait for the shared single-flight quota read; a slow or failed read never fails the request. */
+export async function refreshStalePoolReserveEvidence(prime: () => Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<void>(resolve => { timer = setTimeout(resolve, POOL_RESERVE_REFRESH_WAIT_MS); });
+  try { await Promise.race([prime().catch(() => {}), bound]); } finally { clearTimeout(timer); }
+}
+
 /**
  * Reserve is Luna-only while included quota is shared with Sol and Astra, so a fresh Reserve
  * goes before another seat's included quota. A thread bound to a seat that still has included
@@ -65,17 +94,24 @@ export function poolReserveHoldResetAt(accountId: string, now = Date.now()): num
 export function poolLunaReserveSelection(
   config: OcxConfig, modelId: string | undefined, quotaScope: CodexQuotaScope | undefined,
   options: CodexAccountUsabilityOptions, excludeId?: string, affinityKey?: string, now = Date.now(),
+  pinnedAccountId?: string,
 ): { options: CodexAccountUsabilityOptions; quotaScope: CodexQuotaScope | undefined; reserve: boolean } {
   const unchanged = { options, quotaScope, reserve: false };
   if (modelId !== "gpt-6-luna") return unchanged;
   // With no Reserve anywhere, selection must stay exactly as before (credit seats and affinity included).
   const reserveIds = new Set((config.codexAccounts ?? []).filter(account => account.id !== excludeId
+    && (pinnedAccountId === undefined || account.id === pinnedAccountId)
     && codexUsageLimitResetAt(getAccountQuota(account.id), account.plan, now) !== undefined
     && hasFreshPoolReserve(account.id, now)).map(account => account.id));
   if (reserveIds.size === 0) return unchanged;
+  const reserveOptions: CodexAccountUsabilityOptions = { ...options, modelEligibleAccountIds: reserveIds, poolCapacity: "reserve" };
+  // An operator pin keeps its seat; it only chooses between that seat's own Reserve and the unchanged request.
+  if (pinnedAccountId !== undefined) {
+    return isCodexAccountSelectable(config, pinnedAccountId, now, "reserve", reserveOptions)
+      ? { options: reserveOptions, quotaScope: "reserve", reserve: true } : unchanged;
+  }
   const includedOnly: CodexAccountUsabilityOptions = { ...options, poolCapacity: "included" };
   const included = getEligiblePoolAccounts(config, excludeId, now, quotaScope, includedOnly);
-  const reserveOptions: CodexAccountUsabilityOptions = { ...options, modelEligibleAccountIds: reserveIds, poolCapacity: "reserve" };
   const shared = affinityKey === undefined ? undefined : getThreadAffinity(affinityKey, quotaScope);
   if (affinityKey !== undefined) {
     const serving = getThreadAffinity(affinityKey, "reserve");

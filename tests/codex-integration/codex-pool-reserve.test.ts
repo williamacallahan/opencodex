@@ -125,6 +125,46 @@ test("a window-less successful WHAM response retracts an old Reserve grant", asy
   expect(result.quota?.weeklyPercent).toBe(100);
 });
 
+describe("Luna Reserve where selection used to skip it", () => {
+  async function buildPinned(accountId: string, cfg = config()) {
+    const ctx = await resolveCodexAuthContext(new Headers(), cfg, "pool", { modelId: "gpt-6-luna", accountId });
+    const provider = applyCodexAuthContextToProvider(base, ctx, "pool");
+    const parsed: OcxParsedRequest = { modelId: "gpt-6-luna", stream: true, context: { messages: [] }, options: {}, _rawBody: { model: "gpt-6-luna", input: [] } };
+    const request = await withTestTranslatorBudget(createResponsesPassthroughAdapter(provider))
+      .buildRequest(parsed, { headers: materializeCodexUpstreamAuth(new Headers(), ctx, { config: cfg, modelId: "gpt-6-luna" }) });
+    return { ctx, request };
+  }
+  test("a pinned seat that holds Reserve serves Luna from that Reserve", async () => {
+    reserve();
+    const { ctx, request } = await buildPinned(B);
+    expect(ctx.kind).toBe("pool"); expect(ctx.accountId).toBe(B);
+    expect(JSON.parse(request.body).model).toBe("gpt-reserve");
+  });
+  test("a pin never borrows another seat's Reserve", async () => {
+    reserve(B);
+    await expect(buildPinned(A)).rejects.toBeInstanceOf(CodexPoolAccountCreditsOffError);
+  });
+  test("an exhausted seat with stale Reserve evidence is re-read before Luna falls back to included usage", async () => {
+    // A's included usage is the shared pool the Reserve exists to protect; B is exhausted and
+    // its Reserve reading is older than the freshness window, e.g. right after a hub restart.
+    ordinary(A, 40);
+    const staleAt = now - POOL_RESERVE_FRESHNESS_MS - 60_000;
+    now = staleAt; ordinary(B); reserve(B, 25, staleAt); now = staleAt + POOL_RESERVE_FRESHNESS_MS + 120_000;
+    let primed = 0;
+    const primeCodexPoolQuotas = async () => { primed++; reserve(B); };
+    const cfg = config();
+    const ctx = await resolveCodexAuthContext(new Headers(), cfg, "pool", { modelId: "gpt-6-luna", primeCodexPoolQuotas });
+    expect(primed).toBe(1); expect(ctx.accountId).toBe(B); expect(ctx.quotaScope).toBe("reserve");
+  });
+  test("fresh evidence never waits on a re-read", async () => {
+    ordinary(A, 40);
+    let primed = 0;
+    await resolveCodexAuthContext(new Headers(), config(), "pool", { modelId: "gpt-6-luna",
+      primeCodexPoolQuotas: async () => { primed++; } });
+    expect(primed).toBe(0);
+  });
+});
+
 describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model", () => {
   test("all ordinary-held seats use the fresh Reserve seat on HTTP and WebSocket", async () => {
     reserve();

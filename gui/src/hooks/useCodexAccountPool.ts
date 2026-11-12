@@ -83,6 +83,8 @@ export interface CodexAccountEntry {
   };
   mainAccountHardLock?: MainAccountHardLockStatus;
   needsReauth?: boolean;
+  /** The server's cause for needsReauth. On the main row, `missing_credential` means no native login exists yet. */
+  reauthReason?: string;
   selectionExcludedReason?: "plan_excluded";
   selectionExcludedPlan?: string;
   health?: { status: "healthy" | "cooldown" | "reauth_required" | "warning"; reason?: string; until?: string };

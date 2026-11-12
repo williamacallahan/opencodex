@@ -30,10 +30,18 @@ function reauthMain(): CodexAccountEntry {
   return { id: "__main__", isMain: true, needsReauth: true } as unknown as CodexAccountEntry;
 }
 
-function cardProps(state: MainDeviceReauthState, calls: { starts: number; cancels: number }) {
+/** The main row of a server that never had a native login, as the account list reports it. */
+function signedOutMain(): CodexAccountEntry {
+  return {
+    id: "__main__", isMain: true, needsReauth: true, hasCredential: false, reauthReason: "missing_credential",
+    health: { status: "reauth_required", reason: "refresh_failed" }, healthSummary: "refresh failed",
+  } as unknown as CodexAccountEntry;
+}
+
+function cardProps(state: MainDeviceReauthState, calls: { starts: number; cancels: number }, main = reauthMain()) {
   return {
     t,
-    main: reauthMain(),
+    main,
     isMainActive: false,
     accountModeState: null,
     threshold: 80,
@@ -78,14 +86,31 @@ afterEach(async () => {
   for (const k of globals) Object.defineProperty(globalThis, k, { configurable: true, value: previous[k] });
 });
 
-async function mount(ui: Parameters<typeof cardProps>[1], state: MainDeviceReauthState): Promise<void> {
+async function mount(ui: Parameters<typeof cardProps>[1], state: MainDeviceReauthState, main?: CodexAccountEntry): Promise<void> {
   const { createRoot } = await import("react-dom/client");
   const { createElement } = await import("react");
   await act(async () => {
     root = createRoot(host);
-    root.render(createElement(LanguageProvider, null, createElement(CodexAccountPoolMainCard, cardProps(state, ui))));
+    root.render(createElement(LanguageProvider, null, createElement(CodexAccountPoolMainCard, cardProps(state, ui, main))));
   });
 }
+
+test("a server with no native login offers a first sign-in, not a re-login of an expired token", async () => {
+  const calls = { starts: 0, cancels: 0 };
+  await mount(calls, { phase: "idle" }, signedOutMain());
+  expect(host.textContent).toContain("codexAuth.mainNotSignedIn");
+  expect(host.textContent).toContain("codexAuth.mainSignInHint");
+  expect(host.textContent).not.toContain("codexAuth.mainTokenExpired");
+  expect(host.textContent).not.toContain("codexAuth.mainReauthDevice");
+  // Neither the "Refresh failed" badge nor its summary describes a login that never existed.
+  expect(host.textContent).not.toContain("refreshFailed");
+  expect(host.textContent).not.toContain("refresh failed");
+  const signIn = Array.from(host.querySelectorAll("button.codex-auth-action-btn"))
+    .find(button => button.textContent?.includes("codexAuth.mainSignInDevice"));
+  expect(signIn).toBeDefined();
+  await act(async () => { (signIn as HTMLButtonElement).click(); });
+  expect(calls.starts).toBe(1);
+});
 
 test.each(["idle", "cancelled"] as const)("expired main card in %s state shows the device Re-login CTA and starts the flow", async (phase) => {
   const calls = { starts: 0, cancels: 0 };

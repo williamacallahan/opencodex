@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -330,10 +330,96 @@ describe("beginNativeMainReauth commit (#3898)", () => {
     expect(readTokens().refresh_token).toBe("foreign-writer");
   });
 
-  test("preparation without an existing credential fails fast", () => {
-    removeTreeWithRetry(home);
-    home = mkdtempSync(join(tmpdir(), "ocx-main-reauth-empty-"));
-    process.env.CODEX_HOME = home;
+  test("preparation against a CODEX_HOME that does not exist fails fast", () => {
+    process.env.CODEX_HOME = join(home, "absent");
     expect(() => beginNativeMainReauth()).toThrow(NativeMainReauthUnavailableError);
+  });
+});
+
+describe("beginNativeMainReauth first login", () => {
+  let home: string;
+  let previousCodexHome: string | undefined;
+  let authPath: string;
+
+  const firstLogin = {
+    accessToken: "new-access",
+    refreshToken: "new-refresh",
+    idToken: "new-id-token",
+    chatgptAccountId: "acct-first",
+  };
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "ocx-main-first-login-"));
+    previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = home;
+    authPath = join(home, "auth.json");
+  });
+
+  afterEach(() => {
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    removeTreeWithRetry(home);
+  });
+
+  test("a home with no login is signed in with the auth.json Codex itself writes", async () => {
+    const result = await beginNativeMainReauth().commit(firstLogin);
+    expect(result.chatgptAccountId).toBe("acct-first");
+    const written = JSON.parse(readFileSync(authPath, "utf8")) as { last_refresh: string };
+    expect(written).toMatchObject({
+      auth_mode: "chatgpt",
+      OPENAI_API_KEY: null,
+      tokens: {
+        id_token: "new-id-token",
+        access_token: "new-access",
+        refresh_token: "new-refresh",
+        account_id: "acct-first",
+      },
+    });
+    expect(Number.isNaN(Date.parse(written.last_refresh))).toBe(false);
+    if (process.platform !== "win32") expect(statSync(authPath).mode & 0o777).toBe(0o600);
+  });
+
+  test("the login it created can only be reauthenticated as the same account afterwards", async () => {
+    await beginNativeMainReauth().commit(firstLogin);
+    const before = readFileSync(authPath, "utf8");
+    await expect(beginNativeMainReauth().commit({ ...firstLogin, chatgptAccountId: "acct-someone-else" }))
+      .rejects.toThrow(NativeMainReauthIdentityMismatchError);
+    expect(readFileSync(authPath, "utf8")).toBe(before);
+  });
+
+  test("the device flow signs a home with no login in end to end", async () => {
+    const started = startMainDeviceReauth({ login: loginStub(async () => grant("acct-first")) });
+    expect(await waitForTerminal(started.flowId)).toMatchObject({ status: "succeeded", credentialUpdated: true });
+    const written = JSON.parse(readFileSync(authPath, "utf8")) as { tokens: Record<string, unknown> };
+    expect(written.tokens.account_id).toBe("acct-first");
+    expect(written.tokens.id_token).toBe("new-id-token");
+  });
+
+  test("a login written while the device page was open is kept, not replaced", async () => {
+    const prepared = beginNativeMainReauth();
+    const foreign = JSON.stringify({ tokens: { refresh_token: "foreign-writer", account_id: "acct-foreign" } });
+    writeFileSync(authPath, foreign);
+    await expect(prepared.commit(firstLogin)).rejects.toThrow(MainAuthJsonChangedDuringRefreshError);
+    expect(readFileSync(authPath, "utf8")).toBe(foreign);
+  });
+
+  test("an auth.json that holds no ChatGPT login is never replaced", () => {
+    const apiKeyLogin = JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: "placeholder" });
+    writeFileSync(authPath, apiKeyLogin);
+    expect(() => beginNativeMainReauth()).toThrow(NativeMainReauthUnavailableError);
+    expect(readFileSync(authPath, "utf8")).toBe(apiKeyLogin);
+  });
+
+  test("a dangling auth.json symlink refuses as unavailable and is left in place", () => {
+    if (process.platform === "win32") return;
+    symlinkSync(join(home, "no-such-target.json"), authPath);
+    expect(() => beginNativeMainReauth()).toThrow(NativeMainReauthUnavailableError);
+    expect(lstatSync(authPath).isSymbolicLink()).toBe(true);
+  });
+
+  test("a keyring credential store is never given a file login", () => {
+    writeFileSync(join(home, "config.toml"), 'cli_auth_credentials_store = "keyring"\n');
+    expect(() => beginNativeMainReauth()).toThrow(NativeMainReauthUnavailableError);
+    expect(existsSync(authPath)).toBe(false);
   });
 });
