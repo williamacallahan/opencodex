@@ -47,7 +47,7 @@ import { codexAuthContextLogLabel } from "../../codex/account-label";
 import { forceRefreshMainAccountToken, mainAccountTokenQuotaWriter } from "../../codex/main-account";
 import { rebindPoolCreditPolicy } from "../../codex/pool-credit-policy";
 import { safeCallerSessionId } from "../caller-session-identity";
-import { copyResponsesClientMetadata } from "../../adapters/openai-responses/transport";
+import { copyConfiguredClientHeaders, copyResponsesClientMetadata } from "../../adapters/openai-responses/transport";
 import { AgentAssertionUnsupportedError, agentAssertionUnsupportedResponse, authorizationCredential, carryAgentAssertionForCallerBearer, hasAgentAssertionAuthorization } from "../../lib/authorization-scheme";
 
 /** Normalize caller aliases only on native egress; preserve ingress and fallback identity. */
@@ -364,6 +364,10 @@ export async function resolveResponsesCodexAuth(
     // must also retain the permitted client fingerprint for its routed summarizer send.
     if (options.compactionRecoveryKind === "compaction-v1") {
       copyResponsesClientMetadata(headers, authInputHeaders, route.provider);
+    } else if (!isCanonicalOpenAiForwardProvider(route.provider)) {
+      // The same materialization drops every non-credential header, including the gateway
+      // session identity an opted-in openai-chat or openai-responses provider asked for.
+      copyConfiguredClientHeaders(headers, authInputHeaders, route.provider);
     }
     // dual_header: the assertion is first-party only and travels only beside the caller's own
     // unchanged Bearer, compared with the ORIGINAL request (injected credentials do not count).

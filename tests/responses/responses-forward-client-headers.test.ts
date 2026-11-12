@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { copyResponsesClientMetadata } from "../../src/adapters/openai-responses/transport";
 import { createOpenAIChatAdapter } from "../../src/adapters/openai-chat";
 import { createResponsesPassthroughAdapter } from "../../src/adapters/openai-responses/passthrough";
@@ -195,4 +195,64 @@ describe("openai-chat forwardClientHeaders carries the session identity to a gat
   test("validation accepts the two gateway identity headers", () => {
     expect(providerForwardClientHeadersConfigError(["x-lgw-cache-key", "x-user-id"])).toBeNull();
   });
+});
+
+describe("every route into an openai-chat gateway provider carries the session identity", () => {
+  const { handleChatCompletions } = require("../../src/server/chat-completions") as typeof import("../../src/server/chat-completions");
+  const { handleResponses } = require("../../src/server/responses") as typeof import("../../src/server/responses");
+  const { handleClaudeMessages } = require("../../src/server/claude-messages") as typeof import("../../src/server/claude-messages");
+  const { acquireOwnedSpendHome } = require("../helpers/owned-spend-home") as typeof import("../helpers/owned-spend-home");
+  const originalFetch = globalThis.fetch;
+  const { mkdtempSync } = require("node:fs") as typeof import("node:fs");
+  const { tmpdir } = require("node:os") as typeof import("node:os");
+  const { join } = require("node:path") as typeof import("node:path");
+  const { removeTreeWithRetry } = require("../helpers/remove-tree") as typeof import("../helpers/remove-tree");
+  let home: string; let previousHome: string | undefined; let release: (() => void) | undefined;
+  const config = { defaultProvider: "gw", providers: { gw: {
+    adapter: "openai-chat", authMode: "key", apiKey: "gateway-key", baseUrl: "https://gw.example.com/v1", models: ["m"],
+    forwardClientHeaders: ["x-lgw-cache-key", "x-user-id"] } } } as unknown as OcxConfig;
+  let seen: Headers[];
+  const reply = () => Response.json({ id: "c1", object: "chat.completion", created: 1, model: "m",
+    choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
+  beforeEach(() => {
+    previousHome = process.env.OPENCODEX_HOME; home = mkdtempSync(join(tmpdir(), "ocx-chat-fwd-"));
+    process.env.OPENCODEX_HOME = home; release = acquireOwnedSpendHome(); seen = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => { seen.push(new Headers(init?.headers)); return reply(); }) as typeof fetch;
+  });
+  afterEach(() => {
+    release?.(); globalThis.fetch = originalFetch;
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = previousHome;
+    removeTreeWithRetry(home);
+  });
+  const identity = { "x-lgw-cache-key": "claude-av:probe-1", "x-user-id": "claude-av:probe-1" };
+  function request(path: string, body: unknown, extra: Record<string, string> = identity): Request {
+    return new Request(`http://localhost${path}`, { method: "POST", body: JSON.stringify(body),
+      headers: { "content-type": "application/json", ...extra } });
+  }
+  function expectForwarded(): void {
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.get("x-lgw-cache-key")).toBe("claude-av:probe-1");
+    expect(seen[0]!.get("x-user-id")).toBe("claude-av:probe-1");
+  }
+  const routes: Array<[string, (extra?: Record<string, string>) => Promise<Response>]> = [
+    ["native chat passthrough", extra => handleChatCompletions(request("/v1/chat/completions",
+      { model: "gw/m", messages: [{ role: "user", content: "hi" }], stream: false }, extra), config, { model: "", provider: "" })],
+    ["responses translated to chat", extra => handleResponses(request("/v1/responses",
+      { model: "gw/m", input: "hi", stream: false }, extra), config, { model: "", provider: "" })],
+    ["messages bridged to chat", extra => handleClaudeMessages(request("/v1/messages",
+      { model: "gw/m", max_tokens: 16, messages: [{ role: "user", content: "hi" }], stream: false }, extra), config, { model: "", provider: "" })],
+    ["hybrid routed ocx-claude id", extra => handleClaudeMessages(request("/hybrid/v1/messages",
+      { model: "ocx-claude-gw--m", max_tokens: 16, messages: [{ role: "user", content: "hi" }], stream: false }, extra),
+      config, { model: "", provider: "" }, undefined, config, { hybridMessages: true })],
+  ];
+  for (const [name, send] of routes) {
+    test(`${name} forwards the launcher identity and drops a foreign one`, async () => {
+      await (await send()).text();
+      expectForwarded();
+      seen = [];
+      await (await send({ "x-user-id": "admin", "x-lgw-cache-key": "someone:else" })).text();
+      expect(seen[0]!.get("x-user-id")).toBeNull();
+    });
+  }
 });

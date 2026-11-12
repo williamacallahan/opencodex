@@ -1,4 +1,5 @@
 import { clientFacingModelLabel, clientFacingModelText } from "../lib/error-destination";
+import { GATEWAY_IDENTITY_HEADERS, forwardedClientHeaderValueAllowed } from "../lib/provider-client-headers";
 import { classifyUpstreamCondition } from "../lib/upstream-condition";
 import { CodexInstallationIdUnavailableError } from "../codex/installation-id";
 import { recordLocalFailureDetail, type FailureDetail } from "./request-log-failure-detail";
@@ -1254,6 +1255,12 @@ async function handleClaudeMessagesWithBudget(
     if (name === "authorization") continue;
     const value = req.headers.get(name);
     if (value) headers.set(name, value);
+  }
+  // The internal Responses hop rebuilds headers from an allowlist. The gateway session identity rides
+  // it so a provider that opted in can still receive it; no other provider reads these names.
+  for (const name of GATEWAY_IDENTITY_HEADERS) {
+    const value = req.headers.get(name);
+    if (value && forwardedClientHeaderValueAllowed(name, value)) headers.set(name, value);
   }
   // Routed replays need main ChatGPT auth so OpenAI-backed sidecars remain reachable;
   // native replays have no caller ChatGPT credential. This enrichment is optional:

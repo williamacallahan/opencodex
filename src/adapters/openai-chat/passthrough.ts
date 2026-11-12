@@ -1,5 +1,6 @@
 import { protectGlmSummaryBudget } from "./summary-budget";
 import { openAIChatTransport, stripBracketedModelSuffix } from "./wire";
+import { copyForwardedClientHeaders } from "../../lib/provider-client-headers";
 import type { AdapterRequest } from "../base";
 import { frameAgentRouterMessages } from "../agentrouter";
 import { applyExplicitChatDeveloperRole } from "./developer-role";
@@ -66,8 +67,10 @@ export function buildOpenAIChatPassthroughRequest(
   replayScope?: OcxReasoningReplayScopeRef,
   maxSerializedBytes = TRANSLATOR_MAX_TURN_BYTES,
   translatorBudget?: TranslatorBudget,
+  incomingHeaders?: Headers,
 ): AdapterRequest {
   const { url, headers, hasCredential } = openAIChatTransport(provider);
+  if (incomingHeaders) copyForwardedClientHeaders(provider.forwardClientHeaders, headers, incomingHeaders);
 
   const body: Record<string, unknown> = {
     model: provider.modelSuffixBracketStrip ? stripBracketedModelSuffix(modelId) : modelId,

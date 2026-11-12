@@ -13,14 +13,21 @@ import { openaiResponsesUrl } from "../openai-responses-url";
 
 export { FORWARD_HEADERS } from "../../codex/forward-transport-headers";
 
-/** Carry permitted client metadata across an internal compact handoff, never credentials. */
-export function copyResponsesClientMetadata(target: Headers, incoming: Headers, provider: OcxProviderConfig): void {
+/** Copy the provider's opted-in client metadata onto already-materialized auth headers, never credentials. */
+export function copyConfiguredClientHeaders(target: Headers, incoming: Headers, provider: OcxProviderConfig): void {
   const configured = Array.isArray(provider.forwardClientHeaders) ? provider.forwardClientHeaders.slice(0, 64) : [];
-  for (const rawName of ["user-agent", ...configured]) {
+  for (const rawName of configured) {
     const name = normalizeForwardedClientHeaderName(rawName);
     const value = name === null ? null : incoming.get(name);
     if (name !== null && value && forwardedClientHeaderValueAllowed(name, value) && !target.has(name)) target.set(name, value);
   }
+}
+
+/** Carry permitted client metadata across an internal compact handoff, never credentials. */
+export function copyResponsesClientMetadata(target: Headers, incoming: Headers, provider: OcxProviderConfig): void {
+  const userAgent = incoming.get("user-agent");
+  if (userAgent && !target.has("user-agent")) target.set("user-agent", userAgent);
+  copyConfiguredClientHeaders(target, incoming, provider);
 }
 
 /**

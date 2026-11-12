@@ -67,7 +67,7 @@ export function providerForwardClientHeadersConfigError(value: unknown): string 
 // The hub's own launchers send `<launcher>:<label>` (`claude-av:<session>`, `pi-av:<session>`,
 // `claude-code:codeAgent`). Anything else is a caller choosing its own gateway identity.
 const GATEWAY_IDENTITY_VALUE = /^(?:claude|pi)[a-z0-9-]*:[A-Za-z0-9._:-]{1,128}$/;
-const GATEWAY_IDENTITY_HEADERS = new Set(["x-lgw-cache-key", "x-user-id"]);
+export const GATEWAY_IDENTITY_HEADERS: ReadonlySet<string> = new Set(["x-lgw-cache-key", "x-user-id"]);
 
 /** Whether a caller's value may be forwarded under this header name: gateway identities need a launcher's form. */
 export function forwardedClientHeaderValueAllowed(name: string, value: string): boolean {
