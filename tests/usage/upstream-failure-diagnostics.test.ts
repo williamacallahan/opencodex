@@ -24,64 +24,84 @@ function context(): RequestLogContext {
   return { model: "fixture-model", provider: "openai" };
 }
 
-test("upstream failures record the error code and request id without the body", () => {
-  const log = context();
+function captureWarnings<T>(run: () => T): { result: T; warnings: string[] } {
   const warnings: string[] = [];
   const warn = console.warn;
   console.warn = ((line: string) => { warnings.push(String(line)); }) as typeof console.warn;
-  try {
+  try { return { result: run(), warnings }; } finally { console.warn = warn; }
+}
+
+function attemptRow(ordinal: number, provider: string, model: string, status: number) {
+  return {
+    ordinal, provider, model, adapter: "openai-responses", status, durationMs: 10,
+    sendCount: 1, recoveryKinds: [] as never[], usageStatus: "unreported" as const,
+  };
+}
+
+function finalWarnings(log: RequestLogContext, status: number, terminalStatus?: "failed" | "incomplete"): string[] {
+  return captureWarnings(() => addFinalRequestLog(
+    "req-final-1", Date.now(), log, status,
+    terminalStatus ? { terminalStatus, closeReason: "terminal" } : undefined, () => {},
+  )).warnings;
+}
+
+test("upstream failures record the error code and request id without the body", () => {
+  const log = context();
+  const { warnings } = captureWarnings(() => {
     noteUpstreamRequestId(log, new Headers({ "x-request-id": "req_abc123" }));
     inspectResponseLogJson(log, JSON.stringify({
       error: { type: "server_error", code: "server_error", message: "secret upstream body" },
     }));
     noteUpstreamRequestId(log, new Headers({ "openai-request-id": "not a token" }));
-  } finally {
-    console.warn = warn;
-  }
+  });
   expect(log.upstreamRequestId).toBe("req_abc123");
   expect(log.upstreamErrorCode).toBe("server_error");
   expect(log.upstreamErrorType).toBe("server_error");
-  expect(warnings.join("\n")).not.toContain("secret upstream body");
-  // Service logs persist: only closed-vocabulary values are printed, never an upstream request id.
-  expect(warnings.some(line => line.includes("type=server_error"))).toBe(true);
-  expect(warnings.join("\n")).not.toContain("req_abc123");
-});
-
-test("one failure payload prints exactly one attributed line", () => {
-  const log: RequestLogContext = { model: "fixture-model", provider: "openai", logicalRequestId: "lr_test_1" };
-  const warnings: string[] = [];
-  const warn = console.warn;
-  console.warn = ((line: string) => { warnings.push(String(line)); }) as typeof console.warn;
-  try {
-    noteUpstreamRequestId(log, new Headers({ "x-request-id": "req_abc123" }));
-    inspectResponseLogJson(log, JSON.stringify({
-      error: { type: "server_error", code: "server_error", message: "secret upstream body" },
-    }));
-  } finally {
-    console.warn = warn;
-  }
-  expect(warnings).toEqual([
-    "[opencodex] level=warn upstream failure request=lr_test_1 provider=openai model=fixture-model status=unknown type=server_error code=server_error",
+  // Capturing diagnostics prints nothing; the final request log owns the one warning.
+  expect(warnings).toEqual([]);
+  const lines = finalWarnings(log, 502, "failed");
+  expect(lines).toEqual([
+    "[opencodex] level=warn upstream failure request=req-final-1 attempt=0 provider=openai model=fixture-model status=502 type=server_error code=server_error final=502",
   ]);
-  expect(warnings.join("\n")).not.toContain("req_abc123");
-  expect(warnings.join("\n")).not.toContain("secret upstream body");
+  expect(lines.join("\n")).not.toContain("req_abc123");
+  expect(lines.join("\n")).not.toContain("secret upstream body");
 });
 
-test("attribution values that are not plain labels print as unknown", () => {
-  const log: RequestLogContext = { model: "has space\nnewline", provider: "openai" };
-  const warnings: string[] = [];
-  const warn = console.warn;
-  console.warn = ((line: string) => { warnings.push(String(line)); }) as typeof console.warn;
-  try {
-    inspectResponseLogJson(log, JSON.stringify({ error: { type: "server_error", code: "server_error" } }));
-  } finally {
-    console.warn = warn;
-  }
-  expect(warnings).toHaveLength(1);
-  expect(warnings[0]).toContain("model=unknown");
-  expect(warnings[0]).toContain("request=unknown");
+test("a rate limit (429) logs one line, with provider and model", () => {
+  const log = context();
+  inspectResponseLogJson(log, JSON.stringify({ type: "error", error: { type: "rate_limit_error", code: "rate_limit_exceeded" } }));
+  const lines = finalWarnings(log, 429, "failed");
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("provider=openai model=fixture-model status=429 type=rate_limit_error code=rate_limit_exceeded final=429");
 });
 
+test("each failed attempt prints one line and a successful attempt prints none", () => {
+  const log: RequestLogContext = {
+    ...context(),
+    attempts: [attemptRow(1, "prov-a", "model-a", 429), attemptRow(2, "prov-b", "model-b", 503), attemptRow(3, "prov-c", "model-c", 200)],
+  };
+  const lines = finalWarnings(log, 200);
+  expect(lines).toHaveLength(2);
+  expect(lines[0]).toContain("attempt=1 provider=prov-a model=model-a status=429");
+  expect(lines[1]).toContain("attempt=2 provider=prov-b model=model-b status=503");
+  expect(lines[1]).toContain("final=200");
+});
+
+test("a client abort (499) is not an upstream failure", () => {
+  const solo = finalWarnings(context(), 499);
+  expect(solo).toEqual([]);
+  const withAttempt: RequestLogContext = { ...context(), attempts: [attemptRow(1, "prov-a", "model-a", 499)] };
+  expect(finalWarnings(withAttempt, 499)).toEqual([]);
+});
+
+test("a credential-shaped or unsafe attribution value prints as unknown", () => {
+  const credential = ["sk", "proj", "abcdefghijklmnopqrstuvwxyz0123456789"].join("-");
+  const log: RequestLogContext = { model: credential, provider: "has space\nnewline" };
+  const lines = finalWarnings(log, 503);
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("provider=unknown model=unknown status=503");
+  expect(lines[0]).not.toContain(credential);
+});
 
 for (const shape of ["error", "last_error", "response"] as const) {
   test.each([
@@ -444,7 +464,11 @@ describe("diagnostic wiring against a swapped registry", () => {
       warnings.length = 0;
       noteUpstreamRequestId(log, new Headers({ "x-request-id": "req_later" }));
       addFinalRequestLog("wiring", Date.now(), log, httpStatusForRequestLogTerminal("failed", log), undefined, entry => { row = entry; });
-      expect(warnings.length).toBe(0);
+      // The failure line still prints, but an evicted-registry snapshot cannot vouch for any value.
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("provider=unknown model=unknown");
+      expect(warnings[0]).toContain("type=unknown code=unknown");
+      expect(warnings[0]).not.toMatch(/overloaded_error|opaque_code_value|req_later/);
       expect(log.upstreamRequestId).toBeUndefined();
       expect(row!.upstreamErrorCode).toBeUndefined();
       // A closed vocabulary does not prove an evicted credential was not also a class name.

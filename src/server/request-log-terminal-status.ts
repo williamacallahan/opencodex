@@ -19,10 +19,6 @@ export interface UpstreamErrorDiagnostics {
 }
 
 interface TerminalStatusContext extends UpstreamErrorDiagnostics {
-  /** Attribution for the one-line failure warning; each value prints only if it is a plain label. */
-  provider?: string;
-  model?: string;
-  logicalRequestId?: string;
   terminalHttpStatus?: number;
   terminalErrorCode?: typeof CYBER_POLICY_ERROR_CODE;
 }
@@ -110,22 +106,45 @@ export function noteUpstreamRequestId(logCtx: TerminalStatusContext, headers: He
 
 const ATTRIBUTION_LABEL = /^[A-Za-z0-9_.:@+/-]{1,160}$/;
 
-function attributionLabel(value: unknown): string {
-  return typeof value === "string" && ATTRIBUTION_LABEL.test(value) && redactSecretString(value) === value ? value : "unknown";
+function attributionLabel(value: unknown, snapshot: DiagnosticSources): string {
+  return typeof value === "string" && ATTRIBUTION_LABEL.test(value) && redactSecretString(value) === value
+    && diagnosticValueAllowed(value, snapshot.registry, snapshot.configured) ? value : "unknown";
 }
 
-function isFailurePayload(json: UpstreamErrorPayload): boolean {
-  return json.type === "error" || json.type === "response.failed"
-    || json.error !== undefined || json.last_error !== undefined || json.response?.error !== undefined;
-}
+interface DiagnosticSources { registry: OutboundCredentialRegistry; configured: ConfiguredCredentials }
 
-/** One line per failure payload, after type and code are captured. Prints no upstream request id or body. */
-function warnUpstreamFailure(logCtx: TerminalStatusContext): void {
-  const status = logCtx.terminalHttpStatus;
-  if (status !== undefined && status < 500) return;
-  const { upstreamErrorCode: rawCode, upstreamErrorType: type } = upstreamDiagnosticLogFields(logCtx);
-  const code = rawCode !== undefined && KNOWN_BARE_ERROR_CODES.has(rawCode) ? rawCode : undefined;
-  console.warn(`[opencodex] level=warn upstream failure request=${attributionLabel(logCtx.logicalRequestId)} provider=${attributionLabel(logCtx.provider)} model=${attributionLabel(logCtx.model)} status=${status ?? "unknown"} type=${type ?? "unknown"} code=${code ?? "unknown"}`);
+export interface FailedAttemptView { ordinal: number; provider: string; model: string; status: number }
+
+/**
+ * One warning per failed attempt, written by the final request log owner so every transport
+ * reaches it. A client abort (499) is not an upstream failure. Prints no upstream request id,
+ * body, or credential: type and code come from closed vocabularies, labels pass the credential check.
+ */
+export function warnUpstreamFailures(input: {
+  requestId: string;
+  finalStatus: number;
+  terminalStatus?: string;
+  provider: string;
+  model: string;
+  attempts: readonly FailedAttemptView[] | undefined;
+  diagnostics: UpstreamErrorDiagnostics;
+}): void {
+  const terminalFailed = input.terminalStatus === "failed" || input.terminalStatus === "incomplete";
+  if (input.finalStatus === 499) return;
+  const snapshot: DiagnosticSources = { registry: outboundCredentials(), configured: configuredCredentials() };
+  const attempts = input.attempts?.length
+    ? input.attempts
+    : [{ ordinal: 0, provider: input.provider, model: input.model, status: input.finalStatus }];
+  const lastIndex = attempts.length - 1;
+  attempts.forEach((attempt, index) => {
+    const failed = attempt.status >= 400 || (index === lastIndex && terminalFailed);
+    if (!failed || attempt.status === 499) return;
+    // Captured diagnostics describe the terminal, which belongs to the last attempt.
+    const { upstreamErrorCode: rawCode, upstreamErrorType: type } = index === lastIndex
+      ? upstreamDiagnosticLogFields(input.diagnostics) : {};
+    const code = rawCode !== undefined && KNOWN_BARE_ERROR_CODES.has(rawCode) ? rawCode : undefined;
+    console.warn(`[opencodex] level=warn upstream failure request=${attributionLabel(input.requestId, snapshot)} attempt=${attempt.ordinal} provider=${attributionLabel(attempt.provider, snapshot)} model=${attributionLabel(attempt.model, snapshot)} status=${attempt.status >= 100 ? attempt.status : "unknown"} type=${type ?? "unknown"} code=${code ?? "unknown"} final=${input.finalStatus}`);
+  });
 }
 
 export function captureUpstreamTerminalDiagnostics(logCtx: TerminalStatusContext, json: UpstreamErrorPayload): void {
@@ -136,7 +155,6 @@ export function captureUpstreamTerminalDiagnostics(logCtx: TerminalStatusContext
       ?? (typeof json.code === "string" && KNOWN_BARE_ERROR_CODES.has(json.code) ? json.code : undefined));
   noteBoundedDiagnostic(logCtx, "upstreamErrorType",
     json.error?.type ?? json.last_error?.type ?? json.response?.error?.type);
-  if (isFailurePayload(json)) warnUpstreamFailure(logCtx);
 }
 
 export function upstreamDiagnosticLogFields(logCtx: UpstreamErrorDiagnostics): UpstreamErrorDiagnostics {

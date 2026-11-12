@@ -4,7 +4,7 @@ import { stampApiKeyAccountLabel, usesApiKeyAccount } from "../providers/label";
 import { KEY_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
 import { attemptAccountChanged, sealRequestAttemptIdentity } from "./request-log-account-rotation";
 export { sealRequestAttemptIdentity };
-import { captureUpstreamTerminalDiagnostics, upstreamDiagnosticLogFields, upstreamDiagnosticLogProjection, type UpstreamErrorDiagnostics, type UpstreamErrorPayload } from "./request-log-terminal-status";
+import { captureUpstreamTerminalDiagnostics, warnUpstreamFailures, upstreamDiagnosticLogFields, upstreamDiagnosticLogProjection, type UpstreamErrorDiagnostics, type UpstreamErrorPayload } from "./request-log-terminal-status";
 export { noteUpstreamRequestId } from "./request-log-terminal-status";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 import { ServerShutdownError } from "../lib/abort";
@@ -1513,6 +1513,11 @@ function writeFinalRequestLog(
     // it was written.
     ...(attempt.deliverySummary ? { deliverySummary: { ...attempt.deliverySummary } } : {}),
   }));
+  warnUpstreamFailures({
+    requestId, finalStatus: effectiveStatus, provider: logCtx.provider, model: logCtx.model,
+    ...(meta?.terminalStatus ? { terminalStatus: meta.terminalStatus } : {}),
+    attempts, diagnostics: logCtx,
+  });
   const isCombo = logCtx.comboId !== undefined && (attempts?.length ?? 0) > 0;
   // A key or account rotation splits the attempt and clears `logCtx.usage`, so a multi-attempt
   // request totals from its attempts, combo or not. One attempt keeps the request-level usage
