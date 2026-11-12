@@ -5,7 +5,7 @@ import { capturePoolQuotaWriter, getValidCodexToken, isCodexAccountGenerationLiv
 import type { PoolQuotaWriter } from "../quota-types";
 import { isValidWhamHistoryObservation, getAccountQuota, isCodexQuotaExhausted, isCompleteCodexQuotaRecoverySnapshot, parseUsageQuota, poolWhamPolicyObservation, setAccountQuotaFromParsed } from "../quota";
 import type { StoredAccountQuota, WhamUsageResponse } from "../quota";
-import { codexQuotaProbeIntervalMs } from "../routing/cooldown-math";
+import { CODEX_EXHAUSTED_QUOTA_PROBE_INTERVAL_MS, codexQuotaProbeIntervalMs } from "../routing/cooldown-math";
 import type { ManualResetRefreshLineage } from "../routing";
 import { clearAccountNeedsReauth, markAccountNeedsReauth } from "../account-runtime-state";
 import { captureConfigGeneration } from "../../lib/state-store-sweeper";
@@ -17,7 +17,7 @@ import { claimQuotaRecovery, fencePropagatedQuotaRecovery, quotaRecoveryTerminal
 import { seedLoginRowsForTests } from "./login-state";
 import { nonEmptyPlan } from "./runtime-config";
 import { CODEX_TERMINAL_AUTH_CODES } from "../quota-refresh-outcome";
-import { withPoolReserveQuota } from "../pool-reserve";
+import { holdsPoolReserveWindow, withPoolReserveQuota } from "../pool-reserve";
 
 export const POOL_CACHE_TTL = 5 * 60_000;
 
@@ -36,6 +36,19 @@ function notePoolQuotaAttempt(accountId: string, at: number): void {
 }
 
 /**
+ * The exhausted-seat hold: 15 minutes while every exhausted window has a known future reset,
+ * 0 otherwise. A seat holding a Luna Reserve window never holds, because its Reserve evidence
+ * expires after POOL_RESERVE_FRESHNESS_MS (15 minutes) and must be re-read on the ordinary cadence.
+ */
+export function poolExhaustedHoldMs(
+  accountId: string, quota: StoredAccountQuota, now: number, readAt: number = quota.updatedAt,
+): number {
+  if (!isCodexQuotaExhausted(quota) || holdsPoolReserveWindow(accountId)) return 0;
+  const interval = codexQuotaProbeIntervalMs(quota, now, undefined, readAt);
+  return interval === CODEX_EXHAUSTED_QUOTA_PROBE_INTERVAL_MS ? interval : 0;
+}
+
+/**
  * Whether the stored reading still answers a passive read. Exhausted accounts with a future
  * reset hold for 15 minutes; a reset that passed after the last attempt is due once, and an
  * attempt at or after it (even a failed one) restores the ordinary 5 minute hold.
@@ -43,14 +56,13 @@ function notePoolQuotaAttempt(accountId: string, at: number): void {
 function poolQuotaReadHeld(accountId: string, quota: StoredAccountQuota, now: number): boolean {
   const attemptAt = poolQuotaAttemptAt.get(accountId);
   const readAt = Math.max(quota.updatedAt, attemptAt ?? 0);
-  const interval = codexQuotaProbeIntervalMs(quota, now, undefined, readAt);
-  if (interval === 0) return false;
-  return now - quota.updatedAt < Math.max(POOL_CACHE_TTL, interval)
+  if (codexQuotaProbeIntervalMs(quota, now, undefined, readAt) === 0) return false;
+  return now - quota.updatedAt < Math.max(POOL_CACHE_TTL, poolExhaustedHoldMs(accountId, quota, now, readAt))
     || (attemptAt !== undefined && attemptAt > quota.updatedAt && isCodexQuotaExhausted(quota)
       && now - attemptAt < POOL_CACHE_TTL);
 }
 
-/** Recovery sweeps use this to honor the exhausted interval instead of forcing a read. */
+/** Recovery sweeps and the quota-refresh route use this to honor the exhausted interval instead of forcing a read. */
 export function isExhaustedPoolQuotaReadHeld(accountId: string, now: number): boolean {
   const quota = getAccountQuota(accountId);
   return !!quota && isCodexQuotaExhausted(quota) && poolQuotaReadHeld(accountId, quota, now);

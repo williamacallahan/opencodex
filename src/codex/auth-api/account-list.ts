@@ -31,7 +31,7 @@ import type { AdmissionLease } from "../../lib/admission";
 import { tryAcquireNativeMainProfileClaim } from "../native-main-admission";
 import { withNativeMainCredentialClaim, isNativeMainClaimUnavailable, isNativeMainObservationUnavailable } from "./http";
 import { fetchMainAccountInfoAttempt, EMPTY_MAIN_ACCOUNT_INFO, mainResetCreditsForCurrentIdentity } from "./main-account-probe";
-import { fetchPoolAccountQuota, PoolQuotaProbeBusyError, POOL_QUOTA_REFRESH_CONCURRENCY } from "./pool-quota-probe";
+import { fetchPoolAccountQuota, isExhaustedPoolQuotaReadHeld, PoolQuotaProbeBusyError, POOL_QUOTA_REFRESH_CONCURRENCY } from "./pool-quota-probe";
 import type { PoolQuotaResult } from "./pool-quota-probe";
 import { getRuntimeConfig, configuredPoolAccount, mapWithConcurrency } from "./runtime-config";
 import { isPassiveRead } from "../../lib/passive-read";
@@ -301,6 +301,8 @@ export interface CodexAuthAccountsListOptions {
   validatePending?: boolean;
   /** An operator's explicit refresh command, which may retry a grant already recorded as dead. */
   explicitRefresh?: boolean;
+  /** A forced listing still answers an exhausted seat inside its read hold from the stored reading. */
+  holdExhausted?: boolean;
 }
 
 export interface CodexAuthAccountsSnapshot {
@@ -346,7 +348,8 @@ export async function listCodexAuthAccountsSnapshot(
         // identity when the switch is on and nothing has been observed yet.
         const creditsIdentity = runtimeConfig.showCodexCredits === true ? poolQuotaHistoryIdentity(account.id) ?? null : null;
         const creditsUnobserved = creditsIdentity !== null && !hasCodexCreditsObservation(account.id, creditsIdentity);
-        quotaResult = await fetchPoolAccountQuota(account.id, forceRefresh || creditsUnobserved, account.plan, getValidCodexToken,
+        const held = options.holdExhausted === true && isExhaustedPoolQuotaReadHeld(account.id, Date.now());
+        quotaResult = await fetchPoolAccountQuota(account.id, (forceRefresh && !held) || creditsUnobserved, account.plan, getValidCodexToken,
           options.validatePending === true, undefined, undefined, options.explicitRefresh === true);
       } catch (error) {
         if (!(error instanceof PoolQuotaProbeBusyError)) throw error;
