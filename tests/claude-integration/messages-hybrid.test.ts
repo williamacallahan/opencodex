@@ -283,6 +283,20 @@ describe("hybrid Messages public HTTP transport", () => {
       });
     }
 
+    test(`${endpoint} refuses duplicate top-level keys so routing and forwarding cannot read different models`, async () => {
+      await launch();
+      for (const body of [
+        raw.replace('"model":"claude-sonnet-4-5",', `"model":"${routedModel}", "model":"${nativeModel}",`),
+        raw.replace('"model":"claude-sonnet-4-5",', `"model":"${nativeModel}", "mo\\u0064el":"${routedModel}",`),
+      ]) {
+        const response = await post(`/hybrid/v1/${endpoint}`, encode(body));
+        expect(response.status).toBe(400);
+        expect((await response.json()).error.message).toContain("duplicate top-level key");
+      }
+      expect(nativeCalls).toHaveLength(0);
+      expect(bridgeCalls).toHaveLength(0);
+    });
+
     for (const encoding of [undefined, "unsupported-fixture"]) {
       test(`${endpoint} reports an invalid body (encoding=${encoding})`, async () => {
         await launch();

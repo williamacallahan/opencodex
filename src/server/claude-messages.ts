@@ -77,7 +77,7 @@ import { captureRouteStaticPolicy, NoEligiblePolicyCandidateError, previewRouteM
 import { evidenceFromBody } from "../routing/request-evidence";
 import { resolveWireProtocolOverride } from "./adapter-resolve";
 import type { OcxConfig } from "../types";
-import { readJsonRequestBody, readBoundedJsonRequestBody, resolveInboundBodyLimitBytes, DecompressedBodyTooLargeError } from "./request-decompress";
+import { readJsonRequestBody, readBoundedJsonRequestBody, resolveInboundBodyLimitBytes, DecompressedBodyTooLargeError, DuplicateJsonKeyError } from "./request-decompress";
 import { withCallerSessionIdentity } from "./caller-session-identity";
 import { addFinalRequestLog, httpStatusForRequestLogTerminal, nextRequestLogId, recordFirstOutput, type RequestLogContext } from "./request-log";
 import { admissionFields } from "./auth-cors";
@@ -648,6 +648,7 @@ async function handleClaudeMessagesWithBudget(
     try {
       const body = await readBoundedJsonRequestBody(req, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes), translatorBudget, {
         retainWire(bytes) { translatorBudget.chargeRetained(bytes.byteLength, { kind: "request_copies" }); wire = bytes; },
+        rejectDuplicateTopLevelKeys: true,
       });
       if (!isRec(body) || typeof body.model !== "string" || !body.model || !wire) throw new AnthropicRequestError("model is required");
       const model = body.model;
@@ -664,6 +665,7 @@ async function handleClaudeMessagesWithBudget(
       }
       hybridBody = body;
     } catch (error) {
+      if (error instanceof DuplicateJsonKeyError) hybridRefusalMessage = `Hybrid Messages body is invalid: ${error.message}`;
       if (req.signal.aborted) {
         if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 499, { closeReason: "client_cancel" });
         const response = anthropicErrorResponse(499, "Client cancelled request", "api_error");

@@ -289,6 +289,39 @@ export function decodeRequestBody(
   return assertBodySizeWithinLimit(decoded, maxBytes);
 }
 
+/** A body whose top-level object repeats a key: parsers disagree on which value wins. */
+export class DuplicateJsonKeyError extends Error {
+  constructor(readonly key: string) {
+    super(`duplicate top-level key "${key.slice(0, 80)}"`);
+    this.name = "DuplicateJsonKeyError";
+  }
+}
+
+/** Throws on the first repeated key of the top-level object (escapes decoded). One linear pass. */
+function assertNoDuplicateTopLevelKey(text: string): void {
+  const seen = new Set<string>();
+  let depth = 0;
+  let expectKey = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (ch === '"') {
+      let end = i + 1;
+      while (end < text.length && text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
+      if (depth === 1 && expectKey) {
+        const key = JSON.parse(text.slice(i, end + 1)) as string;
+        if (seen.has(key)) throw new DuplicateJsonKeyError(key);
+        seen.add(key);
+        expectKey = false;
+      }
+      i = end;
+    } else if (ch === "{" || ch === "[") {
+      depth++;
+      expectKey = depth === 1 && ch === "{";
+    } else if (ch === "}" || ch === "]") depth--;
+    else if (ch === "," && depth === 1) expectKey = true;
+  }
+}
+
 /**
  * Parse a bounded JSON request body, transparently decoding compressed payloads.
  *
@@ -300,7 +333,11 @@ export async function readBoundedJsonRequestBody(
   req: Request,
   maxBytes: number,
   budget?: TranslatorBudget,
-  options?: { emptyBodyFallback?: unknown; signal?: AbortSignal; retainWire?: (bytes: Uint8Array) => void },
+  options?: {
+    emptyBodyFallback?: unknown; signal?: AbortSignal; retainWire?: (bytes: Uint8Array) => void;
+    /** Refuse a repeated top-level key, for callers that route on the parsed value but forward the raw bytes. */
+    rejectDuplicateTopLevelKeys?: boolean;
+  },
 ): Promise<unknown> {
   const encoding = req.headers.get("content-encoding");
   const declaredLength = declaredBodyLength(req);
@@ -335,6 +372,7 @@ export async function readBoundedJsonRequestBody(
       return options.emptyBodyFallback;
     }
     const parsed = JSON.parse(text);
+    if (options?.rejectDuplicateTopLevelKeys) assertNoDuplicateTopLevelKey(text);
     // Keep the serialized-size contract: normalization can expand numeric literals. The
     // measurement walks iteratively, so a deeply nested valid body cannot overflow the stack.
     const parsedBytes = serializedJsonByteLength(parsed);
