@@ -74,7 +74,7 @@ test("upstream failures record the error code and request id without the body", 
   expect(warnings).toEqual([]);
   const lines = finalWarnings(log, 502, "failed");
   expect(lines).toEqual([
-    "[opencodex] level=warn upstream failure request=req-final-1 attempt=0 provider=openai model=fixture-model status=502 type=server_error code=server_error final=502",
+    "[opencodex] level=warn upstream failure request=req-final-1 attempt=0 provider=openai model=fixture-model status=502 type=server_error code=server_error cause=upstream-fault final=502",
   ]);
   expect(lines.join("\n")).not.toContain("req_abc123");
   expect(lines.join("\n")).not.toContain("secret upstream body");
@@ -85,7 +85,32 @@ test("a rate limit (429) logs one line, with provider and model", () => {
   inspectResponseLogJson(log, JSON.stringify({ type: "error", error: { type: "rate_limit_error", code: "rate_limit_exceeded" } }));
   const lines = finalWarnings(log, 429, "failed");
   expect(lines).toHaveLength(1);
-  expect(lines[0]).toContain("provider=openai model=fixture-model status=429 type=rate_limit_error code=rate_limit_exceeded final=429");
+  expect(lines[0]).toContain("provider=openai model=fixture-model status=429 type=rate_limit_error code=rate_limit_exceeded cause=rate-limit final=429");
+});
+
+test("a failure whose upstream code is outside the known set still names the hub's cause", () => {
+  // Production 2026-11-12: codex-lb answered 429 usage_limit_reached, and the line said only
+  // type=unknown code=unknown. The hub's own attribution is a closed set and needs no upstream text.
+  // The final attribution stamps the active attempt, which is the last one the request made.
+  const last = attemptRow(3, "prov-c", "model-c", 502);
+  const log: RequestLogContext = {
+    ...context(),
+    attempts: [
+      { ...attemptRow(1, "prov-a", "model-a", 429), failureCause: "rate-limit" as const },
+      { ...attemptRow(2, "prov-b", "model-b", 503), failureCause: "not-a-cause" as never },
+      last,
+    ],
+    activeAttempt: last,
+  };
+  inspectResponseLogJson(log, JSON.stringify({ error: { code: "usage_limit_reached", message: "secret upstream body" } }));
+  const lines = finalWarnings(log, 502, "failed");
+  expect(lines).toHaveLength(3);
+  expect(lines[0]).toContain("attempt=1 provider=prov-a model=model-a status=429 type=unknown code=unknown cause=rate-limit final=502");
+  // A value outside REQUEST_FAILURE_CAUSES is never printed.
+  expect(lines[1]).toContain("attempt=2 provider=prov-b model=model-b status=503 type=unknown code=unknown cause=unknown final=502");
+  // The last attempt carries the cause the final attribution stamped on it.
+  expect(lines[2]).toContain("attempt=3 provider=prov-c model=model-c status=502 type=unknown code=unknown cause=upstream-fault final=502");
+  expect(lines.join("\n")).not.toMatch(/usage_limit_reached|secret upstream body/);
 });
 
 test("each failed attempt prints one line and a successful attempt prints none", () => {
