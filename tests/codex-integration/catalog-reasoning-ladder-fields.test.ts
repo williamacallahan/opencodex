@@ -32,11 +32,26 @@ describe("models-API reasoning ladder fields", () => {
     })).toMatchObject({ reasoningEfforts: ["low", "high", "max"], defaultReasoningEffort: "high" });
   });
 
-  test("keeps none from a gateway ladder", () => {
+  test("leaves none and minimal out of a published ladder", () => {
     expect(catalogHintsFromModelsApiItem("gateway", {
       id: "deepseek/deepseek-v4.1-flash",
       capabilities: { reasoning: { effort_levels: ["none", "low", "high", "max"], default_effort: "high" } },
-    })).toMatchObject({ reasoningEfforts: ["none", "low", "high", "max"], defaultReasoningEffort: "high" });
+    })).toMatchObject({ reasoningEfforts: ["low", "high", "max"], defaultReasoningEffort: "high" });
+    expect(catalogHintsFromModelsApiItem("gateway", {
+      id: "muse-spark",
+      capabilities: { reasoning: { effort_levels: ["minimal", "low", "medium", "high", "xhigh"], default_effort: "minimal" } },
+    })).toEqual(expect.objectContaining({ reasoningEfforts: ["low", "medium", "high", "xhigh"] }));
+    expect(catalogHintsFromModelsApiItem("gateway", {
+      id: "muse-spark",
+      capabilities: { reasoning: { effort_levels: ["minimal", "low", "medium", "high", "xhigh"], default_effort: "minimal" } },
+    })).not.toHaveProperty("defaultReasoningEffort");
+  });
+
+  test("treats a ladder of only none and minimal as absent", () => {
+    expect(catalogHintsFromModelsApiItem("gateway", {
+      id: "sentinel-only-model",
+      capabilities: { reasoning: { effort_levels: ["none", "minimal"] } },
+    })).not.toHaveProperty("reasoningEfforts");
   });
 
   test("treats an empty gateway ladder as absent", () => {

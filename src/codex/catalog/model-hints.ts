@@ -830,12 +830,16 @@ export function catalogHintsFromModelsApiItem(providerName: string, item: Provid
   // resolves keeps its ladder. A list with no usable rung leaves the ladder unknown rather than
   // empty: an alias spanning several providers can publish `[]` and still accept an effort, and a
   // declared-empty ladder would strip the effort from every request to it.
+  // `none` and `minimal` are left out: a ladder read here reaches the catalogs but not the request
+  // path, which without a stored effort map sends no effort for `none` and `low` for `minimal`, so
+  // publishing either would offer a level the route then silently replaces.
   const capabilityReasoning = plainRecord(capabilityRecord?.reasoning);
   const topLevelReasoning = plainRecord(plainRecord(item.capabilities)?.reasoning);
   const publishedReasoningEfforts = rawReasoningEfforts === null || rawReasoningEfforts === undefined
     ? [metadata?.supported_reasoning_levels, capabilityReasoning?.effort_levels, topLevelReasoning?.effort_levels]
       .map(levels => Array.isArray(levels)
         ? sanitizeCodexReasoningEfforts(normalizedStringList(levels.map(level => typeof level === "string" ? level : plainRecord(level)?.effort), 8, 24))
+          ?.filter(level => level !== "none" && level !== "minimal")
         : undefined)
       .find(levels => levels !== undefined && levels.length > 0)
     : undefined;
