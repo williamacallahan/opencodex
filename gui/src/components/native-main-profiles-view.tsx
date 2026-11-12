@@ -45,6 +45,10 @@ export function NativeMainProfilesView({
   const disabled = busy || blocked;
   const mutationDisabled = disabled || refreshFailed;
   const unavailable = s ? nativeMainUnavailableCode(s) : null;
+  // Two states no control in this panel can leave: nothing to save, or nowhere to keep it. They
+  // get a sentence instead of a diagnostic code, and no save form that could never be enabled.
+  const plainUnavailable = unavailable === "AUTH_MISSING" ? "nativeMain.signInFirst"
+    : unavailable === "KEYRING_UNAVAILABLE" ? "nativeMain.noKeyStore" : null;
   const profiles = s?.list?.profiles ?? [];
   const active = profiles.find(item => item.id === s?.doctor.activeProfileId);
   const previous = profiles.find(item => item.id === previousId && item.state === "inactive");
@@ -81,7 +85,7 @@ export function NativeMainProfilesView({
       <button type="button" className="btn btn-sm btn-ghost" onClick={onRefresh} disabled={disabled || !!action}>{t("nativeMain.refresh")}</button>
       {s && !s.doctor.supported && <p role="alert">{t("nativeMain.unsupported")}</p>}
       {unavailable && s?.doctor.supported && !s.doctor.recoveryPending && <p role="status">
-        {t("nativeMain.unavailable")} <code>{unavailable}</code>
+        {plainUnavailable ? t(plainUnavailable) : <>{t("nativeMain.unavailable")} <code>{unavailable}</code></>}
       </p>}
       {s?.doctor.recoveryPending && <div className="notice notice-warn">
         <p>{t("nativeMain.recoveryHint")}</p>
@@ -93,7 +97,7 @@ export function NativeMainProfilesView({
         </div>
       </div>}
       {s?.list && <>
-        {profiles.length === 0 && <p>{t("nativeMain.empty")}</p>}
+        {profiles.length === 0 && !plainUnavailable && <p>{t("nativeMain.empty")}</p>}
         <ul style={{ listStyle: "none", padding: 0 }}>
           {profiles.map(item => <li key={item.id} className="row" style={{ padding: "8px 0", flexWrap: "wrap" }}>
             <strong style={{ overflowWrap: "anywhere", minWidth: 0 }}>{item.label}</strong> <code style={{ overflowWrap: "anywhere", minWidth: 0 }}>{item.identityHint}</code>
@@ -111,7 +115,7 @@ export function NativeMainProfilesView({
           </button>
           <p className="card-sub">{t("nativeMain.restoreHint")}</p>
         </>}
-        <form onSubmit={event => { event.preventDefault(); onRegister(); }}>
+        {!plainUnavailable && <form onSubmit={event => { event.preventDefault(); onRegister(); }}>
           <label htmlFor={`${id}-label`}>{t("nativeMain.label")}</label>
           <div className="row" style={{ flexWrap: "wrap" }}>
             <input id={`${id}-label`} className="input min-w-0 flex-[1_1_14rem]" value={label} onChange={event => onLabel(event.target.value)}
@@ -121,7 +125,7 @@ export function NativeMainProfilesView({
             </button>
           </div>
           <p className="card-sub">{t("nativeMain.saveHint")}</p>
-        </form>
+        </form>}
       </>}
       {action && s && <div ref={confirmationRef} role="group" tabIndex={-1} aria-labelledby={`${id}-confirm-title`}
         className="notice notice-warn" style={{ marginTop: 12, display: "block" }}

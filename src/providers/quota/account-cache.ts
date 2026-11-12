@@ -6,12 +6,13 @@ import { anthropicModelQuotaFor, ANTHROPIC_PASSIVE_FAMILY_MAX_AGE_MS } from "../
 import { createHash } from "node:crypto";
 import { getValidAccessTokenForAccount } from "../../oauth";
 import { credentialGeneration, getAccountCredential, getAccountCredentialWithStatus, getAccountSet } from "../../oauth/store";
+import { subscribeOAuthCredentialRotations } from "../../lib/account-selection-events";
 import { isAnthropicInstanceId, type AnthropicInstanceId } from "../anthropic-instance-id";
 import type { GenerationContext } from "../../lib/state-store-sweeper";
 import { ACCOUNT_QUOTA_TTL_MS, toFiniteNumber } from "../quota-wire";
 import { clearKiroAccountUsageState, hydrateKiroUsageVerdict, kiroPersistableVerdicts, reconcileKiroAccountUsageState } from "../kiro-usage";
 import { kiroEvidenceIdentity, sanitizeKiroQuota, type KiroPersistedQuota } from "../kiro-account-state-disk";
-import { cancelPendingAccountQuotaPersist, readPersistedAccountQuotas, readPersistedKiroVerdicts, schedulePersistAccountQuotas } from "../account-quota-disk";
+import { type AnthropicPersistedQuota, cancelPendingAccountQuotaPersist, readPersistedAccountQuotas, readPersistedKiroVerdicts, schedulePersistAccountQuotas } from "../account-quota-disk";
 import type { ProviderAccount } from "../../oauth/types";
 import { replaceCachedProviderQuotas } from "../quota-routing-cache";
 import { getProviderRegistryEntry } from "../registry";
@@ -40,7 +41,7 @@ export type AccountQuotaCacheEntry = {
   quotaFailureIsCurrent?: () => boolean;
   /** Private new-reader identity; never persisted or serialized. */
   identity?: string;
-  /** Private passive Anthropic ownership fence; not serialized with quota bars. */
+  /** Private Anthropic ownership fence; persisted separately from public quota bars. */
   anthropicCredentialGeneration?: string;
   isCurrent?: () => boolean;
 };
@@ -137,8 +138,8 @@ export function captureProviderAccountQuotaEpoch(provider: string): number {
  *
  * Without this a restart forgets every measurement, so the pool opens its next turn with
  * no idea which account has room — the exact blindness pre-dispatch selection exists to
- * remove. A hydrated row is still subject to the ordinary TTL, so it orders the first
- * request and is replaced by a live probe immediately after.
+ * remove. Matching Anthropic ownership can order the first request, but its probe clock
+ * starts at zero. Legacy unbound observations remain historical until a live observation.
  */
 let diskHydrated = false;
 export function hydrateAccountQuotaCache(): void {
@@ -161,10 +162,12 @@ export function hydrateAccountQuotaCache(): void {
     // Disk stores observation time, not the Anthropic usage probe's clock.
     if (!accountQuotaCache.has(key)) {
       const anthropic = isAnthropicAccountCacheKey(key);
+      const { anthropicCredentialGeneration, ...bars } = quota as AnthropicPersistedQuota;
       accountQuotaCache.set(key, {
         ts: anthropic ? 0 : quota.updatedAt,
-        quota: anthropic ? normalizeAnthropicQuota(quota, now)
+        quota: anthropic ? normalizeAnthropicQuota(bars, now)
           : key.startsWith("kiro\0") ? sanitizeKiroQuota(quota) : quota,
+        ...(anthropic ? { anthropicCredentialGeneration } : {}),
         ...(key.startsWith("kiro\0") ? { identity: (quota as KiroPersistedQuota).identity } : {}),
       });
     }
@@ -186,6 +189,11 @@ export function persistAccountQuotaCache(): void {
         const account = liveKiro.get(key);
         if (account && entry.identity === kiroEvidenceIdentity(account))
           yield [key, { ...sanitizeKiroQuota(quota), identity: entry.identity } as KiroPersistedQuota] as [string, KiroPersistedQuota];
+      } else if (quota && isAnthropicAccountCacheKey(key)) {
+        const separator = key.indexOf("\0");
+        const instance = key.slice(0, separator) as AnthropicInstanceId;
+        if (entry.anthropicCredentialGeneration && anthropicQuotaEntryIsCurrent(instance, key.slice(separator + 1), entry))
+          yield [key, { ...quota, anthropicCredentialGeneration: entry.anthropicCredentialGeneration }] as [string, AnthropicPersistedQuota];
       } else if (quota) yield [key, quota] as [string, ProviderQuota];
     }
   }, () => kiroPersistableVerdicts());
@@ -236,17 +244,49 @@ export function accountCacheKey(provider: string, accountId: string): string {
  * Synchronous last-good per-account quota read for routing. Never probes the network.
  * Returns null when nothing is cached (or the cached row has no bars).
  */
+/** Whether an Anthropic row still belongs to the account's current credential and flight. */
+export function anthropicQuotaEntryIsCurrent(
+  instance: AnthropicInstanceId, accountId: string, entry: AccountQuotaCacheEntry | undefined,
+): boolean {
+  // Only live flight ownership or persisted matching credential ownership can authorize bars.
+  if (!entry || (!entry.anthropicCredentialGeneration && !entry.isCurrent)) return false;
+  if (entry.anthropicCredentialGeneration) {
+    const credential = getAccountCredential(instance, accountId);
+    if (!credential || credentialGeneration(credential) !== entry.anthropicCredentialGeneration) return false;
+  }
+  return !(entry?.isCurrent && !entry.isCurrent());
+}
+
+/**
+ * A refresh rotates the access token and expiry, so the generation digest changes on every
+ * refresh. Usage belongs to the login, not the bearer: a reading that was current for the
+ * replaced credential moves to the new generation instead of leaving the account unmeasured
+ * (and eligible past its threshold) until the next probe. Login replacements and re-auth do not
+ * publish a rotation, so their old readings stay historical. Currency is judged before the store
+ * changes; the flight fence is then dropped, as for header observations, because it names the
+ * replaced generation.
+ */
+subscribeOAuthCredentialRotations(({ provider, accountId, previousGeneration, nextGeneration }) => {
+  if (!isAnthropicInstanceId(provider)) return;
+  hydrateAccountQuotaCache();
+  const key = accountCacheKey(provider, accountId);
+  const entry = accountQuotaCache.get(key);
+  if (entry?.anthropicCredentialGeneration !== previousGeneration || !anthropicQuotaEntryIsCurrent(provider, accountId, entry)) return;
+  return () => {
+    if (accountQuotaCache.get(key) !== entry) return;
+    accountQuotaCache.set(key, { ...entry, anthropicCredentialGeneration: nextGeneration, isCurrent: undefined });
+    persistAccountQuotaCache();
+  };
+});
+
 export function getCachedProviderAccountQuota(provider: string, accountId: string): ProviderQuota | null {
   const entry = accountQuotaCache.get(accountCacheKey(provider, accountId));
   if (provider === "kiro") {
     const account = getAccountSet("kiro")?.accounts.find(row => row.id === accountId);
     if (!account || entry?.identity !== kiroEvidenceIdentity(account)) return null;
   }
-  if (isAnthropicInstanceId(provider) && entry?.anthropicCredentialGeneration) {
-    const credential = getAccountCredential(provider, accountId);
-    if (!credential || credentialGeneration(credential) !== entry.anthropicCredentialGeneration) return null;
-  }
-  if (entry?.isCurrent && !entry.isCurrent()) return null;
+  if (isAnthropicInstanceId(provider) ? !anthropicQuotaEntryIsCurrent(provider, accountId, entry)
+    : entry?.isCurrent && !entry.isCurrent()) return null;
   return isAnthropicInstanceId(provider) ? normalizeAnthropicQuota(entry?.quota, Date.now()) : entry?.quota ?? null;
 }
 
@@ -262,7 +302,10 @@ export function setCachedProviderAccountQuotaForTests(
     return;
   }
   const account = provider === "kiro" ? getAccountSet("kiro")?.accounts.find(row => row.id === accountId) : undefined;
+  const credential = isAnthropicInstanceId(provider) ? getAccountCredential(provider, accountId) : undefined;
   accountQuotaCache.set(key, { ts: Date.now(), quota,
+    ...(isAnthropicInstanceId(provider) ? { isCurrent: () => true } : {}),
+    ...(credential ? { anthropicCredentialGeneration: credentialGeneration(credential) } : {}),
     ...(account ? { identity: kiroEvidenceIdentity(account) } : {}) });
 }
 
@@ -327,8 +370,7 @@ export function recordAnthropicAccountQuotaFromHeadersForInstance(
   const candidate = accountQuotaCache.get(key);
   const credential = getAccountCredential(instance, accountId);
   const generation = credential && credentialGeneration(credential);
-  const previous = candidate?.isCurrent?.() === false
-    || candidate?.anthropicCredentialGeneration && candidate.anthropicCredentialGeneration !== generation ? undefined : candidate;
+  const previous = anthropicQuotaEntryIsCurrent(instance, accountId, candidate) ? candidate : undefined;
   if (observed.customWindows) observeAnthropicFamilyQuota(accountId, observed.customWindows, observed.updatedAt);
   accountQuotaCache.set(key, {
     ...previous,
@@ -552,7 +594,9 @@ export function accountQuotaProbeSkip(provider: string, accountId: string): Acco
   if (!supportsPerAccountQuota(provider)) return { ts: Date.now(), quota: null, unavailable: true };
   if (getAccountCredentialWithStatus(provider, accountId)?.paused !== true) return undefined;
   const cached = accountQuotaCache.get(accountCacheKey(provider, accountId));
-  return cached && cached.isCurrent?.() !== false ? cached : { ts: Date.now(), quota: null, unavailable: true };
+  const current = isAnthropicInstanceId(provider) ? anthropicQuotaEntryIsCurrent(provider, accountId, cached)
+    : cached?.isCurrent?.() !== false;
+  return cached && current ? cached : { ts: Date.now(), quota: null, unavailable: true };
 }
 
 export function explicitQuotaConfig(provider: string, configured?: OcxProviderConfig): OcxProviderConfig | undefined {

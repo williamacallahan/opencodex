@@ -66,10 +66,10 @@ function createAnthropicCooldownRecovery(instance: AnthropicInstanceId) {
     return `${baseKey}\0${instance}-cooldown:${generation}`;
   }
 
-  /** Active usage readers bind this key after token refresh; renewal keeps the legacy flight valid. */
+  /** Bind active usage reads after renewal; a pause/resume starts a separate flight. */
   function anthropicCredentialQuotaFlightKey(baseKey: string, accountId: string): string {
     const row = getAccountSet(instance)?.accounts.find(row => row.id === accountId);
-    return `${anthropicCooldownFlightKey(baseKey, accountId)}\0${row ? JSON.stringify([credentialGeneration(row.credential), row.loginId, row.addedAt]) : "missing"}`;
+    return `${anthropicCooldownFlightKey(baseKey, accountId)}\0${row ? JSON.stringify([credentialGeneration(row.credential), row.loginId, row.addedAt, row.pauseRevision]) : "missing"}`;
   }
 
   function reserveCooldownGeneration(accountId: string): number {
@@ -131,6 +131,7 @@ function createAnthropicCooldownRecovery(instance: AnthropicInstanceId) {
       return quotaEpoch === captureProviderAccountQuotaEpoch(instance)
         && anthropicAccountIncarnation(accountId) === incarnation
         && currentRow?.loginId === initialRow?.loginId && currentRow?.addedAt === initialRow?.addedAt
+        && !!currentRow && !currentRow.paused && currentRow.pauseRevision === initialRow.pauseRevision
         && !!current && credentialGeneration(current) === generation;
     };
     return {

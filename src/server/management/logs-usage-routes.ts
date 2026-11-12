@@ -70,6 +70,7 @@ import type { OcxClaudeCodeConfig, OcxConfig, OcxCustomModel, OcxProviderConfig 
 import { drainAndShutdown } from "../lifecycle";
 import { getRequestLogEntries, queryRequestLogs, type RequestLogEntry } from "../request-log";
 import { decodeRequestLogCursor, selectRequestLogPoll } from "../request-log-cursor";
+import { upstreamDiagnosticLogProjection } from "../request-log-terminal-status";
 import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerSecond } from "../../usage/cost";
 import { userCostOverlayVersion } from "../../usage/user-cost-overlays";
 import type { PersistedUsageAttempt } from "../../usage/log";
@@ -137,7 +138,8 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     // Not point-free: requestLogDto takes an options object second, and Array.map would pass the
     // element INDEX into it. An explicit arrow keeps the default (decode rate included) and is
     // what /api/logs wants; /api/request-history opts out at its own call sites.
-    const logs = queried.logs.map(entry => requestLogDto(entry));
+    const projectDiagnostics = upstreamDiagnosticLogProjection();
+    const logs = queried.logs.map(entry => requestLogDto(entry, { projectDiagnostics }));
     const poll = selectRequestLogPoll(logs, url.searchParams, cursor);
     return jsonResponse({
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,

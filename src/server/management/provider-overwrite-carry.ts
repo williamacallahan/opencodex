@@ -204,6 +204,36 @@ export function providerCompatFieldConfigError(provider: Record<string, unknown>
   return null;
 }
 
+/** Every field the PATCH field mask stores: its own branches in provider-routes.ts plus `applyProviderCompatPatchFields`. */
+const PROVIDER_PATCH_FIELDS: ReadonlySet<string> = new Set([
+  "disabled", "adapter", "baseUrl", "defaultModel", "authMode", "apiKeyTransport", "note", "allowPrivateNetwork",
+  "liveModels", "annotateEmptyToolOutputs", "fastEnabled", "xaiResponsesOptIn", "requestPacing",
+  "upstreamHttpVersion", "upstreamWebsocket", "contextWindow", "modelCapabilities", "modelContextTiers",
+  "modelContextWindows", "pinnedReasoningEffort", "modelPinnedReasoningEfforts", "autoReviewModel",
+  "autoReviewModelOverrides", "modelAutoCompactTokenLimits", "modelSupportsServiceTier", "modelSuppressSyntheticMax",
+  "noStructuredOutputModels", "noJsonSchemaModels", "unsupportedHostedTools", "retainModels",
+  "omitReasoningEffortWithToolsModels", "headers",
+  ...REASONING_LIST_FIELDS,
+  "promptCacheKey",
+  "foldDeveloperRoleToSystem",
+  "singleLeadingSystemMessage",
+  "hideRawReasoning",
+  "preserveResponsesReasoningContent",
+  "promoteAdditionalTools",
+  "inferContextWindow",
+  "reasoningWireFormat",
+  ...RETRY_POLICY_FIELDS,
+]);
+
+/**
+ * A PATCH that names a field no branch stores used to answer 200 and drop it, so a caller read success for a
+ * setting that never persisted. Returns the refusal naming every such field, or null when all are stored.
+ */
+export function unrecognizedProviderPatchFields(keys: readonly string[]): string | null {
+  const unrecognized = keys.filter(key => !PROVIDER_PATCH_FIELDS.has(key));
+  return unrecognized.length > 0 ? `unrecognized provider fields: ${unrecognized.join(", ")}` : null;
+}
+
 /**
  * PATCH branches for the settings the field mask did not know. `null` clears a field. For the two
  * reasoning lists an empty array is kept rather than deleted: it is the explicit opt-out that stops
@@ -225,6 +255,13 @@ export function applyProviderCompatPatchFields(
       if (error) return { error };
       next[field] = normalizeNonBlankStringArray(value as string[]);
     }
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "promptCacheKey")) {
+    const value = rawBody.promptCacheKey;
+    if (value === null) delete next.promptCacheKey;
+    else if (typeof value === "boolean") next.promptCacheKey = value;
+    else return { error: "promptCacheKey must be a boolean or null" };
     touched = true;
   }
   if (Object.hasOwn(rawBody, "foldDeveloperRoleToSystem")) {

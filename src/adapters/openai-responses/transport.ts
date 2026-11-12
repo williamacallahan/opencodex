@@ -7,20 +7,24 @@ import {
   isolateCodexPoolAccountHeaders,
 } from "../../codex/forward-transport-headers";
 import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers-destination";
-import { normalizeForwardedClientHeaderName } from "../../lib/provider-client-headers";
+import { copyForwardedClientHeaders, forwardableClientHeaders } from "../../lib/provider-client-headers";
 import { AGENT_ASSERTION_HEADER } from "../../lib/authorization-scheme";
 import { openaiResponsesUrl } from "../openai-responses-url";
 
 export { FORWARD_HEADERS } from "../../codex/forward-transport-headers";
 
+/** Copy the provider's opted-in client metadata onto already-materialized auth headers, never credentials. */
+export function copyConfiguredClientHeaders(target: Headers, incoming: Headers, provider: OcxProviderConfig): void {
+  for (const [name, value] of forwardableClientHeaders(provider.forwardClientHeaders, incoming)) {
+    if (!target.has(name)) target.set(name, value);
+  }
+}
+
 /** Carry permitted client metadata across an internal compact handoff, never credentials. */
 export function copyResponsesClientMetadata(target: Headers, incoming: Headers, provider: OcxProviderConfig): void {
-  const configured = Array.isArray(provider.forwardClientHeaders) ? provider.forwardClientHeaders.slice(0, 64) : [];
-  for (const rawName of ["user-agent", ...configured]) {
-    const name = normalizeForwardedClientHeaderName(rawName);
-    const value = name === null ? null : incoming.get(name);
-    if (name !== null && value && !target.has(name)) target.set(name, value);
-  }
+  const userAgent = incoming.get("user-agent");
+  if (userAgent && !target.has("user-agent")) target.set("user-agent", userAgent);
+  copyConfiguredClientHeaders(target, incoming, provider);
 }
 
 /**
@@ -92,14 +96,7 @@ export function buildResponsesTransport(provider: OcxProviderConfig, incoming: P
     if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
     if (provider.headers) Object.assign(headers, provider.headers);
   }
-  if (Array.isArray(provider.forwardClientHeaders)) {
-    for (const rawName of provider.forwardClientHeaders.slice(0, 64)) {
-      const name = normalizeForwardedClientHeaderName(rawName);
-      if (name === null || Object.keys(headers).some(existing => existing.toLowerCase() === name)) continue;
-      const value = incoming.headers.get(name);
-      if (value) headers[name] = value;
-    }
-  }
+  copyForwardedClientHeaders(provider.forwardClientHeaders, headers, incoming.headers);
   if (!Object.keys(headers).some(name => name.toLowerCase() === "user-agent")) {
     const userAgent = incoming.headers.get("user-agent");
     if (userAgent) headers["User-Agent"] = userAgent;

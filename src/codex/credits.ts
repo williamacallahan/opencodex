@@ -1,14 +1,5 @@
 import type { OcxConfig } from "../types";
-
-/** Display-only WHAM observation, never persisted or used for routing. */
-export interface CodexCredits {
-  hasCredits?: boolean;
-  unlimited?: boolean;
-  overageLimitReached?: boolean;
-  balance?: string;
-  approxLocalMessages?: [number, number];
-  approxCloudMessages?: [number, number];
-}
+import type { CodexCredits } from "./quota-types";
 
 /**
  * An entry without `credits` means "this identity was observed and reported nothing to show".
@@ -24,7 +15,7 @@ function messageRange(raw: unknown): [number, number] | undefined {
 }
 
 /** Undefined keeps the prior observation; null or unusable input clears it. */
-export function parseCodexCredits(raw: unknown): CodexCredits | null | undefined {
+export function parseCodexCredits(raw: unknown, options?: { allowNegative?: boolean }): CodexCredits | null | undefined {
   if (raw === undefined) return undefined;
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
   const value = raw as Record<string, unknown>;
@@ -32,8 +23,10 @@ export function parseCodexCredits(raw: unknown): CodexCredits | null | undefined
   if (typeof value.has_credits === "boolean") credits.hasCredits = value.has_credits;
   if (typeof value.unlimited === "boolean") credits.unlimited = value.unlimited;
   if (typeof value.overage_limit_reached === "boolean") credits.overageLimitReached = value.overage_limit_reached;
-  if (typeof value.balance === "string" && /^\d+(\.\d+)?$/.test(value.balance)) credits.balance = value.balance;
-  else if (typeof value.balance === "number" && Number.isFinite(value.balance) && value.balance >= 0) {
+  if (typeof value.balance === "string" && /^-?\d+(\.\d+)?$/.test(value.balance)
+    && (options?.allowNegative === true || !value.balance.startsWith("-"))) credits.balance = value.balance;
+  else if (typeof value.balance === "number" && Number.isFinite(value.balance)
+    && (options?.allowNegative === true || value.balance >= 0)) {
     // String(1e-7) is "1e-7"; the DTO promises a plain decimal string, which the GUI validates.
     credits.balance = value.balance.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 20 });
   }
@@ -71,9 +64,14 @@ export function hasCodexCreditsObservation(accountId: string, identity: string |
   return observation !== undefined && identity !== null && observation.identity === identity;
 }
 
+/** The one `showCodexCredits` gate: every credits display (seat rows and relay reports) passes it. */
+export function shownCodexCredits(config: Pick<OcxConfig, "showCodexCredits">, credits: CodexCredits | undefined): CodexCredits | undefined {
+  return config.showCodexCredits === true ? credits : undefined;
+}
+
 export function codexCreditsDtoField(config: Pick<OcxConfig, "showCodexCredits">, accountId: string, identity: string | null): { credits?: CodexCredits } {
-  const credits = codexCreditsFor(accountId, identity);
-  return config.showCodexCredits === true && credits ? { credits } : {};
+  const credits = shownCodexCredits(config, codexCreditsFor(accountId, identity));
+  return credits ? { credits } : {};
 }
 
 export function pruneCodexCredits(liveAccountIds: Iterable<string>): void {

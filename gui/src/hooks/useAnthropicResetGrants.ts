@@ -13,7 +13,7 @@ import type { AnthropicInstanceId } from "../../../src/providers/anthropic-insta
  * `unknown_outcome`, 500 `journal_write_failed`, 409 `in_flight`) is reported as
  * `unknown` so the dialog keeps the operation id and can only retry that same id.
  */
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createBoundedFetch } from "../bounded-fetch";
 
 export type AnthropicResetWindow = "five_hour" | "seven_day" | "seven_day_overage_included";
@@ -56,8 +56,11 @@ export type AnthropicSpendOutcome =
   | { kind: "unknown"; code: string }
   | { kind: "refused"; code: string };
 
+export interface AnthropicGrantAttempt { grantId: string; operationId: string; inFlight: boolean }
+
 export interface AnthropicResetGrantController {
   entries: Record<string, AnthropicGrantEntry>;
+  held: Record<string, AnthropicGrantAttempt>;
   /** `keepSnapshot` re-reads without blanking a ready entry (and the row badge) while the read runs. */
   refresh: (accountId: string, options?: { keepSnapshot?: boolean }) => Promise<void>;
   spend: (accountId: string, request: { grantId: string; operationId: string }) => Promise<AnthropicSpendOutcome>;
@@ -70,6 +73,25 @@ const MAX_READS_IN_FLIGHT = 3;
 const NO_ENTRIES: Record<string, AnthropicGrantEntry> = {};
 const WINDOWS: readonly AnthropicResetWindow[] = ["five_hour", "seven_day", "seven_day_overage_included"];
 const UNKNOWN_CODES = new Set(["unknown_outcome", "journal_write_failed", "in_flight"]);
+const RELEASES_HELD = new Set(["unknown_outcome_expired", "operation_identity_mismatch"]);
+// Like Grok's controller-owned holds, these survive every modal and panel remount.
+// Anthropic permits an explicit same-ID retry; a GET never proves settlement.
+let grantHolds: ReadonlyMap<string, AnthropicGrantAttempt> = new Map();
+const holdListeners = new Set<() => void>();
+const holdSnapshot = () => grantHolds;
+function subscribeHolds(listener: () => void): () => void {
+  holdListeners.add(listener);
+  return () => { holdListeners.delete(listener); };
+}
+function updateHold(key: string, operationId: string, value: AnthropicGrantAttempt | null): void {
+  const current = grantHolds.get(key);
+  if (current && current.operationId !== operationId) return;
+  const next = new Map(grantHolds);
+  if (value) next.set(key, value);
+  else next.delete(key);
+  grantHolds = next;
+  for (const listener of holdListeners) listener();
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -184,6 +206,10 @@ export function useAnthropicResetGrants({ apiBase, provider = "anthropic", accou
   enabled: boolean;
 }): AnthropicResetGrantController {
   const namespace = `${apiBase}\0${provider}`;
+  const holds = useSyncExternalStore(subscribeHolds, holdSnapshot, holdSnapshot);
+  const prefix = `${namespace}\0`;
+  const held = Object.fromEntries([...holds].filter(([key]) => key.startsWith(prefix))
+    .map(([key, attempt]) => [key.slice(prefix.length), attempt]));
   // Entries are stored with the pool namespace that produced them. A render for another
   // namespace treats them as absent, so equal account IDs in A and B never share a row.
   const [store, setStore] = useState<{ namespace: string; entries: Record<string, AnthropicGrantEntry> }>(
@@ -264,6 +290,12 @@ export function useAnthropicResetGrants({ apiBase, provider = "anthropic", accou
     accountId: string,
     request: { grantId: string; operationId: string },
   ): Promise<AnthropicSpendOutcome> => {
+    const key = `${namespace}\0${accountId}`;
+    const prior = grantHolds.get(key);
+    if (prior && (prior.inFlight || prior.operationId !== request.operationId || prior.grantId !== request.grantId))
+      return { kind: "unknown", code: "in_flight" };
+    // Publish before fetch: closing or pausing during the request cannot lose its identity.
+    updateHold(key, request.operationId, { ...request, inFlight: true });
     const spendEpoch = epoch.current;
     const bounded = createBoundedFetch(SPEND_TIMEOUT_MS);
     try {
@@ -275,11 +307,16 @@ export function useAnthropicResetGrants({ apiBase, provider = "anthropic", accou
       });
       if (!response.ok) {
         const code = errorCode(await response.json().catch(() => null));
+        if (RELEASES_HELD.has(code)) updateHold(key, request.operationId, null);
         return UNKNOWN_CODES.has(code) ? { kind: "unknown", code } : { kind: "refused", code };
       }
       const data = await response.json().catch(() => null) as unknown;
       if (!isRecord(data) || typeof data.code !== "string"
+        || (data.operationId !== undefined && data.operationId !== request.operationId)
+        || (data.accountId !== undefined && data.accountId !== accountId)
+        || (data.grantId !== undefined && data.grantId !== request.grantId)
         || (data.provider !== provider && !(provider === "anthropic" && data.provider === undefined))) return { kind: "unknown", code: "unknown_outcome" };
+      updateHold(key, request.operationId, null);
       if (spendEpoch === epoch.current) void read(accountId, spendEpoch);
       return {
         kind: "settled",
@@ -292,8 +329,10 @@ export function useAnthropicResetGrants({ apiBase, provider = "anthropic", accou
       return { kind: "unknown", code: "aborted" };
     } finally {
       bounded.clear();
+      if (grantHolds.get(key)?.operationId === request.operationId)
+        updateHold(key, request.operationId, { ...request, inFlight: false });
     }
-  }, [apiBase, provider, read]);
+  }, [apiBase, provider, namespace, read]);
 
-  return { entries: store.namespace === namespace ? store.entries : NO_ENTRIES, refresh, spend };
+  return { entries: store.namespace === namespace ? store.entries : NO_ENTRIES, held, refresh, spend };
 }

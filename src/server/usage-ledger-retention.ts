@@ -68,9 +68,17 @@ function enforceNow(): void {
   }
 }
 
+function safeCurrentUsageLogBytes(): number {
+  try {
+    return currentUsageLogRevision()?.size ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
 function scheduleEnforcement(): void {
   if (scheduledEnforcement !== null || configuredMaxBytes === undefined) return;
-  if ((currentUsageLogRevision()?.size ?? 0) <= configuredMaxBytes) return;
+  if (safeCurrentUsageLogBytes() <= configuredMaxBytes) return;
   scheduledEnforcement = setTimeout(() => {
     scheduledEnforcement = null;
     enforceNow();
@@ -81,16 +89,21 @@ function scheduleEnforcement(): void {
 /** Install or update the policy. `undefined` removes the hook entirely. */
 export function setUsageLedgerRetention(maxBytes: number | undefined): void {
   configuredMaxBytes = maxBytes;
-  if (maxBytes === undefined && scheduledEnforcement !== null) {
+  if (scheduledEnforcement !== null) {
     clearTimeout(scheduledEnforcement);
     scheduledEnforcement = null;
   }
   setUsageLedgerAppendHook(maxBytes === undefined ? null : scheduleEnforcement);
+  if (maxBytes !== undefined) scheduleEnforcement();
 }
 
-export function usageLedgerRetentionStatus(): UsageLedgerRetentionStatus {
+export function configuredUsageLedgerMaxBytes(): number | undefined {
+  return configuredMaxBytes;
+}
+
+export function usageLedgerRetentionStatus(maxBytes: number | undefined = configuredMaxBytes): UsageLedgerRetentionStatus {
   return {
-    ...(configuredMaxBytes !== undefined ? { maxBytes: configuredMaxBytes } : {}),
-    currentBytes: currentUsageLogRevision()?.size ?? 0,
+    ...(maxBytes !== undefined ? { maxBytes } : {}),
+    currentBytes: safeCurrentUsageLogBytes(),
   };
 }

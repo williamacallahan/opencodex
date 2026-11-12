@@ -35,6 +35,7 @@ import {
 import {
   CodexAccountCooldownError,
   CodexMainAccountHardLockError,
+  CodexPoolExhaustedError,
   cooldownErrorMessage,
   cooldownErrorResponse,
 } from "../../codex/auth-context";
@@ -94,7 +95,7 @@ import type { ServeOptionsContext } from "./serve-options";
 import type { RequestMetricsRecorder } from "../request-metrics";
 import { resolveInboundBodyLimitBytes } from "../request-decompress";
 import { responseToolOwnership } from "../responses/response-tool-ownership";
-import { runTurnStateCallerScope } from "../turn-state-handles";
+import { noteTurnStateCaller, runTurnStateCallerScope } from "../turn-state-handles";
 import { admitHttpWorkflowTurn, workflowDecisionRefusalResponse } from "../workflow-refusal";
 
 /**
@@ -295,7 +296,14 @@ export function createWebsocketHandler(
           return;
         }
 
-        const turnAdmissionLease = tryAdmitTurn(ws.data.sessionLaneId);
+        const wsAdmission = ws.data.admission;
+        const logCtx: RequestLogContext = {
+          model: "unknown", provider: "unknown", inboundProtocol: "responses",
+          client: ws.data.client ?? "unknown",
+          ...(requestMetricsRecorder ? { requestMetricsRecorder } : {}),
+          ...(wsAdmission ? admissionFields(wsAdmission) : {}),
+        };
+        const turnAdmissionLease = tryAdmitTurn(ws.data.sessionLaneId, undefined, logCtx);
         if (!turnAdmissionLease) {
           sendJsonFrame(ws, buildWsErrorFrame(503, {
             type: "server_error",
@@ -313,23 +321,12 @@ export function createWebsocketHandler(
         const payload: Record<string, unknown> = { ...frame };
         delete payload.type;
         turnAdmissionLease.bindAbortController(turnAbort);
-        // The frame runs with its own caller slot, which admission fills for turn-state handle binding.
+        // The frame runs with its own caller slot. logCtx was built before the slot existed (turn
+        // admission needs it), so the handshake admission is recorded here for turn-state binding.
         void runTurnStateCallerScope(async () => {
+          if (wsAdmission) noteTurnStateCaller(wsAdmission);
           const start = Date.now();
           const requestId = nextRequestLogId(start);
-          // Resolved once at the handshake — a frame has no request headers left
-          // to re-resolve from. Optional on WsData like every other member, so
-          // narrow rather than assume: an unattributed frame is preferable to a
-          // fabricated attribution.
-          const wsAdmission = ws.data.admission;
-          const logCtx: RequestLogContext = {
-            model: "unknown",
-            provider: "unknown",
-            ...(requestMetricsRecorder ? { requestMetricsRecorder } : {}),
-            ...(wsAdmission ? admissionFields(wsAdmission) : {}),
-            client: ws.data.client ?? "unknown",
-            inboundProtocol: "responses",
-          };
           let logged = false;
           const finalizeLog = (
             status: number,
@@ -391,7 +388,15 @@ export function createWebsocketHandler(
                 ws.data.responsesActivity?.observePayload(payload, providerExecuted);
                 observeLog(payload);
               },
-              onTerminal: status => {
+              onTerminal: (status, source) => {
+                // Eager inspection can observe an origin terminal that drain prevents
+                // the WS reader from receiving. Control chains retain their last-terminal owner.
+                const observed = nativeControl?.relayActive !== true && logCtx.terminalSource === "upstream"
+                  ? logCtx.observedTerminalStatus : undefined;
+                if (source === "synthetic" && observed) { status = observed; source = "upstream"; }
+                // EOF/error fallbacks are not origin terminals. Preserve any earlier
+                // synthetic provenance on a generated SSE tail as well.
+                if (source === "synthetic" || logCtx.terminalSource === undefined) logCtx.terminalSource = source;
                 terminalRecorder?.(status, logCtx.terminalHttpStatus);
                 finalizeLog(httpStatusForRequestLogTerminal(status, logCtx), {
                   terminalStatus: status,
@@ -410,7 +415,7 @@ export function createWebsocketHandler(
                 const accountSelector = typeof payload.model === "string"
                   ? codexAccountNamespaceForModel(config.codexAccountNamespaces, payload.model)
                   : undefined;
-                if (err instanceof CodexMainAccountHardLockError) {
+                if (err instanceof CodexMainAccountHardLockError || err instanceof CodexPoolExhaustedError) {
                   // Same terminal usage-limit body and Retry-After as HTTP (#7046).
                   const refusal = cooldownErrorResponse(err, Date.now(), accountSelector);
                   const body = await refusal.json() as { error: Record<string, unknown> };

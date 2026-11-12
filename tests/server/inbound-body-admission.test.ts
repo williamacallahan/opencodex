@@ -129,6 +129,8 @@ describe("raised inbound body admission lifetime", () => {
         }, req);
         assert.equal(response.status, 503);
         assert.equal(response.headers.get("retry-after"), "1");
+        // A busy refusal is not safe to replay blindly, so it never carries the restarting marker.
+        assert.equal(response.headers.get("x-opencodex-restarting"), null);
         const payload = await response.json() as { type?: string; error: { type: string; code: string } };
         assert.equal(payload.error.code, "server_busy");
         const anthropic = path.startsWith("/v1/messages");

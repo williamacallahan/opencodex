@@ -82,10 +82,16 @@ itself stays on the context like every other upstream text. The dashboard append
 a machine token. `tests/usage/provider-failure-detail.test.ts` drives the Vertex route for an HTTP 400,
 a combo child, a mid-stream error frame, a truncated turn and a recovered replay.
 
-`upstreamError`, `upstreamErrorCode`, `upstreamErrorType` and `upstreamRequestId` stay on the request
-context, where status heuristics and classifiers read them, and never reach a row, `usage.jsonl` or the
-service log. Bytes already in `usage.jsonl` from earlier builds are not rewritten; they are dropped on every
-read and hydration. The Logs detail shows the localized condition and the failure detail.
+`upstreamError` (free upstream text) stays on the request context, where status heuristics and
+classifiers read it, and never reaches a row, `usage.jsonl` or the service log; `UPSTREAM_TEXT_FIELDS` in
+`src/usage/error-detail.ts` lists only it. Bytes already in `usage.jsonl` from earlier builds are not
+rewritten; they are dropped on every read and hydration. The bounded `upstreamErrorCode`,
+`upstreamErrorType` and `upstreamRequestId` do reach rows and `usage.jsonl` as durable diagnostics, but
+only through `upstreamDiagnosticLogFields` in `src/server/request-log-terminal-status.ts`, which admits a
+value only while it is a safe token, is not a configured or outbound credential, and (for the type) is a
+closed vocabulary member; hydration and history reads re-check the same rule against the credentials
+current at read time. The service warning prints only closed-vocabulary type and code values. The Logs
+detail shows the localized condition and the failure detail.
 `tests/usage/request-log-error-detail.test.ts` covers the vocabulary, projection, hydration and the Muse
 round trip; `tests/server/upstream-error-detail-boundaries.test.ts` drives native Chat, Responses
 passthrough and both Messages lanes against an upstream that echoes its credential, and checks the live

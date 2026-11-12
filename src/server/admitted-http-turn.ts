@@ -7,6 +7,8 @@ import { sessionLaneIdFromRequest } from "./request-log-conversation";
 import { admitHttpWorkflowTurn, workflowDecisionRefusalResponse, type WorkflowRefusalLog } from "./workflow-refusal";
 
 export interface AdmittedHttpTurnOptions {
+  /** Hybrid Messages determines its conversation lane only after reading the model. */
+  deferSessionLane?: boolean;
   mapRefusal?: (response: Response) => Response;
   onAdmissionError?: (error: unknown) => Response;
 }
@@ -23,7 +25,7 @@ export function createAdmittedHttpTurn(
     options?: AdmittedHttpTurnOptions,
   ): Promise<Response> {
     const map = (response: Response) => options?.mapRefusal ? options.mapRefusal(response) : response;
-    const lease = tryAdmitTurn(sessionLaneIdFromRequest(req.headers), req.signal);
+    const lease = tryAdmitTurn(options?.deferSessionLane ? undefined : sessionLaneIdFromRequest(req.headers), req.signal, refusalLog?.logCtx);
     if (!lease) {
       const response = serverBusyResponse(req, "active turns", policy);
       return options?.mapRefusal ? withCors(map(response), req, policy) : response;

@@ -93,13 +93,14 @@ describe("native final request log", () => {
       [429, sentence, "meta-muse", { errorCode: "rate_limit_exceeded", upstreamCondition: "billing_exhausted", rateLimitResetAt: resetAt }],
       [400, "This model's maximum context length is 8192 tokens; key " + credential, "fixture", { errorCode: "invalid_request_error", upstreamCondition: "context_overflow" }],
     ] as const) {
-      const logCtx = { ...context(), provider, upstreamError, upstreamErrorCode: credential, upstreamRequestId: credential };
+      // Free upstream text never reaches the row; the deployment line keeps sanitized code and request id.
+      const logCtx = { ...context(), provider, upstreamError, upstreamErrorCode: "fixture_code", upstreamRequestId: "req_fixture" };
       const rows: RequestLogEntry[] = [];
       const owner = createNativeFinalLog("evidence", timestamp, logCtx, { addLog: row => rows.push(row) });
       addFinalRequestLog("evidence", timestamp, logCtx, status, { terminalStatus: "failed", closeReason: "terminal" });
       await owner.waitForInner();
       owner.commit({ status, terminalStatus: "failed", closeReason: "terminal" });
-      expect(rows[0]).toMatchObject({ status, ...expected });
+      expect(rows[0]).toMatchObject({ status, ...expected, upstreamErrorCode: "fixture_code", upstreamRequestId: "req_fixture" });
       const serialized = JSON.stringify(rows[0]);
       expect(serialized).not.toContain(credential);
       expect(serialized).not.toContain("Subscription quota exhausted");

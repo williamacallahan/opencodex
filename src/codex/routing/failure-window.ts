@@ -19,7 +19,11 @@ export const CODEX_SLIDING_FAILURE_RECOVER_SUSTAIN_MS = 30_000;
 const MAX_SAMPLES = 512;
 
 type Sample = { at: number; failed: boolean; credentialGeneration?: number };
-type WindowState = { samples: Sample[]; degraded: boolean; healthySince?: number; credentialGeneration?: number };
+type WindowState = {
+  samples: Sample[]; degraded: boolean; healthySince?: number; credentialGeneration?: number;
+  /** Newest failed sample, kept after it ages out of the window: a quiet account rejoins from it. */
+  lastFailedAt?: number;
+};
 
 const windows = new Map<string, WindowState>();
 const pinnedDegradeWarned = new Set<string>();
@@ -27,8 +31,9 @@ const pinnedDegradeWarned = new Set<string>();
 /** Read only dispatch-time provenance retained by auth materialization, never recapture at arrival. */
 export function codexFailureWindowOutcomeMeta(
   context: CodexAuthContext,
-): Pick<CodexUpstreamOutcomeMeta, "failureWindowCredentialGeneration" | "mainFailureWindowDispatch"> {
-  if (context.kind === "pool") return { failureWindowCredentialGeneration: context.generation };
+): Pick<CodexUpstreamOutcomeMeta, "failureWindowCredentialGeneration" | "mainFailureWindowDispatch" | "poolReserve"> {
+  if (context.kind === "pool") return { failureWindowCredentialGeneration: context.generation,
+    ...(context.poolReserve ? { poolReserve: true } : {}) };
   return context.kind === "main-pool" ? { mainFailureWindowDispatch: context.mainQuotaDispatch ?? null } : {};
 }
 
@@ -56,6 +61,12 @@ function stateFor(accountId: string): WindowState {
   return state;
 }
 
+/** When a degraded account below the sample floor rejoins: its newest fault aged out plus the sustain. */
+function quietRejoinAt(state: WindowState): number {
+  const lastFailedAt = state.lastFailedAt ?? state.samples.at(-1)?.at ?? 0;
+  return lastFailedAt + CODEX_SLIDING_FAILURE_WINDOW_MS + CODEX_SLIDING_FAILURE_RECOVER_SUSTAIN_MS;
+}
+
 function recompute(
   accountId: string, state: WindowState, now: number,
   generationLive?: ReturnType<typeof beginCodexAccountGenerationLiveCheck>,
@@ -71,6 +82,7 @@ function recompute(
     state.degraded = false;
     state.healthySince = undefined;
     state.credentialGeneration = undefined;
+    state.lastFailedAt = undefined;
     pinnedDegradeWarned.delete(accountId);
   }
   const cutoff = now - CODEX_SLIDING_FAILURE_WINDOW_MS;
@@ -78,6 +90,17 @@ function recompute(
     && (sample.credentialGeneration === undefined || live?.(accountId, sample.credentialGeneration)));
   state.credentialGeneration ??= state.samples.find(sample => sample.credentialGeneration !== undefined)?.credentialGeneration;
   const samples = state.samples.length;
+  // Degradation steers new threads away, so a degraded account with little or no bound traffic
+  // never collects the 20 samples recovery needs and stayed out of rotation indefinitely (10 h
+  // on a credited seat while every other seat was spent; a bound thread sending every 10-50 s
+  // keeps the window non-empty yet short of 20). Below that sample floor, a full fault-free
+  // window plus the recovery sustain ends degradation; a recurring fault degrades it again.
+  if (state.degraded && samples < CODEX_SLIDING_FAILURE_MIN_SAMPLES && quietRejoinAt(state) <= now) {
+    state.degraded = false;
+    state.healthySince = undefined;
+    pinnedDegradeWarned.delete(accountId);
+    return;
+  }
   const failed = state.samples.reduce((count, sample) => count + (sample.failed ? 1 : 0), 0);
   const degraded = samples >= CODEX_SLIDING_FAILURE_MIN_SAMPLES
     && failed * 4 >= samples;
@@ -127,6 +150,7 @@ function appendSample(
   if (credentialGeneration !== undefined && !live?.(accountId, credentialGeneration)) return;
   const state = stateFor(accountId);
   state.samples.push({ at: now, failed, ...(credentialGeneration === undefined ? {} : { credentialGeneration }) });
+  if (failed) state.lastFailedAt = Math.max(state.lastFailedAt ?? now, now);
   if (state.samples.length > MAX_SAMPLES) state.samples.splice(0, state.samples.length - MAX_SAMPLES);
   recompute(accountId, state, now, live);
   if (!state.degraded) pinnedDegradeWarned.delete(accountId);
@@ -158,6 +182,20 @@ export function failureWindowSteersNewThreads(
     console.warn("[opencodex] pinned Codex account is degraded; new threads stay on it until it recovers");
   }
   return false;
+}
+
+/**
+ * The latest time the failure window keeps steering new threads off this account: degradation
+ * lapses once its newest sample ages out of the window. Undefined when it does not steer them.
+ */
+export function failureWindowSteeringEndsAt(
+  config: OcxConfig,
+  accountId: string,
+  now: number,
+): number | undefined {
+  if (!failureWindowSteersNewThreads(config, accountId, now)) return undefined;
+  const state = windows.get(accountId);
+  return state === undefined ? undefined : quietRejoinAt(state);
 }
 
 export function forgetCodexFailureWindow(accountId: string): void {

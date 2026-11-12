@@ -7,7 +7,9 @@ import { configDiagnosticsFromRaw, validateConfigCandidate } from "../../src/con
 import { metricsExportEnabled } from "../../src/config/feature-flags";
 import { getDefaultConfig } from "../../src/config/proxy-env";
 import * as audioUpstream from "../../src/server/audio-upstream";
-import { MAX_ACTIVE_SESSION_LANES, tryAdmitTurn } from "../../src/server/lifecycle";
+import * as requestLog from "../../src/server/request-log";
+import { abortAndReleaseAllTurns, getActiveTurnCount, MAX_ACTIVE_SESSION_LANES, tryAdmitTurn } from "../../src/server/lifecycle";
+import { setRelayPlatformForTests } from "../../src/server/responses/passthrough-delivery";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { requireManagementAuth, type ManagementAuthState } from "../../src/server/management-auth";
 import {
@@ -27,7 +29,7 @@ import {
 } from "../../src/server/request-metrics";
 import { startServer } from "../../src/server";
 import type { OcxConfig } from "../../src/types";
-import type { AttemptRecoveryKind } from "../../src/usage/log";
+import { readUsageEntries, type AttemptRecoveryKind } from "../../src/usage/log";
 import { ManagementRequest } from "../helpers/management-auth";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -322,6 +324,15 @@ async function runWebSocketTurn(server: ReturnType<typeof startServer>): Promise
 }
 
 describe("request metrics aggregation", () => {
+  test("a 200 stream whose terminal failed counts as a failed logical request", () => {
+    const metrics = createRequestMetricsOwner(123);
+    const logCtx: RequestLogContext = { model: "m", provider: "p", inboundProtocol: "messages", requestMetricsRecorder: metrics };
+    addFinalRequestLog("req-stream-error", Date.now() - 10, logCtx, 200, { terminalStatus: "failed", closeReason: "terminal" }, () => {});
+    const output = metrics.snapshot();
+    expect(sampleValue(output, 'opencodex_logical_requests_total{protocol="messages",result="failed"}')).toBe(1);
+    expect(sampleValue(output, 'opencodex_logical_requests_total{protocol="messages",result="completed"}')).toBe(0);
+  });
+
   test("one finalized logical request counts once while attempts preserve physical sends and distinct recovery kinds", () => {
     const metrics = createRequestMetricsOwner(123);
     const logCtx: RequestLogContext = {
@@ -698,6 +709,94 @@ describe("metrics through live HTTP and WebSocket server flows", () => {
     }
   });
 
+  test.each(["eager-relay", "legacy-tee"] as const)("%s native HTTP drain finalizes once with the caller still connected", async streamMode => {
+    const encoder = new TextEncoder();
+    let sends = 0;
+    const upstream = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      fetch(req) {
+        if (req.method !== "POST" || !new URL(req.url).pathname.endsWith("/responses")) return new Response(null, { status: 404 });
+        sends += 1;
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode([
+              `data: ${JSON.stringify({ type: "response.created", response: { id: "resp_http_drain", status: "in_progress" } })}\n\n`,
+              `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "before shutdown" })}\n\n`,
+            ].join("")));
+            // The real HTTP connection remains open without a terminal or EOF.
+          },
+        }), { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const config = runtimeConfig("openai-responses");
+    config.streamMode = streamMode;
+    config.providers.fixture = {
+      adapter: "openai-responses", baseUrl: new URL("/v1", upstream.url).href,
+      apiKey: "sk-metrics-fixture", allowPrivateNetwork: true, liveModels: false,
+      models: ["metrics-model"], defaultModel: "metrics-model",
+    };
+    // Select only the documented relay-platform seam, not the process's platform.
+    setRelayPlatformForTests("darwin");
+    saveConfig(config);
+    let server: ReturnType<typeof startServer> | undefined;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    const rows: RequestLogEntry[] = [];
+    const disposeRows = observeRequestLogsForTests(entry => { if (entry.model === "metrics-model") rows.push(entry); });
+    const finalized = nextFinalRequestLog(entry => entry.model === "metrics-model");
+    try {
+      server = startMetricsServer();
+      const before = getActiveTurnCount();
+      const response = await awaitBounded(sendResponsesRequest(server, true), "native HTTP stream did not open");
+      expect(response.status).toBe(200);
+      reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let wire = "";
+      while (!wire.includes("before shutdown")) {
+        const chunk = await awaitBounded(reader.read(), "native HTTP prelude did not arrive");
+        expect(chunk.done).toBe(false);
+        if (chunk.done) throw new Error("native HTTP stream ended before drain");
+        wire += decoder.decode(chunk.value, { stream: true });
+      }
+      expect(getActiveTurnCount()).toBe(before + 1);
+      // The caller stays connected. Production drain owns this abort, not reader.cancel().
+      abortAndReleaseAllTurns();
+      const row = await awaitBounded(finalized.promise, "native HTTP shutdown did not finalize its request");
+      for (;;) {
+        const chunk = await awaitBounded(reader.read(), "native HTTP drain did not close the body");
+        if (chunk.done) break;
+        wire += decoder.decode(chunk.value, { stream: true });
+      }
+      expect(row.status).toBe(503);
+      expect(row.errorCode).toBe("server_shutdown");
+      expect(row.failureCause).toBe("transport-ambiguous");
+      expect(row.closeReason).not.toBe("client_cancel");
+      expect(row.spend?.sends).toBe(1);
+      expect(row.spend?.settled).toBe(1);
+      expect(row.spend?.unresolved).toBe(0);
+      expect(rows).toHaveLength(1);
+      expect(readUsageEntries().filter(entry => entry.requestId === row.requestId)).toHaveLength(1);
+      expect(getActiveTurnCount()).toBe(before);
+      expect(sends).toBe(1);
+      if (streamMode === "legacy-tee") {
+        expect(wire).toContain('"code":"server_shutdown"');
+        expect(wire).not.toContain("upstream_reset");
+      } else {
+        expect(wire).not.toContain("response.failed");
+      }
+      expect(wire).not.toContain("response.incomplete");
+      const metrics = await scrapeServer(server);
+      expect(sampleValue(metrics, 'opencodex_logical_requests_total{protocol="responses",result="failed"}')).toBe(1);
+      expect(sampleValue(metrics, 'opencodex_logical_requests_total{protocol="responses",result="aborted"}')).toBe(0);
+    } finally {
+      await reader?.cancel().catch(() => {});
+      finalized.dispose();
+      disposeRows();
+      if (server) await stopMetricsServer(server);
+      await upstream.stop(true);
+      setRelayPlatformForTests(undefined);
+    }
+  });
+
   test("WebSocket response.create finalizes into the shared metrics owner", async () => {
     const sends = installUpstream(originalFetch, () => new Response(responseSse({
       terminal: "completed",
@@ -713,6 +812,224 @@ describe("metrics through live HTTP and WebSocket server flows", () => {
       expect(sampleValue(metrics, 'opencodex_physical_sends_total{protocol="responses"}')).toBe(1);
     } finally {
       await stopMetricsServer(server);
+    }
+  });
+
+  test("translated HTTP silent shutdown records lifecycle failure rather than incomplete", async () => {
+    let sends = 0;
+    const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
+      if (req.method !== "POST") return new Response(null, { status: 404 });
+      sends += 1;
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({
+          id: "chat_shutdown", object: "chat.completion.chunk", model: "metrics-model",
+          choices: [{ index: 0, delta: { content: "translated before shutdown" }, finish_reason: null }],
+        })}\n\n`));
+      } }), { headers: { "content-type": "text/event-stream" } });
+    } });
+    const config = runtimeConfig("openai-chat");
+    config.providers.fixture = { adapter: "openai-chat", baseUrl: new URL("/v1", upstream.url).href,
+      apiKey: "sk-metrics-fixture", allowPrivateNetwork: true, liveModels: false,
+      models: ["metrics-model"], defaultModel: "metrics-model" };
+    saveConfig(config);
+    const rows: RequestLogEntry[] = [];
+    const disposeRows = observeRequestLogsForTests(entry => { if (entry.model === "metrics-model") rows.push(entry); });
+    const finalized = nextFinalRequestLog(entry => entry.model === "metrics-model");
+    let server: ReturnType<typeof startServer> | undefined;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      server = startMetricsServer();
+      const response = await awaitBounded(sendResponsesRequest(server, true), "translated HTTP did not open");
+      reader = response.body!.getReader();
+      let wire = "";
+      const decoder = new TextDecoder();
+      while (!wire.includes("translated before shutdown")) {
+        const chunk = await awaitBounded(reader.read(), "translated output did not arrive");
+        if (chunk.done) throw new Error("translated stream ended before shutdown");
+        wire += decoder.decode(chunk.value);
+      }
+      abortAndReleaseAllTurns();
+      const row = await awaitBounded(finalized.promise, "translated shutdown was not finalized");
+      expect(row.status).toBe(503);
+      expect(row.errorCode).toBe("server_shutdown");
+      expect(row.terminalStatus).toBeUndefined();
+      expect(row.terminalSource).toBe("synthetic");
+      expect(row.failureCause).toBe("transport-ambiguous");
+      expect(row.spend).toMatchObject({ sends: 1, settled: 1, unresolved: 0 });
+      expect(rows).toHaveLength(1);
+      expect(readUsageEntries().filter(entry => entry.requestId === row.requestId)).toHaveLength(1);
+      expect(sends).toBe(1);
+      expect(getActiveTurnCount()).toBe(0);
+    } finally {
+      await reader?.cancel().catch(() => {});
+      finalized.dispose(); disposeRows();
+      if (server) await stopMetricsServer(server);
+      await upstream.stop(true);
+    }
+  });
+
+  test.each(["silent", "completed", "quota"] as const)("Responses WebSocket shutdown provenance preserves %s outcome", async outcome => {
+    let sends = 0;
+    const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
+      if (req.method !== "POST") return new Response(null, { status: 404 });
+      sends += 1;
+      const events: object[] = [
+        { type: "response.created", response: { id: "resp_ws_shutdown", status: "in_progress" } },
+        { type: "response.output_text.delta", delta: "WebSocket before shutdown" },
+      ];
+      if (outcome !== "silent") events.push({ type: outcome === "quota" ? "response.failed" : "response.completed",
+        response: { id: "resp_ws_shutdown", status: outcome === "quota" ? "failed" : "completed", output: [],
+          usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+          ...(outcome === "quota" ? { error: { type: "rate_limit_error", code: "rate_limit_exceeded", message: "fixture quota refusal" } } : {}),
+        } });
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(new TextEncoder().encode(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join("")));
+      } }), { headers: { "content-type": "text/event-stream" } });
+    } });
+    const config = runtimeConfig("openai-responses");
+    config.streamMode = "eager-relay";
+    config.providers.fixture = { adapter: "openai-responses", baseUrl: new URL("/v1", upstream.url).href,
+      apiKey: "sk-metrics-fixture", allowPrivateNetwork: true, liveModels: false,
+      models: ["metrics-model"], defaultModel: "metrics-model" };
+    setRelayPlatformForTests("darwin");
+    saveConfig(config);
+    const rows: RequestLogEntry[] = [];
+    const disposeRows = observeRequestLogsForTests(entry => { if (entry.model === "metrics-model") rows.push(entry); });
+    const finalized = nextFinalRequestLog(entry => entry.model === "metrics-model");
+    const inspectPayload = requestLog.inspectResponseLogSsePayload;
+    let raced = false;
+    // Keep the actual observer and real transport. Trigger drain only after the origin
+    // terminal was parsed, immediately before the WS pump invokes its terminal callback.
+    const inspection = spyOn(requestLog, "inspectResponseLogSsePayload").mockImplementation((logCtx, payload) => {
+      inspectPayload(logCtx, payload);
+      if (outcome !== "silent" && /"type":"response\.(completed|failed)"/.test(payload) && !raced) {
+        raced = true;
+        abortAndReleaseAllTurns();
+      }
+    });
+    let server: ReturnType<typeof startServer> | undefined;
+    let socket: WebSocket | undefined;
+    const wire: string[] = [];
+    try {
+      server = startMetricsServer();
+      const url = new URL("/v1/responses", server.url); url.protocol = "ws:";
+      const receivedOutput = Promise.withResolvers<void>();
+      socket = new WebSocket(url);
+      socket.addEventListener("open", () => socket!.send(JSON.stringify({
+        type: "response.create", model: "fixture/metrics-model", input: "hello",
+      })), { once: true });
+      socket.addEventListener("message", event => {
+        const payload = String(event.data); wire.push(payload);
+        if (payload.includes("WebSocket before shutdown")) receivedOutput.resolve();
+      });
+      await awaitBounded(receivedOutput.promise, "WebSocket output did not arrive");
+      if (outcome === "silent") abortAndReleaseAllTurns();
+      const row = await awaitBounded(finalized.promise, "WebSocket shutdown was not finalized");
+      expect(row.status).toBe(outcome === "silent" ? 503 : outcome === "quota" ? 429 : 200);
+      expect(row.terminalSource).toBe(outcome === "silent" ? "synthetic" : "upstream");
+      expect(row.terminalStatus).toBe(outcome === "silent" ? undefined : outcome === "quota" ? "failed" : "completed");
+      if (outcome === "silent") expect(row.errorCode).toBe("server_shutdown");
+      else {
+        expect(raced).toBe(true);
+        expect(row.errorCode).not.toBe("server_shutdown");
+        expect(row.usage).toMatchObject({ inputTokens: 3, outputTokens: 2 });
+        if (outcome === "quota") {
+          expect(row.upstreamErrorCode).toBe("rate_limit_exceeded");
+          expect(row.failureCause).toBe("rate-limit");
+        }
+      }
+      expect(row.spend).toMatchObject({ sends: 1, settled: 1, unresolved: 0 });
+      expect(rows).toHaveLength(1);
+      expect(readUsageEntries().filter(entry => entry.requestId === row.requestId)).toHaveLength(1);
+      expect(sends).toBe(1);
+      expect(wire.some(payload => payload.includes("upstream_reset"))).toBe(false);
+      expect(getActiveTurnCount()).toBe(0);
+    } finally {
+      socket?.close(); inspection.mockRestore();
+      finalized.dispose(); disposeRows();
+      if (server) await stopMetricsServer(server);
+      await upstream.stop(true);
+      setRelayPlatformForTests(undefined);
+    }
+  });
+
+  test.each(["completed", "quota"] as const)("Responses WebSocket upstream inspection retains %s terminal lost to drain", async outcome => {
+    let sends = 0;
+    const terminalType = outcome === "quota" ? "response.failed" : "response.completed";
+    const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
+      if (req.method !== "POST") return new Response(null, { status: 404 });
+      sends += 1;
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({
+          type: terminalType,
+          response: { id: "resp_upstream_drain_race", status: outcome === "quota" ? "failed" : "completed", output: [],
+            usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+            ...(outcome === "quota" ? { error: { type: "rate_limit_error", code: "rate_limit_exceeded", message: "fixture quota refusal" } } : {}),
+          },
+        })}\n\n`));
+      } }), { headers: { "content-type": "text/event-stream" } });
+    } });
+    const config = runtimeConfig("openai-responses");
+    config.streamMode = "eager-relay";
+    config.providers.fixture = { adapter: "openai-responses", baseUrl: new URL("/v1", upstream.url).href,
+      apiKey: "sk-metrics-fixture", allowPrivateNetwork: true, liveModels: false,
+      models: ["metrics-model"], defaultModel: "metrics-model" };
+    setRelayPlatformForTests("darwin");
+    saveConfig(config);
+    const rows: RequestLogEntry[] = [];
+    const disposeRows = observeRequestLogsForTests(entry => { if (entry.model === "metrics-model") rows.push(entry); });
+    const finalized = nextFinalRequestLog(entry => entry.model === "metrics-model");
+    const inspectParsed = requestLog.inspectResponseLogSsePayloadParsed;
+    let upstreamObserved = false;
+    // This is the eager producer's raw inspection boundary, not the later WS
+    // payload observer. Drain cuts delivery after inspection of the settled read.
+    const inspection = spyOn(requestLog, "inspectResponseLogSsePayloadParsed").mockImplementation((logCtx, payload, parsed) => {
+      inspectParsed(logCtx, payload, parsed);
+      if (!upstreamObserved && parsed && typeof parsed === "object"
+        && "type" in parsed && parsed.type === terminalType) {
+        upstreamObserved = true;
+        abortAndReleaseAllTurns();
+      }
+    });
+    let server: ReturnType<typeof startServer> | undefined;
+    let socket: WebSocket | undefined;
+    const wire: string[] = [];
+    const fallbackReceived = Promise.withResolvers<void>();
+    try {
+      server = startMetricsServer();
+      const url = new URL("/v1/responses", server.url); url.protocol = "ws:";
+      socket = new WebSocket(url);
+      socket.addEventListener("open", () => socket!.send(JSON.stringify({
+        type: "response.create", model: "fixture/metrics-model", input: "hello",
+      })), { once: true });
+      socket.addEventListener("message", event => {
+        const payload = String(event.data); wire.push(payload);
+        if (payload.includes("websocket_protocol_error")) fallbackReceived.resolve();
+      });
+      const row = await awaitBounded(finalized.promise, "upstream-observed WS terminal was not finalized");
+      await awaitBounded(fallbackReceived.promise, "WS EOF fallback did not arrive");
+      expect(upstreamObserved).toBe(true);
+      expect(wire.some(payload => payload.includes(terminalType))).toBe(false);
+      expect(row.status).toBe(outcome === "quota" ? 429 : 200);
+      expect(row.terminalStatus).toBe(outcome === "quota" ? "failed" : "completed");
+      expect(row.terminalSource).toBe("upstream");
+      expect(row.errorCode).not.toBe("server_shutdown");
+      expect(row.usage).toMatchObject({ inputTokens: 3, outputTokens: 2 });
+      if (outcome === "quota") {
+        expect(row.upstreamErrorCode).toBe("rate_limit_exceeded");
+        expect(row.failureCause).toBe("rate-limit");
+      }
+      expect(row.spend).toMatchObject({ sends: 1, settled: 1, unresolved: 0 });
+      expect(rows).toHaveLength(1);
+      expect(readUsageEntries().filter(entry => entry.requestId === row.requestId)).toHaveLength(1);
+      expect(sends).toBe(1);
+      expect(getActiveTurnCount()).toBe(0);
+    } finally {
+      socket?.close(); inspection.mockRestore();
+      finalized.dispose(); disposeRows();
+      if (server) await stopMetricsServer(server);
+      await upstream.stop(true);
+      setRelayPlatformForTests(undefined);
     }
   });
 

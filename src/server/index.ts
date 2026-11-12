@@ -97,6 +97,7 @@ import {
   setServerRef,
   trackStreamLifetime,
   unregisterTurn,
+  RESTARTING_HEADER,
 } from "./lifecycle";
 export {
   drainAndShutdown,
@@ -480,7 +481,8 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
       error: { type: "server_error", code: "server_restarting", message: "OpenCodex is restarting; retry this request." },
     }), {
       status: 503,
-      headers: { "Content-Type": "application/json", "Retry-After": "5" },
+      // Rejected before the request was read, so a holding gate may replay it; no other 503 carries this.
+      headers: { "Content-Type": "application/json", "Retry-After": "5", [RESTARTING_HEADER]: "1" },
     }), req, policy);
   }
 

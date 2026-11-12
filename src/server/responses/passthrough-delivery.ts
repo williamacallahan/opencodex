@@ -158,7 +158,7 @@ import { linkAbortSignal, UPSTREAM_JSON_BODY_READ_OPTIONS } from "./core-lifetim
 import { registerTurn, unregisterTurn, trackStreamLifetime } from "../lifecycle";
 import { relaySseEagerBounded } from "../relay-eager";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
-import { idleDeadline } from "../../lib/abort";
+import { idleDeadline, ServerShutdownError } from "../../lib/abort";
 import { resolveStallTimeoutMs } from "../../stall-timeout";
 import { formatErrorResponse } from "../../bridge";
 import {
@@ -546,7 +546,7 @@ export async function deliverPassthroughResponse(
         applyAccountQuotaFromUpstreamHeaders(admissionState.authCtx.accountId, upstreamResponse.headers,
           admissionState.authCtx.writerGeneration, admissionState.authCtx.kind === "main-pool" ? admissionState.authCtx.mainQuotaWriter : undefined,
           { modelId: route.modelId, poolWriter: admissionState.authCtx.kind === "pool" ? admissionState.authCtx.poolQuotaWriter : undefined,
-            poolResponse: admissionState.authCtx.kind === "pool" });
+            poolResponse: admissionState.authCtx.kind === "pool", poolReserve: admissionState.authCtx.kind === "pool" && admissionState.authCtx.poolReserve === true });
       }
       if (terminalBodyWillRecord) {
         options.setTerminalOutcomeRecorder?.((status, httpStatusOverride) => {
@@ -1275,7 +1275,17 @@ export async function deliverPassthroughResponse(
             responseEffects.responseCompletionCancelled = true;
             options.onNativePassthroughCancel?.();
           },
-          onDone: () => unregisterTurn(turnAc),
+          onDone: () => {
+            try {
+              // A connected caller never invokes onClientCancel during lifecycle drain.
+              // Settle through the existing native owner without writing a synthetic wire tail.
+              if (turnAc.signal.reason instanceof ServerShutdownError
+                && !inspector.terminalSeen() && !responseEffects.responseCompletionCancelled) {
+                responseEffects.responseCompletionCancelled = true;
+                options.onNativePassthroughCancel?.();
+              }
+            } finally { unregisterTurn(turnAc); }
+          },
         }, {
           clientGoneSignal: options.abortSignal,
           terminalBoundary: codexSafetyBufferingOptions,

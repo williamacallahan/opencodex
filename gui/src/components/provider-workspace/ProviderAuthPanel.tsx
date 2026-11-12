@@ -261,17 +261,19 @@ export default function ProviderAuthPanel({
   const isAnthropicPool = isAnthropicInstanceId(item.name) && anthropicInstanceRowShapeMatches(item.name, item);
   const claudeGrantsEnabled = isOauth && isAnthropicPool && accounts.length > 0;
   const claudeAccountIds = useMemo(
-    () => (claudeGrantsEnabled ? accounts.filter(account => !accountShowsReauth(account)).map(account => account.id) : []),
+    () => (claudeGrantsEnabled ? accounts.filter(account => !accountShowsReauth(account) && !account.paused).map(account => account.id) : []),
     [claudeGrantsEnabled, accounts],
   );
   const claudeGrants = useAnthropicResetGrants({ apiBase, provider: isAnthropicInstanceId(item.name) ? item.name : "anthropic", accountIds: claudeAccountIds, enabled: claudeGrantsEnabled });
-  // The open reset dialog belongs to the pool it was opened in. Switching server or pool
-  // hides it during render rather than resetting it from an effect.
+  // Switching server or pool hides the selection; observing its paused row closes it for good.
   const grantScope = `${apiBase}\0${item.name}`;
-  const [grantSelection, setGrantSelection] = useState<{ scope: string; account: OAuthAccountRow } | null>(null);
-  const grantAccount = grantSelection?.scope === grantScope ? grantSelection.account : null;
+  const [grantSelection, setGrantSelection] = useState<{ scope: string; accountId: string } | null>(null);
+  const selectedGrantRow = grantSelection?.scope === grantScope
+    ? accounts.find(row => row.id === grantSelection.accountId) : undefined;
+  if (selectedGrantRow?.paused) setGrantSelection(null);
+  const grantAccount = selectedGrantRow && !selectedGrantRow.paused ? selectedGrantRow : null;
   const setGrantAccount = (account: OAuthAccountRow | null) => {
-    setGrantSelection(account ? { scope: grantScope, account } : null);
+    setGrantSelection(account ? { scope: grantScope, accountId: account.id } : null);
   };
   const refreshQuota = async () => {
     if (!onRefreshQuota || refreshingQuota) return;
@@ -656,8 +658,8 @@ export default function ProviderAuthPanel({
                         onClick={() => setCouponAccount(account)}
                       />
                     )}
-                    {claudeGrantsEnabled && !showReauth && (
-                      <AnthropicGrantBadge entry={claudeGrants.entries[account.id]} t={t} onClick={() => setGrantAccount(account)} />
+                    {claudeGrantsEnabled && !showReauth && !account.paused && (
+                      <AnthropicGrantBadge entry={claudeGrants.entries[account.id]} held={!!claudeGrants.held[account.id]} t={t} onClick={() => setGrantAccount(account)} />
                     )}
                     <button type="button" className="btn btn-ghost btn-sm"
                       onClick={() => void authHandlers.onEditAlias(item.name, "oauth", account.id, account.alias)}>

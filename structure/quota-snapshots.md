@@ -3,7 +3,32 @@
 `src/codex/quota.ts` and `src/providers/account-quota-disk.ts` persist last-known account
 quotas for restart recovery. The Codex snapshot also carries bounded observation history
 and separately identity-bound main-policy evidence; provider snapshots include Kiro's
-identity-bound exhaustion verdicts. Their existing hydration and expiry rules govern readers.
+identity-bound exhaustion verdicts and Anthropic's private credential-generation digest in the
+existing row snapshot. Anthropic hydration strips that metadata from public quota bars, keeps its
+probe clock at zero, and treats missing or mismatched ownership as historical rather than current
+routing evidence. Only matching current ownership is persisted. Existing expiry rules still apply.
+
+## Automatic Pool Luna Reserve
+
+Pool WHAM reads opt in with `x-openai-codex-luna-reserve: 1`, including a 401 replay.
+`src/codex/pool-reserve.ts` reuses the Reserve grant predicates and stores an independently timed
+`Luna Reserve` custom window with its own `observedAt`. A non-granting response retracts that window
+without changing the ordinary weekly bar. The existing account DTO, persistence and dashboard carry it.
+Only automatic stored-account requests for `gpt-6-luna` may use it. Reserve is Luna-only while
+ordinary quota is shared with Sol and Astra, so fresh Reserve below 100% wins, then ordinary
+capacity, then previously consented fresh credits, then the existing refusal. A thread bound to a
+seat that still has ordinary capacity keeps Luna there.
+Before the selector changes scope, `src/codex/auth-context.ts` adopts a live legacy parent binding
+onto the current cohort key in the existing quota scope, so a code-swap thread keeps its ordinary
+seat when that seat still has capacity. A genuinely unbound thread can still select Reserve.
+The existing selector still enforces pause, plan, credential, failure-window and account-wide holds.
+Reserve uses its independent quota scope; shared Responses serialization changes only the wire model
+to `gpt-reserve` for HTTP and WebSocket. Ordinary headers cannot renew its five-minute WHAM observation,
+and Reserve headers do not overwrite ordinary quota, even when an optional Pool history writer was not
+captured. The header publisher uses the normalized wire model and automatic Reserve request mode;
+writer availability does not determine which quota the response describes. Materialization and physical sends recheck the
+grant, including after credential-refresh context copies. Explicit Desktop Reserve and native-main
+authorization remain separate and unchanged. Coverage: `tests/codex-integration/codex-pool-reserve.test.ts`.
 
 ## Bounded write deferral
 
@@ -23,3 +48,5 @@ Atomic replacement and account identity checks stay with the existing writer and
 `tests/providers/provider-account-quota-persistence.test.ts` check real disk contents under
 controlled timers: idle debounce, consecutive sustained-update windows, cancellation and
 home reset, removed rows, latest provider callbacks, and recovery after a failed write.
+
+When Reserve is available, a continuing Luna thread keeps its eligible included owner through quota and reset-first preference checks. If its newer live binding is already in Reserve, that binding takes precedence over an older shared binding after the old owner's ordinary quota resets. The canonical legacy-lineage adoption preserves the original binding clocks, and the planner compares those last-use times; it creates no separate owner record.

@@ -283,7 +283,7 @@
   "codex-credits-settings.test.ts": "codex-integration", "codex-credits-probes.test.ts": "codex-integration",
   "pool-monthly-window-retirement.test.ts": "codex-integration",
     "codex-credits-after-limit.test.ts": "codex-integration",
-    "codex-pool-credit-policy.test.ts": "codex-integration", "codex-credit-retry-after.test.ts": "codex-integration", "codex-credit-scoped-retry.test.ts": "codex-integration",
+    "codex-pool-credit-policy.test.ts": "codex-integration", "codex-pool-reserve.test.ts": "codex-integration", "codex-credit-retry-after.test.ts": "codex-integration", "codex-credit-scoped-retry.test.ts": "codex-integration",
     "codex-direct-credit-renewal.test.ts": "codex-integration", "codex-direct-renewal-revocation.test.ts": "codex-integration",
     "direct-credit-renewal-ingress.test.ts": "responses",
     "codex-sidecar-credit-policy.test.ts": "codex-integration",
@@ -718,7 +718,7 @@
   "codex-quota-auto-refresh-main-admission.test.ts": "codex-integration",
   "codex-quota-auto-refresh.test.ts": "codex-integration", "codex-quota-capacity.test.ts": "codex-integration",
   "codex-quota-history.test.ts": "codex-integration", "codex-quota-window-conflict.test.ts": "codex-integration", "codex-quota-parser-parity.test.ts": "codex-integration",
-  "codex-quota-prime.test.ts": "codex-integration", "codex-quota-rejection.test.ts": "codex-integration",
+  "codex-exhausted-refresh-hold.test.ts": "codex-integration", "codex-quota-prime.test.ts": "codex-integration", "codex-quota-rejection.test.ts": "codex-integration",
   "codex-refresh.test.ts": "codex-integration", "codex-reset-credit-auto-redeem.test.ts": "codex-integration",
   "codex-reset-credit-operation-ledger.test.ts": "codex-integration",
   "codex-reset-credit-recovery.test.ts": "codex-integration",
@@ -1055,6 +1055,7 @@
   "management-origin-tls.test.ts": "server", "management-provider-compat-carry.test.ts": "server",
   "management-provider-hide-raw-reasoning.test.ts": "server",
   "management-provider-forward-advisor-tool.test.ts": "server",
+  "management-provider-patch-fields.test.ts": "server",
     "management-provider-responses-reasoning.test.ts": "server", "management-provider-atomicity.test.ts": "server",
   "management-provider-pinsless-validation.test.ts": "server", "management-provider-proto-override.test.ts": "server",
   "management-provider-reasoning-lists.test.ts": "server", "management-provider-reset-replay.test.ts": "server",
@@ -1689,5 +1690,7 @@
   "link-child-ops-no-timer.test.ts": "lab",
   "link-child-policy-routes.test.ts": "server",
   "cli-link-policy.test.ts": "cli",
-  "link-child-catalog-oracle.test.ts": "e2e-style"
+  "link-child-catalog-oracle.test.ts": "e2e-style",
+  "messages-hybrid.test.ts": "claude-integration",
+  "provider-quota-codex-lb.test.ts": "providers"
 }

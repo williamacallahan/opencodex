@@ -2422,6 +2422,9 @@ export const zh: Record<TKey, string> = {
   "codexAuth.mainReauthOpen": "打开",
   "codexAuth.mainReauthPending": "等待登录…",
   "codexAuth.mainReauthDevice": "使用设备码重新登录",
+  "codexAuth.mainNotSignedIn": "未登录",
+  "codexAuth.mainSignInHint": "此服务器尚无 Codex 登录 — 请使用下方设备码登录",
+  "codexAuth.mainSignInDevice": "使用设备码登录",
   "codexAuth.emailCollision": "此账号与您的主 Codex 登录相同。请使用其他账号。",
 
   "codexAuth.resetCreditsTitle": "重置额度",

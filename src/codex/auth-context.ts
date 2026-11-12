@@ -5,7 +5,9 @@ export { requestOwnedMainPinState } from "./request-owned-main-pin";
 import type { OcxRuntimeProviderConfig } from "./auth-context-provider";
 export type { OcxRuntimeProviderConfig } from "./auth-context-provider";
 export { stripCodexRuntimeProviderFields } from "./auth-context-provider";
-import { bindPoolCreditPolicy, poolCreditHoldResetAt, poolContextCreditHoldResetAt, poolCreditRecoveryNeeded, poolContextCreditRecoveryNeeded, poolCreditRecoveryRetryAt } from "./pool-credit-policy";
+import { bindPoolCreditPolicy, poolCreditHoldResetAt, poolContextCreditHoldResetAt, poolCreditRecoveryNeeded, poolContextCreditRecoveryNeeded, poolCreditRecoveryRetryAt, poolUnavailableUntilKnownHorizon } from "./pool-credit-policy";
+import { poolLunaReserveSelection } from "./pool-reserve";
+import { adoptLegacyLineageAffinity } from "./routing/thread-affinity";
 import { nextQuotaQueryDelay } from "./quota-query-backoff";
 import { noteMainAccountActivity } from "./main-account-external-usage";
 import { codexAccountPriorityFailbackEnabled } from "./account-priority";
@@ -25,7 +27,7 @@ import {
 import { isAccountNeedsReauth, markAccountNeedsReauth } from "./account-runtime-state";
 import { ConfigMutationLockError } from "../config";
 import { NativeProfileError } from "./native-profile-types";
-import { codexAccountUnusableReason, codexPoolOnlyExcludesMain, isCodexAccountUsable } from "./account-usability";
+import { codexAccountUnusableReason, codexPoolOnlyExcludesMain, isCodexAccountUsable, type CodexAccountUsabilityOptions } from "./account-usability";
 import { reconcileMainCodexAccountRuntimeState } from "./account-lifecycle";
 import {
   MAIN_CODEX_ACCOUNT_ID,
@@ -74,7 +76,7 @@ import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS, NATIVE_RESERVE_MODEL } from "./cata
 import type { CodexCooldownSource, CodexQuotaScope } from "./routing";
 import { maskAccountId } from "../lib/privacy";
 import { formatErrorResponse, formatUsageLimitReachedResponse } from "../bridge";
-import { nextCodexPoolRecoveryAt } from "./routing/pool-recovery";
+import { exhaustedCodexPoolRecovery, nextCodexPoolRecoveryAt, poolMainRecoveryAt } from "./routing/pool-recovery";
 import { getAccountQuota, isValidWhamHistoryObservation, parseUsageQuota, parseMainPolicyUsageQuota, setAccountQuotaFromParsed } from "./quota";
 import { codexAccountUsesCreditsAfterLimit } from "./account-credit-use";
 import type { CodexAccountMode, OcxConfig, OcxProviderConfig } from "../types";
@@ -250,6 +252,7 @@ export type CodexAuthContext =
       writerGeneration: number;
       generation: number;
       poolQuotaWriter?: PoolQuotaWriter;
+      poolReserve?: true;
       accessToken: string;
       chatgptAccountId: string;
       /** Bypass Pool selection and suppress quota/transient failover for an exact selector. */
@@ -510,6 +513,44 @@ export class CodexPoolAccountCreditsOffError extends CodexAccountCooldownError {
   }
 }
 
+/**
+ * No pool account can serve now, but one is held back only by the sliding failure window, which
+ * lapses within a minute. A transient wait, never the spent-pool reset days away.
+ */
+export class CodexPoolFailureWindowError extends CodexAccountCooldownError {
+  constructor(accountId: string, lapsesAt: number, quotaScope?: CodexQuotaScope) {
+    super(accountId, lapsesAt, undefined, quotaScope);
+    this.name = "CodexPoolFailureWindowError";
+    this.message = `No Codex pool account can serve now: account ${cooldownAccountLabel(accountId)}`
+      + " is held out of new threads after recent upstream failures"
+      + ` until ${new Date(lapsesAt).toISOString()} at the latest. Retry after that.`;
+  }
+}
+
+/** No account was selected: every pool rotation candidate is held on quota with a known end. */
+export class CodexPoolQuotaHeldError extends CodexAccountCooldownError {
+  constructor(accountId: string, retryAt: number, quotaScope?: CodexQuotaScope) {
+    super(accountId, retryAt, undefined, quotaScope);
+    this.name = "CodexPoolQuotaHeldError";
+    this.message = `No Codex account can serve now: every Codex pool account is held on quota until ${new Date(retryAt).toISOString()}`
+      + " at the earliest. Retry after that; the holds lapse on their own as quota resets.";
+  }
+}
+
+/** No pool account can serve: every unpaused account is held at its usage limit. */
+export class CodexPoolExhaustedError extends CodexPoolAccountCreditsOffError {
+  constructor(accountId: string, resetAt: number, quotaScope?: CodexQuotaScope, mainNeedsSignIn = false) {
+    super(accountId, resetAt, false, quotaScope);
+    this.name = "CodexPoolExhaustedError";
+    // A main login that needs sign-in is a credential failure the operator can fix now; the
+    // reset horizon must not hide it.
+    this.message = "Every Codex pool account reached its usage limit, and none may spend credits now."
+      + ` The earliest reset is ${new Date(resetAt).toISOString()}.`
+      + (mainNeedsSignIn ? " The Codex main account also needs sign-in: run `codex login` to restore it." : "")
+      + " Wait for the reset, add credits to an account, or allow credits for an account in Codex Auth.";
+  }
+}
+
 function assertPoolAccountCredits(accountId: string, resetAt: number | undefined, creditRecovery: boolean, quotaScope?: CodexQuotaScope): void {
   if (resetAt !== undefined) throw new CodexPoolAccountCreditsOffError(accountId, resetAt, creditRecovery, quotaScope);
 }
@@ -562,9 +603,7 @@ export class CodexReserveHelperUnsupportedError extends CodexReserveUnavailableE
  *
  * What must NOT be inherited is the quota wording -- "cooling down", `ocx account
  * clear-cooldown` -- because none of it describes a 5xx hold and following it would do
- * nothing. {@link cooldownErrorMessage} therefore returns this class's own message verbatim,
- * the same escape hatch {@link CodexMainAccountHardLockError} and
- * {@link CodexReserveUnavailableError} already use.
+ * nothing. {@link cooldownErrorMessage} therefore returns its message verbatim, as for every subclass.
  *
  * `cooldownUntil` carries the limiter's own change point, which is strictly in the future:
  * either the moment the held account may next be probed or the moment the recovery window
@@ -866,16 +905,8 @@ export function cooldownAccountLabel(accountId: string): string {
  * injected `openai_base_url` in config.toml.
  */
 export function cooldownErrorMessage(err: CodexAccountCooldownError, accountSelector?: string): string {
-  if (err instanceof CodexMainAccountHardLockError
-    // A credits-off refusal is a configuration policy, not a cooldown: clearing a cooldown
-    // cannot lift it, so its own wording (wait for the reset or allow credits) is the remedy.
-    || err instanceof CodexMainAccountCreditsOffError
-    || err instanceof CodexPoolAccountCreditsOffError
-    || err instanceof CodexReserveUnavailableError
-    // A transient-hold refusal is not a quota cooldown. Its own wording is the only accurate
-    // one, and the quota recovery advice below would send the operator after a cooldown that
-    // does not exist (#4701).
-    || err instanceof CodexRecoveryWithheldError) return err.message;
+  // Every subclass is a refusal no cooldown clear can lift, and each owns its accurate wording.
+  if (err.constructor !== CodexAccountCooldownError) return err.message;
   const until = new Date(err.cooldownUntil).toISOString();
   const scopeLabels: Record<CodexQuotaScope, string> = {
     shared: "shared native quota", reserve: "Reserve quota",
@@ -915,6 +946,11 @@ export function cooldownErrorResponse(
   now = Date.now(),
   accountSelector?: string,
 ): Response {
+  if (err instanceof CodexPoolExhaustedError) {
+    // Same known-horizon reasoning as the hard lock below: the whole pool is spent until a reset.
+    return formatUsageLimitReachedResponse(err.message, err.resetAt,
+      Math.max(1, Math.ceil((err.resetAt - now) / 1000)));
+  }
   if (err instanceof CodexMainAccountHardLockError) {
     // A local policy refusal with a known horizon, not a transient throttle (#7046): Codex keeps
     // a Goal active and sleeps through `rate_limit_exceeded` for the whole Retry-After, but
@@ -1113,7 +1149,7 @@ async function resolveCodexAuthContextUnannotated(
   // selectors (fixed account, Reserve) and Direct mode are operator choices outside the policy.
   // Read from the routing config, the same object the shared usability decision reads.
   const poolOnlyApplies = mode === "pool" && fixedAccountId === undefined && codexPoolOnlyExcludesMain(config);
-  const quotaScope = codexQuotaScopeForModel(options.modelId);
+  let quotaScope = codexQuotaScopeForModel(options.modelId);
   // Pool pins and fallback must not resurrect an observed main credential that is cooling
   // down. Unrelated caller-owned credentials and explicit Direct keep their own policy.
   // The identity match and scoped health read are memory-only; never probe the auth file.
@@ -1259,6 +1295,11 @@ async function resolveCodexAuthContextUnannotated(
   const lineage = affinityKey !== undefined && poolStateEligible(fixedAccountId, requestScopedMainCredential)
     ? recordCodexThreadLineage(headers)
     : undefined;
+  // Adopt both Luna lanes before the Reserve planner compares their bindings.
+  if (options.modelId === "gpt-6-luna" && affinityKey !== undefined && lineage !== undefined) {
+    adoptLegacyLineageAffinity(affinityKey, lineage, Date.now(), quotaScope, options.modelId);
+    adoptLegacyLineageAffinity(affinityKey, lineage, Date.now(), "reserve", options.modelId);
+  }
   // Why this request is on this account, carried to the request log so a move reads as an event
   // instead of something inferred from account labels across lines (#4546).
   let affinityDecision: CodexAffinityDecision | undefined;
@@ -1290,6 +1331,7 @@ async function resolveCodexAuthContextUnannotated(
   const nativeMainSelectionOnly = !nativeMainTrafficBlocked
     && selectionAdmission?.mainProfileDraining === true;
   let accountId: string;
+  let poolReserve = false;
   let mainDiscoveryFailure: unknown;
   // Answering this with the manual-pin predicate made `codexAccountUnusableReason` report
   // `main_credential_unavailable` for every UNPINNED request, so `getEligiblePoolAccounts` never
@@ -1358,7 +1400,7 @@ async function resolveCodexAuthContextUnannotated(
       { excludeAccountIds },
     );
     eligibility.deniedModelAccountIds = deniedModelAccountIds;
-    const selectionOptions = {
+    let selectionOptions: CodexAccountUsabilityOptions = {
       // A fixed selector (exact account, Reserve) is outside the pool-only policy (#7410).
       explicitAccountSelector: fixedAccountId !== undefined,
       // Temporary switch drain keeps the candidate until the atomic claim rejects
@@ -1378,6 +1420,13 @@ async function resolveCodexAuthContextUnannotated(
       // conversation's attachments say nothing about where unrelated threads should be served.
       retainAccountForUploadedFiles: options.retainAccountForUploadedFiles === true,
     };
+    // The native main login keeps its own per-request Reserve authorization, so only stored seats take part here.
+    const reserveModelId = !requestScopedMainCredential && fixedAccountId !== MAIN_CODEX_ACCOUNT_ID ? options.modelId : undefined;
+    const poolSelection = poolLunaReserveSelection(config, reserveModelId,
+      quotaScope, selectionOptions, options.excludeAccountId, affinityKey, Date.now(), fixedAccountId);
+    selectionOptions = poolSelection.options;
+    quotaScope = poolSelection.quotaScope;
+    poolReserve = poolSelection.reserve;
     // A pre-drain selector reserves the native identity while reconciliation and
     // routing inspect it. Selectors arriving after the fence skip reconciliation
     // and may still route to non-main pool accounts without touching switch state.
@@ -1498,12 +1547,24 @@ async function resolveCodexAuthContextUnannotated(
             : "Codex accounts that support this model are currently unavailable",
         );
       }
-      throw new CodexPoolAuthenticationError(undefined, {
-        quarantinedMain: !nativeMainReadsForbidden
-          && options.excludeAccountId !== MAIN_CODEX_ACCOUNT_ID
-          && !policy.pausedCodexAccountIds?.includes(MAIN_CODEX_ACCOUNT_ID)
-          && codexAccountUnusableReason(config, MAIN_CODEX_ACCOUNT_ID, selectionOptions) === "needs_reauth",
-      });
+      const mainCandidate = !nativeMainReadsForbidden
+        && options.excludeAccountId !== MAIN_CODEX_ACCOUNT_ID
+        && !policy.pausedCodexAccountIds?.includes(MAIN_CODEX_ACCOUNT_ID);
+      const quarantinedMain = mainCandidate && codexAccountUnusableReason(config, MAIN_CODEX_ACCOUNT_ID, selectionOptions) === "needs_reauth";
+      const mainRecoveryAt = mainCandidate && !quarantinedMain ? poolMainRecoveryAt(config, quotaScope, selectionOptions) : undefined;
+      const unavailable = poolUnavailableUntilKnownHorizon(policy, config, Date.now(),
+        { candidate: mainCandidate, needsSignIn: quarantinedMain, recoveryAt: mainRecoveryAt },
+        (id) => isCodexAccountUsable(config, id, selectionOptions), quotaScope);
+      switch (unavailable?.kind) {
+        case "failure-window": throw new CodexPoolFailureWindowError(unavailable.accountId, unavailable.lapsesAt, quotaScope);
+        case "credit-recheck": throw new CodexPoolAccountCreditsOffError(unavailable.accountId, unavailable.resetAt, true, quotaScope);
+        case "exhausted": throw new CodexPoolExhaustedError(unavailable.accountId, unavailable.resetAt, quotaScope, unavailable.mainNeedsSignIn);
+        case undefined: break;
+        default: { const exhaustive: never = unavailable; throw exhaustive; }
+      }
+      const exhausted = quarantinedMain ? undefined : exhaustedCodexPoolRecovery(config, Date.now(), quotaScope, selectionOptions, mainCandidate);
+      if (exhausted) throw new CodexPoolQuotaHeldError(exhausted.accountId, exhausted.retryAt, quotaScope);
+      throw new CodexPoolAuthenticationError(undefined, { quarantinedMain });
     }
     accountId = selected;
     if (accountId === MAIN_CODEX_ACCOUNT_ID) assertMainAccountPolicy(policy);
@@ -1564,7 +1625,7 @@ async function resolveCodexAuthContextUnannotated(
   try {
     assertCodexAccountValidationReady(accountId);
     if (configuredCodexMainDuplicate(config, accountId)) throw new CodexPoolAuthenticationError(CODEX_MAIN_DUPLICATE_ACTION);
-    assertPoolAccountCredits(accountId, poolCreditHoldResetAt(policy, accountId, config), poolCreditRecoveryNeeded(policy, accountId), quotaScope);
+    assertPoolAccountCredits(accountId, poolCreditHoldResetAt(policy, accountId, config, Date.now(), poolReserve), poolCreditRecoveryNeeded(policy, accountId), quotaScope);
   } catch (cause) {
     // Nothing will reach upstream, so give the trial back instead of leaving the held account
     // unprobeable until the lease deadline lapses (#4701).
@@ -1697,13 +1758,14 @@ async function resolveCodexAuthContextUnannotated(
     const token = await getValidCodexToken(accountId, { signal: options.signal });
     assertCodexAccountValidationReady(accountId);
     if (configuredCodexMainDuplicate(config, accountId)) throw new CodexPoolAuthenticationError(CODEX_MAIN_DUPLICATE_ACTION);
-    assertPoolAccountCredits(accountId, poolCreditHoldResetAt(policy, accountId, config), poolCreditRecoveryNeeded(policy, accountId), quotaScope);
+    assertPoolAccountCredits(accountId, poolCreditHoldResetAt(policy, accountId, config, Date.now(), poolReserve), poolCreditRecoveryNeeded(policy, accountId), quotaScope);
     return bindPoolCreditPolicy({
       kind: "pool",
       accountId,
       writerGeneration,
       generation: token.generation,
       poolQuotaWriter: capturePoolQuotaWriter(accountId, token),
+      ...(poolReserve ? { poolReserve: true as const } : {}),
       accessToken: token.accessToken,
       chatgptAccountId: token.chatgptAccountId,
       ...(fixedAccountId !== undefined ? { fixedAccount: true } : {}),
@@ -1753,6 +1815,7 @@ export function applyCodexAuthContextToProvider(
       accessToken: ctx.accessToken,
       chatgptAccountId: ctx.chatgptAccountId,
       kind: ctx.kind,
+      ...(ctx.kind === "pool" && ctx.poolReserve ? { poolReserve: true as const } : {}),
     },
     _codexAccountRequired: true,
   };

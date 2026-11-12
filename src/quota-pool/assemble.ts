@@ -14,7 +14,9 @@
  * - Claude CLI: the usage-admission snapshot (5-hour, weekly and family windows, plus a parsed
  *   CLI limit refusal);
  * - provider-level reports: `heldProviderQuotaReports`, the reports the Home last published, used
- *   as `pooled` only for a provider without account rows.
+ *   as `pooled` only for a provider without account rows. A codex-lb relay's report is left out:
+ *   it is display-only, and codex-lb keeps serving on purchased credits after its windows fill, so
+ *   a full window there would read to placement as an unavailable provider.
  *
  * A provider with account rows gets its `pooled` windows from those rows (`pooled.ts`), so the
  * pool does not depend on an active quota read having warmed the report cache.
@@ -34,6 +36,7 @@ import { latestCodexQuotaObservationSource } from "../codex/quota";
 import { ACCOUNT_LOG_LABEL_RE, oauthAccountLogLabel } from "../codex/account-label";
 import { OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers-destination";
 import { hasCodexPoolProvider, heldProviderQuotaReports, type ProviderQuotaReport } from "../providers/quota/report-cache";
+import { CODEX_LB_USAGE_SOURCE } from "../providers/quota-types";
 import {
   accountCacheKey,
   accountQuotaCache,
@@ -314,7 +317,9 @@ function enabled(provider: OcxProviderConfig | undefined): provider is OcxProvid
 async function assemble(config: OcxConfig, identity: QuotaPoolIdentity, deps: QuotaPoolDeps): Promise<QuotaPool> {
   const now = (deps.now ?? Date.now)();
   const names = Object.keys(config.providers).filter(name => enabled(config.providers[name])).sort();
-  const reports = new Map(heldProviderQuotaReports(config).reports.map(report => [report.provider, report]));
+  const reports = new Map(heldProviderQuotaReports(config).reports
+    .filter(report => report.source !== CODEX_LB_USAGE_SOURCE)
+    .map(report => [report.provider, report]));
   const codexPool = hasCodexPoolProvider(config);
   const codex = codexPool ? (await (deps.codexSnapshot ?? listCodexAuthAccountsSnapshot)(config)).accounts : [];
   const providers: QuotaPoolProvider[] = [];

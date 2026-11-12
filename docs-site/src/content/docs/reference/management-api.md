@@ -112,6 +112,15 @@ without moving the weekly reset day. When a claim does not answer, the dialog ke
 `operationId` and offers a retry with that same ID for ten minutes, which is how the
 Claude Code client itself recovers; a new operation on that account, for any grant, is refused
 until then. Spending is dashboard-only: the admin token alone gets `403 session_required`.
+A pause during a preliminary status or profile read returns `409 account_paused`, even if that
+read fails or the grant is unusable. A claim already sent keeps its real journaled result or
+unknown outcome. Pausing closes the account's reset dialog; resuming does not reopen it.
+Click its badge to reopen. The running dashboard page retains an unconfirmed `operationId` across
+pause, dialog close and panel remount, even while a status read is slow or fails. A status response
+with no pending operation does not prove your earlier claim settled: the server may have recorded
+its result while the browser lost the reply. Recovery still uses an explicit same-ID retry, never
+an automatic spend or a new operation. A definitive reply, or an explicit expiry/identity refusal,
+releases that hold. A full page reload can recover only operations the server still reports open.
 
 For the concepts behind the model roster and encrypted worker-task behavior, see
 [Sub-agent Surface](/guides/sub-agent-surface/).

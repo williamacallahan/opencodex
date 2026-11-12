@@ -353,6 +353,8 @@ async function commandCodeConfig(cwd: string | undefined): Promise<Record<string
   };
 }
 
+// AI SDK v6 reports `inputTokens` as the total prompt (its Anthropic provider sums input, cache
+// reads and cache writes), which is already the canonical inclusive convention (types/request.ts).
 function usage(value: unknown): OcxUsage | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const row = value as Record<string, unknown>;

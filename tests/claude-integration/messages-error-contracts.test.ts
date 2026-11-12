@@ -162,7 +162,7 @@ const ingressProducerRows: [string, number, string[]][] = [
   ["src/claude/inbound-content-options.ts", 2, ["tool_choice.tool requires a name", "Restricted web search cannot be forced on a translated route without an available search declaration"]],
   ["src/claude/inbound-model-options.ts", 1, ["Unknown Claude Desktop alias; reapply the Desktop profile from the connected hub"]],
   ["src/server/messages-shared.ts", 1, ["tool_use block has an empty id", "tool_result block has an empty tool_use_id"]],
-  ["src/server/claude-messages.ts", 1, ["Invalid JSON body"]],
+  ["src/server/claude-messages.ts", 3, ["Invalid JSON body", "model is required", "incompatible model"]],
 ];
 test("C1/C2 ingress constructors have explicit producer rows and local identity", async () => {
   const actual: Record<string, number> = {};
@@ -184,7 +184,7 @@ const envelopeWriterRows = [
   ["src/claude/outbound.ts", 6, "shared baseline helpers, original verdict and incomplete/unfinished presentation construction"],
   ["src/protocols/encoders/messages.ts", 4, "original verdict construction and fixed local collection failures"],
   ["src/server/messages-native.ts", 8, "local/evidence legacy formatters, original combo and fold envelopes, owned workflow refusal projection, strict gateway local refusals (non-object body, client cancel, oversized body)"],
-  ["src/server/claude-messages.ts", 30, "mapped local ingress/bypass constructors, original combo and defensive JSON presentation envelopes"],
+  ["src/server/claude-messages.ts", 33, "mapped local ingress/bypass constructors, original combo and defensive JSON presentation envelopes, hybrid lane client-cancel and incompatible-model refusals"],
   ["src/server/index/serve-options.ts", 4, "fixed endpoint auth/origin bypasses"],
   ["src/server/messages-native-tool-guard.ts", 1, "deferred local guard terminal"],
 ] as const;

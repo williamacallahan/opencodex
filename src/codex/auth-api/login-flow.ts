@@ -6,7 +6,7 @@ import type { StoredAccountQuota, WhamUsageResponse } from "../quota";
 import { ConfigMutationLockError, withConfigMutationLockSync } from "../../config";
 import { appendDefaultCodexAccountNamespace, codexAccountPickerEnabled } from "../account-namespaces";
 import { catalogRefreshIsPending, normalizeCatalogDisposition } from "../catalog-refresh-status";
-import { checkAccountIdCollisionWithNativeMain as checkAccountIdCollision, CodexCollisionReadBusyError } from "./login-collision";
+import { checkAccountIdCollisionWithNativeMain as checkAccountIdCollision, CodexCollisionReadBusyError, CodexLoginRestartingError, warnCodexLoginFailed } from "./login-collision";
 import { extractChatgptPlanType } from "../plan";
 import { clearAccountNeedsReauth, isAccountNeedsReauth, markAccountNeedsReauth } from "../account-runtime-state";
 import { clearCodexPoolRefreshFailure } from "../pool-refresh-backoff";
@@ -17,7 +17,7 @@ import type { CodexAccount, CodexAccountCredentials, OcxConfig } from "../../typ
 import type { CatalogDisposition } from "../convergence-types";
 import { isValidCodexAccountId } from "../account-id";
 import { codexAccountIdNamespaceCollisionError } from "../account-namespace-match";
-import { jsonResponse } from "./http";
+import { jsonResponse, loginRestartingResponse } from "./http";
 import { codexAuthLoginState, MAX_CODEX_LOGIN_STATE_ROWS, CODEX_LOGIN_TERMINAL_TTL_MS, CodexLoginStateBusyError, setCodexLoginState, pruneCodexLoginState, expireCodexAuthFlow } from "./login-state";
 import type { CodexLoginStateRow } from "./login-state";
 import { getRuntimeConfig, configuredPoolAccount, nonEmptyPlan, saveRuntimeConfig } from "./runtime-config";
@@ -177,6 +177,8 @@ export async function convergeAccountNamespaceCatalog(
 }
 
 export async function handleCodexAuthLoginStart(req: Request, config: OcxConfig, convergeCodexCatalog?: CodexAuthCatalogConvergence): Promise<Response> {
+  const restarting = loginRestartingResponse();
+  if (restarting) return restarting;
   const body = (await req.json().catch(() => ({}))) as {
     id?: string;
     reauth?: boolean;
@@ -492,7 +494,11 @@ export async function handleCodexAuthLoginStart(req: Request, config: OcxConfig,
           });
         }
       } catch (error) {
-        const message = error instanceof CodexCollisionReadBusyError
+        // One closed-vocabulary line per failed login: no email, account id, token, or flow id.
+        warnCodexLoginFailed("chatgpt", error);
+        const message = error instanceof CodexLoginRestartingError
+          ? error.message
+          : error instanceof CodexCollisionReadBusyError
           ? "Native Codex login is busy or unreadable; retry login shortly."
           : error instanceof ConfigMutationLockError
           || error instanceof CodexCredentialRefreshLockTimeoutError

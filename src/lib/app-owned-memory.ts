@@ -115,6 +115,10 @@ export function configureAppOwnedMemoryBudget(bytes: number): void {
   budgetBytes = bytes;
 }
 
+export function configuredAppOwnedMemoryBudgetBytes(): number {
+  return budgetBytes;
+}
+
 function retainedSnapshot(registration: RetainedStoreRegistration): RetainedStoreSnapshot {
   try {
     return registration.snapshot();

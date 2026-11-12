@@ -224,7 +224,20 @@ quota, reset eligibility, billing credit or routing capacity.
 `src/providers/quota/anthropic-account-quota.ts` probes per-account usage for either
 instance. It refuses an unconfigured instance, resolves token renewal before keying its
 flight on the credential actually dispatched, and publishes only while the instance's
-quota epoch, configured row, account incarnation and login identity are unchanged.
+quota epoch, configured row, account incarnation, login identity and pause revision are unchanged.
+A pause retires in-flight usage evidence even if the account resumes before the response arrives;
+neither cooldown recovery nor cache/decision publication adopts that result. Both account and
+shared vendor flight keys include the pause revision, so a resumed read cannot join a pre-pause read.
+Failed probes retain last-good bars only when `anthropicQuotaEntryIsCurrent` still accepts their
+credential generation and flight; a failed replacement probe never renews old-credential bars.
+The existing account-quota snapshot stores the non-secret `credentialGeneration` digest as private
+Anthropic metadata. Hydration removes it from public bars and keeps the probe clock at zero.
+Matching digests preserve last-good retention after restart; legacy unbound or mismatched snapshots
+remain historical and cannot seed routing, failed-probe retention, or a fresh header merge.
+A refresh merge (`mergeAccountCredential` with `expectedGeneration`) that keeps the login identity
+prepares `prepareOAuthCredentialRotation` before the write; after it persists the cache moves that account's current reading to
+the new generation, so a refreshed account keeps its usage and threshold standing. Login, re-auth
+and a different-identity replacement publish no rotation, so their old readings stay historical.
 `captureProviderAccountQuotaEpoch(instance)` and the cache keys in
 `src/providers/quota/account-cache.ts` are per instance, so clearing Pool 2 quota never
 invalidates the primary pool. With the pool on and two or more accounts, `fetchAnthropicQuota` (`src/providers/quota/vendor-probes-oauth.ts`) reports a display-only estimate via `aggregateCodexPoolCapacity`: seats weigh 1, inactive seats use their last-good row (no extra probes), paused, reauth or stale seats count as incomplete coverage. Every Anthropic report is current only while the pool switch and each seat's id, paused and reauth state are unchanged; pool off or one account keeps the active report. Quota reset detection observes the active seat's own reading (`observedQuotaFor`), never the estimate, which has no reset times (`tests/providers/provider-anthropic-pool-capacity.test.ts`).
@@ -277,42 +290,7 @@ and `gui/tests/anthropic-instance-helper-controls.test.tsx`.
 
 ## Anthropic account pause
 
-Anthropic OAuth shares `ProviderAccount.paused` in the protected auth store with generic
-OAuth, not a second list in provider config. `setAccountPaused` serializes pause/resume
-with credential and selection writes, advances the selection revision, and only publishes
-invalidation after persistence. Removing an account removes its pause; reauthentication
-preserves it. The store moves active selection to an unpaused, non-reauth row if available.
-For Anthropic, automatic fallback preserves ring order, including source-less legacy rows,
-and skips background local-CLI rows expiring within 60 seconds, including still-valid credentials.
-`src/oauth/refresh-policy.ts` shares that skew between pause fallback, routing and token refresh.
-Claude Code credential adoption follows the [bearer identity contract](#claude-credential-identity).
-A legacy row selected by pause fallback or explicitly can use its own valid bearer for quota/model
-discovery and refresh its stored token normally. Missing or invalid provenance normalizes to no
-source, which never permits CLI-disk adoption. With no permitted fallback, active-account probes
-stay closed until a usable account is selected or resumed.
-Pause does not clear cooldowns, quota, or credentials and does not cancel an already-sent turn.
-
-`src/oauth/anthropic-routing.ts` excludes paused rows from quota, round-robin, fill-first,
-manual, affinity, model-route and reactive 429 candidates, including when proactive pooling
-is off. All-paused requests return 403 with resume guidance. Quorum is invalidated on pause
-and resume; a sent account paused before its 429 may still recover on its sole unpaused
-successor. Credential resolution, refresh-lock acquisition, selection commit and physical
-dispatch recheck live eligibility after asynchronous waits. Responses and native Messages
-preserve typed 401 authentication, 403 pause and 429 cooldown refusals after pacing, including pool-off recovery;
-they do not report local rejection as 502. Only cooled usable survivors of a strict route
-produce its scoped 429 and Retry-After, not a login error. An already-dispatched refresh
-retains a successful rotated credential without unpausing; a late failure cannot mark the
-paused row for reauthentication. Token Guardian and Anthropic quota probes recheck live
-pause, selection and bearer ownership after token resolution and before each usage send;
-a newly paused account makes no auxiliary request. An account switch during a usage probe still seeds the probed account's quota cache but suppresses its stale provider report and reset observation. Pool-off keeps a healthy active account;
-pause/prior-429 recovery uses `only-eligible`, and logs name the committed account.
-
-> Decision record: [ADR-6013](../decisions/ADR-6013-anthropic-account-pause.md)
-
-Regression coverage: `tests/adapters/anthropic/anthropic-account-pause.test.ts`,
-`tests/oauth/local-token-detect.test.ts`, `tests/oauth/oauth-refresh.test.ts`,
-`tests/adapters/anthropic/anthropic-model-routes.test.ts`, `tests/oauth/oauth-accounts-api.test.ts`,
-`tests/cli/cli-account-pool-verbs.test.ts`, and `gui/tests/provider-quota-refresh-controls.test.tsx`.
+Paused-row semantics (`ProviderAccount.paused`, selection fallback, routing exclusion and refresh handling) live in [`anthropic-account-pause.md`](anthropic-account-pause.md).
 
 ## Claude credential identity
 

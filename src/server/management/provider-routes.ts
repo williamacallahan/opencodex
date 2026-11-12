@@ -54,7 +54,7 @@ import { parseAntigravityAvailableModels } from "../../providers/antigravity-mod
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
 import {
   applyProviderCompatPatchFields,
-  carryProviderCompatFields,
+  carryProviderCompatFields, unrecognizedProviderPatchFields,
   providerCompatFieldConfigError,
   providerOverwriteKeepsDestination,
   sampleProviderOverwrite,
@@ -85,6 +85,7 @@ import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider } from "../../
 import { codexAccountNamespaceProviderCollisionError } from "../../codex/account-namespace-match";
 import { clearThreadAccountMap } from "../../codex/routing";
 import { primeCodexPoolQuotas } from "../../codex/auth-api";
+import { shownCodexCredits } from "../../codex/credits";
 import { clearModelCache, getProviderDiscoveryStatus } from "../../codex/model-cache";
 import { getCodexModelEntitlementStatus } from "../../codex/model-entitlements";
 import { DEFAULT_PROVIDER_CONTEXT_CAP, globalContextCapValue, providerContextCap, providerContextCaps, selectedProviderContextCaps, forgetProviderContextCap, setAllProviderContextCaps, setGlobalContextCapValue, setProviderContextCap } from "../../providers/context-cap";
@@ -906,10 +907,14 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const now = Date.now();
     return jsonResponse({
       ...snapshot,
-      reports: snapshot.reports.map(report => ({
-        ...report,
-        routingQuota: providerRoutingQuota(config, report.provider, now),
-      })),
+      reports: snapshot.reports.map(({ quota: { codexCredits, ...quota }, ...report }) => {
+        const credits = shownCodexCredits(config, codexCredits);
+        return {
+          ...report,
+          quota: credits ? { ...quota, codexCredits: credits } : quota,
+          routingQuota: providerRoutingQuota(config, report.provider, now),
+        };
+      }),
     });
   }
 
@@ -1501,6 +1506,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (name === "openai" && (Object.hasOwn(rawBody, "autoReviewModel") || Object.hasOwn(rawBody, "autoReviewModelOverrides"))) {
       return jsonResponse({ error: "provider openai must not include autoReviewModel or autoReviewModelOverrides" }, 400);
     }
+    const unrecognized = unrecognizedProviderPatchFields(keys); if (unrecognized) return jsonResponse({ error: unrecognized }, 400);
     const applied = applyProviderPatchFields(name, config.providers[name]!, rawBody, keys, config);
     if ("error" in applied) return jsonResponse({ error: applied.error }, 400);
     const next = applied.next;

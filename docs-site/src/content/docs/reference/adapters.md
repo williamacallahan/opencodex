@@ -203,8 +203,10 @@ if the caller sends none, OpenCodex does not invent one. Additional caller metad
 with `forwardClientHeaders`; provider `headers` win for this option, and credential or transport-owned
 names are refused. Canonical ChatGPT forward auth retains its separate fixed header allowlist.
 Only `originator`, `x-client-request-id`, `x-codex-app-version`, `user-agent`,
-`x-codex-window-id`, and `x-codex-installation-id` are supported by `forwardClientHeaders`;
-arbitrary names and wildcard prefixes are rejected on load/write and ignored at runtime.
+`x-codex-window-id`, and `x-codex-installation-id` are supported by `forwardClientHeaders`, plus
+`x-lgw-cache-key` and `x-user-id` (the `openai-chat` adapter honours those two too, for a provider that
+fronts the LLM gateway); arbitrary names and wildcard prefixes are rejected on load/write and
+ignored at runtime.
 
 For a custom gateway that requires original Codex client metadata (for example, a sub2api
 account with `codex_cli_only` enabled), select only the fields its operator requires.

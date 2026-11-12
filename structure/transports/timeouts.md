@@ -8,6 +8,7 @@ linked after clearing or disabling the header timer; `src/server/claude-messages
 `fetchWithHeaderDeadline` success/error cleanup and timeout provenance. Local pacing admission
 still pauses positive header clocks; `src/web-search/header-deadline.ts` distinguishes disabled
 budgets from exhausted positive budgets. Default image/search sidecar deadlines stay unchanged.
+The shared abort module also carries the typed lifecycle shutdown reason; it is distinct from caller cancellation and header expiry, while retaining the same linked abort propagation.
 Native Chat/Messages, non-forward Responses (including adapter retries/continuations), and keyed
 compact start header clocks at the final send after pacing and credential/destination refresh.
 Header and subsequent body policy follow the serving URL across local/public transitions.

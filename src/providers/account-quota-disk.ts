@@ -33,10 +33,13 @@ const PERSIST_DEBOUNCE_MS = 250;
 /** Match the reset ledger's maximum deferral under sustained quota observations. */
 const MAX_PERSIST_DEFERRAL_MS = 1_000;
 
+/** Private Anthropic ownership metadata in the existing snapshot, never in quota DTOs. */
+export type AnthropicPersistedQuota = ProviderQuota & { anthropicCredentialGeneration?: string };
+
 type DiskFile = {
   version: 1;
   /** provider\u0000accountId -> quota, the same key the in-memory cache uses. */
-  rows: Record<string, ProviderQuota | KiroPersistedQuota>;
+  rows: Record<string, ProviderQuota | KiroPersistedQuota | AnthropicPersistedQuota>;
   kiroVerdicts?: Record<string, KiroPersistedVerdict>;
 };
 
@@ -63,7 +66,12 @@ export function readPersistedAccountQuotas(now = Date.now()): Map<string, Provid
       if (key.startsWith("kiro\0") && (quota.updatedAt > now
         || typeof (quota as KiroPersistedQuota).identity !== "string"
         || !/^[a-f0-9]{64}$/.test((quota as KiroPersistedQuota).identity))) continue;
-      rows.set(key, quota);
+      if (key.startsWith("anthropic\0") || key.startsWith("anthropic2\0")) {
+        const { anthropicCredentialGeneration, ...bars } = quota as AnthropicPersistedQuota;
+        // Legacy or malformed ownership remains historical, never bound to today's login.
+        rows.set(key, { ...bars, ...(typeof anthropicCredentialGeneration === "string"
+          && /^[a-f0-9]{64}$/.test(anthropicCredentialGeneration) ? { anthropicCredentialGeneration } : {}) } as AnthropicPersistedQuota);
+      } else rows.set(key, quota);
     }
   } catch {
     // A corrupt cache must never block routing or the dashboard.
@@ -97,7 +105,7 @@ export function readPersistedKiroVerdicts(now = Date.now()): Map<string, KiroPer
 
 /** Debounce snapshots without starving writes under load. Failures remain best-effort. */
 export function schedulePersistAccountQuotas(
-  rows: () => Iterable<[string, ProviderQuota | KiroPersistedQuota]>,
+  rows: () => Iterable<[string, ProviderQuota | KiroPersistedQuota | AnthropicPersistedQuota]>,
   verdicts: () => Iterable<[string, KiroPersistedVerdict]> = () => [],
 ): void {
   const now = performance.now();

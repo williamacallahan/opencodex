@@ -406,6 +406,7 @@ export async function runNativeChatAttempt(
       replayScope,
       undefined,
       translatorBudget,
+      req.headers,
     );
     observeAdvisorNativeReasoning(req.headers, logCtx, request.body);
     return request;

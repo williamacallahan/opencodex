@@ -69,12 +69,17 @@ const CODEX_SPARSE_TERMINAL_EVENTS = [
 ];
 
 const GROK_CONTROL_FRAME_EVENTS = [
+  { type: "codex.keepalive" },
   {
     type: "codex.rate_limits",
     rate_limits: { primary: { used_percent: 12, window_minutes: 60, reset_at: 123 } },
   },
   { type: "codex.response.metadata", headers: { "x-models-etag": "fixture" } },
+  { type: "response.metadata", metadata: { type: "provider", sequence: 1 } },
   { type: "response.created", response: { id: "resp_control" } },
+  { type: "response.output_item.added", output_index: 0, item: { type: "message", id: "msg_control" } },
+  { type: "response.output_text.delta", item_id: "msg_control", output_index: 0, delta: "hello" },
+  { type: "responsesapi.websocket_timing", latency_ms: 12 },
   { type: "response.completed", response: { id: "resp_control", status: "completed", output: [] } },
 ];
 
@@ -133,7 +138,9 @@ afterEach(async () => {
   removeTreeWithRetry(TEST_DIR);
 });
 
-for (const controlType of ["codex.rate_limits", "codex.response.metadata"]) {
+for (const controlType of [
+  "codex.keepalive", "codex.rate_limits", "codex.response.metadata", "response.metadata", "responsesapi.websocket_timing",
+]) {
   describe(`Grok control frame ${controlType}`, () => {
     test.each(["{}", "not-json"])("filters an event-only discriminator with payload %s", payload => {
       const rewrite = createGrokResponsesControlFrameBlockRewrite();
@@ -181,6 +188,8 @@ for (const controlType of ["codex.rate_limits", "codex.response.metadata"]) {
       const rewrite = createGrokResponsesControlFrameBlockRewrite();
       expect(rewrite(`event: ${controlType}\ndata: {}`)).toEqual([]);
       for (const block of ["data: {}", "data: not-json", ": heartbeat", "data: [DONE]",
+        'data: {"type":"response.failed","response":{"status":"failed"}}',
+        'data: {"type":"error","error":{"message":"upstream failed"}}',
         `data: {"type":"response.output_text.delta","delta":"${controlType}"}`]) {
         expect(rewrite(block)).toEqual([block]);
       }
@@ -502,16 +511,26 @@ describe("responsesSnapshotRepair through /v1/responses", () => {
       const grokResponse = await request(true);
       expect(grokResponse.status).toBe(200);
       const grokText = await grokResponse.text();
+      expect(grokText).not.toContain("codex.keepalive");
       expect(grokText).not.toContain("codex.rate_limits");
       expect(grokText).not.toContain("codex.response.metadata");
+      expect(grokText).not.toContain('"type":"response.metadata"');
+      expect(grokText).not.toContain("responsesapi.websocket_timing");
+      expect(grokText).toContain('"type":"response.output_text.delta"');
+      expect(grokText).toContain('"delta":"hello"');
       expect(grokText).toContain('"type":"response.completed"');
       expect(grokText).toContain('"created_at":1789740485}');
 
       const ordinaryResponse = await request(false);
       expect(ordinaryResponse.status).toBe(200);
       const ordinaryText = await ordinaryResponse.text();
+      expect(ordinaryText).toContain("codex.keepalive");
       expect(ordinaryText).toContain("codex.rate_limits");
       expect(ordinaryText).toContain("codex.response.metadata");
+      expect(ordinaryText).toContain('"type":"response.metadata"');
+      expect(ordinaryText).toContain("responsesapi.websocket_timing");
+      expect(ordinaryText).toContain('"type":"response.output_text.delta"');
+      expect(ordinaryText).toContain('"type":"response.completed"');
       expect(ordinaryText).toContain('"created_at":1789740485.0}');
     } finally {
       await server.stop(true);

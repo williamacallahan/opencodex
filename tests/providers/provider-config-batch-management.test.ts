@@ -5,7 +5,7 @@ import { join } from "node:path";
 import * as configModule from "../../src/config";
 import { getConfigPath, loadConfig, saveConfig } from "../../src/config";
 import * as destinationPolicy from "../../src/lib/destination-policy";
-import { safeConfigDTO } from "../../src/server/auth-cors";
+import { providerEditorConfigDTO, safeConfigDTO } from "../../src/server/auth-cors";
 import { handleManagementAPI } from "../../src/server/management-api";
 import type { OcxConfig } from "../../src/types";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
@@ -170,6 +170,36 @@ describe("atomic provider editor batch", () => {
       apiKeyPool: [{ id: "woong-main", key: "sk-woong-secret", label: "primary" }],
       headers: { "x-tenant-token": "tenant-secret" },
     });
+  });
+
+  test("accepts the baseline a client read back for a provider that carries a manual price", async () => {
+    const liveConfig: OcxConfig = {
+      port: 10100,
+      hostname: "127.0.0.1",
+      defaultProvider: "priced",
+      providers: {
+        priced: {
+          adapter: "openai-chat",
+          baseUrl: "https://priced.example.test/v1",
+          defaultModel: "priced-model",
+          apiKey: "sk-priced-secret",
+          modelCosts: { "priced-model": { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1.25 } },
+        },
+      },
+    };
+    saveConfig(liveConfig);
+    // What a client holds: the editor projection serialized to JSON and parsed back.
+    const baseline = JSON.parse(JSON.stringify(providerEditorConfigDTO(liveConfig))) as EditorConfig;
+
+    const destinationSpy = spyOn(destinationPolicy, "providerDestinationResolvedError").mockResolvedValue(null);
+    let response: Response | null;
+    try {
+      response = await putBatch(liveConfig, { baseline, next: structuredClone(baseline) });
+    } finally {
+      destinationSpy.mockRestore();
+    }
+
+    expect(response?.status).toBe(200);
   });
 
   test("updates several providers in one commit and preserves credentials and private fields", async () => {

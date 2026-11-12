@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { upstreamDiagnosticLogProjection } from "../server/request-log-terminal-status";
 import {
   currentUsageLogRevision,
   exactFileIdentity,
@@ -238,6 +239,7 @@ function digestRangeSync(fd: number, from: number, to: number, buffer: Buffer): 
 export async function scanUsageLedgerCooperatively(
   options: ScanUsageLedgerOptions,
 ): Promise<UsageLedgerScanResult> {
+  const projectDiagnostics = upstreamDiagnosticLogProjection();
   const chunkBytes = options.chunkBytes ?? USAGE_LEDGER_READ_CHUNK_BYTES;
   if (!Number.isSafeInteger(chunkBytes) || chunkBytes <= 0 || chunkBytes > USAGE_LEDGER_READ_CHUNK_BYTES) {
     throw new RangeError(`usage ledger chunk bytes must be between 1 and ${USAGE_LEDGER_READ_CHUNK_BYTES}`);
@@ -330,7 +332,7 @@ export async function scanUsageLedgerCooperatively(
       let entry: PersistedUsageEntry | undefined;
       try {
         const text = decoder.decode(line.subarray(0, lineLength));
-        entry = normalizePersistedUsageRow(JSON.parse(text));
+        entry = normalizePersistedUsageRow(JSON.parse(text), projectDiagnostics);
       } catch {
         invalidRows += 1;
         return;

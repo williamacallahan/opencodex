@@ -30,6 +30,7 @@ import { routeModel, routedProviderConfig } from "../../src/router";
 import { setProviderKeychainEntryFactoryForTests } from "../../src/providers/key-store";
 import { setActiveProviderApiKey } from "../../src/providers/api-keys";
 import { clearProviderApiKeyQuotaCache, setCachedProviderApiKeyQuotaForTests } from "../../src/providers/quota-key-accounts";
+import { fetchProviderApiKeyQuotas } from "../../src/providers/quota";
 import { ACCOUNT_QUOTA_TTL_MS } from "../../src/providers/quota-wire";
 import { subscribeAccountSelections } from "../../src/lib/account-selection-events";
 import { providerManagementConfigError, safeConfigDTO } from "../../src/server/auth-cors";
@@ -715,6 +716,37 @@ describe("rotateKeyOn401", () => {
       seedQuota(config, "k2", "key-beta-444555666777", 80);
       seedQuota(config, "k3", "key-gamma-888999000111", 10);
       expect(selectProactiveApiKey(config, "p", now)?.apiKey).toBe("key-gamma-888999000111");
+    });
+
+    test.each(["relay", "kimi"] as const)("real %s quota reads preserve the correct cooled-key selection", async kind => {
+      const config = cooledFirstKey("quota");
+      const provider = config.providers.p!;
+      provider.adapter = kind === "relay" ? "openai-responses" : "openai-chat";
+      provider.authMode = "key";
+      provider.baseUrl = kind === "relay" ? "https://lb.example.com/backend-api/codex" : "https://api.kimi.com/coding/v1";
+      saveConfig(config);
+      const originalFetch = globalThis.fetch;
+      const fetchQuota = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const bearer = new Headers(init?.headers).get("authorization")!;
+        const used = bearer.includes("beta") ? 100 : 50;
+        return Response.json(kind === "relay"
+          ? { limits: [], account_pool_usage: { secondary: 100 - used }, purchased_credits: { balance: 10, unlimited: false, is_partial: false } }
+          : { usages: { limit_month_total: { used_ratio: used / 100 } } });
+      }) as typeof fetch;
+      if (kind === "relay") (provider as OcxProviderConfig & { fetch?: typeof fetch }).fetch = fetchQuota;
+      else globalThis.fetch = fetchQuota;
+      try {
+        const rows = await fetchProviderApiKeyQuotas(config, "p", true);
+        expect(rows).toHaveLength(3);
+        expect(rows.map(row => kind === "relay" ? row.quota?.weeklyPercent : row.quota?.monthlyPercent)).toEqual([50, 100, 50]);
+        if (kind === "relay") {
+          expect(rows[1]?.quota?.codexCredits).toEqual({ balance: "10", unlimited: false });
+          delete (provider as OcxProviderConfig & { fetch?: typeof fetch }).fetch;
+        }
+        expect(selectProactiveApiKey(config, "p", now)?.apiKey).toBe(
+          kind === "relay" ? "key-beta-444555666777" : "key-gamma-888999000111",
+        );
+      } finally { globalThis.fetch = originalFetch; }
     });
 
     test("an unmeasured key outranks a measured-and-spent one", () => {

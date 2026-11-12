@@ -60,23 +60,25 @@ const REFUSED_KEYS: Record<string, TKey> = {
   ledger_unavailable: "anthropicGrant.journalBusy",
   ledger_capacity: "anthropicGrant.journalBusy",
   auth_failed: "anthropicGrant.resultAuthError",
+  account_paused: "pws.accountPausedHint",
 };
 
 /** Ticket badge on an Anthropic account row. Muted at zero, amber when a reset is spendable. */
-export function AnthropicGrantBadge({ entry, onClick, t }: {
+export function AnthropicGrantBadge({ entry, held = false, onClick, t }: {
   entry: AnthropicGrantEntry | undefined;
+  held?: boolean;
   onClick: () => void;
   t: TFn;
 }) {
-  if (entry === undefined || entry.status === "loading") {
+  if (!held && (entry === undefined || entry.status === "loading")) {
     return (
       <span className="badge badge-muted codex-ticket-badge-slot" aria-hidden="true">
         <IconTicket width={12} />0
       </span>
     );
   }
-  const count = entry.status === "ready" ? unspentResets(entry.snapshot) : null;
-  const spendable = entry.status === "ready" && spendableGrant(entry.snapshot) !== undefined;
+  const count = entry?.status === "ready" ? unspentResets(entry.snapshot) : null;
+  const spendable = entry?.status === "ready" && spendableGrant(entry.snapshot) !== undefined;
   const label = count === null
     ? t("anthropicGrant.badgeErrorAria")
     : t("anthropicGrant.badgeAria", { count: String(count) });
@@ -211,13 +213,6 @@ function outcomeOf(result: AnthropicSpendOutcome): Outcome {
   return { tone: "warn", key: REFUSED_KEYS[result.code] ?? "anthropicGrant.failed" };
 }
 
-/**
- * Refusals that settle a held attempt for good. Any other refusal of a same-id
- * retry (journal busy, auth, session) leaves the attempt open, so the dialog
- * keeps holding it rather than offering a fresh id.
- */
-const RELEASES_HELD = new Set(["unknown_outcome_expired", "operation_identity_mismatch"]);
-
 export function AnthropicResetGrantModal({ accountId, accountLabel, entry, controller, onClose }: {
   accountId: string;
   accountLabel: string;
@@ -234,8 +229,7 @@ export function AnthropicResetGrantModal({ accountId, accountLabel, entry, contr
   const optionRefs = useRef(new Map<string, HTMLDivElement>());
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(false);
-  /** Set by an unknown outcome; while it holds, the only post is a same-id retry. */
-  const [held, setHeld] = useState<Held | null>(null);
+  const held = controller.held[accountId];
   const [outcome, setOutcome] = useState<Outcome | null>(null);
 
   useEffect(() => {
@@ -347,19 +341,11 @@ export function AnthropicResetGrantModal({ accountId, accountLabel, entry, contr
 
   const post = async (request: Held) => {
     if (busy) return;
-    const retryingHeld = unresolved !== null && unresolved.operationId === request.operationId;
     setBusy(true);
     const result = await controller.spend(accountId, request);
     setBusy(false);
     setConfirming(null);
-    if (result.kind === "unknown" || (result.kind === "refused" && retryingHeld && !RELEASES_HELD.has(result.code))) {
-      setHeld(request);
-      setOutcome(result.kind === "refused" ? outcomeOf(result) : null);
-      return;
-    }
-    setHeld(null);
-    setOutcome(outcomeOf(result));
-    if (result.kind === "refused") void controller.refresh(accountId);
+    setOutcome(result.kind === "unknown" ? null : outcomeOf(result));
   };
 
   const recheck = async () => {
@@ -411,7 +397,7 @@ export function AnthropicResetGrantModal({ accountId, accountLabel, entry, contr
                 {checking ? t("anthropicGrant.checking") : t("anthropicGrant.checkResult")}
               </button>
               <button type="button" className="btn btn-primary" data-anthropic-grant-retry
-                onClick={() => { void post(unresolved); }} disabled={busy || checking}>
+                onClick={() => { void post(unresolved); }} disabled={busy || checking || held?.inFlight}>
                 {busy ? t("anthropicGrant.redeeming") : t("anthropicGrant.retrySame")}
               </button>
             </div>

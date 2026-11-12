@@ -184,3 +184,7 @@ export function anySignal(signals: AbortSignal[]): { signal: AbortSignal; cleanu
   }
   return { signal: controller.signal, cleanup };
 }
+/** Lifecycle-owned abort, never evidence that the caller disconnected. */
+export class ServerShutdownError extends Error {
+  constructor() { super("server shutdown"); this.name = "ServerShutdownError"; }
+}

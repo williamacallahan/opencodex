@@ -472,11 +472,11 @@ rotation away from being permanently blocked (#4778).
 predicate the refusal guard uses, so routing and refusal can never disagree about which
 conversations are in scope — and `resolveResponsesCodexAuth` carries the answer into
 `CodexAccountUsabilityOptions.retainAccountForUploadedFiles`. `src/codex/routing/cache-affinity.ts`
-owns the rule: `retainsBoundAccountForQuota` names every reason a healthy bound account is kept,
+owns the rule: `retainsBoundAccountForQuota` also keeps Luna included owners while another seat has Reserve,
 and `mayRebindAffinityForQuota` applies the default cache-affinity bar whenever one of them holds,
 even with `pool.cacheAffinity` false. That flag trades cache locality for capacity, not
 correctness for capacity.
-
+Legacy-lineage adoption preserves the original binding clocks when it changes the key, so migration does not make an old owner the newest serving owner.
 The retention is a preference over the VOLUNTARY move only, and it is not an eligibility boundary.
 Genuine exhaustion and an unusable account still release the binding, and every involuntary release
 that runs earlier in `resolveCodexAccountForThreadDetailed` — quota refusal, failover streak, pause,

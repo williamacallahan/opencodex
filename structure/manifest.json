@@ -761,6 +761,15 @@
       ]
     },
     {
+      "path": "providers/anthropic-account-pause.md",
+      "tier": 4,
+      "title": "Anthropic Account Pause",
+      "scope": "Anthropic OAuth account pause: shared ProviderAccount.paused state, selection fallback, routing exclusion, refresh and probe rechecks.",
+      "documents": [
+        "src/oauth/"
+      ]
+    },
+    {
       "path": "providers/oauth-code-display-login.md",
       "tier": 4,
       "title": "OAuth Code-Display Login",
@@ -818,6 +827,13 @@
         "src/codex/",
         "src/config.ts"
       ]
+    },
+    {
+      "path": "providers/openai-native-main-sign-in.md",
+      "tier": 4,
+      "title": "Native Main Device Sign-In",
+      "scope": "Device-code sign-in of the native main Codex login: same-identity reauthentication, the first login of a home with no auth.json, the fenced auth.json write, and cancellation.",
+      "documents": ["src/codex/main-device-reauth.ts", "src/codex/main-device-reauth-api.ts"]
     },
     {
       "path": "providers/codex-round-robin-placement.md",

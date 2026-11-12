@@ -2970,6 +2970,9 @@ export const ru: Record<TKey, string> = {
   "codexAuth.mainReauthOpen": "Открыть",
   "codexAuth.mainReauthPending": "Ожидание входа…",
   "codexAuth.mainReauthDevice": "Войти снова по коду устройства",
+  "codexAuth.mainNotSignedIn": "Вход не выполнен",
+  "codexAuth.mainSignInHint": "На этом сервере ещё нет входа в Codex — войдите ниже по коду устройства",
+  "codexAuth.mainSignInDevice": "Войти по коду устройства",
   "codexAuth.emailCollision": "Этот аккаунт совпадает с вашим основным входом Codex. Используйте другой аккаунт.",
 
   "codexAuth.resetCreditsTitle": "Кредиты сброса",

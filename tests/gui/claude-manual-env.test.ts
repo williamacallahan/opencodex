@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import { buildManualEnv, type ClaudeManualEnvState } from "../../gui/src/pages/claude-manual-env";
+import { effectiveModelEnv } from "../../src/claude/context-windows";
+import { CLAUDE_CODE_NATIVE_TIERS } from "../../src/claude/long-context";
 
 const CONDITIONAL_FLAG_LINE = '[ -z "${CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST+x}" ] && export CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1';
 
@@ -82,6 +84,24 @@ test("a 200k draft without slot evidence still strips automatic marks", () => {
   expect(env).not.toContain("[1m]");
   expect(env).not.toContain("ANTHROPIC_DEFAULT_OPUS_MODEL");
   expect(env).not.toContain("CLAUDE_CODE_AUTO_COMPACT_WINDOW");
+});
+
+test("a 200k draft without slot evidence drops every tier the server filled on its own", () => {
+  // The snapshot is the server's own output for an unconfigured install, not a list of ids
+  // written here: the page once kept a copy of those ids, and it went stale for Sonnet and Fable.
+  const nativeWindows = Object.fromEntries(Object.values(CLAUDE_CODE_NATIVE_TIERS).map(id => [id, 1_000_000]));
+  const served = effectiveModelEnv(undefined, nativeWindows);
+  expect(Object.keys(served).sort()).toEqual([
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  ]);
+  const env = buildManualEnv(state({
+    contextAccounting: "200k",
+    servedContextAccounting: "1m",
+    effectiveModelEnv: served,
+  }));
+  expect(env).not.toContain("ANTHROPIC_DEFAULT_");
 });
 
 test("switching back to 1M does not add a compact window beside a 200k model snapshot", () => {

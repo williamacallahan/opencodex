@@ -8,6 +8,7 @@ import { isApiTargetCaptureCurrent, targetFetch, type ApiTargetCapture } from ".
 import { useRenderTargetCapture } from "../use-render-target-capture";
 import { extractAutoSwitchThresholdPayload } from "../codex-auto-switch";
 import { quotaAutoRefreshAvailability, type AccountQuota } from "../codex-quota-utils";
+import type { CodexCredits } from "../../../src/codex/quota-types";
 import { accountNeedsReauth } from "../oauth-health-display";
 import {
   codexAccountMutationCompletion,
@@ -51,15 +52,6 @@ export function hardLockThresholds(value: unknown): { short: number; long: numbe
   return { ...DEFAULT_MAIN_HARD_LOCK_THRESHOLDS };
 }
 
-export interface CodexCredits {
-  hasCredits?: boolean;
-  unlimited?: boolean;
-  overageLimitReached?: boolean;
-  balance?: string;
-  approxLocalMessages?: [number, number];
-  approxCloudMessages?: [number, number];
-}
-
 export interface CodexAccountEntry {
   id: string;
   email: string;
@@ -95,6 +87,8 @@ export interface CodexAccountEntry {
   };
   mainAccountHardLock?: MainAccountHardLockStatus;
   needsReauth?: boolean;
+  /** The server's cause for needsReauth. On the main row, `missing_credential` means no native login exists yet. */
+  reauthReason?: string;
   selectionExcludedReason?: "plan_excluded";
   selectionExcludedPlan?: string;
   health?: { status: "healthy" | "cooldown" | "reauth_required" | "warning"; reason?: string; until?: string };

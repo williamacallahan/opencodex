@@ -51,7 +51,10 @@ every caller, and reads only caches other paths filled:
   no account rows (an API-key provider's credits, for example) or a per-account provider configured
   with an API key (see [Pooled windows](#pooled-windows)). An in-band observed report is `header`,
   any other report is `measured`. Credential-bound reports are withheld when their current owner
-  cannot be verified passively, including keychain references.
+  cannot be verified passively, including keychain references. A codex-lb relay's report (source
+  `codex-lb:usage`) is left out: it is display-only, and codex-lb keeps serving on purchased
+  credits once its windows fill, so a full window would read to placement as an unavailable
+  provider.
 
 `tests/server/quota-pool-relay.test.ts` reads the route on the Home, over the link relay and over
 the hub relay against a pool account with an expired token and an empty provider-report cache. It

@@ -1,6 +1,6 @@
 import { loadConfig } from "../../config";
 import type { OcxConfig } from "../../types";
-import { getAccountSet } from "../../oauth/store";
+import { credentialGeneration, getAccountCredential, getAccountSet } from "../../oauth/store";
 import { captureConfigGeneration, sweepExpiredOnWrite } from "../../lib/state-store-sweeper";
 import { configuredAnthropicInstance, type AnthropicInstanceId } from "../anthropic-instance";
 import { ACCOUNT_QUOTA_TTL_MS } from "../quota-wire";
@@ -10,7 +10,7 @@ import type { QuotaFailureCode } from "../quota-types";
 import { AnthropicQuotaProbeOwnershipError, anthropicCooldownRecoveryFor, type AnthropicQuotaRecoveryResult } from "./anthropic-cooldown-recovery";
 import {
   accountCacheKey, accountQuotaCache, accountQuotaInflight, captureProviderAccountQuotaEpoch,
-  getTokenForAccountQuotaProbe, hydrateAccountQuotaCache, mayCommitAccountQuotaKey,
+  anthropicQuotaEntryIsCurrent, getTokenForAccountQuotaProbe, hydrateAccountQuotaCache, mayCommitAccountQuotaKey,
   normalizeAnthropicQuota, type AccountQuotaCacheEntry,
 } from "./account-cache";
 
@@ -31,7 +31,7 @@ export async function fetchAnthropicAccountQuota(
   const targetIdentity = JSON.stringify(target);
   const epoch = captureProviderAccountQuotaEpoch(instance);
   const initialRow = getAccountSet(instance)?.accounts.find(row => row.id === accountId);
-  if (!initialRow) return unavailable();
+  if (!initialRow || initialRow.paused) return unavailable();
   const recovery = anthropicCooldownRecoveryFor(instance);
   const incarnation = recovery.reserveAnthropicAccountIncarnation(accountId);
   const ownerCurrent = () => {
@@ -40,12 +40,15 @@ export async function fetchAnthropicAccountQuota(
       && configuredAnthropicInstance(config, instance) === instance
       && JSON.stringify(config.providers[instance]) === targetIdentity
       && recovery.anthropicAccountIncarnation(accountId) === incarnation
-      && !!row && row.loginId === initialRow.loginId && row.addedAt === initialRow.addedAt;
+      && !!row && !row.paused && row.pauseRevision === initialRow.pauseRevision
+      && row.loginId === initialRow.loginId && row.addedAt === initialRow.addedAt;
   };
   hydrateAccountQuotaCache();
   const key = accountCacheKey(instance, accountId);
   const candidate = accountQuotaCache.get(key);
-  const cached = candidate?.isCurrent?.() === false ? undefined : candidate;
+  // A row routing cannot see (a revoked flight, or headers recorded under a credential a token
+  // refresh has since replaced) is a miss: serving it as fresh left routing blind until the TTL.
+  const cached = anthropicQuotaEntryIsCurrent(instance, accountId, candidate) ? candidate : undefined;
   if (!force && cached && Date.now() - cached.ts < ACCOUNT_QUOTA_TTL_MS) {
     return { ...cached, quota: normalizeAnthropicQuota(cached.quota, Date.now()) };
   }
@@ -56,6 +59,9 @@ export async function fetchAnthropicAccountQuota(
     return { ...unavailable(), quotaFailure: "account_unavailable", quotaFailureIsCurrent: ownerCurrent };
   }
   if (!ownerCurrent()) return unavailable();
+  const credential = getAccountCredential(instance, accountId);
+  if (!credential || credential.access !== token) return unavailable();
+  const generation = credentialGeneration(credential);
   const flightKey = recovery.anthropicCredentialQuotaFlightKey(key, accountId);
   const flightCurrent = () => ownerCurrent()
     && recovery.anthropicCredentialQuotaFlightKey(key, accountId) === flightKey;
@@ -72,10 +78,11 @@ export async function fetchAnthropicAccountQuota(
   /** Cache the settled probe result for an account and publish its decision evidence only while the flight is still current for its credential and generation. */
   const publish = (result: AnthropicQuotaRecoveryResult | null, failure?: QuotaFailureCode): AccountQuotaCacheEntry => {
     const previous = accountQuotaCache.get(key);
-    const retained = previous?.isCurrent?.() === false ? undefined : previous;
+    const retained = anthropicQuotaEntryIsCurrent(instance, accountId, previous) ? previous : undefined;
     const isCurrent = result?.isCurrent ?? flightCurrent;
     const entry: AccountQuotaCacheEntry = {
       ts: Date.now(), quota: normalizeAnthropicQuota(result?.quota ?? retained?.quota, Date.now()),
+      anthropicCredentialGeneration: generation,
       ...(!result ? { unavailable: true as const } : {}), isCurrent,
       ...(!result && failure ? { quotaFailure: failure, quotaFailureIsCurrent: isCurrent } : {}),
     };

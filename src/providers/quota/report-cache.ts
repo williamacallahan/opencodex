@@ -310,7 +310,9 @@ export function hasQuotaRows(quota: ProviderQuota | null | undefined): quota is 
     || typeof quota.monthlyPercent === "number"
     || quota.creditsUsd?.unlimited === true
     || typeof quota.creditsUsd?.percent === "number"
-    || !!quota.customWindows?.some(window => typeof window.percent === "number");
+    || !!quota.customWindows?.some(window => typeof window.percent === "number")
+    // A codex-lb relay that answers only a purchased-credit balance still has a row to show.
+    || quota.codexCredits !== undefined;
 }
 
 export function providerLabel(providerId: string): string {

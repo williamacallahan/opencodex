@@ -1,7 +1,7 @@
 import type { OcxProviderConfig } from "../types";
 
 export type OcxRuntimeProviderConfig = OcxProviderConfig & {
-  _codexAccountOverride?: { accessToken: string; chatgptAccountId: string; kind?: "pool" | "main-pool" };
+  _codexAccountOverride?: { accessToken: string; chatgptAccountId: string; kind?: "pool" | "main-pool"; poolReserve?: true };
   _codexAccountRequired?: boolean;
 };
 

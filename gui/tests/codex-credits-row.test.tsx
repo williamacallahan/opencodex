@@ -5,7 +5,8 @@ import CodexCreditsRow from "../src/components/CodexCreditsRow";
 import QuotaBars from "../src/components/QuotaBars";
 import { CodexAccountPoolMainCard } from "../src/components/codex-account-pool-main-card";
 import { CodexAccountPoolCards } from "../src/components/codex-account-pool-cards";
-import type { CodexCredits, CodexAccountEntry } from "../src/hooks/useCodexAccountPool";
+import type { CodexAccountEntry } from "../src/hooks/useCodexAccountPool";
+import type { CodexCredits } from "../../src/codex/quota-types";
 import { en } from "../src/i18n/en";
 import { I18nContext, interpolate, type TFn } from "../src/i18n/shared";
 const t: TFn = (key, vars) => interpolate(en[key], vars);
@@ -19,6 +20,7 @@ test.each([
   [{ balance: "62500" }, "62,500", "1"],
   [{ balance: "62498.725" }, "62,498.73", "1"],
   [{ balance: "0" }, "0", "0"],
+  [{ balance: "-5" }, "-5", "0"],
   [{ balance: "0.001" }, "0", "1"],
   [{ unlimited: true }, "Unlimited", "1"],
   [{ unlimited: true, balance: "10" }, "Unlimited", "1"],

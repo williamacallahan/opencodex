@@ -1,5 +1,5 @@
 import type { CSSProperties } from "react";
-import type { CodexCredits } from "../hooks/useCodexAccountPool";
+import type { CodexCredits } from "../../../src/codex/quota-types";
 import type { Locale, TFn } from "../i18n/shared";
 import "../styles/codex-credits.css";
 
@@ -10,7 +10,7 @@ export default function CodexCreditsRow({ credits, t, locale }: {
   locale: Locale;
 }) {
   if (!credits) return null;
-  const balance = credits.balance !== undefined && /^\d+(\.\d+)?$/.test(credits.balance)
+  const balance = credits.balance !== undefined && /^-?\d+(\.\d+)?$/.test(credits.balance)
     ? Number(credits.balance) : undefined;
   const usableBalance = balance !== undefined && Number.isFinite(balance);
   if (!usableBalance && credits.unlimited !== true && credits.overageLimitReached !== true) return null;

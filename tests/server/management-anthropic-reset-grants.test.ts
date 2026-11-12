@@ -129,6 +129,108 @@ async function call(
 const consume = (routeDeps: AnthropicResetGrantRouteDeps, body: Record<string, unknown> = { accountId: "acct-1", grantId: GRANT, operationId: OP }, principal?: ManagementContext["principal"] | "absent") =>
   call("POST", "/api/anthropic/reset-grants/consume", routeDeps, body, principal);
 
+for (const provider of ["anthropic", "anthropic2"] as const) {
+  for (const stage of ["get-status", "post-profile", "post-gate"] as const) {
+    for (const outcome of ["success", "auth", "transport", "upstream", "malformed", "blocked"] as const) {
+      if (outcome === "blocked" && stage !== "post-gate") continue;
+      test(`${provider}: pause during ${stage} takes precedence over ${outcome} before reservation`, async () => {
+        const up = upstream();
+        let paused = false;
+        let entered!: () => void;
+        let release!: () => void;
+        const started = new Promise<void>(resolve => { entered = resolve; });
+        const held = new Promise<void>(resolve => { release = resolve; });
+        const fetchFn = (async (input, init) => {
+          const selected = stage === "post-profile" ? String(input).endsWith("/api/oauth/profile") : String(input).includes("/api/oauth/usage");
+          if (!selected) return up.fetchFn(input, init);
+          entered();
+          await held;
+          if (outcome === "transport") throw new TypeError("synthetic lost preliminary read");
+          if (outcome === "auth") return new Response(null, { status: 401 });
+          if (outcome === "upstream") return new Response(null, { status: 503 });
+          if (outcome === "malformed") return Response.json({ malformed: true });
+          if (outcome === "blocked") return Response.json({ cedar_ember: grantBlock({ eligible: false }) });
+          return up.fetchFn(input, init);
+        }) as typeof fetch;
+        const path = join(dir, `${provider}-paused-${stage}-${outcome}.json`);
+        // Pause has its own authoritative dependency; it need not be duplicated in isCurrent.
+        const routeDeps = deps({ fetchFn }, { provider, journalPath: path, isPaused: () => paused });
+        const pending = stage === "get-status"
+          ? call("GET", `/api/anthropic/reset-grants?provider=${provider}`, routeDeps)
+          : consume(routeDeps, { provider, accountId: "acct-1", grantId: GRANT, operationId: OP });
+        try {
+          await started;
+          paused = true;
+          release();
+          expect(await pending).toMatchObject({ status: 409, json: { error: { code: "account_paused", provider } } });
+          expect(up.claims).toEqual([]);
+          const { anthropicResetOperationExists } = await import("../../src/providers/anthropic-reset-grant-ledger");
+          expect(anthropicResetOperationExists(OP, { journalPath: path })).toBe(false);
+        } finally { release(); await pending; }
+      });
+    }
+  }
+  for (const stage of ["get-status", "post-profile", "post-gate"] as const) {
+    test(`${provider}: revoked ownership during ${stage} precedes an upstream error`, async () => {
+      const up = upstream();
+      let current = true;
+      const fetchFn = (async (input, init) => {
+        const selected = stage === "post-profile" ? String(input).endsWith("/api/oauth/profile") : String(input).includes("/api/oauth/usage");
+        if (!selected) return up.fetchFn(input, init);
+        current = false;
+        return new Response(null, { status: 503 });
+      }) as typeof fetch;
+      const path = join(dir, `${provider}-revoked-${stage}.json`);
+      const routeDeps = deps({ fetchFn }, { provider, journalPath: path, isCurrent: () => current });
+      const result = stage === "get-status"
+        ? await call("GET", `/api/anthropic/reset-grants?provider=${provider}`, routeDeps)
+        : await consume(routeDeps, { provider, accountId: "acct-1", grantId: GRANT, operationId: OP });
+      expect(result).toMatchObject({ status: 401, json: { error: { code: "auth_failed", provider } } });
+      expect(up.claims).toEqual([]);
+      const { anthropicResetOperationExists } = await import("../../src/providers/anthropic-reset-grant-ledger");
+      expect(anthropicResetOperationExists(OP, { journalPath: path })).toBe(false);
+    });
+  }
+  for (const outcome of ["reset", "unknown"] as const) {
+    test(`${provider}: pause after claim dispatch preserves its ${outcome} journal identity`, async () => {
+      const up = upstream();
+      let paused = false;
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      const held = new Promise<void>(resolve => { release = resolve; });
+      up.claim = async () => {
+        entered();
+        await held;
+        if (outcome === "unknown") throw new TypeError("synthetic lost claim response");
+        return Response.json({ result: "reset", resets_left: 0 });
+      };
+      const routeDeps = deps(up, { provider, journalPath: join(dir, `${provider}-late-${outcome}.json`),
+        isPaused: () => paused, isCurrent: () => !paused });
+      const body = { provider, accountId: "acct-1", grantId: GRANT, operationId: OP };
+      const pending = consume(routeDeps, body);
+      try {
+        await started;
+        paused = true;
+        release();
+        const result = await pending;
+        expect(result).toMatchObject(outcome === "reset"
+          ? { status: 200, json: { code: "reset", operationId: OP } }
+          : { status: 502, json: { error: { code: "unknown_outcome", operationId: OP } } });
+        expect(await consume(routeDeps, body)).toMatchObject({ status: 409, json: { error: { code: "account_paused" } } });
+        paused = false;
+        if (outcome === "unknown") {
+          expect(await consume(routeDeps, { ...body, operationId: OP2 }))
+            .toMatchObject({ status: 409, json: { error: { code: "unresolved_prior_operation", pendingOperationId: OP } } });
+        }
+        up.claim = () => Response.json({ result: "reset", resets_left: 0 });
+        expect(await consume(routeDeps, body)).toMatchObject({ status: 200, json: { code: "reset", replayed: outcome === "reset" } });
+        expect(up.claims.map(claim => claim.body.request_id)).toEqual(outcome === "reset" ? [OP] : [OP, OP]);
+      } finally { release(); await pending; }
+    });
+  }
+}
+
 describe("GET /api/anthropic/reset-grants", () => {
   test("returns the parsed grants for the requested account", async () => {
     const up = upstream();
@@ -137,6 +239,28 @@ describe("GET /api/anthropic/reset-grants", () => {
     expect(json).toMatchObject({ accountId: "acct-2", eligible: true, pendingOperation: null, journalAvailable: true });
     expect(json.grants[0]).toMatchObject({ id: GRANT, resetsLeft: 1, usableNow: true });
     expect(JSON.stringify(json)).not.toContain("claude_max_20x");
+  });
+
+  test("a paused account is refused as paused, not as a sign-in failure, before any token or upstream use", async () => {
+    const up = upstream();
+    let tokenReads = 0;
+    const paused = deps(up, { isPaused: id => id === "acct-2", accessTokenFor: async () => { tokenReads++; return TOKEN; } });
+    expect(await call("GET", "/api/anthropic/reset-grants?accountId=acct-2", paused))
+      .toMatchObject({ status: 409, json: { error: { code: "account_paused" } } });
+    expect(await consume(paused, { accountId: "acct-2", grantId: GRANT, operationId: OP }))
+      .toMatchObject({ status: 409, json: { error: { code: "account_paused" } } });
+    expect({ tokenReads, claims: up.claims.length }).toEqual({ tokenReads: 0, claims: 0 });
+    expect((await call("GET", "/api/anthropic/reset-grants?accountId=acct-1", paused)).status).toBe(200);
+  });
+
+  test("a pause that lands mid-read is reported as paused, and the default account skips paused slots", async () => {
+    const up = upstream();
+    let pausedNow = false;
+    const racing = deps(up, { isPaused: () => pausedNow, accessTokenFor: async () => { pausedNow = true; throw new Error("paused"); } });
+    expect(await call("GET", "/api/anthropic/reset-grants?accountId=acct-1", racing))
+      .toMatchObject({ status: 409, json: { error: { code: "account_paused" } } });
+    const firstPaused = deps(up, { isPaused: id => id === "acct-1", activeAccountId: () => null });
+    expect(await call("GET", "/api/anthropic/reset-grants", firstPaused)).toMatchObject({ status: 200, json: { accountId: "acct-2" } });
   });
 
   test("unknown account, token failure, and upstream failures use fixed codes", async () => {

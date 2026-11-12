@@ -7,9 +7,11 @@ import {
   recognizedUpstreamError,
 } from "../lib/errors";
 import { redactSecretString } from "../lib/redact";
+import { STRUCTURED_QUOTA_CODES } from "../bridge/errors";
 import { outboundCredentials, type OutboundCredentialRegistry } from "../lib/outbound-credential-registry";
 import { configuredCredentials, type ConfiguredCredentials } from "./configured-credentials";
 import { codexWsWrapperStatus } from "./responses/codex-ws-wire";
+import { REQUEST_FAILURE_CAUSES, type RequestFailureCause } from "../usage/telemetry-contract";
 
 /** First bounded upstream diagnostics shared by request contexts and final rows. */
 export interface UpstreamErrorDiagnostics {
@@ -62,7 +64,7 @@ function isSafeDiagnosticToken(value: unknown): value is string {
 const KNOWN_UPSTREAM_ERROR_TYPES: ReadonlySet<string> = new Set([
   "api_error", "authentication_error", "billing_error", "insufficient_quota", "invalid_request_error",
   "not_found_error", "overloaded_error", "permission_error", "rate_limit_error", "request_too_large",
-  "requests", "server_error", "timeout_error", "tokens",
+  "requests", "server_error", "timeout_error", "tokens", "usage_limit_reached",
   "INVALID_ARGUMENT", "FAILED_PRECONDITION", "PERMISSION_DENIED", "UNAUTHENTICATED", "NOT_FOUND",
   "RESOURCE_EXHAUSTED", "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED",
 ]);
@@ -70,6 +72,8 @@ const KNOWN_UPSTREAM_ERROR_TYPES: ReadonlySet<string> = new Set([
 /** Bare top-level error codes worth keeping: the rate-limit and overload classes recognizedUpstreamError maps, plus server_error. */
 const KNOWN_BARE_ERROR_CODES: ReadonlySet<string> = new Set([
   "rate_limit_exceeded", "rate_limit_error", "server_is_overloaded", "overloaded_error", "server_error",
+  // codex-lb's refusal when every seat is out of included usage: type and code are both this value.
+  "usage_limit_reached",
 ]);
 
 function noteBoundedDiagnostic(
@@ -82,13 +86,6 @@ function noteBoundedDiagnostic(
   if (field === "upstreamErrorType" && !KNOWN_UPSTREAM_ERROR_TYPES.has(value)) return;
   if (!diagnosticValueAllowed(value)) return;
   logCtx[field] = value;
-  const status = logCtx.terminalHttpStatus;
-  if (status === undefined || status >= 500) {
-    // Service logs persist too: print only closed-vocabulary values, never an upstream id or code.
-    const { upstreamErrorCode: rawCode, upstreamErrorType: type } = upstreamDiagnosticLogFields(logCtx);
-    const code = rawCode !== undefined && KNOWN_BARE_ERROR_CODES.has(rawCode) ? rawCode : undefined;
-    console.warn(`[opencodex] upstream failure${status ? ` status=${status}` : ""}${type ? ` type=${type}` : ""}${code ? ` code=${code}` : ""}`);
-  }
 }
 
 /**
@@ -111,6 +108,57 @@ export function noteUpstreamRequestId(logCtx: TerminalStatusContext, headers: He
   noteBoundedDiagnostic(logCtx, "upstreamRequestId", headers.get("openai-request-id") ?? headers.get("x-request-id"));
 }
 
+const ATTRIBUTION_LABEL = /^[A-Za-z0-9_.:@+/-]{1,160}$/;
+
+function attributionLabel(value: unknown, snapshot: DiagnosticSources): string {
+  return typeof value === "string" && ATTRIBUTION_LABEL.test(value) && redactSecretString(value) === value
+    && diagnosticValueAllowed(value, snapshot.registry, snapshot.configured) ? value : "unknown";
+}
+
+interface DiagnosticSources { registry: OutboundCredentialRegistry; configured: ConfiguredCredentials }
+
+export interface FailedAttemptView { ordinal: number; provider: string; model: string; status: number; failureCause?: RequestFailureCause | undefined }
+
+const FAILURE_CAUSES: ReadonlySet<string> = new Set(REQUEST_FAILURE_CAUSES);
+
+/**
+ * One warning per failed attempt, written by the final request log owner so every transport
+ * reaches it. A client abort (499) is not an upstream failure. Prints no upstream request id,
+ * body, or credential: type and code come from closed vocabularies, labels pass the credential check.
+ * `cause` is the hub's own attribution (REQUEST_FAILURE_CAUSES), derived without upstream text, so
+ * a failure whose upstream code is outside the known set still says why it failed.
+ */
+export function warnUpstreamFailures(input: {
+  requestId: string;
+  finalStatus: number;
+  terminalStatus?: string;
+  provider: string;
+  model: string;
+  attempts: readonly FailedAttemptView[] | undefined;
+  diagnostics: UpstreamErrorDiagnostics;
+  /** The request's attribution, for the synthetic attempt of a request that recorded none. */
+  failureCause?: RequestFailureCause | undefined;
+}): void {
+  const terminalFailed = input.terminalStatus === "failed" || input.terminalStatus === "incomplete";
+  const snapshot: DiagnosticSources = { registry: outboundCredentials(), configured: configuredCredentials() };
+  const attempts = input.attempts?.length
+    ? input.attempts
+    : [{ ordinal: 0, provider: input.provider, model: input.model, status: input.finalStatus, failureCause: input.failureCause }];
+  const lastIndex = attempts.length - 1;
+  attempts.forEach((attempt, index) => {
+    const failed = attempt.status >= 400 || (index === lastIndex && terminalFailed);
+    if (!failed || attempt.status === 499) return;
+    // Captured diagnostics describe the terminal, which belongs to the last attempt.
+    const { upstreamErrorCode: rawCode, upstreamErrorType: type } = index === lastIndex
+      ? upstreamDiagnosticLogFields(input.diagnostics) : {};
+    // Quota codes print too: cause says rate-limit for every 429, and only the code tells an
+    // operator that the account is spent rather than briefly throttled.
+    const code = rawCode !== undefined && (KNOWN_BARE_ERROR_CODES.has(rawCode) || STRUCTURED_QUOTA_CODES.has(rawCode))
+      ? rawCode : undefined;
+    console.warn(`[opencodex] level=warn upstream failure request=${attributionLabel(input.requestId, snapshot)} attempt=${attempt.ordinal} provider=${attributionLabel(attempt.provider, snapshot)} model=${attributionLabel(attempt.model, snapshot)} status=${attempt.status >= 100 ? attempt.status : "unknown"} type=${type ?? "unknown"} code=${code ?? "unknown"} cause=${FAILURE_CAUSES.has(attempt.failureCause as string) ? attempt.failureCause : "unknown"} final=${input.finalStatus}`);
+  });
+}
+
 export function captureUpstreamTerminalDiagnostics(logCtx: TerminalStatusContext, json: UpstreamErrorPayload): void {
   captureTerminalHttpStatus(logCtx, json);
   noteBoundedDiagnostic(logCtx, "upstreamErrorCode",
@@ -122,23 +170,28 @@ export function captureUpstreamTerminalDiagnostics(logCtx: TerminalStatusContext
 }
 
 export function upstreamDiagnosticLogFields(logCtx: UpstreamErrorDiagnostics): UpstreamErrorDiagnostics {
-  // One verification per projection: the three fields are checked at the same instant, so they
-  // share one snapshot of each source, taken only once a field is actually populated (a row with
-  // no upstream diagnostic reads no credential store).
+  return upstreamDiagnosticLogProjection()(logCtx);
+}
+
+/** One fresh credential snapshot per read/publication batch, acquired only for populated diagnostics. */
+export function upstreamDiagnosticLogProjection(): (logCtx: UpstreamErrorDiagnostics) => UpstreamErrorDiagnostics {
   let sources: { registry: OutboundCredentialRegistry; configured: ConfiguredCredentials } | undefined;
-  const allowed = (field: keyof UpstreamErrorDiagnostics): string | undefined => {
-    const value = logCtx[field];
-    if (!value) return undefined;
-    sources ??= { registry: outboundCredentials(), configured: configuredCredentials() };
-    return diagnosticValueAllowed(value, sources.registry, sources.configured) ? value : undefined;
-  };
-  const code = allowed("upstreamErrorCode");
-  const type = allowed("upstreamErrorType");
-  const requestId = allowed("upstreamRequestId");
-  return {
-    ...(code ? { upstreamErrorCode: code } : {}),
-    ...(type ? { upstreamErrorType: type } : {}),
-    ...(requestId ? { upstreamRequestId: requestId } : {}),
+  return logCtx => {
+    const allowed = (field: keyof UpstreamErrorDiagnostics): string | undefined => {
+      const value = logCtx[field];
+      if (!isSafeDiagnosticToken(value)) return undefined;
+      if (field === "upstreamErrorType" && !KNOWN_UPSTREAM_ERROR_TYPES.has(value)) return undefined;
+      sources ??= { registry: outboundCredentials(), configured: configuredCredentials() };
+      return diagnosticValueAllowed(value, sources.registry, sources.configured) ? value : undefined;
+    };
+    const code = allowed("upstreamErrorCode");
+    const type = allowed("upstreamErrorType");
+    const requestId = allowed("upstreamRequestId");
+    return {
+      ...(code ? { upstreamErrorCode: code } : {}),
+      ...(type ? { upstreamErrorType: type } : {}),
+      ...(requestId ? { upstreamRequestId: requestId } : {}),
+    };
   };
 }
 

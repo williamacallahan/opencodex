@@ -1,6 +1,7 @@
 import { expect } from "bun:test";
 import { installEndpointHooks, test, fetch, startServer, serveUpstream, ownCleanup, caseSignal, testDir, isolatedCodexHome, originalFetch } from "../helpers/claude-endpoint-lifetime";
 import { logsFromApiBody } from "../helpers/logs-api";
+import { createHash } from "node:crypto";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, saveConfig } from "../../src/config";
@@ -686,6 +687,67 @@ test("native openai-responses route carries prompt_cache_key + synthesized sessi
     expect(capture.body?.max_output_tokens).toBeUndefined();
     expect(capture.body?.reasoning?.effort).toBe("high");
     expect(capture.headers?.["session_id"]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await server.stop(true);
+    upstream.stop(true);
+  }
+});
+
+test("each Claude Code subagent reaches the upstream with its own prompt_cache_key", async () => {
+  const keys: Array<string | undefined> = [];
+  const upstream = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      keys.push(((await req.json()) as { prompt_cache_key?: string }).prompt_cache_key);
+      const frames = [
+        `event: response.created\ndata: ${JSON.stringify({ response: { id: "resp_1", status: "in_progress" } })}\n\n`,
+        `event: response.output_text.delta\ndata: ${JSON.stringify({ delta: "Hello" })}\n\n`,
+        `event: response.completed\ndata: ${JSON.stringify({ response: { status: "completed", usage: { input_tokens: 10, output_tokens: 2 } } })}\n\n`,
+      ];
+      return new Response(frames.join(""), { headers: { "Content-Type": "text/event-stream" } });
+    },
+  });
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (new URL(requestUrl).origin === "https://chatgpt.com") return originalFetch(new URL("/responses", upstream.url), init);
+    return originalFetch(input, init);
+  }) as typeof fetch;
+  saveConfig({
+    port: 0,
+    defaultProvider: "native",
+    providers: {
+      native: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" },
+    },
+  } as OcxConfig);
+  const server = startServer(0);
+  const userId = "user_abc123_account__session_11111111-2222-3333-4444-555555555555";
+  const send = async (agentId?: string) => {
+    const response = await fetch(new URL("/v1/messages", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(agentId ? { "x-claude-code-agent-id": agentId } : {}) },
+      body: JSON.stringify({
+        model: "native/gpt-test",
+        max_tokens: 128,
+        messages: [{ role: "user", content: "hi" }],
+        metadata: { user_id: userId },
+      }),
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+  };
+  try {
+    await send();
+    await send("a1b2c3d4e5f60718");
+    await send("a1b2c3d4e5f60718");
+    await send("f0e1d2c3b4a59687");
+    const [main, first, again, sibling] = keys;
+    expect(main).toBe(createHash("sha256").update(userId).digest("hex").slice(0, 32));
+    expect(first).toMatch(/^[0-9a-f]{32}$/);
+    expect(again).toBe(first);
+    expect(first).not.toBe(main);
+    expect(sibling).not.toBe(first);
+    expect(sibling).not.toBe(main);
   } finally {
     globalThis.fetch = originalFetch;
     await server.stop(true);

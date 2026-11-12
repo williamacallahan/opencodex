@@ -13,6 +13,7 @@ import { IconPlus } from "../icons";
 import { useT } from "../i18n/shared";
 import { useProviderAccountPools, type AccountSelectionTarget } from "../hooks/useProviderAccountPools";
 import { useCodexAccountPool } from "../hooks/useCodexAccountPool";
+import { CodexCreditsVisibilityContext } from "../hooks/useCodexCreditsVisibility";
 import { useJsonConfigEditor } from "../hooks/useJsonConfigEditor";
 import { createProviderDraftStore, providerDraftTargetLabel } from "../provider-workspace/target-drafts";
 import { useLegacyTargetPreflightNotice } from "./use-legacy-target-preflight-notice";
@@ -647,6 +648,16 @@ export default function Providers({ apiBase, targetKey, targetLabel }: { apiBase
       {status && (
         <ToastNotice tone={statusTone} onDismiss={clearStatus} dismissLabel={t("common.close")}>{status}</ToastNotice>
       )}
+      <CodexCreditsVisibilityContext.Provider value={{
+        visible: config.showCodexCredits === true,
+        onConfirmed: visible => {
+          if (config.showCodexCredits === visible) return;
+          setConfig(current => current ? { ...current, showCodexCredits: visible } : current);
+          void refreshConfigResult();
+          void fetchProviderQuotas();
+          void fetchKeyPools(Object.keys(keyPools));
+        },
+      }}>
       <ProviderWorkspaceShell
         key={draftTargetKey}
         onRemoveProvider={removeProvider}
@@ -737,6 +748,7 @@ export default function Providers({ apiBase, targetKey, targetLabel }: { apiBase
           );
         }}
       />
+      </CodexCreditsVisibilityContext.Provider>
       <ProvidersPageModals
         apiBase={apiBase}
         targetKey={draftTargetKey}

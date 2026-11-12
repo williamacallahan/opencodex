@@ -2449,6 +2449,9 @@ export const ko: Record<TKey, string> = {
   "codexAuth.mainReauthOpen": "열기",
   "codexAuth.mainReauthPending": "로그인을 기다리는 중…",
   "codexAuth.mainReauthDevice": "디바이스 코드로 다시 로그인",
+  "codexAuth.mainNotSignedIn": "로그인되지 않음",
+  "codexAuth.mainSignInHint": "이 서버에는 아직 Codex 로그인이 없습니다 — 아래 디바이스 코드로 로그인하세요",
+  "codexAuth.mainSignInDevice": "디바이스 코드로 로그인",
   "codexAuth.emailCollision": "이 계정은 메인 Codex 로그인과 동일합니다. 다른 계정을 사용하세요.",
 
   "codexAuth.resetCreditsTitle": "리셋 크레딧",

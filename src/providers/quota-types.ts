@@ -9,6 +9,8 @@
  */
 
 export const PROVIDER_QUOTA_MAX_AGE_MS = 30 * 60_000;
+/** codex-lb pool usage is a display-only observation, not per-key routing evidence. */
+export const CODEX_LB_USAGE_SOURCE = "codex-lb:usage";
 
 // Process-local authority: display readings must not acquire key-selection authority.
 const displayOnlyQuotas = new WeakSet<ProviderQuota>();
@@ -93,6 +95,8 @@ export interface ProviderQuota {
    */
   displayWindows?: ProviderQuotaWindow[];
   creditsUsd?: ProviderQuotaCreditsUsd;
+  /** Display-only purchased ChatGPT credits of a pooling relay (codex-lb), the Codex seat credits shape. */
+  codexCredits?: import("../codex/quota-types").CodexCredits;
   updatedAt: number;
 }
 

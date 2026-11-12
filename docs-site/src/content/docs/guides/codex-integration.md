@@ -1294,9 +1294,8 @@ the response carries `rate_limit_upsell.banner_type = "luna_reserve"`, the prima
 conversation's model setting to `gpt-reserve` and rewrites any other pick back to it — the
 picker is collapsed to the reserve entry by the client, and a `model =` value in
 `config.toml` is overridden the same way. None of this consults the model catalog, so no
-representation on our side participates in the decision. opencodex has no reserve concept to
-adjust, and the alternative — misreporting your own quota back to your own client — would be
-a worse bug than the one it papered over.
+representation on our side participates in that client-side decision. The proxy does not
+misreport the client's quota to unlock its picker.
 
 **Workaround:** the models themselves stay fully usable; only the Codex app's model
 selection is gated. Reach them from a client that does not consult the ChatGPT usage
@@ -1321,6 +1320,15 @@ that would reach the canonical ChatGPT forward route. A `gpt-reserve` selector a
 aliased or routed onto another provider keeps working, a request admitted on a non-loopback listener
 still forwards, and a proxy running in the `client` runtime role is unchanged. Enabling the opt-in
 restores the normal Reserve path rather than the refusal.
+
+**Automatic Pool fallback for Luna.** Pool account usage probes opt in to Luna Reserve and show
+each granted window as a separate **Luna Reserve** bar, alongside ordinary weekly usage. Automatic
+Pool routing serves `gpt-6-luna` from a Pool seat with a fresh Reserve grant below 100% and sends
+the upstream model `gpt-reserve`. Reserve is Luna-only, while ordinary quota is shared with Sol and
+Astra, so Reserve comes first, then ordinary capacity, then credits only on accounts already allowed
+to spend them. A conversation already bound to a seat with ordinary capacity stays there on Luna.
+Other models do not use this fallback. A missing, expired or exhausted grant preserves the existing quota refusal.
+This does not change the explicit Desktop Reserve opt-in or main-login behavior described above.
 
 ## The subagent picker
 

@@ -5,6 +5,7 @@ import { PassThrough } from "node:stream";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { create } from "@bufbuild/protobuf";
 import { afterEach, describe, expect, test } from "bun:test";
+import { ServerShutdownError } from "../../src/lib/abort";
 import {
   drainAndShutdown,
   registerTurn,
@@ -175,6 +176,7 @@ describe("routing cleanup before listener release", () => {
       expect(await (await fetch(server.url, { signal: AbortSignal.timeout(1_000) })).text()).toBe("local");
       draining = drainAndShutdown(server, 0, (): undefined => {
         expect(turn.signal.aborted).toBe(true);
+        expect(turn.signal.reason).toBeInstanceOf(ServerShutdownError);
         expect(getActiveTurnCount()).toBe(0);
         events.push("restore-start");
         expect(() => {
@@ -382,6 +384,7 @@ describe("active turn tracking", () => {
     const lateController = new AbortController();
     registerTurn(lateController, lease!);
     expect(lateController.signal.aborted).toBe(true);
+    expect(lateController.signal.reason).toBeInstanceOf(ServerShutdownError);
     unregisterTurn(lateController);
     lease?.release();
     expect(getActiveTurnCount()).toBe(before);

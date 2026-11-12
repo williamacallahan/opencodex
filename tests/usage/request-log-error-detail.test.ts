@@ -22,11 +22,15 @@ import { log } from "../helpers/request-log-entry";
 // A provider key with no recognizable prefix, so pattern-based redaction cannot spot it.
 const PROVIDER_KEY = "zq7Vb2LmN4pX9tR1sK8wD3fH6jY0cA5e";
 const NUMERIC_KEY = "73915028461739205817";
+// The deployment line keeps sanitized upstream code, type and request id on rows; only the free
+// upstream text is dropped, and attempt records keep none of the four. Credential echoes in those
+// fields are rejected against the configured and outbound credential sets
+// (tests/usage/usage-failure-persistence.test.ts), not by field name.
 const UPSTREAM_TEXT = {
   upstreamError: "invalid key " + PROVIDER_KEY + " " + NUMERIC_KEY,
-  upstreamErrorCode: PROVIDER_KEY,
+  upstreamErrorCode: "fixture_code",
   upstreamErrorType: "invalid_request_error",
-  upstreamRequestId: PROVIDER_KEY,
+  upstreamRequestId: "req_fixture",
 };
 
 function withHome<T>(run: () => T): T {
@@ -189,9 +193,10 @@ describe("request-log rows keep only proxy-owned error facts", () => {
     const dto = JSON.stringify(requestLogDto(live));
     expect(dto).not.toContain(PROVIDER_KEY);
     expect(dto).not.toContain(NUMERIC_KEY);
-    for (const field of ["upstreamError", "upstreamErrorCode", "upstreamErrorType", "upstreamRequestId"]) {
-      expect((live as Record<string, unknown>)[field]).toBeUndefined();
-    }
+    expect((live as Record<string, unknown>).upstreamError).toBeUndefined();
+    expect(live).toMatchObject({ upstreamErrorCode: "fixture_code", upstreamErrorType: "invalid_request_error", upstreamRequestId: "req_fixture" });
+    // Attempt records skip the top-level credential check, so the live /api/logs row keeps no upstream field on them.
+    for (const field of Object.keys(UPSTREAM_TEXT)) expect(live.attempts?.[0]).not.toHaveProperty(field);
     expect(persisted()).not.toContain(PROVIDER_KEY);
     expect(persisted()).not.toContain(NUMERIC_KEY);
     const hydrated = requestLogEntryFromPersistedUsage(readUsageEntries().find(entry => entry.requestId === "canary-direct")!);
@@ -209,10 +214,10 @@ describe("request-log rows keep only proxy-owned error facts", () => {
     expect(row.upstreamCondition).toBe("upstream_failed");
   }));
 
-  test("legacy rows holding upstream text hydrate to closed facts only", () => withHome(() => {
+  test("legacy rows holding upstream text hydrate without that text", () => withHome(() => {
     const legacy = { requestId: "canary-legacy", timestamp: Date.now(), provider: "openai", model: "m", status: 403,
       durationMs: 1, usageStatus: "unreported", errorCode: PROVIDER_KEY,
-      upstreamError: "Your organization must be verified " + PROVIDER_KEY, upstreamErrorCode: PROVIDER_KEY, upstreamRequestId: PROVIDER_KEY };
+      upstreamError: "Your organization must be verified " + PROVIDER_KEY, upstreamErrorCode: "fixture_code", upstreamRequestId: "req_fixture" };
     writeFileSync(usageLogPath(), JSON.stringify(legacy) + "\n", { mode: 0o600 });
     resetUsageReadCacheForTests();
     const entry = readUsageEntries().find(row => row.requestId === "canary-legacy")!;
@@ -221,6 +226,7 @@ describe("request-log rows keep only proxy-owned error facts", () => {
     expect(JSON.stringify(hydrated)).not.toContain(PROVIDER_KEY);
     expect(hydrated.errorCode).toBe("permission_denied");
     expect(hydrated.upstreamCondition).toBe("account_verification_required");
+    expect(hydrated).toMatchObject({ upstreamErrorCode: "fixture_code", upstreamRequestId: "req_fixture" });
   }));
 
   test("a local diagnostic is failure detail, not upstream evidence", () => {

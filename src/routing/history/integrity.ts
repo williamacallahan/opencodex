@@ -11,7 +11,8 @@ import { RebuildWorkerJob } from "./rebuild-job";
 
 export const REQUEST_HISTORY_INTEGRITY_INTERVAL_MS = 5 * 60_000;
 export const REQUEST_HISTORY_INTEGRITY_FAILURE_COOLDOWN_MS = 30_000;
-export const REQUEST_HISTORY_INTEGRITY_CHECK_TIMEOUT_MS = 30_000;
+// quick_check on a 2.1 GB index measured 49.9 s; the disposable worker keeps the serving thread free.
+export const REQUEST_HISTORY_INTEGRITY_CHECK_TIMEOUT_MS = 300_000;
 
 type IntegrityJob = Pick<RebuildWorkerJob, "check" | "dispose" | "afterExit">;
 

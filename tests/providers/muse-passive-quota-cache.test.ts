@@ -133,17 +133,17 @@ describe("passive Muse quota cache", () => {
    */
   test("hydrates before persisting so an observation cannot erase other providers' rows", async () => {
     const [firstId] = await seedAccounts(FIRST);
-    writeDiskRows({ [`anthropic\u0000other-acct`]: quotaAt(55) });
+    writeDiskRows({ [`cursor\u0000other-acct`]: quotaAt(55) });
 
     // Restart with an empty map, then observe BEFORE anything reads the cache.
     clearAccountQuotaCache();
     recordPassiveAccountQuota("meta-muse", firstId!, quotaAt(3), captureConfigGeneration());
     // The foreign row is in memory, which is only possible if the write hydrated first.
-    expect(getCachedProviderAccountQuota("anthropic", "other-acct")?.fiveHourPercent).toBe(55);
+    expect(getCachedProviderAccountQuota("cursor", "other-acct")?.fiveHourPercent).toBe(55);
 
     await Bun.sleep(PERSIST_SETTLE_MS);
     const persisted = readPersistedAccountQuotas();
-    expect(persisted.get(`anthropic\u0000other-acct`)?.fiveHourPercent).toBe(55);
+    expect(persisted.get(`cursor\u0000other-acct`)?.fiveHourPercent).toBe(55);
     expect(persisted.get(`meta-muse\u0000${firstId!}`)?.fiveHourPercent).toBe(3);
   });
 

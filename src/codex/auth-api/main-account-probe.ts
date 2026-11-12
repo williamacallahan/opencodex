@@ -14,7 +14,7 @@ import { reconcileMainCodexAccountRuntimeState } from "../account-lifecycle";
 import { getMainChatgptAccountId, readCodexTokensResult } from "../auth-collision";
 import { clearAccountNeedsReauth, markAccountNeedsReauth } from "../account-runtime-state";
 import { decodeJwtPayload, extractAccountId } from "../../oauth/chatgpt";
-import { getMainAccountPlan, getValidMainAccountToken, isMainAccountTokenVerifiablyLive, mainAccountTokenIsCurrent, mainAccountTokenQuotaWriter, MainAccountTokenRefreshError, MAIN_CODEX_ACCOUNT_ID, setMainAccountPlan, type MainAccountToken } from "../main-account";
+import { getMainAccountPlan, getValidMainAccountToken, isMainAccountTokenVerifiablyLive, mainAccountTokenIsCurrent, mainAccountTokenQuotaWriter, MainAccountTokenRefreshError, MAIN_CODEX_ACCOUNT_ID, nativeMainLoginProvablyAbsent, setMainAccountPlan, type MainAccountToken } from "../main-account";
 import { resolveCodexHomeDir } from "../home";
 import { captureConfigGeneration } from "../../lib/state-store-sweeper";
 import { captureMainAccountIdentityGeneration, clearMainAccountInfoCache, getMainAccountInfoCache, getMainQuotaCredentialGeneration, isMainAccountIdentityGenerationLive, isMainQuotaWriterLive, matchesMainQuotaCredential, observeMainQuotaCredential, setMainAccountCredentialPresence, setMainAccountInfoCache } from "../main-account-cache";
@@ -207,7 +207,9 @@ export async function fetchMainAccountInfoAttempt(
       const generation = captureMainAccountIdentityGeneration();
       try { preparedToken = await prepareMainAccountInfoToken(); }
       catch (error) {
-        const absent = error instanceof MainAccountTokenRefreshError && (error.reason === "reauth" || error.credentialObservedAbsent)
+        // Codex not answering proves nothing by itself; a home with nowhere to keep a login does.
+        const absent = error instanceof MainAccountTokenRefreshError
+          && (error.reason === "reauth" || error.credentialObservedAbsent || await nativeMainLoginProvablyAbsent())
           && home === resolveCodexHomeDir() && isMainAccountIdentityGenerationLive(generation);
         if (absent) setMainAccountCredentialPresence(false);
         return { info: getMainAccountInfoCache() ?? EMPTY_MAIN_ACCOUNT_INFO,

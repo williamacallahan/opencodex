@@ -1557,8 +1557,13 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       // An explicit public base URL isolates strict callers without changing shared config.
       const strictMessagesPath = ingress === "public" &&
         (url.pathname === "/strict/v1/messages" || url.pathname === "/strict/v1/messages/count_tokens");
+      const hybridMessagesPath = ingress === "public" &&
+        (url.pathname === "/hybrid/v1/messages" || url.pathname === "/hybrid/v1/messages/count_tokens");
       const messagesConfig = strictMessagesPath ? { ...config, claudeCode: { ...config.claudeCode, strictPassthrough: true } } : config;
-      const messagesPath = strictMessagesPath ? url.pathname.slice("/strict".length) : url.pathname;
+      const messagesPath = strictMessagesPath ? url.pathname.slice("/strict".length)
+        : hybridMessagesPath ? url.pathname.slice("/hybrid".length) : url.pathname;
+      // Admission must see the same bounded JSON route as the existing Messages endpoints.
+      const messagesReq = hybridMessagesPath ? new Request(new URL(messagesPath + url.search, url), req) : req;
       if (messagesPath === "/v1/messages/count_tokens" && req.method === "POST") {
         if (isDraining()) {
           return drainingResponse(req, policy);
@@ -1570,8 +1575,8 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         if (!isAllowedRequestOrigin(req, policy)) {
           return withCors(anthropicErrorResponse(403, "cross-origin data-plane request blocked", "permission_error"), req, policy);
         }
-        return runAdmittedHttpTurn(req, policy, async (turnAdmissionLease) => withCors(
-          await handleClaudeCountTokens(req, messagesConfig, policy, { claudeIntercept: ingress === "claude-intercept", admission, turnAdmissionLease }),
+        return runAdmittedHttpTurn(messagesReq, policy, async (turnAdmissionLease) => withCors(
+          await handleClaudeCountTokens(messagesReq, messagesConfig, policy, { claudeIntercept: ingress === "claude-intercept", hybridMessages: hybridMessagesPath, admission, turnAdmissionLease }),
           req,
           policy,
         ));
@@ -1601,7 +1606,8 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         // Logging is finalized inside handleClaudeMessages (Responses-vocab tap on the
         // pre-translation stream + native passthrough callbacks) — do not re-wrap the
         // translated Anthropic stream here.
-        const sessionReq = messagesConfig.claudeCode?.strictPassthrough ? req : withCallerSessionIdentity(req, admission);
+        let strictMessagesRequest = !hybridMessagesPath && !!messagesConfig.claudeCode?.strictPassthrough;
+        const sessionReq = hybridMessagesPath || strictMessagesRequest ? messagesReq : withCallerSessionIdentity(messagesReq, admission);
         // Entering the handler, or a logged refusal, means the final request log owns requestId.
         let ownsRequestLog = false;
         const claimRequestLog = (work: (lease: ActiveTurnLease) => Promise<Response>) =>
@@ -1609,11 +1615,18 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         // Capture at authentication: runAdmittedHttpTurn can wait for body capacity first (#7859).
         const advisorAdmissionPolicy = captureAdmissionPolicy(config, admission);
         const response = await runAdmittedHttpTurn(sessionReq, policy, claimRequestLog(async turnAdmissionLease => withCors(
-          await handleClaudeMessages(sessionReq, messagesConfig, logCtx, { requestId, start, turnAdmissionLease, admission, advisorAdmissionPolicy }, policy, { claudeIntercept: ingress === "claude-intercept" }),
+          await handleClaudeMessages(sessionReq, messagesConfig, logCtx, { requestId, start, turnAdmissionLease, admission, advisorAdmissionPolicy }, policy, {
+            claudeIntercept: ingress === "claude-intercept", hybridMessages: hybridMessagesPath,
+            onHybridLane: (lane, laneReq) => {
+              strictMessagesRequest = lane === "strict";
+              const sessionLane = sessionLaneIdFromRequest(laneReq.headers);
+              if (sessionLane && !turnAdmissionLease.claimSessionLane(sessionLane)) return serverBusyResponse(laneReq, "active turns", policy);
+            },
+          }),
           req,
           policy,
-        )), { requestId, start, logCtx, onLogged: () => { ownsRequestLog = true; } });
-        return ownsRequestLog && !messagesConfig.claudeCode?.strictPassthrough ? withMessagesRequestLogId(response, requestId) : response;
+        )), { requestId, start, logCtx, onLogged: () => { ownsRequestLog = true; } }, { deferSessionLane: hybridMessagesPath });
+        return ownsRequestLog && !strictMessagesRequest ? withMessagesRequestLogId(response, requestId) : response;
       }
 
       // OpenAI Chat Completions inbound (GitHub Copilot App / OpenAI-compatible clients).

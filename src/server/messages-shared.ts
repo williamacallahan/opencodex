@@ -151,7 +151,10 @@ export function tapAnthropicSseForLog(
   let usageAcc: Rec = {};
   // message_stop or an upstream error event: the turn's own terminal already went through.
   let terminalSeen = false;
+  // An `event: error` terminal on a 200 stream is a failed turn; the relayed status and bytes stay.
   let errorSeen = false;
+  const seenTerminalMeta = (): PassthroughFinalizeMeta =>
+    errorSeen ? { terminalStatus: "failed", closeReason: "terminal" } : { closeReason: "terminal" };
   // stop_reason of the latest message event the client received as a complete SSE event. Any
   // later message event (resumed content) clears it; pings and comments do not.
   let lastDeliveredStop: string | null = null;
@@ -359,7 +362,7 @@ export function tapAnthropicSseForLog(
       // The turn already ended (message_stop or an upstream error event): an upstream that then
       // idles or keeps sending did not cut it short. Same rule as the read-error branch,
       // including the restored blank line for a terminal found only in the tail.
-      finalize(200, { closeReason: "terminal" });
+      finalize(200, seenTerminalMeta());
       try {
         if (terminalInTail) enqueue(encoder.encode("\n\n"));
         close();
@@ -439,7 +442,7 @@ export function tapAnthropicSseForLog(
             const { terminalInTail, tailClean } = flushTail();
             recordUsage();
             if (guard?.verbatim) {
-              finalize(guard.verbatim.status, { closeReason: "terminal" });
+              finalize(guard.verbatim.status, seenTerminalMeta());
               close();
               return;
             }
@@ -457,7 +460,7 @@ export function tapAnthropicSseForLog(
                     ? null
                     : "anthropic passthrough upstream stream ended before message_stop";
             if (failure === null) {
-              finalize(200, { closeReason: "terminal" });
+              finalize(200, seenTerminalMeta());
               if (terminalInTail) enqueue(encoder.encode("\n\n"));
               close();
               return;
@@ -522,7 +525,7 @@ export function tapAnthropicSseForLog(
         if (terminalSeen && !guard?.verbatim) {
           // Only the transport trailer was lost; the client already has the turn's terminal.
           // The Responses relay likewise reports a read error only without a seen terminal.
-          finalize(200, { closeReason: "terminal" });
+          finalize(200, seenTerminalMeta());
           try {
             // An SSE parser drops an event that EOF cuts off before its blank line, so restore
             // the delimiter when the terminal was only found in that unterminated tail.

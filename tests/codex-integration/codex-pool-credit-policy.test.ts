@@ -1,17 +1,19 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OcxConfig } from "../../src/types";
 import {
   resolveCodexAuthContext, materializeCodexUpstreamAuth, applyCodexAuthContextToProvider,
-  assertCodexAuthContextNotCooled, CodexPoolAccountCreditsOffError, createCodexAuthDispatchGuard,
+  assertCodexAuthContextNotCooled, CodexPoolAccountCreditsOffError, CodexPoolAuthenticationError, CodexPoolExhaustedError, CodexPoolFailureWindowError,
+  createCodexAuthDispatchGuard,
   cooldownErrorMessage, cooldownErrorResponse, shouldMarkAccountNeedsReauthForCodexAuthFailure,
 } from "../../src/codex/auth-context";
 import { rebindPoolCreditPolicy } from "../../src/codex/pool-credit-policy";
 import { TERMINAL_SHORT_WINDOW_FRESHNESS_MS } from "../../src/codex/quota-types";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
-import { isAccountNeedsReauth } from "../../src/codex/account-runtime-state";
+import { isAccountNeedsReauth, markAccountNeedsReauth } from "../../src/codex/account-runtime-state";
+import { MAIN_CODEX_ACCOUNT_ID } from "../../src/codex/account-id";
 import { clearAccountNeedsReauth, clearAccountQuota, updateAccountQuota } from "../../src/codex/auth-api";
 import { getAccountQuota, parseUsageQuota, setAccountQuotaFromParsed } from "../../src/codex/quota";
 import { providerFetch, fetchWithHeaderTimeout } from "../../src/server/responses/fetch-helpers";
@@ -20,6 +22,7 @@ import {
   recordCodexUpstreamOutcome, tryAcquireCodexQuotaProbeLease,
 } from "../../src/codex/routing";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
+import { forgetCodexFailureWindows, noteCodexFailureWindowSample } from "../../src/codex/routing/failure-window";
 import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -63,7 +66,7 @@ describe("stored-account credit policy at authentication", () => {
   afterEach(async () => {
     try {
       clearAccountQuota(); clearCodexUpstreamHealth(); clearThreadAccountMap(); clearPoolRotationState();
-      clearAccountNeedsReauth(ID);
+      clearAccountNeedsReauth(ID); clearAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID); forgetCodexFailureWindows();
       await flushConfigDirHardeningForTests();
     } finally {
       setIcaclsRunnerForTests(null); setAsyncIcaclsRunnerForTests(null);
@@ -72,6 +75,123 @@ describe("stored-account credit policy at authentication", () => {
       if (dir) removeTreeWithRetry(dir);
       dir = "";
     }
+  });
+  test("a pool with every account held answers usage_limit_reached with the reset, not a bad credential", async () => {
+    const resetAt = Date.now() + 3_600_000;
+    quota(100, resetAt);
+    const error = await resolveCodexAuthContext(new Headers(), config(), "pool", { modelId: "gpt-5.5" })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CodexPoolExhaustedError);
+    const response = cooldownErrorResponse(error as CodexPoolExhaustedError);
+    expect(response.status).toBe(429);
+    const body = await response.json() as { error: { code: string; resets_at: number } };
+    expect(body.error.code).toBe("usage_limit_reached");
+    expect(body.error.resets_at).toBe(Math.ceil(resetAt / 1000));
+    expect(Number(response.headers.get("Retry-After"))).toBeGreaterThan(3_500);
+    expect(isAccountNeedsReauth(ID)).toBe(false);
+  });
+  test("a credits-off pool whose seat needs sign-in answers 401, not the quota 429", async () => {
+    // A seat that needs sign-in is not "held for credits": its reset would not help, so the
+    // pool must answer the credential 401 instead of usage_limit_reached.
+    quota(100, Date.now() + 2 * 86_400_000);
+    markAccountNeedsReauth(ID);
+    const error = await resolveCodexAuthContext(new Headers(), config(), "pool", { modelId: "gpt-5.5" })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CodexPoolAuthenticationError);
+    expect(error).not.toBeInstanceOf(CodexPoolExhaustedError);
+  });
+  test("a spent pool reports a usable main login's sooner hold instead of the later pool reset", async () => {
+    const poolReset = Date.now() + 2 * 86_400_000;
+    const mainReset = Date.now() + 3_600_000;
+    quota(100, poolReset);
+    writeFileSync(join(dir, "auth.json"), JSON.stringify({ tokens: { access_token: "main_access", account_id: "main_acct" } }));
+    updateAccountQuota(MAIN_CODEX_ACCOUNT_ID, 100, mainReset);
+    const error = await resolveCodexAuthContext(new Headers(), config(), "pool", { modelId: "gpt-5.5" })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CodexPoolExhaustedError);
+    const body = await cooldownErrorResponse(error as CodexPoolExhaustedError).json() as { error: { resets_at: number } };
+    expect(body.error.resets_at).toBe(Math.ceil(mainReset / 1000));
+  });
+  test("a stale-credit recheck reports a usable main login's sooner hold", async () => {
+    const cfg = config(); cfg.creditCodexAccountIds = [ID];
+    const mainReset = Date.now() + 60_000;
+    updateAccountQuota(ID, 100, Date.now() + 2 * 86_400_000);
+    setAccountQuotaFromParsed(ID, { credits: { hasCredits: true, balance: 42.5, observedAt: Date.now() - 6 * 60_000 } });
+    writeFileSync(join(dir, "auth.json"), JSON.stringify({ tokens: { access_token: "main_access", account_id: "main_acct" } }));
+    updateAccountQuota(MAIN_CODEX_ACCOUNT_ID, 100, mainReset);
+    const error = await resolveCodexAuthContext(new Headers(), cfg, "pool", { modelId: "gpt-5.5" })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CodexPoolExhaustedError);
+    const body = await cooldownErrorResponse(error as CodexPoolExhaustedError).json() as { error: { resets_at: number } };
+    expect(body.error.resets_at).toBe(Math.ceil(mainReset / 1000));
+  });
+  test("a spent pool whose main login needs sign-in answers usage_limit_reached that names `codex login`", async () => {
+    quota(100, Date.now() + 2 * 86_400_000);
+    markAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
+    const error = await resolveCodexAuthContext(new Headers(), config(), "pool", { modelId: "gpt-5.5" })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CodexPoolExhaustedError);
+    const response = cooldownErrorResponse(error as CodexPoolExhaustedError);
+    expect(response.status).toBe(429);
+    const body = await response.json() as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("usage_limit_reached");
+    expect(body.error.message).toContain("codex login");
+    expect(isAccountNeedsReauth(ID)).toBe(false);
+  });
+  test("a spent pool whose only other account sits out a failure window answers a short retry, not the reset", async () => {
+    const degraded = "credit-policy-degraded";
+    const cfg = config();
+    cfg.codexAccounts = [...cfg.codexAccounts!, { id: degraded, email: "degraded@example.test", isMain: false, plan: "pro" }];
+    saveCodexAccountCredential(degraded, {
+      accessToken: "access-token-value-degraded", refreshToken: "fixture-refresh-degraded",
+      expiresAt: Date.now() + 3_600_000, chatgptAccountId: "fixture-workspace-degraded",
+    });
+    quota(100, Date.now() + 2 * 86_400_000);
+    updateAccountQuota(degraded, 10, Date.now() + 3 * 86_400_000);
+    for (let sample = 0; sample < 20; sample += 1) noteCodexFailureWindowSample(cfg, degraded, true, Date.now());
+    const error = await resolveCodexAuthContext(new Headers(), cfg, "pool", { modelId: "gpt-5.5" })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CodexPoolFailureWindowError);
+    const response = cooldownErrorResponse(error as CodexPoolFailureWindowError);
+    expect(response.status).toBe(429);
+    const body = await response.json() as { error: { code?: string; type?: string } };
+    expect(body.error.code).not.toBe("usage_limit_reached");
+    const retryAfter = Number(response.headers.get("Retry-After"));
+    expect(retryAfter).toBeGreaterThan(0);
+    expect(retryAfter).toBeLessThanOrEqual(90);
+    expect(isAccountNeedsReauth(degraded)).toBe(false);
+  });
+  test("a spent pool whose credits-allowed seat only has a stale credit reading answers a short recheck, not the reset", async () => {
+    const cfg = config(); cfg.creditCodexAccountIds = [ID];
+    updateAccountQuota(ID, 100, Date.now() + 2 * 86_400_000);
+    setAccountQuotaFromParsed(ID, { credits: { hasCredits: true, balance: 42.5, observedAt: Date.now() - 6 * 60_000 } });
+    const error = await resolveCodexAuthContext(new Headers(), cfg, "pool", { modelId: "gpt-5.5" })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CodexPoolAccountCreditsOffError);
+    expect(error).not.toBeInstanceOf(CodexPoolExhaustedError);
+    const response = cooldownErrorResponse(error as CodexPoolAccountCreditsOffError);
+    expect(response.status).toBe(429);
+    const retryAfter = Number(response.headers.get("Retry-After"));
+    expect(retryAfter).toBeGreaterThan(0);
+    expect(retryAfter).toBeLessThan(3_600);
+  });
+  test("a stale credit reading does not hide another seat's sooner reset", async () => {
+    const soon = "credit-policy-soon";
+    const cfg = config(); cfg.creditCodexAccountIds = [ID];
+    cfg.codexAccounts = [...cfg.codexAccounts!, { id: soon, email: "soon@example.test", isMain: false, plan: "pro" }];
+    saveCodexAccountCredential(soon, {
+      accessToken: "access-token-value-soon", refreshToken: "fixture-refresh-soon",
+      expiresAt: Date.now() + 3_600_000, chatgptAccountId: "fixture-workspace-soon",
+    });
+    updateAccountQuota(ID, 100, Date.now() + 2 * 86_400_000);
+    setAccountQuotaFromParsed(ID, { credits: { hasCredits: true, balance: 42.5, observedAt: Date.now() - 6 * 60_000 } });
+    const soonReset = Date.now() + 60_000;
+    updateAccountQuota(soon, 100, soonReset);
+    const error = await resolveCodexAuthContext(new Headers(), cfg, "pool", { modelId: "gpt-5.5" })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CodexPoolExhaustedError);
+    const body = await cooldownErrorResponse(error as CodexPoolExhaustedError).json() as { error: { resets_at: number } };
+    expect(body.error.resets_at).toBe(Math.ceil(soonReset / 1000));
   });
   test("an exact selector respects the credits-off hold without quarantining the account", async () => {
     quota();

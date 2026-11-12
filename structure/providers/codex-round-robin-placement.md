@@ -24,6 +24,11 @@ sticky count stay keyed per quota scope through `codexPoolKeyForScope`. A sticky
 the threshold drops out of the list the ring sees, which releases it for the next placement; it rejoins
 rotation once its usage is back under the threshold.
 
+Automatic Luna Reserve narrows the request's capacity tier before invoking this same selector:
+included quota first, Reserve second, and consented credits last. The request-local Reserve candidate
+set bypasses only the ordinary usage-limit exclusion, not pause, plan, credential or health checks.
+See [automatic Pool Luna Reserve](../quota-snapshots.md#automatic-pool-luna-reserve).
+
 An operator's unspent manual selection for the scope stays in the list whatever its usage
 (`unspentManualPreference` in `src/codex/routing/active-account.ts`). Manual selection seeds the shared
 ring and each independent quota-scope ring, and records a one-shot for each of them, so the next

@@ -824,7 +824,26 @@ export function catalogHintsFromModelsApiItem(providerName: string, item: Provid
   const rawReasoningEfforts = capabilityRecord?.reasoning_effort
     ?? item.reasoning_efforts
     ?? reasoningParameters?.efforts;
-  const listedReasoningEfforts = normalizedStringList(rawReasoningEfforts, 8, 24);
+  // Some upstreams publish the ladder elsewhere: `metadata.supported_reasoning_levels` as
+  // `{ effort }` objects (codex-lb), or `capabilities.reasoning.effort_levels` (an LLM gateway).
+  // They are read only when none of the fields above is present, so every catalog that already
+  // resolves keeps its ladder. A list with no usable rung leaves the ladder unknown rather than
+  // empty: an alias spanning several providers can publish `[]` and still accept an effort, and a
+  // declared-empty ladder would strip the effort from every request to it.
+  // `none` and `minimal` are left out: a ladder read here reaches the catalogs but not the request
+  // path, which without a stored effort map sends no effort for `none` and `low` for `minimal`, so
+  // publishing either would offer a level the route then silently replaces.
+  const capabilityReasoning = plainRecord(capabilityRecord?.reasoning);
+  const topLevelReasoning = plainRecord(plainRecord(item.capabilities)?.reasoning);
+  const publishedReasoningEfforts = rawReasoningEfforts === null || rawReasoningEfforts === undefined
+    ? [metadata?.supported_reasoning_levels, capabilityReasoning?.effort_levels, topLevelReasoning?.effort_levels]
+      .map(levels => Array.isArray(levels)
+        ? sanitizeCodexReasoningEfforts(normalizedStringList(levels.map(level => typeof level === "string" ? level : plainRecord(level)?.effort), 8, 24))
+          ?.filter(level => level !== "none" && level !== "minimal")
+        : undefined)
+      .find(levels => levels !== undefined && levels.length > 0)
+    : undefined;
+  const listedReasoningEfforts = normalizedStringList(rawReasoningEfforts, 8, 24) ?? publishedReasoningEfforts;
   const reasoningEfforts = reasoningCapabilities.supportsReasoning === false || reasoningCapabilities.supportsReasoningEffort === false ? []
     : listedReasoningEfforts
     ? sanitizeCodexReasoningEfforts(listedReasoningEfforts)
@@ -837,6 +856,13 @@ export function catalogHintsFromModelsApiItem(providerName: string, item: Provid
             : ["low", "medium", "high", "xhigh"])
         : [])
       : undefined;
+  // A published default is kept only when it names a rung of the ladder returned here.
+  const publishedDefaultEffort = metadata?.default_reasoning_level
+    ?? capabilityReasoning?.default_effort
+    ?? topLevelReasoning?.default_effort;
+  const defaultReasoningEffort = typeof publishedDefaultEffort === "string" && reasoningEfforts?.includes(publishedDefaultEffort)
+    ? publishedDefaultEffort
+    : undefined;
   const capabilities = modelCapabilities(item);
   const inputModalities = modelInputModalities(item, capabilities);
   const pricingStatus = discoveredPricingStatus(item);
@@ -846,6 +872,7 @@ export function catalogHintsFromModelsApiItem(providerName: string, item: Provid
     ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     ...reasoningCapabilities,
     ...(reasoningEfforts !== undefined ? { reasoningEfforts } : {}),
+    ...(defaultReasoningEffort !== undefined ? { defaultReasoningEffort } : {}),
     ...(inputModalities ? { inputModalities } : {}),
     ...(capabilities ? { capabilities } : {}),
     // Omitted when the classification is "unknown", following this function's existing

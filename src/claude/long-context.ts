@@ -28,6 +28,19 @@ export const AUTO_CONTEXT_FLOOR = 200_000;
 export const AUTO_COMPACT_WINDOW_DEFAULT = 829_800;
 
 /**
+ * The native id each Claude Code tier alias resolves to (2.1.321: `--model opus` sends
+ * `claude-opus-5-5`, `sonnet` sends `claude-sonnet-5-5`, `fable` sends `claude-fable-5-2`).
+ * Behind a gateway Claude Code accounts an unmarked id at 200k, so an unset tier slot is filled
+ * with this id when the map marks it (#5755). A marked alias cannot stand in: Claude Code sends
+ * `sonnet[1m]` upstream unresolved. Haiku has no entry; its 200k window never marks.
+ *
+ * Exported from this leaf so the dashboard's manual-env block (gui/src/pages/claude-manual-env.ts)
+ * imports the ids: its hand-kept copy stayed on `claude-sonnet-5` and `claude-fable-5-1` when
+ * these changed, and context-windows.ts would pull the catalog into the dashboard bundle.
+ */
+export const CLAUDE_CODE_NATIVE_TIERS = { opus: "claude-opus-5-5", sonnet: "claude-sonnet-5-5", fable: "claude-fable-5-2" } as const;
+
+/**
  * Whether a window earns the 1M selection on a surface whose Claude Code runner may not inherit
  * CLAUDE_CODE_AUTO_COMPACT_WINDOW (Desktop pickers, discovery, Desktop 3P, generated subagents).
  * A window >= 1M always does. A smaller one does when it can host the default compact window, so

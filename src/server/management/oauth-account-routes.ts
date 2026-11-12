@@ -49,6 +49,7 @@ import { routedSlug, slugEquals } from "../../providers/slug-codec";
 import { clearAccountQuotaCache, clearProviderQuotaCache, clearProviderQuotaCacheFor, fetchProviderAccountQuotas, fetchProviderApiKeyQuotas, fetchProviderQuotaReports, providerOAuthAccountQuotaMode, providerApiKeyQuotaMode, readPassiveProviderAccountQuotas } from "../../providers/quota";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { clearThreadAccountMap } from "../../codex/routing";
+import { shownCodexCredits } from "../../codex/credits";
 import {
   normalizeAccountPoolStickyLimit,
   normalizeAccountPoolStrategy,
@@ -76,6 +77,7 @@ import {
 } from "../../lib/debug-settings";
 import type { OcxApiKeyEntry, OcxClaudeCodeConfig, OcxConfig, OcxCustomModel, OcxProviderConfig } from "../../types";
 import { drainAndShutdown } from "../lifecycle";
+import { loginRestartingResponse } from "../../codex/auth-api/http";
 import { filterRequestLogs, getRequestLogEntries, type RequestLogEntry } from "../request-log";
 import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerSecond } from "../../usage/cost";
 import type { PersistedUsageAttempt } from "../../usage/log";
@@ -260,6 +262,8 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
   // the provider's loopback callback server (inside this process) captures the redirect in the
   // background, then the credential is persisted. The GUI opens the URL and polls /api/oauth/status.
   if (url.pathname === "/api/oauth/login" && req.method === "POST") {
+    const restarting = loginRestartingResponse();
+    if (restarting) return restarting;
     const body = await readManagementJsonBodyOr(req, {}) as { provider?: string; addAccount?: boolean; accountId?: string; reauth?: boolean; openBrowser?: unknown; method?: unknown; mode?: unknown; startUrl?: unknown; region?: unknown; flowId?: unknown; profileArn?: unknown };
     const provider = (body.provider ?? "").trim().toLowerCase();
     if (!isPublicOAuthProvider(provider)) return jsonResponse({ error: "unknown oauth provider" }, 400);
@@ -1176,9 +1180,11 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
         // A successful read with no meterable balance (authoritative empty) still names why it is unknown.
         const reason = row.unavailable ? (row.readAt === undefined ? "not_read" : "read_failed")
           : row.quota === null && row.readAt !== undefined ? "not_reported" : undefined;
+        const { codexCredits, ...otherQuota } = row.quota ?? {};
+        const credits = shownCodexCredits(config, codexCredits);
         // Internal identity/epoch checks never enter the JSON DTO.
-        return { ...key, quota: row.quota, quotaUnavailable: row.unavailable === true, ...readAt,
-          ...(reason ? { quotaUnknownReason: reason } : {}) };
+        return { ...key, quota: row.quota && (credits ? { ...otherQuota, codexCredits: credits } : otherQuota),
+          quotaUnavailable: row.unavailable === true, ...readAt, ...(reason ? { quotaUnknownReason: reason } : {}) };
       }),
     });
   }

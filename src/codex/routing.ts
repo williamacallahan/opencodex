@@ -516,6 +516,7 @@ function pickAffinityPriorityFailback(
   quotaScope?: CodexQuotaScope,
   selectionOptions?: CodexAccountUsabilityOptions,
 ): string | null {
+  if (selectionOptions?.poolCapacity === "included") return null;
   if (!codexAccountPriorityFailbackEnabled(config, accountId)
     || accountPoolStrategyForScope(config, quotaScope) !== "quota") return null;
   if (!pickPriorityPreemption(config, accountId, now, quotaScope, selectionOptions)) return null;
@@ -1294,7 +1295,7 @@ export function recordCodexUpstreamOutcome(
   // Reject retired quota evidence before stale-credential cleanup or any shared mutation.
   if (outcomeClass === "quota" && isRetiredCodexSparkModel(meta.modelId)
       && computeQuotaCooldown(meta).source === "reset-derived") return;
-  const quotaScope = codexQuotaScopeForModel(meta.modelId);
+  const quotaScope = meta.poolReserve ? "reserve" : codexQuotaScopeForModel(meta.modelId);
   /*
    * Spend a stale credential failure BEFORE any branch reads health (#2892 gap 4 review).
    *

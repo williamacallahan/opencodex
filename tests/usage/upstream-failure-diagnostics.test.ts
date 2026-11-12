@@ -24,29 +24,149 @@ function context(): RequestLogContext {
   return { model: "fixture-model", provider: "openai" };
 }
 
-test("upstream failures record the error code and request id without the body", () => {
-  const log = context();
+function captureWarnings<T>(run: () => T): { result: T; warnings: string[] } {
   const warnings: string[] = [];
   const warn = console.warn;
   console.warn = ((line: string) => { warnings.push(String(line)); }) as typeof console.warn;
+  try { return { result: run(), warnings }; } finally { console.warn = warn; }
+}
+
+function attemptRow(ordinal: number, provider: string, model: string, status: number) {
+  return {
+    ordinal, provider, model, adapter: "openai-responses", status, durationMs: 10,
+    sendCount: 1, recoveryKinds: [] as never[], usageStatus: "unreported" as const,
+  };
+}
+
+function finalWarnings(log: RequestLogContext, status: number, terminalStatus?: "failed" | "incomplete"): string[] {
+  // A private config home gives the credential check a fresh, complete source whatever ran before.
+  const home = mkdtempSync(join(tmpdir(), "ocx-final-warn-"));
+  const previousHome = process.env.OPENCODEX_HOME;
+  process.env.OPENCODEX_HOME = home;
+  // An earlier test in the same process may have sent "fixture-model" as a header value.
+  const restoreRegistry = setOutboundCredentialRegistryForTests(new OutboundCredentialRegistry());
   try {
+    return captureWarnings(() => addFinalRequestLog(
+      "req-final-1", Date.now(), log, status,
+      terminalStatus ? { terminalStatus, closeReason: "terminal" } : undefined, () => {},
+    )).warnings;
+  } finally {
+    restoreRegistry();
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+    removeTreeWithRetry(home);
+  }
+}
+
+test("upstream failures record the error code and request id without the body", () => {
+  const log = context();
+  const { warnings } = captureWarnings(() => {
     noteUpstreamRequestId(log, new Headers({ "x-request-id": "req_abc123" }));
     inspectResponseLogJson(log, JSON.stringify({
       error: { type: "server_error", code: "server_error", message: "secret upstream body" },
     }));
     noteUpstreamRequestId(log, new Headers({ "openai-request-id": "not a token" }));
-  } finally {
-    console.warn = warn;
-  }
+  });
   expect(log.upstreamRequestId).toBe("req_abc123");
   expect(log.upstreamErrorCode).toBe("server_error");
   expect(log.upstreamErrorType).toBe("server_error");
-  expect(warnings.join("\n")).not.toContain("secret upstream body");
-  // Service logs persist: only closed-vocabulary values are printed, never an upstream request id.
-  expect(warnings.some(line => line.includes("type=server_error"))).toBe(true);
-  expect(warnings.join("\n")).not.toContain("req_abc123");
+  // Capturing diagnostics prints nothing; the final request log owns the one warning.
+  expect(warnings).toEqual([]);
+  const lines = finalWarnings(log, 502, "failed");
+  expect(lines).toEqual([
+    "[opencodex] level=warn upstream failure request=req-final-1 attempt=0 provider=openai model=fixture-model status=502 type=server_error code=server_error cause=upstream-fault final=502",
+  ]);
+  expect(lines.join("\n")).not.toContain("req_abc123");
+  expect(lines.join("\n")).not.toContain("secret upstream body");
 });
 
+test("a rate limit (429) logs one line, with provider and model", () => {
+  const log = context();
+  inspectResponseLogJson(log, JSON.stringify({ type: "error", error: { type: "rate_limit_error", code: "rate_limit_exceeded" } }));
+  const lines = finalWarnings(log, 429, "failed");
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("provider=openai model=fixture-model status=429 type=rate_limit_error code=rate_limit_exceeded cause=rate-limit final=429");
+});
+
+test("a failure whose upstream code is outside the known set still names the hub's cause", () => {
+  // Production 2026-11-12: a codex-lb 429 line said only type=unknown code=unknown. An upstream
+  // code outside every known set still prints nothing, but the hub's own closed cause does.
+  // The final attribution stamps the active attempt, which is the last one the request made.
+  const last = attemptRow(3, "prov-c", "model-c", 502);
+  const log: RequestLogContext = {
+    ...context(),
+    attempts: [
+      { ...attemptRow(1, "prov-a", "model-a", 429), failureCause: "rate-limit" as const },
+      { ...attemptRow(2, "prov-b", "model-b", 503), failureCause: "not-a-cause" as never },
+      last,
+    ],
+    activeAttempt: last,
+  };
+  inspectResponseLogJson(log, JSON.stringify({ error: { code: "opaque_upstream_code", message: "secret upstream body" } }));
+  const lines = finalWarnings(log, 502, "failed");
+  expect(lines).toHaveLength(3);
+  expect(lines[0]).toContain("attempt=1 provider=prov-a model=model-a status=429 type=unknown code=unknown cause=rate-limit final=502");
+  // A value outside REQUEST_FAILURE_CAUSES is never printed.
+  expect(lines[1]).toContain("attempt=2 provider=prov-b model=model-b status=503 type=unknown code=unknown cause=unknown final=502");
+  // The last attempt carries the cause the final attribution stamped on it.
+  expect(lines[2]).toContain("attempt=3 provider=prov-c model=model-c status=502 type=unknown code=unknown cause=upstream-fault final=502");
+  expect(lines.join("\n")).not.toMatch(/opaque_upstream_code|secret upstream body/);
+});
+
+test("a spent-quota 429 prints its quota code, so it reads differently from a brief throttle", () => {
+  const log = context();
+  inspectResponseLogJson(log, JSON.stringify({ error: { code: "usage_limit_reached", message: "secret upstream body" } }));
+  const lines = finalWarnings(log, 429, "failed");
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("status=429 type=unknown code=usage_limit_reached cause=rate-limit final=429");
+  expect(lines[0]).not.toContain("secret upstream body");
+});
+
+test("a usage-limit refusal from the pool logs its type and code instead of unknown", () => {
+  const log = context();
+  inspectResponseLogJson(log, JSON.stringify({ error: { type: "usage_limit_reached", code: "usage_limit_reached",
+    message: "Rate limit exceeded. Try again in 300s" } }));
+  const lines = finalWarnings(log, 429);
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("status=429 type=usage_limit_reached code=usage_limit_reached cause=rate-limit final=429");
+});
+
+test("each failed attempt prints one line and a successful attempt prints none", () => {
+  const log: RequestLogContext = {
+    ...context(),
+    attempts: [attemptRow(1, "prov-a", "model-a", 429), attemptRow(2, "prov-b", "model-b", 503), attemptRow(3, "prov-c", "model-c", 200)],
+  };
+  const lines = finalWarnings(log, 200);
+  expect(lines).toHaveLength(2);
+  expect(lines[0]).toContain("attempt=1 provider=prov-a model=model-a status=429");
+  expect(lines[1]).toContain("attempt=2 provider=prov-b model=model-b status=503");
+  expect(lines[1]).toContain("final=200");
+});
+
+test("a client abort (499) is not an upstream failure", () => {
+  const solo = finalWarnings(context(), 499);
+  expect(solo).toEqual([]);
+  const withAttempt: RequestLogContext = { ...context(), attempts: [attemptRow(1, "prov-a", "model-a", 499)] };
+  expect(finalWarnings(withAttempt, 499)).toEqual([]);
+  // A cancellation after failover still reports the attempt that failed before it.
+  const afterFailover: RequestLogContext = {
+    ...context(),
+    attempts: [attemptRow(1, "prov-a", "model-a", 503), attemptRow(2, "prov-b", "model-b", 499)],
+  };
+  const lines = finalWarnings(afterFailover, 499);
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("attempt=1 provider=prov-a model=model-a status=503");
+  expect(lines[0]).toContain("final=499");
+});
+
+test("a credential-shaped or unsafe attribution value prints as unknown", () => {
+  const credential = ["sk", "proj", "abcdefghijklmnopqrstuvwxyz0123456789"].join("-");
+  const log: RequestLogContext = { model: credential, provider: "has space\nnewline" };
+  const lines = finalWarnings(log, 503);
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("provider=unknown model=unknown status=503");
+  expect(lines[0]).not.toContain(credential);
+});
 
 for (const shape of ["error", "last_error", "response"] as const) {
   test.each([
@@ -133,7 +253,7 @@ test("an unrecognized bare top-level code is never recorded as a diagnostic", ()
 });
 
 
-test("final request rows keep the mapped status and closed condition; upstream diagnostics stay on the context", () => {
+test("final request rows expose original upstream error type, code, request id and mapped status", () => {
   const log = context();
   noteUpstreamRequestId(log, new Headers({ "openai-request-id": "req_diagnostic_fixture" }));
   inspectResponseLogJson(log, JSON.stringify({ type: "error",
@@ -143,12 +263,11 @@ test("final request rows keep the mapped status and closed condition; upstream d
     { terminalStatus: "failed", closeReason: "terminal" }, entry => rows.push(entry));
   expect(rows).toHaveLength(1);
   expect(rows[0]!.status).toBe(503);
-  // The context keeps the bounded upstream diagnostics; the row keeps only the closed condition.
-  expect(log.upstreamErrorType).toBe("overloaded_error");
-  expect(log.upstreamErrorCode).toBe("overloaded_error");
-  expect(log.upstreamRequestId).toBe("req_diagnostic_fixture");
+  // The deployment line keeps the sanitized upstream diagnostics on the row beside the closed condition.
+  expect(rows[0]!.upstreamErrorType).toBe("overloaded_error");
+  expect(rows[0]!.upstreamErrorCode).toBe("overloaded_error");
+  expect(rows[0]!.upstreamRequestId).toBe("req_diagnostic_fixture");
   expect(rows[0]!.upstreamCondition).toBe("upstream_unavailable");
-  expect(JSON.stringify(rows[0])).not.toContain("req_diagnostic_fixture");
 });
 
 // #6740: the Codex WebSocket wraps a backend failure as {type:"error", status|status_code, error}.
@@ -207,8 +326,7 @@ test("a wrapped 503 reaches the final row as an upstream overload instead of a g
   expect(rows[0]!.status).toBe(503);
   expect(rows[0]!.errorCode).toBe("server_is_overloaded");
   expect(rows[0]!.failureCause).toBe("upstream-declined");
-  expect(log.upstreamErrorCode).toBe("server_error");
-  expect(rows[0]!.upstreamErrorCode).toBeUndefined();
+  expect(rows[0]!.upstreamErrorCode).toBe("server_error");
   // Same transient class as the 502 it replaces: account health and rotation do not move.
   expect(classifyCodexUpstreamOutcome(503)).toBe(classifyCodexUpstreamOutcome(502));
 });
@@ -411,7 +529,11 @@ describe("diagnostic wiring against a swapped registry", () => {
       warnings.length = 0;
       noteUpstreamRequestId(log, new Headers({ "x-request-id": "req_later" }));
       addFinalRequestLog("wiring", Date.now(), log, httpStatusForRequestLogTerminal("failed", log), undefined, entry => { row = entry; });
-      expect(warnings.length).toBe(0);
+      // The failure line still prints, but an evicted-registry snapshot cannot vouch for any value.
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("provider=unknown model=unknown");
+      expect(warnings[0]).toContain("type=unknown code=unknown");
+      expect(warnings[0]).not.toMatch(/overloaded_error|opaque_code_value|req_later/);
       expect(log.upstreamRequestId).toBeUndefined();
       expect(row!.upstreamErrorCode).toBeUndefined();
       // A closed vocabulary does not prove an evicted credential was not also a class name.
@@ -880,5 +1002,78 @@ describe("configured credential source", () => {
       if (previous === undefined) delete process.env[name];
       else process.env[name] = previous;
     }
+  });
+});
+
+describe("prompt_cache.outcome line", () => {
+  const { promptCacheOutcomeLine, minimumCacheablePromptTokens, providerFamily } =
+    require("../../src/server/prompt-cache-outcome") as typeof import("../../src/server/prompt-cache-outcome");
+  const base = {
+    provider: "codex-lb", requestedModel: "gpt-6.1-sol", servedModel: "gpt-6.1-sol", usageStatus: "reported" as const,
+    wireParsed: false, nativeCacheWire: false, succeeded: true, locallyAnswered: false, comboParent: false,
+  };
+  test("an OpenAI-style hit counts the cached reads as a subset of the prompt", () => {
+    const line = promptCacheOutcomeLine({ ...base, conversationId: "conv-1",
+      usage: { inputTokens: 5000, outputTokens: 10, cachedInputTokens: 4608 } });
+    expect(line).toContain("event=prompt_cache.outcome provider_name=codex-lb provider_id=codex-lb namespace=codex-lb");
+    expect(line).toContain("telemetry=reported cache_eligible=true prompt_tokens=5000 cached_tokens=4608 cache_write_tokens=0");
+    expect(line).toMatch(/key_hash=[0-9a-f]{16}$/);
+    expect(line).not.toContain("conv-1");
+  });
+  test("an Anthropic-style report adds reads and writes to the uncached input and groups seats into the family", () => {
+    const line = promptCacheOutcomeLine({ ...base, provider: "anthropic-pf2cf1b", servedModel: "claude-opus-5-5",
+      requestedModel: "claude-opus-5-5",
+      usage: { inputTokens: 100, outputTokens: 5, cacheReadInputTokens: 4000, cacheCreationInputTokens: 900 } });
+    expect(line).toContain("provider_name=anthropic provider_id=anthropic-pf2cf1b namespace=anthropic");
+    expect(line).toContain("cache_eligible=true prompt_tokens=5000 cached_tokens=4000 cache_write_tokens=900");
+  });
+  test("turns that cannot hit are not eligible, and unreported or synthesized detail is labeled", () => {
+    const usage = { inputTokens: 5000, outputTokens: 1, cachedInputTokens: 0 };
+    expect(promptCacheOutcomeLine({ ...base, usage: { ...usage, inputTokens: 100 } })).toContain("cache_eligible=false");
+    expect(promptCacheOutcomeLine({ ...base, usage, succeeded: false })).toContain("cache_eligible=false");
+    expect(promptCacheOutcomeLine({ ...base, usage, locallyAnswered: true })).toContain("cache_eligible=false");
+    expect(promptCacheOutcomeLine({ ...base, usage, comboParent: true })).toContain("cache_eligible=false");
+    expect(promptCacheOutcomeLine({ ...base, usage, wireParsed: true })).toContain("telemetry=unavailable cache_eligible=false");
+    const missing = promptCacheOutcomeLine({ ...base, usage: { inputTokens: 5000, outputTokens: 1 } });
+    expect(missing).toContain("telemetry=missing cache_eligible=false");
+    expect(missing).toContain("cached_tokens=0");
+  });
+  test("a native wire's own zero is a measured miss that stays in the denominator", () => {
+    const usage = { inputTokens: 5000, outputTokens: 1, cachedInputTokens: 0 };
+    const collapse = promptCacheOutcomeLine({ ...base, usage, wireParsed: true, nativeCacheWire: true });
+    expect(collapse).toContain("telemetry=reported cache_eligible=true prompt_tokens=5000 cached_tokens=0");
+    expect(promptCacheOutcomeLine({ ...base, usage: { inputTokens: 5000, outputTokens: 1 }, wireParsed: true, nativeCacheWire: true }))
+      .toContain("telemetry=missing cache_eligible=false");
+  });
+  test("provider seats group by the label owner's family", () => {
+    expect(providerFamily("anthropic-pf2cf1b")).toBe("anthropic");
+    expect(providerFamily("openai-main")).toBe("openai");
+    expect(providerFamily("chatgpt")).toBe("openai");
+  });
+  test("minimums and families follow the gateway's table", () => {
+    expect(minimumCacheablePromptTokens("claude-opus-5-5-20260101")).toBe(512);
+    expect(minimumCacheablePromptTokens("anthropic/claude-haiku-4.5")).toBe(4096);
+    expect(minimumCacheablePromptTokens("gpt-6-luna")).toBe(1024);
+    expect(providerFamily("openai-p2e22d0")).toBe("openai");
+    expect(providerFamily("llm-gateway")).toBe("llm-gateway");
+  });
+  test("the final request log prints exactly one line for the request", () => {
+    const log = context();
+    log.usage = { inputTokens: 2000, outputTokens: 3, cachedInputTokens: 1536 };
+    const home = mkdtempSync(join(tmpdir(), "ocx-final-cache-"));
+    const previousHome = process.env.OPENCODEX_HOME;
+    process.env.OPENCODEX_HOME = home;
+    const info = console.info; const lines: string[] = [];
+    console.info = ((line: string) => { lines.push(String(line)); }) as typeof console.info;
+    try { addFinalRequestLog("req-cache-1", Date.now(), log, 200, undefined, () => {}); }
+    finally {
+      console.info = info;
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = previousHome;
+      removeTreeWithRetry(home);
+    }
+    const outcome = lines.filter(line => line.includes("event=prompt_cache.outcome"));
+    expect(outcome).toHaveLength(1);
+    expect(outcome[0]).toContain("provider_name=openai provider_id=openai namespace=openai requested_model=fixture-model served_model=fixture-model");
+    expect(outcome[0]).toContain("telemetry=reported cache_eligible=true prompt_tokens=2000 cached_tokens=1536");
   });
 });

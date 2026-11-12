@@ -12,12 +12,40 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, uti
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  awaitResponseSpillPublicationTailForTests,
   clearResponseStateForTests,
   clearResponseStateMemoryForTests,
+  enforceResponseContinuationByteCap,
+  evictOldestResponseContinuationForBudget,
+  expandPreviousResponseInput,
   flushResponseState,
+  MAX_STORED_RESPONSE_BYTES,
+  pendingResponseSpillMetricsForTests,
   rememberResponseState,
+  responseAdmissionCountersForTests,
+  responseContinuationRetainedStoreSnapshot,
+  responseStateMetrics,
   setResponseStateByteCapForTests,
+  setSpilledResponseByteCapForTests,
 } from "../../src/responses/state";
+import { setResponseSpillPayloadCapForTests } from "../../src/responses/spill-store";
+import {
+  configureAppOwnedMemoryBudget,
+  enforceAppOwnedMemoryBudget,
+  registerRetainedStore,
+  resetAppOwnedMemoryForTests,
+} from "../../src/lib/app-owned-memory";
+import {
+  resetHardenedStateForTests,
+  setAsyncIcaclsRunnerForTests,
+  setIcaclsRunnerForTests,
+  setPlatformForTests,
+} from "../../src/lib/windows-secret-acl";
+import {
+  resetWindowsPrincipalForTests,
+  setAsyncWindowsPrincipalRunnerForTests,
+  setWindowsPrincipalRunnerForTests,
+} from "../../src/lib/windows-user-principal";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 function remember(id: string, text: string): void {
@@ -41,7 +69,18 @@ describe("responses-state snapshot write amplification (#2460)", () => {
     clearResponseStateMemoryForTests();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await awaitResponseSpillPublicationTailForTests();
+    setAsyncIcaclsRunnerForTests(null);
+    setIcaclsRunnerForTests(null);
+    setPlatformForTests(null);
+    setWindowsPrincipalRunnerForTests(null);
+    setAsyncWindowsPrincipalRunnerForTests(null);
+    resetWindowsPrincipalForTests();
+    resetHardenedStateForTests();
+    resetAppOwnedMemoryForTests();
+    setResponseSpillPayloadCapForTests(null);
+    setSpilledResponseByteCapForTests(null);
     setResponseStateByteCapForTests(null);
     clearResponseStateForTests();
     removeTreeWithRetry(home);
@@ -173,18 +212,18 @@ describe("responses-state snapshot write amplification (#2460)", () => {
     await flushResponseState();
 
     expect(delay).toBeGreaterThan(2_000);
-    expect(delay).toBeLessThanOrEqual(30_000);
-    // Roughly proportional to size: ~3.2 MiB of payload is ~6 s, not ~2 s.
+    expect(delay).toBeLessThanOrEqual(300_000);
+    // Roughly proportional to size: ~3.2 MiB of payload stretches well past the 2 s base.
     expect(delay).toBeGreaterThanOrEqual(5_000);
   });
 
   // The ceiling is the half of the scaling rule that a proportional formula gets
-  // wrong silently: `<= 30_000` passes for any well-behaved input, so it proves
+  // wrong silently: `<= 300_000` passes for any well-behaved input, so it proves
   // the clamp exists only when something actually reaches it. A snapshot at the
   // byte cap is the case that does.
-  test("the scheduled debounce clamps to exactly 30s at the snapshot cap", async () => {
-    // The scaling rule is 2s per MiB, so a payload at or past 15 MiB computes above
-    // the ceiling. 900 KB of text per entry matters: the entry is serialized with the
+  test("the scheduled debounce clamps to exactly 300s at the snapshot cap", async () => {
+    // At 21.5s per additional MiB past 1 MiB, a payload past 15 MiB computes above
+    // the 300s ceiling. 900 KB of text per entry matters: the entry is serialized with the
     // input echoed alongside the output, so ~1.5 MB of text lands past the 2 MiB
     // per-entry bound and is skipped entirely, leaving an empty snapshot.
     for (let i = 0; i < 20; i += 1) remember(`resp_amp_cap_${i}`, "c".repeat(900 * 1024));
@@ -196,7 +235,34 @@ describe("responses-state snapshot write amplification (#2460)", () => {
     const delay = scheduledDelay(() => remember("resp_amp_cap_next", "next"));
     await flushResponseState();
 
-    expect(delay).toBe(30_000);
+    expect(delay).toBe(300_000);
+  });
+
+  test("raising appOwnedMemoryBudget scales the resident continuation ceiling above 64 MiB without spilling", async () => {
+    configureAppOwnedMemoryBudget(512 * 1024 * 1024);
+    for (let i = 0; i < 25; i += 1) remember(`resp_amp_budget_${i}`, "b".repeat(1500 * 1024));
+    await flushResponseState();
+    const metrics = responseStateMetrics();
+    expect(metrics.totalBytes).toBeGreaterThan(MAX_STORED_RESPONSE_BYTES);
+    expect(metrics.spillWrites).toBe(0);
+    expect(metrics.spillStubCount).toBe(0);
+
+    // Lowering the budget at runtime demotes excess resident continuations immediately.
+    configureAppOwnedMemoryBudget(256 * 1024 * 1024);
+    enforceResponseContinuationByteCap();
+    const afterLower = responseStateMetrics();
+    expect(afterLower.totalBytes).toBeLessThanOrEqual(MAX_STORED_RESPONSE_BYTES);
+    expect(afterLower.spillStubCount).toBeGreaterThan(0);
+  });
+
+  test("rejects single entries exceeding responseSpillPayloadCap even when byteCap is larger", () => {
+    configureAppOwnedMemoryBudget(1024 * 1024 * 1024);
+    setResponseSpillPayloadCapForTests(64 * 1024);
+    const beforeDrops = responseAdmissionCountersForTests().oversizedDrops;
+    remember("resp_amp_single_oversized", "z".repeat(48 * 1024));
+    const afterDrops = responseAdmissionCountersForTests().oversizedDrops;
+    expect(afterDrops).toBe(beforeDrops + 1);
+    expect(responseStateMetrics().spillStubCount).toBe(0);
   });
 
   // Shutdown is the one moment the debounce must not apply: a pending write that
@@ -234,5 +300,53 @@ describe("responses-state snapshot write amplification (#2460)", () => {
     };
     expect(parsed.version).toBe(2);
     expect(parsed.states.map(([id]) => id)).toContain("resp_amp_roundtrip");
+  });
+
+  test("win32: crossing byteCap subtracts already-queued resident bytes and paces runtime budget shrink without tombstoning", async () => {
+    const icaclsOk = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+    const sid = { success: true, exitCode: 0, timedOut: false, stdout: "S-1-5-21-1-2-3-1001\nocx-test\n" };
+    setPlatformForTests("win32");
+    setWindowsPrincipalRunnerForTests(() => sid);
+    setAsyncWindowsPrincipalRunnerForTests(async () => sid);
+    setIcaclsRunnerForTests(() => icaclsOk);
+    setAsyncIcaclsRunnerForTests(async () => icaclsOk);
+
+    setResponseStateByteCapForTests(160 * 1024);
+    remember("resp_win_1", "a".repeat(45 * 1024));
+    remember("resp_win_2", "b".repeat(45 * 1024));
+    // Turn 2 crosses 160 KiB: only resp_win_1 needs to demote so resp_win_2 stays resident.
+    expect(pendingResponseSpillMetricsForTests().count).toBe(1);
+    await awaitResponseSpillPublicationTailForTests();
+    expect(responseStateMetrics()).toMatchObject({ spillStubCount: 1, tombstoneCount: 0, spillCapacityRefusals: 0 });
+
+    // Runtime shrink with registered app-owned-memory store and tight 2x reservation headroom
+    // paces both enforceResponseContinuationByteCap() and enforceAppOwnedMemoryBudget() waves.
+    const unregister = registerRetainedStore({
+      id: "response-continuation",
+      category: "continuation",
+      snapshot: responseContinuationRetainedStoreSnapshot,
+      evictOldest: evictOldestResponseContinuationForBudget,
+    });
+    try {
+      configureAppOwnedMemoryBudget(512 * 1024);
+      setResponseStateByteCapForTests(512 * 1024);
+      remember("resp_win_3", "c".repeat(45 * 1024));
+      remember("resp_win_4", "d".repeat(45 * 1024));
+      setSpilledResponseByteCapForTests(450 * 1024);
+      configureAppOwnedMemoryBudget(96 * 1024);
+      setResponseStateByteCapForTests(96 * 1024);
+      enforceResponseContinuationByteCap();
+      enforceAppOwnedMemoryBudget();
+      await awaitResponseSpillPublicationTailForTests();
+    } finally {
+      unregister();
+    }
+
+    expect(responseStateMetrics().tombstoneCount).toBe(0);
+    expect(responseStateMetrics().spillCapacityRefusals).toBe(0);
+    for (const id of ["resp_win_1", "resp_win_2", "resp_win_3", "resp_win_4"]) {
+      const expanded = expandPreviousResponseInput({ previous_response_id: id, input: "next" }) as { input: unknown[] };
+      expect(expanded.input).toHaveLength(3);
+    }
   });
 });

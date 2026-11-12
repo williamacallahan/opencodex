@@ -589,6 +589,9 @@ export function writeResponseSpillDurably(
   try {
     const aclBudget = spillAclBudget(options.aclBudgetMs);
     const { bytes, digest, idDigest, contentDigest } = serializedSpill(responseId, state);
+    if (bytes.byteLength > responseSpillPayloadCap()) {
+      throw Object.assign(new Error("Response spill payload exceeds replay ceiling"), { code: "EFBIG" });
+    }
     const dir = responseSpillDirectory();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     harden(dir, 0o700, aclBudget);
@@ -652,6 +655,9 @@ export async function writeResponseSpillDurablyAsync(
   try {
     throwIfPublicationSuperseded(publicationControl);
     const { bytes, digest, idDigest, contentDigest } = serializedSpill(responseId, state);
+    if (bytes.byteLength > responseSpillPayloadCap()) {
+      throw Object.assign(new Error("Response spill payload exceeds replay ceiling"), { code: "EFBIG" });
+    }
     const dir = responseSpillDirectory();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     await hardenAsync(dir, 0o700, aclBudget, options.retryTimedOutOnce === true);

@@ -660,8 +660,10 @@ describe("Anthropic quota namespace isolation", () => {
     const now = Date.now();
     cache.clearAccountQuotaCache();
     writeFileSync(join(f.paths.OPENCODEX_HOME, "provider-account-quota-cache.json"), JSON.stringify({ version: 1, rows: {
-      [cache.accountCacheKey("anthropic", f.ids[0])]: { fiveHourPercent: 81, fiveHourResetAt: now - 1, weeklyPercent: 42, updatedAt: now },
-      [cache.accountCacheKey("anthropic2", f.ids[0])]: { fiveHourPercent: 93, fiveHourResetAt: now - 1, weeklyPercent: 17, updatedAt: now },
+      [cache.accountCacheKey("anthropic", f.ids[0])]: { fiveHourPercent: 81, fiveHourResetAt: now - 1, weeklyPercent: 42, updatedAt: now,
+        anthropicCredentialGeneration: f.store.credentialGeneration(f.store.getAccountCredential("anthropic", f.ids[0])!) },
+      [cache.accountCacheKey("anthropic2", f.ids[0])]: { fiveHourPercent: 93, fiveHourResetAt: now - 1, weeklyPercent: 17, updatedAt: now,
+        anthropicCredentialGeneration: f.store.credentialGeneration(f.store.getAccountCredential("anthropic2", f.ids[0])!) },
     } }));
     cache.hydrateAccountQuotaCache();
     expect(f.quota.getCachedProviderAccountQuota("anthropic", f.ids[0])).toMatchObject({ weeklyPercent: 42 });

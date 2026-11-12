@@ -23,7 +23,7 @@ import { tryAcquireNativeMainProfileClaim } from "../native-main-admission";
 import { withNativeMainCredentialClaim, isNativeMainClaimUnavailable } from "./http";
 import type { PoolQuotaResult } from "./pool-quota-probe";
 import { fetchMainAccountInfoAttempt, fetchMainAccountInfo, prepareMainAccountInfoToken, MAIN_CACHE_TTL } from "./main-account-probe";
-import { fetchPoolAccountQuota, isExhaustedPoolQuotaReadHeld, PoolQuotaProbeBusyError, POOL_CACHE_TTL, POOL_QUOTA_REFRESH_CONCURRENCY } from "./pool-quota-probe";
+import { fetchPoolAccountQuota, isExhaustedPoolQuotaReadHeld, poolExhaustedHoldMs, PoolQuotaProbeBusyError, POOL_CACHE_TTL, POOL_QUOTA_REFRESH_CONCURRENCY } from "./pool-quota-probe";
 import { getRuntimeConfig, configuredPoolAccount, mapWithConcurrency } from "./runtime-config";
 import { trackBackgroundWork } from "../../lib/background-work";
 
@@ -94,12 +94,14 @@ function poolCreditRenewalDue(config: OcxConfig, accountId: string, now = Date.n
     || isCodexAccountPaused(config, accountId) || isAccountNeedsReauth(accountId)) return false;
   const quota = getAccountQuota(accountId);
   if (codexUsageLimitResetAt(quota, account.plan, now) === undefined) return false;
+  // An exhausted seat with a known future reset cannot change sooner than its 15 minute usage hold.
+  const renewalAgeMs = Math.max(MAIN_CREDIT_RENEWAL_AGE_MS, quota ? poolExhaustedHoldMs(accountId, quota, now) : 0);
   const observedAt = quota?.credits?.observedAt;
   if (observedAt !== undefined && Number.isFinite(observedAt)
-    && now - observedAt >= 0 && now - observedAt < MAIN_CREDIT_RENEWAL_AGE_MS) return false;
+    && now - observedAt >= 0 && now - observedAt < renewalAgeMs) return false;
   const attempt = poolQuotaPrimeAttemptedAt.get(accountId);
   return !attempt || attempt.generation !== readCodexAccountRecord(accountId)?.generation
-    || now - attempt.at >= MAIN_CREDIT_RENEWAL_AGE_MS;
+    || now - attempt.at >= renewalAgeMs;
 }
 
 let mainHardLockRecoveryInFlight: Promise<void> | null = null;

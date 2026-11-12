@@ -68,7 +68,7 @@ State-changing: no. JSON mode: `payload`.
 
 Usage: `ocx account main reauth --device [--no-wait] [--json]`
 
-Reauthenticate the native main Codex login with a device code (#3898); headless hubs need no Codex App or keyring.
+Sign the native main Codex login in, or back in, with a device code (#3898); headless hubs need no Codex App or keyring.
 
 State-changing: yes. JSON mode: `payload`.
 
@@ -85,7 +85,7 @@ State-changing: yes. JSON mode: `payload`.
 | `--flow` | string | Flow id for status and cancel. |
 | `--json` | boolean | Emit the flow status as JSON. |
 
-- Same-identity native main device reauthentication; pool login endpoints are separate. Human authorization is required and credentials are never printed.
+- An existing native main login is reauthenticated as the same account only; a CODEX_HOME with no auth.json (file credential store) gets its first login. Pool login endpoints are separate. Human authorization is required and credentials are never printed.
 - Start requires --device; --no-wait returns a flow handle. Follow with account main reauth status --flow <id> or account main reauth cancel --flow <id>. Status/cancel require --flow and reject --device/--no-wait.
 - Returned verification URLs and device codes are human handoff material; keep them out of agent transcripts.
 

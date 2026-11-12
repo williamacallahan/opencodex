@@ -221,6 +221,7 @@ import { hasResponsesItemIdRepair, relaySseWithResponsesItemIdRepair } from "../
 import type { EffectiveSubagentRoster, SpawnAgentSurface } from "../../codex/catalog";
 import { codexAuthContextLogLabel } from "../../codex/account-label";
 import { rebindPoolCreditPolicy } from "../../codex/pool-credit-policy";
+import { poolReserveWireBody } from "../../codex/pool-reserve";
 import { clientCancelledResponse } from "./core-errors";
 
 import {
@@ -1110,7 +1111,7 @@ export async function handleResponsesCompact(
       applyAccountQuotaFromUpstreamHeaders(ctx.accountId, response.headers, ctx.writerGeneration,
         ctx.kind === "main-pool" ? ctx.mainQuotaWriter : undefined,
         { modelId: route.modelId, poolWriter: ctx.kind === "pool" ? ctx.poolQuotaWriter : undefined,
-          poolResponse: ctx.kind === "pool" });
+          poolResponse: ctx.kind === "pool", poolReserve: ctx.kind === "pool" && ctx.poolReserve === true });
     };
     // Takes its context explicitly: the alternate-account flow below records a rejection
     // against A while promoting B, then records B's own outcome. A closure over a single
@@ -1245,14 +1246,14 @@ export async function handleResponsesCompact(
           ).body as typeof replayBody;
           validateFinalCustomToolCompatibility(replayBody, sendProvider.supportsResponsesCustomTools);
         }
-        return replayBody;
+        return poolReserveWireBody({ ...replayBody as typeof compactBody, model: route.modelId }, sendProvider);
       };
       const doFetch = (upstreamRecovery?: UpstreamSendRecovery) => fetchWithHeaderTimeout(
         compactUrl,
         applyUpstreamRecoveryInit({
           method: "POST",
           headers: wireHeaders,
-          body: JSON.stringify({ ...buildCompactSendBody() as typeof compactBody, model: route.modelId }),
+          body: JSON.stringify(buildCompactSendBody()),
         }, upstreamRecovery),
         req.signal,
         // Keyed sends can refresh their destination after pacing. Their physical send below
@@ -1307,7 +1308,7 @@ export async function handleResponsesCompact(
                 distributedKeyPhysicalFetch((sendProvider as { fetch?: typeof fetch }).fetch ?? execute, route.providerName, sendProvider, compactUrl), String(input),
                 physicalInit, { providerName: route.providerName, provider: sendProvider })) as typeof fetch;
               return fetchWithHeaderTimeout(compactUrl,
-                { ...init, headers: sendHeaders, body: JSON.stringify({ ...buildCompactSendBody() as typeof compactBody, model: route.modelId }) },
+                { ...init, headers: sendHeaders, body: JSON.stringify(buildCompactSendBody()) },
                 init.signal ?? req.signal, connectMs(), false, physicalFetch);
             } : undefined,
           ...(onPhysicalDispatch ? { onPhysicalDispatch } : {}),
@@ -1704,7 +1705,7 @@ export async function handleResponsesCompact(
     if (outcomeCtx.kind === "pool") {
       const { applyAccountQuotaFromUpstreamHeaders } = await import("../../codex/quota");
       applyAccountQuotaFromUpstreamHeaders(outcomeCtx.accountId, upstream.headers, outcomeCtx.writerGeneration,
-        undefined, { modelId: route.modelId, poolWriter: outcomeCtx.poolQuotaWriter, poolResponse: true });
+        undefined, { modelId: route.modelId, poolWriter: outcomeCtx.poolQuotaWriter, poolResponse: true, poolReserve: outcomeCtx.poolReserve === true });
     }
     const retryAfter = upstream.headers.get("retry-after");
     const resetAt = [

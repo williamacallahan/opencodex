@@ -115,6 +115,59 @@ async function mount() {
   await act(async () => { await new Promise(r => setTimeout(r, 120)); });
 }
 
+test("turning credits off hides a cached relay balance without remounting the workspace", async () => {
+  const fallback = globalThis.fetch;
+  let visible = true;
+  let reportReads = 0;
+  let releaseReport: ((response: Response) => void) | undefined;
+  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname === "/api/config") return Response.json({
+      port: 10100, defaultProvider: "relay", showCodexCredits: visible,
+      providers: {
+        relay: { adapter: "openai-responses", authMode: "key", hasApiKey: true, baseUrl: "https://relay.test/backend-api/codex" },
+        openai: { adapter: "openai-responses", authMode: "forward", codexAccountMode: "pool", baseUrl: "https://chatgpt.com/backend-api/codex" },
+      },
+    });
+    if (url.pathname === "/api/settings") {
+      if (init?.method === "PUT") visible = (JSON.parse(String(init.body)) as { showCodexCredits: boolean }).showCodexCredits;
+      return Response.json({ showCodexCredits: visible });
+    }
+    if (url.pathname === "/api/provider-quotas") {
+      if (++reportReads > 1) return new Promise<Response>(resolve => { releaseReport = resolve; });
+      return Response.json({ reports: [{ provider: "relay", source: "codex-lb:usage", updatedAt: Date.now(), quota: {
+        weeklyPercent: 90, codexCredits: { balance: "1234" }, updatedAt: Date.now(),
+      } }] });
+    }
+    if (url.pathname === "/api/oauth/providers") return Response.json({ providers: [] });
+    if (url.pathname.startsWith("/api/codex-auth/")) return Response.json({ mode: "pool", accounts: [{
+      id: "main", email: "fixture@example.test", isMain: true, hasCredential: true, priority: 0, quota: null,
+    }] });
+    return fallback(input, init);
+  } });
+
+  await mount();
+  expect(container.querySelector(".quota-row--codex-credits")?.textContent).toContain("1,234");
+  const openai = Array.from(container.querySelectorAll<HTMLElement>('[role="option"]'))
+    .find(option => option.textContent?.includes("OpenAI"));
+  expect(openai).toBeDefined();
+  await act(async () => { openai!.click(); await new Promise(resolve => setTimeout(resolve, 80)); });
+  const accounts = Array.from(container.querySelectorAll<HTMLElement>('[role="tab"]'))
+    .find(tab => tab.textContent?.trim() === "Accounts");
+  expect(accounts).toBeDefined();
+  await act(async () => { accounts!.click(); await new Promise(resolve => setTimeout(resolve, 80)); });
+  const toggle = container.querySelector<HTMLButtonElement>(".codex-auth-credits-toggle button");
+  expect(toggle).not.toBeNull();
+  await act(async () => { toggle!.click(); await new Promise(resolve => setTimeout(resolve, 80)); });
+  expect(visible).toBe(false);
+  const overview = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+    .find(button => button.textContent?.trim() === "Provider Overview");
+  expect(overview).toBeDefined();
+  await act(async () => { overview!.click(); await new Promise(resolve => setTimeout(resolve, 30)); });
+  expect(container.querySelector(".quota-row--codex-credits")).toBeNull();
+  await act(async () => { releaseReport?.(Response.json({ reports: [] })); });
+});
+
 test("account data arriving per provider does not re-read the quota endpoint", async () => {
   await mount();
 

@@ -1,5 +1,5 @@
 import { publishCredentialSync } from "../local-credentials/generation";
-import { captureMainAccountIdentityGeneration, getMainQuotaCredentialGeneration, isMainAccountIdentityGenerationLive, isMainQuotaWriterLive, matchesMainQuotaCredential, observeMainDecisionCredentialUsable, type MainQuotaWriter } from "./main-account-cache";
+import { captureMainAccountIdentityGeneration, getMainAccountCredentialPresence, getMainQuotaCredentialGeneration, isMainAccountIdentityGenerationLive, isMainQuotaWriterLive, matchesMainQuotaCredential, observeMainDecisionCredentialUsable, type MainQuotaWriter } from "./main-account-cache";
 import { classifyChatgptRefreshFailure, noteChatgptRefreshFailure } from "./chatgpt-refresh-failure";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 import { createHash } from "node:crypto";
@@ -21,7 +21,7 @@ import {
   refreshGrantFingerprintForToken,
   withCodexRefreshFileLock,
 } from "./account-store";
-import { resolveWriteTarget } from "../config/atomic-write";
+import { atomicWriteFileNoFollow, resolveWriteTarget } from "../config/atomic-write";
 import { resolveCodexHomeDir } from "./home";
 import { readNativeMainAuthBytes, writeNativeMainAuthFile } from "./native-main-auth-file";
 import { assertNotRealCodexHomeUnderTest } from "../lib/test-home-guard";
@@ -31,9 +31,9 @@ import {
   markMainRefreshGrantRejected,
   clearMainRefreshGrantRejection,
 } from "./account-runtime-state";
-import { advanceCodexCredentialMutationEpoch } from "./credential-mutation-epoch";
+import { advanceCodexCredentialMutationEpoch, codexCredentialMutationEpoch } from "./credential-mutation-epoch";
 import { withNativeMainExclusiveClaim } from "./native-main-claim";
-import { resolveNativeProfileContext } from "./native-profile-store";
+import { OsNativeProfileKeyProvider, readNativeEnvelopeResult, requireFileCredentialStore, resolveNativeProfileContext } from "./native-profile-store";
 import { NativeProfileError } from "./native-profile-types";
 import { isNativeMainTrafficBlocked } from "./native-profile-startup";
 import { loadConfig } from "../config";
@@ -74,8 +74,24 @@ export function mainAccountTokenIsCurrent(token: MainAccountToken): boolean {
     && matchesMainQuotaCredential(token.accessToken, token.chatgptAccountId);
 }
 
+/**
+ * The last ordinary fileless read that found no Codex login at all. Unlike a positive answer,
+ * absence ends only through a login: every login OpenCodex performs writes auth.json, advances
+ * the credential mutation epoch, or moves the identity generation, so remembering it briefly
+ * cannot hide one. Without it every lookup spawned its own `codex app-server`.
+ */
+let codexMainLoginAbsence: { home: string; identityGeneration: number; credentialEpoch: number; until: number } | null = null;
+
+function codexMainLoginKnownAbsent(home: string): boolean {
+  const absence = codexMainLoginAbsence;
+  return absence !== null && absence.home === home && absence.until > Date.now()
+    && isMainAccountIdentityGenerationLive(absence.identityGeneration)
+    && absence.credentialEpoch === codexCredentialMutationEpoch();
+}
+
 function forgetCodexOwnedMainUsability(home: string): void {
   if (codexOwnedMainCredential?.home === home) codexOwnedMainCredential = null;
+  if (codexMainLoginAbsence?.home === home) codexMainLoginAbsence = null;
 }
 
 type MainAuthJsonCredential = {
@@ -213,9 +229,12 @@ function statIdentity(path: string): FileIdentity | null {
 }
 
 function readMainAuthJsonCredential(): MainAuthJsonCredential | null {
-  const path = resolveWriteTarget(join(resolveCodexHomeDir(), "auth.json"));
+  let path: string;
   let raw: string;
   try {
+    // Inside the try: a dangling auth.json symlink makes the resolve itself throw, and that is
+    // an unreadable credential like any other, not an unhandled error for the caller's route.
+    path = resolveWriteTarget(join(resolveCodexHomeDir(), "auth.json"));
     raw = readNativeMainAuthBytes(path, "plain").toString("utf8");
   } catch {
     return null;
@@ -414,7 +433,81 @@ function persistNativeMainReauthTokens(
 }
 
 /**
- * Prepare a same-identity reauth of the native __main__ slot (#3898).
+ * Where a first native sign-in may write: a file-store CODEX_HOME whose auth.json does not exist.
+ *
+ * A hub that has only ever served pool accounts is in exactly this state. The dashboard offered
+ * it a device login the server then refused, and the only other way in was `codex login` in a
+ * shell on the host. Absence is the whole precondition, judged by the read the profile doctor
+ * reports as `authStatus: "missing"`: an unreadable, invalid, or API-key auth.json is somebody's
+ * credential and is never replaced here, and under a keyring store a missing file says nothing
+ * about whether a login exists.
+ */
+/**
+ * True when this home provably holds no native login without asking Codex: a file store, no
+ * auth.json, and no readable OS keyring for a keyring-only login to live in. The account list
+ * falls back to it when the Codex binary does not answer who is signed in, which is the standing
+ * state of a container hub; without it that hub's main account reads "healthy" and its sign-in
+ * is never offered.
+ */
+export async function nativeMainLoginProvablyAbsent(): Promise<boolean> {
+  try {
+    nativeMainFirstLoginPath();
+    await new OsNativeProfileKeyProvider().get(resolveNativeProfileContext().homeId);
+    return false;
+  } catch (error) {
+    return error instanceof NativeProfileError && error.code === "KEYRING_UNAVAILABLE";
+  }
+}
+
+function nativeMainFirstLoginPath(): string {
+  // Codex can hold a login in the OS keyring with no auth.json and no store key in config.toml.
+  // A credential check that saw one means this home is signed in, whatever the file says.
+  if (getMainAccountCredentialPresence() === true) {
+    throw new NativeMainReauthUnavailableError(
+      "The native main credential can be neither reauthenticated nor created in this state",
+    );
+  }
+  const path = join(resolveCodexHomeDir(), "auth.json");
+  try {
+    requireFileCredentialStore(resolveNativeProfileContext());
+    if (readNativeEnvelopeResult(path).status === "missing") return path;
+  } catch (error) {
+    if (!(error instanceof NativeProfileError)) throw error;
+  }
+  throw new NativeMainReauthUnavailableError(
+    "The native main credential can be neither reauthenticated nor created in this state",
+  );
+}
+
+/**
+ * Write a first native login in the shape `codex login` writes for a ChatGPT account, so Codex
+ * reads it as its own. The publication is exclusive: a login that appeared since preparation
+ * (`codex login` run on the host meanwhile) wins and this one is refused.
+ */
+function createNativeMainAuthJson(path: string, tokens: NativeMainReauthTokens): void {
+  const content = JSON.stringify({
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: null,
+    tokens: {
+      id_token: tokens.idToken,
+      access_token: tokens.accessToken,
+      refresh_token: tokens.refreshToken,
+      account_id: tokens.chatgptAccountId,
+    },
+    last_refresh: new Date().toISOString(),
+  }, null, 2) + "\n";
+  try {
+    atomicWriteFileNoFollow(path, content, undefined, {}, { exclusive: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new MainAuthJsonChangedDuringRefreshError();
+    throw error;
+  }
+  advanceCodexCredentialMutationEpoch();
+}
+
+/**
+ * Prepare a device sign-in of the native __main__ slot (#3898): a same-identity reauth of the
+ * credential that exists, or the first login of a home that has none.
  *
  * The existing credential snapshot is captured NOW and held only inside the
  * closure — callers (the device-reauth service) never see the expected
@@ -429,6 +522,11 @@ function persistNativeMainReauthTokens(
  *  3. re-verifies the snapshot (path + hash + dev/ino) inside the claim;
  *  4. writes access/refresh/id token + account_id atomically and clears the
  *     main account's reauth quarantine for the new credential generation.
+ *
+ * A first login has no identity to match and no snapshot to protect, so steps 1 and 3 become
+ * one condition: auth.json is absent at preparation ({@link nativeMainFirstLoginPath}) and the
+ * write inside the claim is exclusive. Replacing a login that exists with another identity
+ * stays impossible through this path.
  */
 export function beginNativeMainReauth(): {
   commit: (
@@ -436,41 +534,69 @@ export function beginNativeMainReauth(): {
     options?: { signal?: AbortSignal },
   ) => Promise<{ chatgptAccountId: string }>;
 } {
+  // The commit rechecks this inside the claim; refusing here keeps a blocked home from handing
+  // out a device code that could only fail after the human has authorized it.
+  if (isNativeMainTrafficBlocked()) {
+    throw new NativeMainReauthUnavailableError("Native main traffic is blocked by startup or recovery state");
+  }
   const expected = readMainAuthJsonCredential();
-  if (!expected || !expected.chatgptAccountId) {
+  if (!expected) {
+    const firstLoginPath = nativeMainFirstLoginPath();
+    return {
+      commit: (tokens, options) => commitNativeMainSignIn({
+        tokens,
+        signal: options?.signal,
+        publish: () => createNativeMainAuthJson(firstLoginPath, tokens),
+      }),
+    };
+  }
+  if (!expected.chatgptAccountId) {
     throw new NativeMainReauthUnavailableError(
-      "No native main credential exists to reauthenticate; enrollment is the native profile workflow",
+      "The native main credential carries no account identity to reauthenticate",
     );
   }
   return {
-    async commit(
-      tokens: NativeMainReauthTokens,
-      options: { signal?: AbortSignal } = {},
-    ): Promise<{ chatgptAccountId: string }> {
-      if (!tokens.accessToken || !tokens.refreshToken || !tokens.idToken) {
-        throw new NativeMainReauthUnavailableError("Device grant did not produce a complete token set");
-      }
-      if (tokens.chatgptAccountId !== expected.chatgptAccountId) {
-        throw new NativeMainReauthIdentityMismatchError();
-      }
-      return withNativeMainExclusiveClaim(resolveNativeProfileContext(), async () => {
-        // Recovery/admission recheck (080): a recovery-blocked or not-ready
-        // home fails native_main_unavailable rather than rewriting auth.json
-        // underneath the gate. The claim waits bounded like the refresh path
-        // (30s) so a busy claim is not an instant refusal.
-        if (isNativeMainTrafficBlocked()) {
-          throw new NativeMainReauthUnavailableError(
-            "Native main traffic is blocked by startup or recovery state",
-          );
-        }
-        if (options.signal?.aborted) throw options.signal.reason;
+    commit: (tokens, options) => commitNativeMainSignIn({
+      tokens,
+      signal: options?.signal,
+      expectedAccountId: expected.chatgptAccountId,
+      publish: () => {
         assertMainAuthJsonSnapshotUnchanged(expected);
         persistNativeMainReauthTokens(expected, tokens);
-        clearAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
-        return { chatgptAccountId: tokens.chatgptAccountId };
-      }, { waitMs: 30_000, signal: options.signal });
-    },
+      },
+    }),
   };
+}
+
+/** The fenced publication both sign-ins share; `publish` is the one step that differs. */
+async function commitNativeMainSignIn({ tokens, signal, expectedAccountId, publish }: {
+  tokens: NativeMainReauthTokens;
+  signal?: AbortSignal;
+  /** Set for a reauth, whose grant must match the existing identity; absent for a first login. */
+  expectedAccountId?: string;
+  publish: () => void;
+}): Promise<{ chatgptAccountId: string }> {
+  if (!tokens.accessToken || !tokens.refreshToken || !tokens.idToken || !tokens.chatgptAccountId) {
+    throw new NativeMainReauthUnavailableError("Device grant did not produce a complete token set");
+  }
+  if (expectedAccountId !== undefined && tokens.chatgptAccountId !== expectedAccountId) {
+    throw new NativeMainReauthIdentityMismatchError();
+  }
+  return withNativeMainExclusiveClaim(resolveNativeProfileContext(), async () => {
+    // Recovery/admission recheck (080): a recovery-blocked or not-ready
+    // home fails native_main_unavailable rather than rewriting auth.json
+    // underneath the gate. The claim waits bounded like the refresh path
+    // (30s) so a busy claim is not an instant refusal.
+    if (isNativeMainTrafficBlocked()) {
+      throw new NativeMainReauthUnavailableError(
+        "Native main traffic is blocked by startup or recovery state",
+      );
+    }
+    if (signal?.aborted) throw signal.reason;
+    publish();
+    clearAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
+    return { chatgptAccountId: tokens.chatgptAccountId };
+  }, { waitMs: 30_000, signal });
 }
 
 /**
@@ -516,6 +642,8 @@ async function resolveMainAccountToken(
   // the outside is indistinguishable from a refusal: same failed request, no write, no verdict.
   // A forced refresh is the only caller that passes `rejectedAccessToken`, so only it reports.
   if (!initial) {
+    // Inside the absence window an ordinary read repeats the last app-server answer, claim-free.
+    if (rejectedAccessToken === undefined && codexMainLoginKnownAbsent(codexHome)) return null;
     const refreshMode = await resolveNativeMainRefreshMode(loadConfig());
     if (refreshMode.mode === "codex") {
       const refreshTimeout = AbortSignal.timeout(30_000);
@@ -553,6 +681,8 @@ async function resolveMainAccountToken(
     if (rejectedAccessToken !== undefined) noteNativeMainRefresh("skipped-no-credential");
     return null;
   }
+  // A readable auth.json disproves the absence, even if Codex later moves it to its keyring.
+  if (codexMainLoginAbsence?.home === codexHome) codexMainLoginAbsence = null;
   if (credentialRefreshGrantRejected(initial)) throw new MainAccountTokenRefreshError("reauth");
   const now = Date.now();
   if (initial.accessToken !== rejectedAccessToken
@@ -715,7 +845,10 @@ async function refreshThroughCodex(
   // Deferred to keep lifecycle's cache/plan cleanup off this module's load-time import cycle.
   const { observeCodexOwnedMainAccountCredential } = await import("./account-lifecycle");
   if (resolveCodexHomeDir() !== codexHome) throw new MainAuthJsonChangedDuringRefreshError();
+  // Ordinary reads queued on this home's claim share the read that just observed absence.
+  if (locked === null && rejectedAccessToken === undefined && codexMainLoginKnownAbsent(codexHome)) return null;
   const identityGeneration = captureMainAccountIdentityGeneration();
+  const credentialEpoch = codexCredentialMutationEpoch();
   // This observation is only selection evidence. A later request must ask Codex again:
   // JWT expiry cannot detect logout or an external keyring account switch.
   forgetCodexOwnedMainUsability(codexHome);
@@ -753,7 +886,11 @@ async function refreshThroughCodex(
     // absence, not a refresh failure: report no credential instead of a retryable error.
     // Once the expiring-bearer answer above promoted this lookup into a real refresh, the
     // same no-login outcome is a refresh failure again.
-    if (locked === null && rejectedAccessToken === undefined && !didRefresh) return null;
+    if (locked === null && rejectedAccessToken === undefined && !didRefresh) {
+      // The bearer skew bounds it: a keyring-only `codex login` outside OpenCodex shows within a minute.
+      codexMainLoginAbsence = { home: codexHome, identityGeneration, credentialEpoch, until: Date.now() + MAIN_TOKEN_REFRESH_SKEW_MS };
+      return null;
+    }
     throw new MainAccountTokenRefreshError("transient", { credentialObservedAbsent: true });
   }
   // A transient Codex refresh failure still answers with its cached bearer.

@@ -47,7 +47,7 @@ import { codexAuthContextLogLabel } from "../../codex/account-label";
 import { forceRefreshMainAccountToken, mainAccountTokenQuotaWriter } from "../../codex/main-account";
 import { rebindPoolCreditPolicy } from "../../codex/pool-credit-policy";
 import { safeCallerSessionId } from "../caller-session-identity";
-import { copyResponsesClientMetadata } from "../../adapters/openai-responses/transport";
+import { copyConfiguredClientHeaders, copyResponsesClientMetadata } from "../../adapters/openai-responses/transport";
 import { AgentAssertionUnsupportedError, agentAssertionUnsupportedResponse, authorizationCredential, carryAgentAssertionForCallerBearer, hasAgentAssertionAuthorization } from "../../lib/authorization-scheme";
 
 /** Normalize caller aliases only on native egress; preserve ingress and fallback identity. */
@@ -78,7 +78,8 @@ export type CodexCredentialOwnershipOptions = Pick<HandleResponsesOptions,
  * allowlist. Every physical send of one Responses turn goes through this rule: the first send,
  * the 401 refresh replay and the alternate-account retry. The copier fills only names the target
  * does not already carry, so a selected Pool installation identity and configured provider
- * headers keep precedence over the caller's values.
+ * headers keep precedence over the caller's values. Chat providers get only their configured
+ * names (the gateway session identity), never the compact-handoff user-agent.
  */
 export function restoreResponsesClientMetadata(
   headers: Headers,
@@ -88,6 +89,10 @@ export function restoreResponsesClientMetadata(
 ): void {
   if (provider.adapter === "openai-responses" || compactionRecoveryKind === "compaction-v1") {
     copyResponsesClientMetadata(headers, incoming, provider);
+  } else {
+    // Auth materialization also drops the gateway session identity an opted-in openai-chat
+    // provider asked for, so every physical send into a chat provider restores it here.
+    copyConfiguredClientHeaders(headers, incoming, provider);
   }
 }
 

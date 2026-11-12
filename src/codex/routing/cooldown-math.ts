@@ -92,6 +92,8 @@ export type CodexUpstreamOutcomeMeta = {
   lastFailureCode?: string;
   /** Native model selected for this request; used only for confirmed scoped quotas. */
   modelId?: string;
+  /** Automatic pool Luna fallback served the independent Reserve model on this attempt. */
+  poolReserve?: true;
   /** When set, clears affinity for this thread immediately on transient failure. */
   threadId?: string | null;
   /**

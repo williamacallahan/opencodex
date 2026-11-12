@@ -3063,6 +3063,9 @@ export const en = {
   "codexAuth.mainReauthOpen": "Open",
   "codexAuth.mainReauthPending": "Waiting for sign-in…",
   "codexAuth.mainReauthDevice": "Re-login with device code",
+  "codexAuth.mainNotSignedIn": "Not signed in",
+  "codexAuth.mainSignInHint": "This server has no Codex login yet — sign in with a device code below",
+  "codexAuth.mainSignInDevice": "Sign in with device code",
   "codexAuth.emailCollision": "This account matches your main Codex login. Use a different account.",
 
   "codexAuth.resetCreditsTitle": "Reset Credits",

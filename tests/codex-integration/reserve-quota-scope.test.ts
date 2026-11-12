@@ -85,7 +85,7 @@ describe("Reserve quota scope", () => {
     globalThis.fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       calls += 1;
       expect(String(input)).toBe("https://chatgpt.com/backend-api/wham/usage");
-      expect(new Headers(init?.headers).get("x-openai-codex-luna-reserve")).toBeNull();
+      expect(new Headers(init?.headers).get("x-openai-codex-luna-reserve")).toBe("1");
       return Response.json({
         plan_type: "team",
         rate_limit: { secondary_window: { used_percent: 10, reset_at: 1_900_000_000 } },

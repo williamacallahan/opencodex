@@ -3,15 +3,15 @@ import { createHash } from "node:crypto";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { apiKeyPoolEntryId } from "./api-keys";
 import { resolveProviderApiKey } from "./key-store";
-import type { ProviderQuota } from "./quota-types";
+import { CODEX_LB_USAGE_SOURCE, type ProviderQuota } from "./quota-types";
 import { ACCOUNT_QUOTA_TTL_MS } from "./quota-wire";
 
 const MAX_ENTRIES = 256;
 const LAST_GOOD_MS = 30 * 60_000;
 /** `unread` marks a synthesized row: no read happened, so `ts` is not a read time. */
-type Entry = { ts: number; quota: ProviderQuota | null; unavailable?: true; unread?: true };
+type Entry = { ts: number; quota: ProviderQuota | null; source?: string; unavailable?: true; unread?: true };
 export type KeyQuotaProbeOutcome =
-  | { kind: "quota"; quota: ProviderQuota }
+  | { kind: "quota"; quota: ProviderQuota; source?: string }
   | { kind: "empty" | "terminal" | "unavailable" };
 export interface ProviderApiKeyQuota {
   keyId: string;
@@ -61,7 +61,7 @@ export function cachedApiKeyQuota(
   try { resolved = resolveProviderApiKey(key)?.trim(); } catch { return null; }
   if (!resolved) return null;
   const entry = cache.get(identity(name, provider, keyId, resolved));
-  if (!entry || entry.unavailable || !entry.quota) return null;
+  if (!entry || entry.unavailable || !entry.quota || entry.source === CODEX_LB_USAGE_SOURCE) return null;
   const now = Date.now();
   if (now - entry.ts >= ACCOUNT_QUOTA_TTL_MS) return null;
   if (now - entry.quota.updatedAt >= LAST_GOOD_MS) return null;
@@ -131,17 +131,18 @@ async function readEntry(
   if (running) return running;
   const lastGood = previous?.quota && Date.now() - previous.quota.updatedAt < LAST_GOOD_MS
     ? previous.quota : null;
-  if (flights.size >= MAX_ENTRIES) return { ts: Date.now(), quota: lastGood, unavailable: true, unread: true };
+  if (flights.size >= MAX_ENTRIES) return { ts: Date.now(), quota: lastGood, source: previous?.source, unavailable: true, unread: true };
   const flight = (async (): Promise<Entry> => {
     let result: KeyQuotaProbeOutcome;
     try { result = await probe(); } catch { result = { kind: "unavailable" }; }
     const entry: Entry = result.kind === "quota"
-      ? { ts: Date.now(), quota: result.quota }
+      ? { ts: Date.now(), quota: result.quota, source: result.source }
       : result.kind === "empty"
         ? { ts: Date.now(), quota: null }
         : {
             ts: Date.now(),
             quota: result.kind !== "terminal" && lastGood && Date.now() - lastGood.updatedAt < LAST_GOOD_MS ? lastGood : null,
+            source: previous?.source,
             unavailable: true,
           };
     if (isCurrent()) remember(key, entry);

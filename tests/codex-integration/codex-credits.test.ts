@@ -7,14 +7,20 @@ describe("Codex credits boundary parser", () => {
   test.each(["62500", "62498.725", "0", "000.050", 125.5, 0])("preserves decimal balance %s", balance => {
     expect(parseCodexCredits({ balance })).toEqual({ balance: String(balance) });
   });
-  test.each([[1e-7, "0.0000001"], [1e21, "1000000000000000000000"], [62498.725, "62498.725"]] as const)(
+  test.each(["-5.25", -5.25])("preserves signed relay balance %s", balance => {
+    expect(parseCodexCredits({ balance }, { allowNegative: true })).toEqual({ balance: String(balance) });
+  });
+  test.each([[1e-7, "0.0000001"], [-1e-7, "-0.0000001"], [1e21, "1000000000000000000000"], [62498.725, "62498.725"]] as const)(
     "normalizes numeric balance %p to a plain decimal string", (balance, expected) => {
-      const parsed = parseCodexCredits({ balance });
+      const parsed = parseCodexCredits({ balance }, { allowNegative: true });
       expect(parsed).toEqual({ balance: expected });
-      expect(parsed?.balance).toMatch(/^\d+(\.\d+)?$/);
+      expect(parsed?.balance).toMatch(/^-?\d+(\.\d+)?$/);
     });
-  test.each([-1, Infinity, NaN, "-1", "1e3", " 25", "25 ", "", "garbage", true, null])("drops invalid balance %s", balance => {
+  test.each([-1, "-1", Infinity, -Infinity, NaN, "1e3", "-1e3", "--1", " 25", "25 ", "", "garbage", true, null])("drops invalid balance %s", balance => {
     expect(parseCodexCredits({ balance })).toBeNull();
+  });
+  test.each([Infinity, -Infinity, NaN, "-1e3", "--1"])("drops invalid signed relay balance %s", balance => {
+    expect(parseCodexCredits({ balance }, { allowNegative: true })).toBeNull();
   });
   test("absent, null, malformed and empty observations remain distinct", () => {
     expect(parseCodexCredits(undefined)).toBeUndefined();
