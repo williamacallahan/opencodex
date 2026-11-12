@@ -671,6 +671,20 @@ To make the ordinary endpoints and enabled intercept listener strict too, set
 Set that flag to false or remove it to restore their existing behavior. The explicit `/strict`
 endpoints remain strict regardless of this flag and are available only on the public listener.
 
+## Native Claude and routed subagents in one session
+
+Append `/hybrid` to the hosted gateway origin in `ANTHROPIC_BASE_URL` to use native Claude
+turns and routed subagents from one Claude Code process. Use the same gateway authentication
+as `/strict`; no additional configuration switch is needed.
+
+Native model ids beginning with `claude-` use the strict managed-account transport above.
+Routed ids such as `ocx-claude-gpt-pool--gpt-model` and escaped `ocx-claude2-` ids use the
+ordinary translating bridge with the configured provider's credential. The caller's bearer is
+never forwarded to that routed upstream. Routed aliases to Anthropic, bare unknown ids, and
+combos that could select Anthropic are refused before an upstream call. Policy routes and
+nested combo targets are also refused. Native token counts call Anthropic with the original
+bytes; routed token counts return the ordinary local estimate. This prefix is public-listener only.
+
 ## Claude Desktop on a connected remote hub
 
 When this machine is connected to a hub, `ocx claude desktop apply` (or `ocx claude desktop`)

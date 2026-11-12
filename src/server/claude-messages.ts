@@ -34,7 +34,8 @@ import {
 import { AnthropicRequestError, callerCacheRetention, DesktopModelMappingUnavailableError, extractOcxEffortDirective, extractOcxRouteDirective, nativeAnthropicProjection, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
 import { nativeReasoningTag, type NativeReasoningOwner } from "../responses/reasoning-replay-cache";
 import { isKnownDesktop3pModelId, resolveDesktop3pAlias } from "../claude/desktop-3p";
-import { resolveAlias, claudeCodeNativeAlias, legacyAliasForNative } from "../claude/alias";
+import { resolveAlias, claudeCodeNativeAlias, legacyAliasForNative, CLAUDE_ALIAS_PREFIX_CURRENT, CLAUDE_ALIAS_PREFIX_CURRENT_V2 } from "../claude/alias";
+import { getCombo } from "../combos";
 import { recordDesktopRequest } from "../claude/desktop-health";
 import { stripOneMillionMarker } from "../claude/context-windows";
 import { captureAdmissionPolicy } from "./capture-admission-policy";
@@ -76,7 +77,8 @@ import { captureRouteStaticPolicy, NoEligiblePolicyCandidateError, previewRouteM
 import { evidenceFromBody } from "../routing/request-evidence";
 import { resolveWireProtocolOverride } from "./adapter-resolve";
 import type { OcxConfig } from "../types";
-import { readJsonRequestBody, resolveInboundBodyLimitBytes } from "./request-decompress";
+import { readJsonRequestBody, readBoundedJsonRequestBody, resolveInboundBodyLimitBytes, DecompressedBodyTooLargeError } from "./request-decompress";
+import { withCallerSessionIdentity } from "./caller-session-identity";
 import { addFinalRequestLog, httpStatusForRequestLogTerminal, nextRequestLogId, recordFirstOutput, type RequestLogContext } from "./request-log";
 import { admissionFields } from "./auth-cors";
 import { createFinalRequestLog } from "./inference/final-log";
@@ -141,6 +143,10 @@ export interface ClaudeIngressOptions {
   claudeIntercept?: boolean;
   admission?: DataPlaneAdmission;
   turnAdmissionLease?: AdmissionLease;
+  hybridMessages?: boolean;
+  onHybridLane?: (lane: "strict" | "bridge", req: Request) => Response | void;
+  /** A hybrid count reuses the body already read under the Messages budget. */
+  parsedBody?: Rec;
 }
 
 /**
@@ -625,6 +631,72 @@ async function handleClaudeMessagesWithBudget(
   // Model resolution reads this view; every other claudeCode setting keeps reading `config`.
   const cc = claudeCodeForIngress(config.claudeCode, ingress.claudeIntercept === true);
 
+  let hybridBody: Rec | undefined;
+  if (ingress.hybridMessages) {
+    let wire: Uint8Array | undefined;
+    let model = "(missing)";
+    let strict = false;
+    try {
+      const body = await readBoundedJsonRequestBody(req, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes), translatorBudget, {
+        retainWire(bytes) { translatorBudget.chargeRetained(bytes.byteLength, { kind: "request_copies" }); wire = bytes; },
+      });
+      if (!isRec(body) || typeof body.model !== "string" || !body.model || !wire) throw new AnthropicRequestError("model is required");
+      model = body.model;
+      const routedAlias = (model.startsWith(CLAUDE_ALIAS_PREFIX_CURRENT) || model.startsWith(CLAUDE_ALIAS_PREFIX_CURRENT_V2))
+        && resolveAlias(model) !== null;
+      const route = previewRouteModel(config, routedAlias ? resolveInboundModel(model, cc) : model);
+      // A combo may select again or fail over; every candidate must stay off Anthropic.
+      const bridgeRouteAllowed = (candidate: RouteResult) => candidate.provider.adapter !== "anthropic"
+        && !configuredAnthropicInstance(config, candidate.providerName) && candidate.routeKind !== "policy";
+      const combo = route.combo && getCombo(config, route.combo.comboId);
+      const bridgeAllowed = bridgeRouteAllowed(route) && (!route.combo || !!combo?.targets.every(target => {
+        const candidate = previewRouteModel(config, `${target.provider}/${target.model}`);
+        return !candidate.combo && bridgeRouteAllowed(candidate);
+      }));
+      strict = !routedAlias && model.startsWith("claude-") && route.modelId === model
+        && nativeMessagesDeclineReason(route, body, config, { strict: true }) === undefined;
+      if (!strict && !(routedAlias && bridgeAllowed)) {
+        throw new AnthropicRequestError("incompatible model");
+      }
+      hybridBody = body;
+    } catch (error) {
+      if (req.signal.aborted) {
+        if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 499, { closeReason: "client_cancel" });
+        return anthropicErrorResponse(499, "Client cancelled request", "api_error");
+      }
+      const oversized = error instanceof DecompressedBodyTooLargeError || isTranslatorBudgetExceededError(error);
+      const response = anthropicErrorResponse(oversized ? 413 : 400, oversized
+        ? "Hybrid Messages request exceeds the body limit"
+        : `Hybrid Messages model ${redactSecretString(model)} is incompatible; accepted forms are native Claude ids and ocx-claude- or ocx-claude2- routed ids`, "invalid_request_error");
+      if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, response.status, { closeReason: "non_stream" });
+      return response;
+    }
+    // The body is consumed. Downstream handlers use the parsed body and strict wire snapshot.
+    const laneUrl = new URL(req.url);
+    laneUrl.pathname = laneUrl.pathname.replace(/^\/hybrid(?=\/)/, "");
+    req = new Request(laneUrl, { method: req.method, headers: req.headers, signal: req.signal });
+    config = { ...config, claudeCode: { ...config.claudeCode, strictPassthrough: strict } };
+    if (!strict) {
+      translatorBudget.releaseRetained(wire!.byteLength, { kind: "request_copies" });
+      const admission = logIds?.admission ?? ingress.admission;
+      if (admission) req = withCallerSessionIdentity(req, admission);
+    }
+    const laneRefusal = ingress.onHybridLane?.(strict ? "strict" : "bridge", req);
+    if (laneRefusal) {
+      if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, laneRefusal.status, { closeReason: "non_stream" });
+      return laneRefusal;
+    }
+    if (strict) {
+      const { handleStrictNativeMessages } = await import("./messages-native");
+      return handleStrictNativeMessages({ req, config, logCtx, logIds, translatorBudget,
+        preRead: { wire: wire!, body: hybridBody },
+        modelScope: resolveAdmissionModelScope(config, logIds?.admission ?? ingress.admission) });
+    }
+    if (laneUrl.pathname === "/v1/messages/count_tokens") {
+      return handleClaudeCountTokens(req, config, requestPolicy, { ...ingress, parsedBody: hybridBody });
+    }
+  }
+
   if (config.claudeCode?.strictPassthrough !== undefined && config.claudeCode.strictPassthrough !== false) {
     const { handleStrictNativeMessages } = await import("./messages-native");
     return handleStrictNativeMessages({ req, config, logCtx, logIds, translatorBudget,
@@ -653,7 +725,7 @@ async function handleClaudeMessagesWithBudget(
   // The Advisor caller policy is the admitted snapshot: capture it before the first await (#7859).
   const advisorAdmissionPolicy = logIds?.advisorAdmissionPolicy ?? captureAdmissionPolicy(config, logIds?.admission);
   try {
-    anthropicBody = await readAnthropicBody(req, translatorBudget, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));
+    anthropicBody = hybridBody ?? await readAnthropicBody(req, translatorBudget, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));
     clientModelLabel = clientFacingModelLabel(isRec(anthropicBody) ? anthropicBody.model : undefined);
     // Defensive [1m] strip (devlog 138): clients normally remove the context-variant
     // marker themselves; the 1M signal we act on is the anthropic-beta header.
@@ -733,7 +805,7 @@ async function handleClaudeMessagesWithBudget(
     messagesFeatures = sourceEnvelope
       ? () => sourceEnvelope.features()
       : () => (scannedFeatures ??= featuresFromMessagesBody(messagesBody));
-    if (!effortRow && !fastRow && isRec(anthropicBody) && wantsNativePassthrough(req, config, requestPolicy, anthropicBody.model, cc)) {
+    if (!ingress.hybridMessages && !effortRow && !fastRow && isRec(anthropicBody) && wantsNativePassthrough(req, config, requestPolicy, anthropicBody.model, cc)) {
       markProtocolEntry(logCtx, { inbound: "messages", lane: "native", features: messagesFeatures });
       recordProtocolShadowPlan(logCtx, config, { inbound: "messages", model: requestedModel });
       let projectedBody: Rec;
@@ -801,7 +873,7 @@ async function handleClaudeMessagesWithBudget(
     }
     // On the direct lane the core receives only the request settings; the conversation is
     // already decoded into the IR. Without a plan the translation below runs as before.
-    directPlan = planMessagesAntigravityDirect(anthropicBody, cc, config, translatorBudget);
+    directPlan = ingress.hybridMessages ? undefined : planMessagesAntigravityDirect(anthropicBody, cc, config, translatorBudget);
     let translation = directPlan && {
       body: directPlan.settingsBody,
       cacheKeySource: directPlan.cacheKeySource,
@@ -1079,7 +1151,7 @@ async function handleClaudeMessagesWithBudget(
   const nativeDecline = settledRoute && isRec(anthropicBody)
     ? nativeMessagesDeclineReason(settledRoute, anthropicBody, config, nativeSelector)
     : "rollout-disabled";
-  const nativeMessagesRoute = settledRoute && nativeDecline === undefined ? settledRoute : undefined;
+  const nativeMessagesRoute = !ingress.hybridMessages && settledRoute && nativeDecline === undefined ? settledRoute : undefined;
   if (nativeProjectionOnlyError && !nativeMessagesRoute) {
     if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 400, { closeReason: "non_stream" });
     return anthropicErrorResponse(400, nativeProjectionOnlyError.message, "invalid_request_error");
@@ -1564,7 +1636,7 @@ export async function handleClaudeCountTokens(
 ): Promise<Response> {
   const disabled = claudeInboundDisabled(config);
   if (disabled) return disabled;
-  if (config.claudeCode?.strictPassthrough !== undefined && config.claudeCode.strictPassthrough !== false) {
+  if ((ingress.hybridMessages && !ingress.parsedBody) || (!ingress.hybridMessages && config.claudeCode?.strictPassthrough !== undefined && config.claudeCode.strictPassthrough !== false)) {
     const start = Date.now();
     return handleClaudeMessages(req, config, {
       model: "unknown", provider: "unknown", ...(ingress.admission ? admissionFields(ingress.admission) : {}),
@@ -1575,7 +1647,7 @@ export async function handleClaudeCountTokens(
   let body: unknown;
   const translatorBudget = createTranslatorBudget();
   try {
-    body = await readAnthropicBody(req, translatorBudget, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));
+    body = ingress.parsedBody ?? await readAnthropicBody(req, translatorBudget, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));
   } catch (err) {
     if (err instanceof DesktopModelMappingUnavailableError) return desktopMappingUnavailableResponse(err);
     if (err instanceof AnthropicRequestError) return anthropicErrorResponse(400, err.message);
@@ -1615,13 +1687,13 @@ export async function handleClaudeCountTokens(
       raw.model = model;
     }
     captureClaudeInbound("count_tokens", raw, resolveInboundModel(model, cc), req.headers.get("anthropic-beta") ?? undefined);
-    if (wantsNativePassthrough(req, config, requestPolicy, model, cc)) {
+    if (!ingress.hybridMessages && wantsNativePassthrough(req, config, requestPolicy, model, cc)) {
       return await anthropicNativePassthrough(req, config, { model, provider: "anthropic-native", surface: "claude" }, undefined, raw, "/v1/messages/count_tokens");
     }
     // A thread delta would undercount; refuse it exactly as the translated Messages path does.
     if (carriesMessageThread(raw)) return messageThreadUnsupportedResponse();
     // PF-08: an eligible managed-key route counts the body the native lane would send.
-    const nativeCountBody = (await import("./messages-native")).nativeMessagesCountBody(
+    const nativeCountBody = ingress.hybridMessages ? undefined : (await import("./messages-native")).nativeMessagesCountBody(
       config, cc, raw, { fastRow: countFastRow !== null }, captureAnthropicClientIdentity(req.headers),
     );
     // A count answers for the prompt a real turn from this model would forward, so it projects

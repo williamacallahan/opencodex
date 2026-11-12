@@ -37,6 +37,8 @@ export const SESSION_LANE_ID_BYTES = 32;
 const turnGate = createAdmissionGate("active_turns", MAX_ACTIVE_TURNS);
 export interface ActiveTurnLease extends AdmissionLease {
   attach(lease: AdmissionLease): void;
+  /** Claim a conversation lane once its authenticated identity becomes known. */
+  claimSessionLane(sessionLaneId: string): boolean;
   cancel(reason: unknown): void;
   bindAbortSignal(signal: AbortSignal): () => void;
   bindAbortController(ac: AbortController): void;
@@ -175,7 +177,7 @@ export function resetLifecycleDrainStateForTests(): void {
 }
 export function tryAdmitTurn(sessionLaneId?: string, clientSignal?: AbortSignal, cancellationContext?: { cancellationReason?: unknown }): ActiveTurnLease | null {
   if (isDraining()) return null;
-  const opaqueSessionLaneId = sessionLaneId
+  let opaqueSessionLaneId = sessionLaneId
     ? createHash("sha256").update(sessionLaneId).digest("hex").slice(0, SESSION_LANE_ID_BYTES)
     : undefined;
   const sessionLaneRefCount = opaqueSessionLaneId
@@ -205,6 +207,23 @@ export function tryAdmitTurn(sessionLaneId?: string, clientSignal?: AbortSignal,
     attach(attachedLease) {
       if (!active) attachedLease.release();
       else attachedLeases.add(attachedLease);
+    },
+    claimSessionLane(sessionLaneId) {
+      if (!active) return false;
+      const next = createHash("sha256").update(sessionLaneId).digest("hex").slice(0, SESSION_LANE_ID_BYTES);
+      if (opaqueSessionLaneId) return opaqueSessionLaneId === next;
+      const count = activeSessionLaneRefCounts.get(next) ?? 0;
+      if (count === 0 && activeSessionLaneRefCounts.size >= MAX_ACTIVE_SESSION_LANES) {
+        sessionLaneRejected += 1;
+        return false;
+      }
+      opaqueSessionLaneId = next;
+      activeSessionLaneRefCounts.set(next, count + 1);
+      if (count === 0) {
+        sessionLaneAdmitted += 1;
+        sessionLanePeak = Math.max(sessionLanePeak, activeSessionLaneRefCounts.size);
+      }
+      return true;
     },
     cancel(reason) {
       if (!active) return;

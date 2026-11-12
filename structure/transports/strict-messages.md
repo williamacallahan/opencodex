@@ -11,6 +11,22 @@ too. Absence/false retains their legacy behavior; any other present value refuse
 Messages/count_tokens rather than silently translating.
 It needs no separate native-rollout flag.
 
+## Hybrid Messages ingress
+
+The public listener also exposes `/hybrid/v1/messages` and `/hybrid/v1/messages/count_tokens`.
+`src/server/claude-messages.ts` reads each body once with the bounded reader and retains the wire
+bytes. An unchanged `claude-` model accepted by the strict route predicate enters the strict handler
+with those bytes. A current `ocx-claude-` or `ocx-claude2-` alias resolving outside Anthropic enters
+the existing bridge; its caller-credential passthrough, managed native and Antigravity direct lanes
+are disabled. Every combo candidate must resolve outside Anthropic; policy or nested combo
+candidates are refused. Other selectors receive a local 400 before any upstream request.
+Native counts forward the original bytes; routed counts use the root endpoint's local estimate.
+Only the bridge promotes the caller session header and adds the request-log response header.
+The hybrid turn defers its session-lane capacity check until lane selection, then claims the
+selected lane through its existing lease. The strict lane keeps the original session identity and headers. Cancelling the bounded read returns 499.
+`tests/claude-integration/messages-hybrid.test.ts` exercises these public HTTP boundaries with
+synthetic pooled credentials and a streaming Chat upstream.
+
 ## Byte-preserving transport
 
 `claudeCode.strictPassthrough: true` selects the strict variant of
