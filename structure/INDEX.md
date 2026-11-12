@@ -104,6 +104,7 @@ Per-vendor contracts and the adapter authority that constructs them.
 | [`providers/codex-pool-affinity.md`](providers/codex-pool-affinity.md) | Restart persistence of Codex pool pins and conversation-state issuers: store, fences, single-writer lease, fail-closed recovery. |
 | [`providers/pool-credit-renewal.md`](providers/pool-credit-renewal.md) | Independent credit-evidence renewal for opted-in exhausted Codex pool accounts. |
 | [`providers/openai-accounts.md`](providers/openai-accounts.md) | Migration and restore, wire identity, store concurrency, pool ordering and exclusions, quota observations, and account-bound retention. |
+| [`providers/openai-native-main-sign-in.md`](providers/openai-native-main-sign-in.md) | Device-code sign-in of the native main Codex login: same-identity reauthentication, the first login of a home with no auth.json, the fenced auth.json write, and cancellation. |
 | [`providers/codex-round-robin-placement.md`](providers/codex-round-robin-placement.md) | Round-robin new-conversation placement preferring accounts under their effective auto-switch threshold, with all-over fallback and bound, failover and lineage boundaries. |
 | [`providers/openai-signed-in-preservation.md`](providers/openai-signed-in-preservation.md) | Opt-in effective priority bands that spend other pool accounts before the signed-in identity, its identity observation and management API. |
 | [`providers/cursor.md`](providers/cursor.md) | Cursor native exec, parameterized models, checkpoints, and active-context usage. |
@@ -294,6 +295,8 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/codex/cli-windows-plan-provenance.ts` | [`codex-cli-update.md`](codex-cli-update.md) |
 | `src/codex/forward-transport-headers.ts` | [`providers/codex-installation-identity.md`](providers/codex-installation-identity.md) |
 | `src/codex/installation-id.ts` | [`providers/codex-installation-identity.md`](providers/codex-installation-identity.md) |
+| `src/codex/main-device-reauth-api.ts` | [`providers/openai-native-main-sign-in.md`](providers/openai-native-main-sign-in.md) |
+| `src/codex/main-device-reauth.ts` | [`providers/openai-native-main-sign-in.md`](providers/openai-native-main-sign-in.md) |
 | `src/codex/provider-routing.ts` | [`codex-provider-routing.md`](codex-provider-routing.md) |
 | `src/codex/quota.ts` | [`quota-snapshots.md`](quota-snapshots.md) |
 | `src/codex/request-owned-affinity.ts` | [`providers/codex-request-owned-affinity.md`](providers/codex-request-owned-affinity.md) |

@@ -118,8 +118,11 @@ export function CodexAccountPoolMainCard({
   const inCooldown = oauthHealthIsCooldown(main?.health?.status);
   const policy = main?.mainAccountHardLock;
   const hardLocked = policy?.enabled === true && policy.state === "blocked";
-  const healthLabel = formatOAuthHealthLabel(t, main?.health);
-  const healthSummary = main
+  // A server that never had a native login is not a failed refresh or an expired token: the
+  // health projection has no such reason, so the card names the state from the cause itself.
+  const signedOut = main?.reauthReason === "missing_credential";
+  const healthLabel = signedOut ? t("codexAuth.mainNotSignedIn") : formatOAuthHealthLabel(t, main?.health);
+  const healthSummary = main && !signedOut
     ? formatOAuthHealthSummary(t, "codex", mainId, main.health)
     : null;
 
@@ -246,7 +249,7 @@ export function CodexAccountPoolMainCard({
       )}
       {showReauth
         ? <div className="card-sub faint">
-            <p role="status">{t("codexAuth.mainTokenExpired")}</p>
+            <p role="status">{t(signedOut ? "codexAuth.mainSignInHint" : "codexAuth.mainTokenExpired")}</p>
             {mainReauth && (mainReauth.state.phase === "idle" || mainReauth.state.phase === "failed" || mainReauth.state.phase === "cancelled") && (
               <>
                 <button
@@ -254,7 +257,7 @@ export function CodexAccountPoolMainCard({
                   className="btn btn-ghost btn-sm codex-auth-action-btn"
                   onClick={() => { void mainReauth.start(); }}
                 >
-                  {t("codexAuth.mainReauthDevice")}
+                  {t(signedOut ? "codexAuth.mainSignInDevice" : "codexAuth.mainReauthDevice")}
                 </button>
                 {mainReauth.state.phase === "failed" && (
                   <span className="badge badge-amber">{t("codexAuth.mainReauthFailed")}: {mainReauth.state.code}</span>
