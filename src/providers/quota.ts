@@ -141,9 +141,23 @@ async function maybeFetchProviderQuota(
     // Keep destination/auth fields bound to the same request as the reader's captured
     // bearer, even if the live provider object changes while the quota probe awaits.
     return reader ? await reader(name, { ...provider }) : null;
-  } catch {
+  } catch (error) {
+    warnQuotaProbeFailureOnce(name, thrownQuotaFailure(error));
     return null;
   }
+}
+
+const warnedQuotaProbeFailures = new Set<string>();
+
+/**
+ * A failed probe becomes a null row so one provider never fails the whole report, but the
+ * failure must stay visible: name the provider and its closed failure code once per process.
+ */
+function warnQuotaProbeFailureOnce(name: string, code: QuotaFailureCode): void {
+  const key = `${name}\u0000${code}`;
+  if (warnedQuotaProbeFailures.has(key)) return;
+  warnedQuotaProbeFailures.add(key);
+  console.warn(`[opencodex] quota probe for provider ${JSON.stringify(name)} failed (${code}); the quota report keeps its last good row while that row is fresh, else omits it`);
 }
 
 /**
