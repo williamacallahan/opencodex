@@ -181,6 +181,10 @@ class Fixture {
   readonly userprofileB = join(this.root, "userprofile-b");
   readonly runtime = join(this.root, "runtime");
   readonly provider = join(this.root, "fixture");
+  // Runtime discovery also probes well-known install paths (~/.local/bin, /usr/local/bin,
+  // /opt/homebrew/bin, the macOS app), so a host Codex CLI would otherwise run against this
+  // fixture's CODEX_HOME. Pin a fake one below the native-auth RPC floor, as on CI.
+  readonly codexCli = join(this.provider, process.platform === "win32" ? "codex.cmd" : "codex");
   readonly dataToken = "composed-data-token";
   readonly managementToken = "composed-admin-token";
   readonly lockPath: string;
@@ -196,6 +200,10 @@ class Fixture {
     for (const path of [this.codex, this.ocx, this.homeA, this.homeB, this.userprofileA, this.userprofileB, this.runtime, this.provider]) {
       mkdirSync(path, { recursive: true, mode: 0o700 });
     }
+    writeFileSync(this.codexCli, process.platform === "win32"
+      ? '@echo off\r\nif "%~1"=="--version" (echo codex-cli 0.129.0) else (echo {"models":[]})\r\n'
+      : '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "codex-cli 0.129.0"; else echo \'{"models":[]}\'; fi\n',
+      { mode: 0o700 });
     try {
       if (process.platform === "win32") {
         // Fresh child profiles otherwise repeatedly rebuild PowerShell's command cache.
@@ -262,6 +270,7 @@ class Fixture {
       // installation on every platform instead of reporting not_installed.
       GROK_HOME: join(home, ".grok"),
       CODEX_HOME: this.codex,
+      CODEX_CLI_PATH: this.codexCli,
       OPENCODEX_HOME: this.ocx,
       XDG_RUNTIME_DIR: this.runtime,
       OPENCODEX_API_AUTH_TOKEN: this.dataToken,
