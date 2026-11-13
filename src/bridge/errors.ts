@@ -8,8 +8,10 @@ import {
   REPLAY_REFUSAL_NO_RETRY_HEADER,
   REPLAY_REFUSAL_NO_RETRY_VALUE,
   retainReplayRefusal,
+  REASONING_LOOP_ERROR_CODE,
 } from "../lib/upstream-retry";
 import { formatClientRetryAfter } from "../lib/client-retry-after";
+import { clientErrorCodeMessage } from "../lib/client-error-body";
 import {
   adapterFailureFromMessage,
   classifyError,
@@ -96,6 +98,7 @@ export function formatErrorResponse(
   const replayBlocked = error.code !== CYBER_POLICY_ERROR_CODE
     && isNonReplayableUpstreamCode(options?.code);
   if (replayBlocked) error.code = options!.code!;
+  if (error.code === REASONING_LOOP_ERROR_CODE) error.message = clientErrorCodeMessage(error.code)!;
   // The replay refusal owns its status as well as its code. A combo or adapter formatter
   // reaches here holding the upstream-shaped status it was about to report, and inheriting
   // that would hand the client a 5xx it is configured to retry four times.
@@ -147,7 +150,8 @@ export function formatUpstreamFailureResponse(
   ...[status, type, message, options]: Parameters<typeof formatErrorResponse>
 ): Response {
   if (!isModelNotInPlanRefusal(source, sourceCode)) {
-    const failure = formatErrorResponse(status, type, message, options);
+    const failure = formatErrorResponse(status, type, message, sourceCode === REASONING_LOOP_ERROR_CODE ? { ...options, code: sourceCode, classified: true } : options);
+    if (sourceCode === REASONING_LOOP_ERROR_CODE) markResponseNonReplayable(failure);
     carryUpstreamNoRetry(source, failure);
     return failure;
   }

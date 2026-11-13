@@ -10,7 +10,7 @@ const openaiCodes = [
   "usage_limit_reached", "slow_down", "misalignment_policy_violation", "invalid_prompt", "bio_policy", "model_not_in_plan",
   "upstream_reset_replay_refused", "upstream_no_response", "upstream_closed_before_response", "claude_subscription_cooldown",
   "model_not_found", "model_not_allowed_for_key", "undeclared_tool_call", "required_tool_contract_unsatisfied",
-  "translation_buffer_limit", "invalid_refusal", "unsupported_feature", "agent_assertion_unsupported", "upstream_error",
+  "translation_buffer_limit", "invalid_refusal", "unsupported_feature", "agent_assertion_unsupported", "upstream_error", "reasoning_loop_detected",
   "upstream_sse_truncated", "upstream_sse_error", "upstream_sse_unterminated", "upstream_sse_invalid", "upstream_stream_incomplete", "upstream_stream_error", "upstream_stall_timeout",
   "upstream_incomplete", "server_busy", "outbound_body_too_large", "codex_no_account", "memory_model_target_unavailable", "intercept_target_unavailable",
   "observation_barrier_timeout", "claude_thread_unsupported", "claude_compatibility_configuration", "claude_compatibility_unsupported",
@@ -76,6 +76,7 @@ export function isPausedTurn(context: object | undefined): boolean {
 }
 const CODE_MESSAGES: ReadonlyMap<string, string> = new Map([
   ["context_length_exceeded", CLIENT_ERROR_CONTRACTS.context_overflow],
+  ["reasoning_loop_detected", "The model's reasoning repeated itself, so the provider ended the reply. Sending the same request again is likely to loop again; shorten or change the context."],
   ["upstream_incomplete", CLIENT_ERROR_CONTRACTS.stream_incomplete],
   ["upstream_stream_incomplete", CLIENT_ERROR_CONTRACTS.stream_incomplete],
   ["upstream_reset_replay_refused", CLIENT_ERROR_CONTRACTS.replay_refused],

@@ -48,6 +48,7 @@ import {
   REPLAY_REFUSED_STATUS,
   retainReplayRefusal,
   UPSTREAM_RESET_REPLAY_REFUSED_CODE,
+  REASONING_LOOP_ERROR_CODE,
 } from "../lib/upstream-retry";
 import { estimateTokens } from "../lib/token-estimate";
 import { AnthropicSecondaryInstanceUnavailableError, captureRouteStaticPolicy, NoEligiblePolicyCandidateError, UnknownRoutingPolicyError, routeModel } from "../router";
@@ -710,6 +711,8 @@ async function handleChatCompletionsWithBudget(
       // below could never restore this one -- the translated client was told the provider
       // throttled the turn, and handed a two-second wait to send it again.
       classified.code = UPSTREAM_RESET_REPLAY_REFUSED_CODE;
+    } else if (upstreamCode === REASONING_LOOP_ERROR_CODE) {
+      classified.code = REASONING_LOOP_ERROR_CODE;
     } else if (upstreamCode === "claude_subscription_cooldown") {
       classified.code = "claude_subscription_cooldown";
       classified.type = "rate_limit_error";
@@ -727,7 +730,7 @@ async function handleChatCompletionsWithBudget(
     const status = isCyberPolicyCode(classified.code) ? 400
       : replayRefusal ? REPLAY_REFUSED_STATUS
       : upstream.status;
-    const retryAfter = isCyberPolicyCode(classified.code) || replayRefusal
+    const retryAfter = isCyberPolicyCode(classified.code) || replayRefusal || upstreamCode === REASONING_LOOP_ERROR_CODE
       ? undefined
       : resolveClientRetryAfter({
         status: upstream.status,
@@ -752,7 +755,7 @@ async function handleChatCompletionsWithBudget(
       headers: {
         "Content-Type": "application/json",
         ...(formatClientRetryAfter(retryAfter) ? { "Retry-After": formatClientRetryAfter(retryAfter)! } : {}),
-        ...(replayRefusal ? REPLAY_REFUSAL_CLIENT_HEADERS : {}),
+        ...(replayRefusal || upstreamCode === REASONING_LOOP_ERROR_CODE ? REPLAY_REFUSAL_CLIENT_HEADERS : {}),
       },
     });
     if (replayRefusal) retainReplayRefusal(rewritten);
@@ -830,6 +833,8 @@ async function handleChatCompletionsWithBudget(
       // The refusal can also arrive as a failed Responses envelope rather than a non-2xx.
       // Reporting that as the 502 below would invite the four resends the refusal prevents.
       classified.code = UPSTREAM_RESET_REPLAY_REFUSED_CODE;
+    } else if (error?.code === REASONING_LOOP_ERROR_CODE) {
+      classified.code = REASONING_LOOP_ERROR_CODE;
     } else if (error?.code === "model_not_found") {
       // Same deliberate preserve as the non-OK path: structured code beats generic classify.
       classified.code = "model_not_found";

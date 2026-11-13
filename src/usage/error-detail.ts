@@ -8,6 +8,7 @@
 import { classifyUpstreamCondition, isUpstreamCondition, type UpstreamCondition } from "../lib/upstream-condition";
 import { boundedFailureDetail, type FailureDetail, type FailureDetailCode } from "../lib/failure-detail";
 import { boundedServiceTier } from "../lib/response-service-tier";
+import { REASONING_LOOP_ERROR_CODE } from "../lib/upstream-retry";
 
 export { boundedServiceTier };
 
@@ -22,7 +23,7 @@ export const LOG_ERROR_CODES: ReadonlySet<string> = new Set([
   "cyber_policy", "input_admission_refused", "inbound_body_too_large", "context_length_exceeded",
   "tool_catalog_too_large", "rate_limit_exceeded", "insufficient_quota", "request_send_budget_exhausted",
   "origin_rejected", "upstream_server_error", "invalid_api_key", "permission_denied", "location_not_supported",
-  "subscription_required", "server_is_overloaded", "invalid_request_error", "upstream_error",
+  "subscription_required", "server_is_overloaded", "invalid_request_error", "upstream_error", REASONING_LOOP_ERROR_CODE,
   // local refusals and proxy decisions
   "server_busy", "server_shutdown", "unsupported_feature", "usage_limit_reached", "undeclared_tool_call", "outbound_body_too_large",
   "codex_no_account", "upstream_reset_replay_refused", "memory_model_target_unavailable",

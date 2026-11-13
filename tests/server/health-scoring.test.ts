@@ -100,6 +100,19 @@ describe("health-aware scoring (RI-06)", () => {
     expect(evidence.successRate).toBe(1);
   });
 
+  test("reasoning loop failures remain in history without affecting target health", async () => {
+    appendUsageEntry(row("ok", 200, 1000));
+    appendUsageEntry(row("loop", 502, 500, { errorCode: "reasoning_loop_detected", terminalStatus: "failed" }));
+    appendUsageEntry({ ...row("combo-loop", 502, 600, { provider: "b", model: "m2", errorCode: "reasoning_loop_detected" }), attempts: [
+      { ordinal: 1, provider: "a", model: "m1", adapter: "openai-chat", status: 502, durationMs: 500, sendCount: 1, recoveryKinds: [], usageStatus: "reported", errorCode: "reasoning_loop_detected" },
+      { ordinal: 2, provider: "b", model: "m2", adapter: "openai-chat", status: 502, durationMs: 600, sendCount: 1, recoveryKinds: [], usageStatus: "reported", errorCode: "reasoning_loop_detected" },
+    ] });
+    const evidence = healthEvidenceForCandidate({ provider: "a", model: "m1" });
+    expect(evidence.sampleCount).toBe(1);
+    expect(evidence.successRate).toBe(1);
+    expect(evidence.failures).toBeUndefined();
+  });
+
   test("incomplete streams lower the health score", async () => {
     for (let index = 0; index < 10; index++) appendUsageEntry(row(`ok-${index}`, 200, 1000));
     appendUsageEntry(row("inc", 200, 1000, { terminalStatus: "incomplete" }));

@@ -93,10 +93,16 @@ export const UPSTREAM_CLOSED_BEFORE_RESPONSE_CODE = "upstream_closed_before_resp
  * structure/transports/responses.md#ambiguous-connection-reset-replay-boundary.
  */
 export const UPSTREAM_RESET_REPLAY_REFUSED_CODE = "upstream_reset_replay_refused";
+/**
+ * The upstream gateway ended a reply because the model's reasoning was repeating itself.
+ * The same request loops again, so nothing here resends it or reports it as an overload.
+ */
+export const REASONING_LOOP_ERROR_CODE = "reasoning_loop_detected";
 const NON_REPLAYABLE_UPSTREAM_CODES: ReadonlySet<string> = new Set([
   UPSTREAM_NO_RESPONSE_CODE,
   UPSTREAM_CLOSED_BEFORE_RESPONSE_CODE,
   UPSTREAM_RESET_REPLAY_REFUSED_CODE,
+  REASONING_LOOP_ERROR_CODE,
 ]);
 
 export function isNonReplayableUpstreamCode(code: unknown): boolean {

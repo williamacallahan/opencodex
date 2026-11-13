@@ -32,7 +32,7 @@ import {
   fetchWithTransientRetry,
   fetchWithResetRetry,
   applyUpstreamRecoveryInit,
-  isNonReplayableResponse, isSameTargetRetryHold,
+  isNonReplayableResponse, isNonReplayableUpstreamCode, isSameTargetRetryHold,
   prepareSameTarget429Wait,
   SendBudgetExhaustedError, errorDestinationLabel,
 } from "../../lib/upstream-retry";
@@ -724,7 +724,7 @@ export function createAdapterContinuations(
             code: CYBER_POLICY_ERROR_CODE,
             retryable: false,
           }
-          : {}),
+          : isNonReplayableUpstreamCode(normalized.code) ? { code: normalized.code, retryable: false } : {}),
       };
       return;
     }

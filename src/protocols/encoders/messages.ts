@@ -19,7 +19,7 @@ import {
   isTranslatorBudgetExceededError,
   type TranslatorBudget,
 } from "../../lib/translator-budget";
-import { isTransientUpstreamStatus } from "../../lib/upstream-retry";
+import { isTransientUpstreamStatus, REASONING_LOOP_ERROR_CODE, REPLAY_REFUSAL_CLIENT_HEADERS } from "../../lib/upstream-retry";
 import { UNDECLARED_TOOL_CALL_ERROR_CODE } from "../../lib/errors";
 import { encodeReasoningEnvelope } from "../../responses/reasoning-envelope";
 import { responsesUsage, webSearchAction } from "../../bridge/internal";
@@ -408,7 +408,7 @@ function createAnthropicMessageWriter(
         return;
       }
       const message = typeof error.message === "string" ? error.message : "upstream request failed";
-      const deterministic = error.code === UNDECLARED_TOOL_CALL_ERROR_CODE;
+      const deterministic = error.code === UNDECLARED_TOOL_CALL_ERROR_CODE || error.code === REASONING_LOOP_ERROR_CODE;
       const transportFailure = isEncoderTransportFailure(terminal);
       const classified = transportFailure ? { ...error, code: "upstream_stream_error", status: 502 } : error;
       const overflow = isContextOverflowError(classified, message);
@@ -492,7 +492,7 @@ export async function collectAnthropicMessageResponse(
   }
   return new Response(JSON.stringify(message), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(translatedError?.code === REASONING_LOOP_ERROR_CODE ? REPLAY_REFUSAL_CLIENT_HEADERS : {}) },
   });
 }
 

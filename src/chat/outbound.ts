@@ -27,6 +27,7 @@ import {
   UNDECLARED_TOOL_CALL_ERROR_CODE,
 } from "../lib/errors";
 import { redactSecretString } from "../lib/redact";
+import { REASONING_LOOP_ERROR_CODE, REPLAY_REFUSAL_CLIENT_HEADERS } from "../lib/upstream-retry";
 import { truncationReasonFor } from "../responses/truncated-stop-reason";
 import { createSseBlockBuffer, sseDataPayload } from "../server/sse-payload-rewrite";
 import { reasoningDetailEntriesForItem } from "./reasoning-details";
@@ -236,7 +237,7 @@ export function ownedChatErrorResponse(status: number, message: string, type?: s
   const finalStatus = legacy.code === CYBER_POLICY_ERROR_CODE ? 400 : status;
   return new Response(JSON.stringify(proxyAuthored ? legacyBody : ownedChatErrorPayload({ status: finalStatus, type: legacy.type, code: legacy.code, contract,
     evidence: { status: finalStatus, type, code: code ?? undefined, message } })),
-    { status: finalStatus, headers: { "Content-Type": "application/json" } });
+    { status: finalStatus, headers: { "Content-Type": "application/json", ...(code === REASONING_LOOP_ERROR_CODE ? REPLAY_REFUSAL_CLIENT_HEADERS : {}) } });
 }
 
 /** How a Responses `response.failed` error object becomes a streamed Chat failure. */
