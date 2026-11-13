@@ -66,6 +66,7 @@ import {
   REPLAY_REFUSAL_NO_RETRY_HEADER,
   REPLAY_REFUSAL_NO_RETRY_VALUE,
   UPSTREAM_RESET_REPLAY_REFUSED_CODE,
+  REASONING_LOOP_ERROR_CODE,
 } from "../lib/upstream-retry";
 import { isClientClosedMessage, recognizedUpstreamError, UNDECLARED_TOOL_CALL_ERROR_CODE } from "../lib/errors";
 import { formatClientRetryAfter, resolveClientRetryAfter } from "../lib/retry-after";
@@ -1542,7 +1543,7 @@ async function handleClaudeMessagesWithBudget(
     // The undeclared-tool guard's refusal is deterministic: the same request produces the
     // same verdict, so it must not arrive as a retryable overload like a transient 5xx.
     const transient = !replayRefusal && !nativeMainFence && !contextError && !catalogRefusal
-      && isTransientUpstreamStatus(response.status);
+      && originalCode !== REASONING_LOOP_ERROR_CODE && isTransientUpstreamStatus(response.status);
     const outStatus = replayRefusal
       ? REPLAY_REFUSED_STATUS
       : nativeMainFence ? 503 : contextError ? 400 : transient ? 529 : response.status;
@@ -1554,7 +1555,7 @@ async function handleClaudeMessagesWithBudget(
     else if (response.headers.get(REPLAY_REFUSAL_NO_RETRY_HEADER) === REPLAY_REFUSAL_NO_RETRY_VALUE) {
       outHeaders.set(REPLAY_REFUSAL_NO_RETRY_HEADER, REPLAY_REFUSAL_NO_RETRY_VALUE);
     }
-    const decidedCode = replayRefusal ? UPSTREAM_RESET_REPLAY_REFUSED_CODE : contextError ? "context_length_exceeded" : catalogRefusal ? UNDECLARED_TOOL_CALL_ERROR_CODE : undefined;
+    const decidedCode = replayRefusal ? UPSTREAM_RESET_REPLAY_REFUSED_CODE : contextError ? "context_length_exceeded" : catalogRefusal ? UNDECLARED_TOOL_CALL_ERROR_CODE : originalCode === REASONING_LOOP_ERROR_CODE ? originalCode : undefined;
     const legacy = anthropicErrorBody(outStatus, message, undefined, decidedCode);
     const legacyBody = JSON.stringify(legacy);
     const out = new Response(JSON.stringify(ownedAnthropicErrorPayload({
@@ -1630,7 +1631,7 @@ async function handleClaudeMessagesWithBudget(
             ? refusalStatus === 400 && isClientClosedMessage(String(translatedError?.message ?? "")) ? 499 : refusalStatus
             : 502
         : 200,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...(translatedError?.code === REASONING_LOOP_ERROR_CODE ? { "x-should-retry": "false" } : {}) },
     });
   }
 

@@ -50,6 +50,7 @@ import {
   UpstreamRetryEvidenceError,
   type UpstreamSendRecovery,
   UPSTREAM_RESET_REPLAY_REFUSED_CODE,
+  REASONING_LOOP_ERROR_CODE,
   wrapWithZeroOutputRefetch,
 } from "../lib/upstream-retry";
 import { isTranslatorBudgetExceededError, type TranslatorBudget } from "../lib/translator-budget";
@@ -324,7 +325,7 @@ export async function runNativeChatAttempt(
     const finalStatus = error.code === CYBER_POLICY_ERROR_CODE ? 400 : status;
     return attachComboFailureEvidence(new Response(JSON.stringify(ownedChatErrorPayload({ status: finalStatus, type: error.type, code: error.code, contract,
       evidence: { status, type, code: code ?? undefined, message } })),
-      { status: finalStatus, headers: { "Content-Type": "application/json" } }), JSON.stringify(legacy));
+      { status: finalStatus, headers: { "Content-Type": "application/json", ...(code === REASONING_LOOP_ERROR_CODE ? REPLAY_REFUSAL_CLIENT_HEADERS : {}) } }), JSON.stringify(legacy));
   };
 
   normalizePinnedChatEffort(execution);
@@ -790,6 +791,8 @@ export async function runNativeChatAttempt(
       // client is told the provider throttled the turn, when what happened is that this proxy
       // declined to send it a second time.
       classified.code = UPSTREAM_RESET_REPLAY_REFUSED_CODE;
+    } else if (upstreamCode === REASONING_LOOP_ERROR_CODE) {
+      classified.code = upstreamCode;
     } else if (upstreamCode === "model_not_found") {
       classified.code = "model_not_found";
       classified.type = "invalid_request_error";
@@ -817,7 +820,7 @@ export async function runNativeChatAttempt(
       headers: {
         "Content-Type": "application/json",
         ...(formatClientRetryAfter(retryAfter) ? { "Retry-After": formatClientRetryAfter(retryAfter)! } : {}),
-        ...(replayRefusal ? REPLAY_REFUSAL_CLIENT_HEADERS : {}),
+        ...(replayRefusal || upstreamCode === REASONING_LOOP_ERROR_CODE ? REPLAY_REFUSAL_CLIENT_HEADERS : {}),
       },
     });
     attachComboFailureEvidence(rewritten, JSON.stringify(chatCompletionsErrorBody(status, classified.message, classified.type, classified.code)));

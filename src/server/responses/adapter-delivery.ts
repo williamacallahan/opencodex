@@ -26,7 +26,7 @@ import { noteKiroServedSuccess } from "../../providers/kiro-usage";
 import { persistKiroAccountState } from "../../providers/kiro-account-state-disk";
 import { readDisplaySafeErrorText, normalizeUpstreamErrorText } from "./core-errors";
 import { sanitizeNonReplayableUpstreamError } from "./non-replayable-error";
-import { isNonReplayableResponse } from "../../lib/upstream-retry";
+import { isNonReplayableResponse, isNonReplayableUpstreamCode } from "../../lib/upstream-retry";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { currentTurnToolBridgeMaps, guardEmptyToolCatalogEvents, guardEmptyToolCatalogStream } from "../../lib/empty-tool-catalog";
 import { guardCompactionSummary } from "../../responses/compaction-summary";
@@ -197,7 +197,7 @@ export async function deliverAdapterResponse(
       ? guardEmptyCompletionEventStream({
           firstEvents: advisorStream,
           continuation: fetchGuardedEmptyCompletionRetry,
-          preserveRetryError: isContinuationBodyStall,
+          preserveRetryError: event => isContinuationBodyStall(event) || (event.type === "error" && isNonReplayableUpstreamCode(event.code)),
         })
       : advisorStream;
     const catalogGuardedEventStream = guardEmptyToolCatalogStream(completionGuardedEventStream, clientToolCatalog, translatorBudget);
@@ -349,7 +349,7 @@ export async function deliverAdapterResponse(
         for await (const event of guardEmptyCompletionEventStream({
           firstEvents: (async function* () { yield* guardedEvents; })(),
           continuation: fetchGuardedEmptyCompletionRetry,
-          preserveRetryError: isContinuationBodyStall,
+          preserveRetryError: event => isContinuationBodyStall(event) || (event.type === "error" && isNonReplayableUpstreamCode(event.code)),
         })) events.push(event);
       } else {
         events = guardedEvents;

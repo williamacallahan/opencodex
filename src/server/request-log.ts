@@ -33,7 +33,7 @@ import type { ClaudeRequestShape } from "./claude-request-shape";
 import type { AdapterRequest } from "../adapters/base";
 import type { RequestSpendSettlement } from "./responses/request-spend";
 import type { AdapterTierMetadata } from "../providers/fastwire";
-import { UPSTREAM_RESET_REPLAY_REFUSED_CODE } from "../lib/upstream-retry";
+import { UPSTREAM_RESET_REPLAY_REFUSED_CODE, REASONING_LOOP_ERROR_CODE } from "../lib/upstream-retry";
 import { redactSecretString, sanitizeLogMetadataString } from "../lib/redact";
 import type { UpstreamCondition } from "../lib/upstream-condition";
 import { boundedServiceTier, errorDetailFor, projectErrorDetail } from "../usage/error-detail";
@@ -1479,7 +1479,8 @@ function writeFinalRequestLog(
     ? 499
     : status;
   // Locally assigned codes name proxy refusals that status and upstream text cannot reconstruct.
-  const errorCode = logCtx.errorCode ?? requestLogErrorCode(
+  const errorCode = logCtx.upstreamErrorCode === REASONING_LOOP_ERROR_CODE && effectiveStatus >= 400
+    ? REASONING_LOOP_ERROR_CODE : logCtx.errorCode ?? requestLogErrorCode(
     effectiveStatus,
     logCtx.upstreamError,
     logCtx.terminalErrorCode,

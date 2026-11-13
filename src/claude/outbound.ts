@@ -18,7 +18,7 @@ import { ADVISOR_SERVER_TOOL_NAME, isAdvisorCallInput, isAdvisorResultContent } 
  */
 import { createHash } from "node:crypto";
 import { httpStatusFromTerminalError, UNDECLARED_TOOL_CALL_ERROR_CODE } from "../lib/errors";
-import { isTransientUpstreamStatus } from "../lib/upstream-retry";
+import { isTransientUpstreamStatus, REASONING_LOOP_ERROR_CODE } from "../lib/upstream-retry";
 import {
   isTranslatorBudgetExceededError,
   TRANSLATOR_MAX_TURN_BYTES,
@@ -919,7 +919,7 @@ export function responsesSseToAnthropicSse(
             // overloaded_error by design.
             // The undeclared-tool refusal is deterministic and proxy-owned, not an upstream
             // condition: keep its api_error type and code instead of a retryable overload.
-            const deterministic = code === UNDECLARED_TOOL_CALL_ERROR_CODE;
+            const deterministic = code === UNDECLARED_TOOL_CALL_ERROR_CODE || code === REASONING_LOOP_ERROR_CODE;
             fail(
               status,
               message,

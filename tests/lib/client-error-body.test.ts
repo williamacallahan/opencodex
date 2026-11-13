@@ -4,6 +4,14 @@ import { OPENAI_ERROR_TYPES, OPENAI_ERROR_CODES, ANTHROPIC_ERROR_TYPES, ANTHROPI
 import { readFileSync } from "node:fs";
 import { repoPath } from "../helpers/repo-root";
 const KEY = "zq7Vb2LmN4pX9tR1sK8wD3fH6jY0cA5e";
+test("reasoning loop errors use the owned sentence on Chat and Messages", async () => {
+  const code = "reasoning_loop_detected";
+  const message = "The model's reasoning repeated itself, so the provider ended the reply. Sending the same request again is likely to loop again; shorten or change the context.";
+  const evidence = { status: 502, code, message: KEY };
+  expect(ownedChatErrorPayload({ status: 502, code, evidence }).error).toMatchObject({ code, message });
+  const { ownedAnthropicErrorPayload } = await import("../../src/lib/messages-error-body");
+  expect(ownedAnthropicErrorPayload({ status: 502, code, evidence })).toEqual({ type: "error", error: { type: "api_error", code, message } });
+});
 for (const token of ["constructor", "__proto__", "toString", KEY, "resource_exhausted"]) {
   for (const status of [400, 401, 404, 429, 502]) test(`closed defaults ${token} ${status}`, () => {
     const payload = ownedChatErrorPayload({ status, type: token, code: token, evidence: { status, type: token, code: token, message: KEY } });

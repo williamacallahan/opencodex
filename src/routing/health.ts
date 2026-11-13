@@ -17,6 +17,7 @@
  */
 
 import type { OcxConfig } from "../types";
+import { REASONING_LOOP_ERROR_CODE } from "../lib/upstream-retry";
 import { openRequestHistoryIndexSync, reportRequestHistoryCorruption, requestHistoryDb } from "./history/indexer";
 import { OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import {
@@ -91,6 +92,7 @@ interface HealthSample {
   terminalStatus: string | null;
   durationMs: number;
   timestamp: number;
+  errorCode?: string | null;
 }
 
 interface HealthRow extends HealthSample {
@@ -144,6 +146,7 @@ function attemptSamplesFor(
         terminalStatus: isFinal && typeof parsed.terminalStatus === "string" ? parsed.terminalStatus : null,
         durationMs: record.durationMs,
         timestamp: row.timestamp,
+        errorCode: typeof record.errorCode === "string" ? record.errorCode : null,
       });
     }
     return samples;
@@ -223,7 +226,7 @@ export function policyCandidateHealthEvidence(
 }
 
 function classifySample(sample: HealthSample): "success" | "failure" | "neutral" {
-  if (sample.closeReason === "client_cancel" || sample.status === 499) return "neutral";
+  if (sample.errorCode === REASONING_LOOP_ERROR_CODE || sample.closeReason === "client_cancel" || sample.status === 499) return "neutral";
   // Invalid requests and policy refusals must not poison target health.
   if (sample.status >= 400 && sample.status < 500 && sample.status !== 429) return "neutral";
   if (sample.terminalStatus === "incomplete") return "failure";
@@ -263,6 +266,7 @@ function computeHistoricalHealthEvidence(
     }
     const rows = handle.query(
       `SELECT status, close_reason AS closeReason, terminal_status AS terminalStatus,
+              CASE WHEN json_valid(row_json) THEN json_extract(row_json, '$.errorCode') END AS errorCode,
               duration_ms AS durationMs, timestamp, row_json AS rowJson
        FROM requests WHERE ${where.join(" AND ")}
        ORDER BY timestamp DESC LIMIT ?`,

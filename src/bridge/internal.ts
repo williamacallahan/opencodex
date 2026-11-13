@@ -16,6 +16,8 @@ import {
   type OcxErrorPayload,
 } from "../lib/errors";
 import { redactSecretString } from "../lib/redact";
+import { clientErrorCodeMessage } from "../lib/client-error-body";
+import { REASONING_LOOP_ERROR_CODE } from "../lib/upstream-retry";
 import { formatRetryAfterAdvice } from "../lib/retry-delay";
 import { usageDisplayTotalTokens } from "../usage/totals";
 
@@ -147,7 +149,7 @@ export function toolCallArgumentsCouldBeJson(args: string): boolean {
 }
 
 export function adapterFailureFromEvent(event: Extract<AdapterEvent, { type: "error" }>): { httpStatus: number; error: OcxErrorPayload } {
-  const message = redactSecretString(event.message);
+  const message = event.code === REASONING_LOOP_ERROR_CODE ? clientErrorCodeMessage(event.code)! : redactSecretString(event.message);
   if (event.status === undefined && event.errorType === undefined && event.code === undefined) {
     return adapterFailureFromMessage(message);
   }
