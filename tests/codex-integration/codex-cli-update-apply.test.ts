@@ -9,7 +9,7 @@ import { applyCodexCliUpdate, verifyInstalledCodexVersion, type CodexCliApplyDep
 import { admitCodexCliUpdateJob, finishCodexCliUpdateJob, runCodexCliUpdateJob, type CodexCliUpdateJobDto } from "../../src/codex/cli-update-job";
 import { createCodexCliUpdatePlan } from "../../src/codex/cli-update-plan";
 import { acquireCodexCliApplyLease } from "../../src/codex/cli-update-lease";
-import { createCodexCliApplyFixture, waitForApplyAdmission, writeFixtureNpmWrapper } from "../helpers/codex-cli-apply-fixture";
+import { createCodexCliApplyFixture, fixtureNodeToolchain, waitForApplyAdmission, writeFixtureNpmWrapper } from "../helpers/codex-cli-apply-fixture";
 import { fixtureArtifactSet } from "../helpers/codex-cli-apply-artifact";
 import { repoPath, repoRoot } from "../helpers/repo-root";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -42,7 +42,7 @@ async function approved(f: ReturnType<typeof fixture>, deps = depsFor(f)) {
   return plan.planId!;
 }
 function cli(f: ReturnType<typeof fixture>, args: string[]) {
-  const result = spawnSync(Bun.which("node")!, [repoPath("bin", "ocx.mjs"), "system", "codex-cli-update", ...args, "--json"], {
+  const result = spawnSync(fixtureNodeToolchain().node, [repoPath("bin", "ocx.mjs"), "system", "codex-cli-update", ...args, "--json"], {
     cwd: f.root, encoding: "utf8", env: f.env, timeout: 60_000,
   });
   expect(result.error).toBeUndefined(); expect(result.status).toBe(0);
@@ -60,8 +60,7 @@ function fixtureInWorkspaceScratch() {
 }
 
 function managementTestEnv(f: ReturnType<typeof fixture>) {
-  const node = Bun.which("node");
-  if (!node) throw new Error("fixture node executable unavailable");
+  const { node } = fixtureNodeToolchain();
   const home = f.home;
   const configDir = join(home, "ocx");
   const env: NodeJS.ProcessEnv = {
@@ -279,7 +278,7 @@ test("HTTP fixture npm wrapper returns all metadata under an ESM ancestor", () =
   const root = createCodexCliTestRoot("ocx-http-npm-module-"); roots.push(root);
   writeFileSync(join(root, "package.json"), JSON.stringify({ private: true, type: "module" }));
   const fakeBin = join(root, "bin"); mkdirSync(fakeBin);
-  const node = Bun.which("node"); if (!node) throw new Error("fixture node unavailable");
+  const { node } = fixtureNodeToolchain();
   const f = fixtureArtifactSet("linux", "x64");
   const main = { ...f.mainManifest, dist: { integrity: f.artifacts.main.integrity, tarball: f.artifacts.main.tarball } };
   const backing = { name: f.artifacts.backing.name, version: f.artifacts.backing.version,

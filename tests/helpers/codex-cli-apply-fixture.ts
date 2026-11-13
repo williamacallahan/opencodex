@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { codexCliPackedFilename } from "../../src/codex/cli-update-artifacts";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createNpmConfigIsolation, isolatedNpmTarget } from "../../src/codex/cli-update-plan";
 import { fixtureArtifact, fixtureArtifactSet } from "./codex-cli-apply-artifact";
@@ -20,6 +20,23 @@ export async function waitForApplyAdmission(admitted: Promise<void>, running: Pr
 }
 
 /** All npm config/cache/prefix/temp effects belong to root; no network or scripts. */
+/**
+ * The Node binary itself, never a wrapper: the first `node` on PATH can be a shell shim
+ * (a profile-free `#!/bin/sh` launcher), which cannot serve as a `#!` interpreter and
+ * whose directory also shadows `npm`. Ask that `node` for its own executable path.
+ */
+export function fixtureNodeToolchain(): { node: string; npm: string } {
+  const found = Bun.which("node");
+  if (!found) throw new Error("fixture node executable unavailable");
+  const probe = spawnSync(found, ["-p", "process.execPath"], { encoding: "utf8" });
+  const node = probe.status === 0 ? probe.stdout.trim() : "";
+  if (!node || !existsSync(node)) throw new Error("fixture node executable unresolved");
+  const sibling = join(dirname(node), "npm");
+  const npm = existsSync(sibling) ? sibling : Bun.which("npm");
+  if (!npm) throw new Error("fixture npm unavailable");
+  return { node, npm };
+}
+
 export function privateNpm(root: string, args: string[]) {
   // Each command starts with a new empty cache, not the previous pack/install's.
   const work = mkdtempSync(join(root, "npm-work-"));
@@ -89,8 +106,7 @@ export function createCodexCliApplyFixture(root: string, platform: NodeJS.Platfo
   privateNpm(root, installArgs(old));
   const trace = join(root, "install-trace.jsonl");
   writeFileSync(trace, "");
-  const node = Bun.which("node"), npm = Bun.which("npm");
-  if (!node || !npm) throw new Error("fixture toolchain unavailable");
+  const { node, npm } = fixtureNodeToolchain();
   const realNpm = realpathSync.native(npm);
   const metadata = Object.fromEntries([old, target].flatMap(v => [
     ["@openai/codex@" + v.artifacts.main.version, { ...v.mainManifest, dist: { integrity: v.artifacts.main.integrity, tarball: v.artifacts.main.tarball } }],
