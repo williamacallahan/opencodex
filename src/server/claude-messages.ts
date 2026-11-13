@@ -758,6 +758,8 @@ async function handleClaudeMessagesWithBudget(
   let cacheKeySource: ClaudeCacheKeySource = null;
   // A forked subagent collapses to the main loop below, once the body is read.
   let claudeAgentId = claudeCodeAgentId(req.headers);
+  // A fork keeps its own transcript, so route continuity still keys by the real header value.
+  const rawClaudeAgentId = claudeAgentId;
   let nativeReasoningReplay: ReadonlyMap<string, string> | undefined;
   const nativeReasoningMint: { owner?: NativeReasoningOwner } = {};
   let nativeProjectionOnlyError: AnthropicRequestError | undefined;
@@ -1436,6 +1438,7 @@ async function handleClaudeMessagesWithBudget(
     abortSignal: req.signal,
     promptCacheKeyIsSharedCohort: cacheKeySource === "system",
     ...(claudeSessionScopedKey ? { sessionScopedCacheKey: claudeSessionScopedKey } : {}),
+    ...(rawClaudeAgentId !== undefined ? { claudeAgentId: rawClaudeAgentId } : {}),
     // The body is Responses-shaped by now, but the client spoke Anthropic Messages.
     // Without this the replay would look native and a Responses-scoped wire default
     // would fire, disagreeing with the pre-flight decision above.

@@ -900,8 +900,30 @@ test("a pool whose every account refuses on spent quota answers the usage limit 
   });
   expect(text.length).toBeGreaterThan(0); expect(text).not.toContain(new Date(resetSeconds * 1000).toISOString().replace(".000Z", "Z"));
   expect(Number(response.headers.get("retry-after"))).toBeGreaterThan(7_000);
+  // The reset is hours away, so Claude Code is told not to retry.
+  expect(response.headers.get("x-should-retry")).toBe("false");
   expect(response.headers.get("request-id")).toBeNull();
   expect(row.protocolTrace?.mode).toBe("native");
+});
+
+test("a pool usage limit that resets within five minutes stays retryable", async () => {
+  await seed(2);
+  const config = fixtureConfig();
+  config.anthropicAccountPool = { enabled: true };
+  const resetSeconds = Math.floor(Date.now() / 1000) + 120;
+  config.providers.anthropic!.fetch = (async (input, init) => {
+    sent.push({ url: String(input), headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) });
+    return Response.json({ type: "error", error: { type: "rate_limit_error", message: "fixture window spent" } }, {
+      status: 429,
+      headers: {
+        "anthropic-ratelimit-unified-7d-status": "rejected", "anthropic-ratelimit-unified-7d-reset": String(resetSeconds),
+        "retry-after": "120",
+      },
+    });
+  }) as typeof fetch;
+  const { response } = await send(config, { ...BODY, stream: false });
+  expect(response.status).toBe(429);
+  expect(response.headers.get("x-should-retry")).toBeNull();
 });
 
 test("family lease releases when spend admission refuses without a physical send", async () => {

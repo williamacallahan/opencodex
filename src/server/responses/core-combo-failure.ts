@@ -34,7 +34,7 @@ import { resolveClientRetryAfter } from "../../lib/retry-after";
 import { formatErrorResponse } from "../../bridge";
 import { upstreamCodeForComboFailure } from "../../bridge/errors";
 import { OLLAMA_LATE_ATTRIBUTION_LIMIT_MESSAGE } from "../../adapters/ollama-native";
-import { carryReplayRefusal, isNonReplayableResponse, isReplayRefusalResponse, markResponseNonReplayable, UPSTREAM_RESET_REPLAY_REFUSED_CODE } from "../../lib/upstream-retry";
+import { carryReplayRefusal, carryUpstreamNoRetry, isNonReplayableResponse, isReplayRefusalResponse, markResponseNonReplayable, UPSTREAM_RESET_REPLAY_REFUSED_CODE } from "../../lib/upstream-retry";
 import { MODEL_NOT_ALLOWED_FOR_KEY } from "../admission-model-scope";
 import { usageFromResponsesPayload } from "../request-log";
 import type { ResponsesTerminalStatus } from "../../bridge";
@@ -183,6 +183,8 @@ export async function consumeComboFailure(
   carryProxyError(response, failureResponse);
   carryWorkflowRefusal(response, failureResponse);
   carryReplayRefusal(response, failureResponse);
+  // The upstream's own do-not-retry verdict survives the rebuild; the response is not made non-replayable.
+  carryUpstreamNoRetry(response, failureResponse);
   carryProxyErrorPresentation(response, failureResponse);
   carryPolicyCandidateRefusal(response, failureResponse);
   if (verifiedPlanRefusal) markVerifiedModelNotInPlanResponse(failureResponse);

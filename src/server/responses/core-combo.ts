@@ -137,6 +137,7 @@ import {
 } from "./context-overflow";
 import { mandatoryResponsesReasoningReplayUnavailable } from "./core-replay";
 import { anthropicSessionKeyFromParts } from "../../oauth/anthropic-routing";
+import { agentServingThreadKey } from "../../oauth/session-affinity-key";
 import { isReplayRefusalResponse, settleOperatorReplacement, UPSTREAM_RESET_REPLAY_REFUSED_CODE } from "../../lib/upstream-retry";
 import { attributeFinalRequest } from "../request-log-failure-attribution";
 import { createComboProtocolLanes, dispatchNativeComboChild } from "./core-combo-native";
@@ -499,14 +500,20 @@ export async function executeComboResponses(
   };
   const promptCacheKey = isPlainObject(body) && typeof body.prompt_cache_key === "string"
     ? body.prompt_cache_key : undefined;
-  const servingThreadId = !inboundClientThreadId && options.inboundWire === "anthropic"
+  const replayConversationId = !inboundClientThreadId && options.inboundWire === "anthropic"
     && options.promptCacheKeyIsSharedCohort !== true && promptCacheKey?.trim()
-    ? anthropicSessionKeyFromParts({ promptCacheKey, promptCacheKeyIsSharedCohort: false }) ?? undefined : undefined;
-  const reasoningReplayConversationId = servingThreadId
     ? anthropicSessionKeyFromParts({
       promptCacheKey: options.sessionScopedCacheKey ?? promptCacheKey,
       promptCacheKeyIsSharedCohort: false,
-    }) ?? undefined
+    }) ?? undefined : undefined;
+  // Per actual agent: a fork shares its parent's body key but has its own transcript.
+  const servingThreadId = replayConversationId
+    ? anthropicSessionKeyFromParts({
+      promptCacheKey: agentServingThreadKey(replayConversationId, options.claudeAgentId),
+      promptCacheKeyIsSharedCohort: false,
+    }) ?? undefined : undefined;
+  const reasoningReplayConversationId = servingThreadId
+    ? replayConversationId
     : reasoningReplayConversationIdFromResponsesRequest({
       clientThreadId: inboundClientThreadId,
       threadIdHeader: req.headers.get("thread-id"),

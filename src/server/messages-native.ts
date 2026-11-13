@@ -521,6 +521,11 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
       const response = markProxyError(fail(429, message, "rate_limit_error"), date === undefined ? undefined : "usage");
       const advice = error.retryAfterSeconds !== null ? formatClientRetryAfter(error.retryAfterSeconds) : undefined;
       if (advice !== undefined) response.headers.set("retry-after", advice);
+      // A spent usage window whose reset is unknown or more than 300 s away is final for this
+      // attempt (same rule as formatUsageLimitReachedResponse); a transient hold is unchanged.
+      if (error.usageLimit !== null && (date === undefined || (reset as number) - Date.now() > 300_000)) {
+        response.headers.set(REPLAY_REFUSAL_NO_RETRY_HEADER, REPLAY_REFUSAL_NO_RETRY_VALUE);
+      }
       return response;
     }
     if (error instanceof OAuthAccountPausedError) return markProxyError(fail(403, publicOAuthAuthenticationErrorMessage(error), "permission_error"), publicOAuthErrorPresentation(error));

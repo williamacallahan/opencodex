@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { formatErrorResponse } from "../../src/bridge";
-import { formatUsageLimitReachedResponse } from "../../src/bridge/errors";
+import { formatUpstreamFailureResponse, formatUsageLimitReachedResponse } from "../../src/bridge/errors";
 import { comboUnavailableResponse } from "../../src/server/responses/core-errors";
 import { fallbackRefusedResponse, type FallbackEvent } from "../../src/routing/fallback-policy";
 import { formatPassthroughUpstreamError } from "../../src/server/responses/passthrough-error";
@@ -60,6 +60,17 @@ describe("client Retry-After is regenerated at every boundary", () => {
     expect(comboUnavailableResponse("none", { retryAfter: NUMERIC_KEY }).headers.get("retry-after")).toBe("691200");
     expect(comboUnavailableResponse("none", { retryAfter: "must-not-echo" }).headers.get("retry-after")).toBeNull();
     expect(comboUnavailableResponse("none", { retryAfter: "60" }).headers.get("retry-after")).toBe("60");
+  });
+
+  test("a rebuilt structured upstream failure keeps an upstream x-should-retry: false", () => {
+    const rebuilt = (verdict: string | null) => formatUpstreamFailureResponse(
+      new Response("{}", { status: 429, headers: verdict === null ? {} : { "x-should-retry": verdict } }),
+      "usage_limit_reached", 429, "upstream_error", "spent", { retryAfter: "60" },
+    );
+    expect(rebuilt("false").headers.get("x-should-retry")).toBe("false");
+    expect(rebuilt("false").headers.get("retry-after")).toBe("60");
+    expect(rebuilt("true").headers.get("x-should-retry")).toBeNull();
+    expect(rebuilt(null).headers.get("x-should-retry")).toBeNull();
   });
 
   test("compact response buffering", async () => {

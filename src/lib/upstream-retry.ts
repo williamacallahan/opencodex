@@ -134,6 +134,17 @@ export const REPLAY_REFUSAL_CLIENT_HEADERS: Readonly<Record<string, string>> = O
 });
 
 /**
+ * Re-attach an upstream's exact `x-should-retry: false` to a failure response rebuilt from it.
+ * Only that verdict is copied; any other value leaves the target unchanged, and the response is
+ * not marked non-replayable (that is a separate, in-process, hub-side decision).
+ */
+export function carryUpstreamNoRetry(source: Response, target: Response): void {
+  if (source.headers.get(REPLAY_REFUSAL_NO_RETRY_HEADER) === REPLAY_REFUSAL_NO_RETRY_VALUE) {
+    target.headers.set(REPLAY_REFUSAL_NO_RETRY_HEADER, REPLAY_REFUSAL_NO_RETRY_VALUE);
+  }
+}
+
+/**
  * Apply the one client-facing retry policy a refusal carries: no wait, and no automatic resend.
  *
  * Kept as a single function rather than two rules each surface repeats, because the two halves

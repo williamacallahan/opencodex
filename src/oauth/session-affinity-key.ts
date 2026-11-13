@@ -1,5 +1,16 @@
 import { createHash } from "node:crypto";
 
+/**
+ * Route-continuity identity of one Claude Code agent transcript: the session key for the main
+ * loop, and a hash of session key plus the real `x-claude-code-agent-id` for a subagent. A fork
+ * shares its parent's body `prompt_cache_key` but not its transcript, so it keys by its own id.
+ */
+export function agentServingThreadKey(sessionKey: string, agentId?: string): string {
+  return agentId === undefined
+    ? sessionKey
+    : createHash("sha256").update(`${sessionKey}:serving-agent:${agentId}`).digest("hex").slice(0, 32);
+}
+
 /** Shared conversation identity precedence; Desktop cohort cache keys never bind sessions. */
 export function oauthSessionKeyFromParts(input: {
   sessionIdHeader?: string | null;

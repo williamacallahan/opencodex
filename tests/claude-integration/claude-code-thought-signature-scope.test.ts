@@ -11,6 +11,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 
 import type { ProviderAdapter } from "../../src/adapters/base";
 import type { AdapterEvent, OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../../src/types";
+import { agentServingThreadKey } from "../../src/oauth/session-affinity-key";
 import { clearReasoningReplayCacheForTests, commitReasoningReplayServingIdentity } from "../../src/responses/reasoning-replay-cache";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 
@@ -78,6 +79,7 @@ async function drive(options: {
   promptCacheKey?: string;
   promptCacheKeyIsSharedCohort?: boolean;
   sessionScopedCacheKey?: string;
+  claudeAgentId?: string;
   model?: string;
   reasoning?: boolean;
 }): Promise<OcxParsedRequest> {
@@ -108,6 +110,7 @@ async function drive(options: {
         ? {}
         : { promptCacheKeyIsSharedCohort: options.promptCacheKeyIsSharedCohort }),
       ...(options.sessionScopedCacheKey === undefined ? {} : { sessionScopedCacheKey: options.sessionScopedCacheKey }),
+      ...(options.claudeAgentId === undefined ? {} : { claudeAgentId: options.claudeAgentId }),
     },
   );
   await response.text();
@@ -126,23 +129,43 @@ describe("Claude Code Anthropic inbound reasoning-replay scope", () => {
   test("a subagent's replay scope is its session's, so a fork finds its parent's thought signatures", async () => {
     const parsed = await drive({
       promptCacheKey: "per-agent-key", promptCacheKeyIsSharedCohort: false, sessionScopedCacheKey: "session-key-123",
+      claudeAgentId: "agent-a",
     });
     expect(parsed._reasoningReplayScope?.clientThreadId).toBe("session-key-123");
-    expect(parsed._reasoningReplayScope?.servingThreadId).toBe("per-agent-key");
+    expect(parsed._reasoningReplayScope?.servingThreadId).toBe(agentServingThreadKey("session-key-123", "agent-a"));
+    const main = await drive({
+      promptCacheKey: "session-key-123", promptCacheKeyIsSharedCohort: false, sessionScopedCacheKey: "session-key-123",
+    });
+    expect(main._reasoningReplayScope?.servingThreadId).toBe("session-key-123");
   });
 
   test("interleaved subagents keep their route while a fork changing models strips reasoning", async () => {
     const shared = { sessionScopedCacheKey: "session-key-123", promptCacheKeyIsSharedCohort: false, reasoning: true };
-    const first = await drive({ ...shared, promptCacheKey: "agent-a", model: "m1" });
+    const first = await drive({ ...shared, promptCacheKey: "agent-a", claudeAgentId: "agent-a", model: "m1" });
     expect(first._reasoningReplayScope?.current?.credentialDurableIdentity).toBeDefined();
     commitReasoningReplayServingIdentity(first._reasoningReplayScope);
-    const sibling = await drive({ ...shared, promptCacheKey: "agent-b", model: "m2" });
+    const sibling = await drive({ ...shared, promptCacheKey: "agent-b", claudeAgentId: "agent-b", model: "m2" });
     commitReasoningReplayServingIdentity(sibling._reasoningReplayScope);
-    const resumed = await drive({ ...shared, promptCacheKey: "agent-a", model: "m1" });
+    const resumed = await drive({ ...shared, promptCacheKey: "agent-a", claudeAgentId: "agent-a", model: "m1" });
     expect(resumed._reasoningReplayScope?.clientThreadId).toBe("session-key-123");
     expect(resumed._stripReasoningEncryptedContent).not.toBe(true);
-    const fork = await drive({ ...shared, promptCacheKey: "agent-a", model: "m2" });
+    const fork = await drive({ ...shared, promptCacheKey: "agent-a", claudeAgentId: "agent-a", model: "m2" });
     expect(fork._stripReasoningEncryptedContent).toBe(true);
+  });
+
+  test("a recognized fork on another route records its own route and the parent keeps its reasoning", async () => {
+    // The fork replays its parent's body prompt_cache_key but sends its own agent id.
+    const shared = {
+      sessionScopedCacheKey: "session-key-123", promptCacheKeyIsSharedCohort: false, reasoning: true,
+      promptCacheKey: "parent-key",
+    };
+    const parent = await drive({ ...shared, claudeAgentId: "parent", model: "m1" });
+    commitReasoningReplayServingIdentity(parent._reasoningReplayScope);
+    const fork = await drive({ ...shared, claudeAgentId: "fork", model: "m2" });
+    expect(fork._reasoningReplayScope?.servingThreadId).not.toBe(parent._reasoningReplayScope?.servingThreadId);
+    commitReasoningReplayServingIdentity(fork._reasoningReplayScope);
+    const resumed = await drive({ ...shared, claudeAgentId: "parent", model: "m1" });
+    expect(resumed._stripReasoningEncryptedContent).not.toBe(true);
   });
 
   test("the shared Desktop prompt_cache_key cohort does not create a scope", async () => {

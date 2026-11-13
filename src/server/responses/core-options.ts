@@ -199,6 +199,11 @@ export interface HandleResponsesOptions {
    */
   sessionScopedCacheKey?: string;
   /**
+   * The raw `x-claude-code-agent-id` header value, kept even when the request is a recognized fork
+   * (whose body key collapses to its parent's). Absent for the main loop. Scopes route continuity.
+   */
+  claudeAgentId?: string;
+  /**
    * Wire protocol the ORIGINAL client spoke. The Chat and Anthropic surfaces translate
    * their body into a Responses shape and replay through this function, so without an
    * explicit value the replay would look like a native Responses request and an

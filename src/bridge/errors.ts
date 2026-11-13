@@ -4,6 +4,7 @@ import {
   isReplayRefusalCode,
   markResponseNonReplayable,
   REPLAY_REFUSED_STATUS,
+  carryUpstreamNoRetry,
   REPLAY_REFUSAL_NO_RETRY_HEADER,
   REPLAY_REFUSAL_NO_RETRY_VALUE,
   retainReplayRefusal,
@@ -145,8 +146,13 @@ export function formatUpstreamFailureResponse(
   sourceCode: string | undefined,
   ...[status, type, message, options]: Parameters<typeof formatErrorResponse>
 ): Response {
-  if (!isModelNotInPlanRefusal(source, sourceCode)) return formatErrorResponse(status, type, message, options);
+  if (!isModelNotInPlanRefusal(source, sourceCode)) {
+    const failure = formatErrorResponse(status, type, message, options);
+    carryUpstreamNoRetry(source, failure);
+    return failure;
+  }
   const failure = formatErrorResponse(status, type, message, { ...options, code: MODEL_NOT_IN_PLAN_CODE });
+  carryUpstreamNoRetry(source, failure);
   markVerifiedModelNotInPlanResponse(failure);
   return failure;
 }

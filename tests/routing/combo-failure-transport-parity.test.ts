@@ -3,6 +3,7 @@ import { comboFailureCooldownScope, comboFailureDecision, isProviderModerationRe
 import { consumeComboFailure } from "../../src/server/responses/core-combo-failure";
 import { preflightComboStreamResponse } from "../../src/server/responses/combo-stream-preflight";
 import { preflightNativeMessagesResponse } from "../../src/server/messages-native-preflight";
+import { isNonReplayableResponse } from "../../src/lib/upstream-retry";
 import { createTestTranslatorBudget } from "../helpers/translator-budget";
 import type { RequestLogContext } from "../../src/server/request-log";
 
@@ -501,5 +502,20 @@ describe("every prose field beside a coded verdict must describe the moderation 
     const started = performance.now();
     expect(isProviderModerationRefusal(400, body, undefined, true)).toBe(false);
     expect(performance.now() - started).toBeLessThan(250);
+  });
+});
+
+describe("an upstream do-not-retry verdict survives the rebuilt combo failure", () => {
+  const rebuild = (headers: Record<string, string>) => consumeComboFailure(new Response(
+    JSON.stringify({ error: { type: "usage_limit_reached", code: "usage_limit_reached", message: "spent" } }),
+    { status: 429, headers: { "content-type": "application/json", ...headers } },
+  ));
+
+  test("exactly x-should-retry: false is kept, without marking the response non-replayable", async () => {
+    const kept = await rebuild({ "x-should-retry": "false" });
+    expect(kept.response.headers.get("x-should-retry")).toBe("false");
+    expect(isNonReplayableResponse(kept.response)).toBe(false);
+    expect((await rebuild({ "x-should-retry": "true" })).response.headers.get("x-should-retry")).toBeNull();
+    expect((await rebuild({})).response.headers.get("x-should-retry")).toBeNull();
   });
 });

@@ -400,7 +400,7 @@ sentences individually; rejected roles and tool-block prefixes use fixed placeho
 model selectors use the brand in `src/lib/error-destination.ts`; configured destination strings do not
 supply client error text. Local pre-handler, admission and thread-refusal envelope shapes stay intact.
 
-Messages error responses carry `x-should-retry: false` when the response they rewrap carries it; local usage-limit refusals carry it when the reset is unknown or more than 300 seconds away, without removing their formatted `Retry-After` advice.
+Messages error responses carry `x-should-retry: false` when the response they rewrap carries it; local usage-limit refusals carry it when the reset is unknown or more than 300 seconds away, without removing their formatted `Retry-After` advice. Failure responses rebuilt from an upstream failure (combo consumption and structured adapter failures) and the native OAuth pool usage-limit 429 apply the same rule, without marking the response non-replayable.
 Status, retry, overflow, rotation, quota and logging decisions retain their original evidence.
 `messagesOverflowPresentation` in `src/lib/messages-error-body.ts` selects only the owned compaction
 sentence by applying Claude Code's case-insensitive, unanchored phrase check to the message this

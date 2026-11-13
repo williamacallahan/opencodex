@@ -85,6 +85,7 @@ import { buildToolBridgeMaps } from "./collaboration";
 import { parseRequest } from "../../responses/parser";
 import { responsesHasFileImage, responsesHasInstructionImage } from "../../adapters/claude-cli/instruction-images";
 import { anthropicSessionKeyFromParts } from "../../oauth/anthropic-routing";
+import { agentServingThreadKey } from "../../oauth/session-affinity-key";
 import { configuredAnthropicInstance } from "../../providers/anthropic-instance";
 import { isTranslatorBudgetExceededError } from "../../lib/translator-budget";
 import { bindTurnTerminationScope, rememberDeliveredFinalAnswer } from "../../responses/turn-termination";
@@ -615,10 +616,13 @@ export async function prepareResponsesRequest(
       if (normalizedCacheKey) {
         parsed._reasoningReplayScope = {
           clientThreadId: normalizedCacheKey,
-          servingThreadId: anthropicSessionKeyFromParts({
-            promptCacheKey: parsed.options.promptCacheKey,
-            promptCacheKeyIsSharedCohort: false,
-          }) ?? undefined,
+          // Per actual agent (a fork shares its parent's body key but has its own transcript).
+          servingThreadId: normalizedCacheKey
+            ? anthropicSessionKeyFromParts({
+              promptCacheKey: agentServingThreadKey(normalizedCacheKey, options.claudeAgentId),
+              promptCacheKeyIsSharedCohort: false,
+            }) ?? undefined
+            : undefined,
         };
       }
     }

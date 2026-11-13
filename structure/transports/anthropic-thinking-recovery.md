@@ -33,7 +33,7 @@ successful terminal can memoize the rejection. Errors, incomplete/empty response
 terminals, cancellation and changed principal or serving identity cannot memoize it. The key in
 `src/responses/reasoning-replay-cache.ts` includes the principal, thread and durable serving identity;
 keyless callers have a separate namespace. Claude Code call-ID reasoning and signature stores use the session key,
-while serving-route continuity and rejection memos use the per-transcript prompt cache key, shared by forks.
+while serving-route continuity and rejection memos are keyed per actual agent (session key plus the real `x-claude-code-agent-id`, even for a recognized fork, whose body prompt cache key is its parent's).
 The five-minute TTL and 256-payload digest cap remain;
 merged sets that cannot fit fall back to the existing blanket policy. `src/server/responses/core-replay.ts`
 binds a memo only for the current serving scope; a serving-identity change retains its independent
