@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readBoundedResponseBody } from "../lib/bounded-body";
+import { parseRetryAfterMs } from "./routing/cooldown-math";
 import type { CodexAccountCredentialRecord, OcxConfig } from "../types";
 import { isSelectableCodexPoolAccount } from "./account-id";
 import {
@@ -695,11 +696,12 @@ function unconfirmedAccountModels(
   clientVersion: string,
   now: number,
   provenance: CodexModelEntitlementProvenance,
+  retryAfterMs = 0,
 ): CachedAccountModels {
   return {
     credentialIdentity: credential.credentialIdentity,
     clientVersion,
-    expiresAt: now + MODEL_ROSTER_FAILURE_TTL_MS,
+    expiresAt: now + Math.min(Math.max(MODEL_ROSTER_FAILURE_TTL_MS, retryAfterMs), MODEL_ROSTER_TTL_MS),
     models: new Set(),
     confirmed: false,
     provenance,
@@ -731,10 +733,16 @@ async function fetchAccountModels(
       signal: controller.signal,
     });
     if (!response.ok) {
+      // A 429/503 names when to ask again; asking every 15 s instead is the upstream spam a
+      // throttled seat cannot answer. Honor it, capped at the success TTL so entitlement
+      // changes are still seen.
+      const retryAfterMs = response.status === 429 || response.status === 503
+        ? parseRetryAfterMs(response.headers.get("retry-after"), now) ?? 0
+        : 0;
       return unconfirmedAccountModels(credential, clientVersion, now, {
         kind: "http-error",
         httpStatus: response.status,
-      });
+      }, retryAfterMs);
     }
     const body = await readBoundedResponseBody(response, {
       signal: controller.signal,

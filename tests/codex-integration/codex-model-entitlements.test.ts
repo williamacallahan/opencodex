@@ -313,6 +313,36 @@ describe("Codex account model entitlements", () => {
     )).resolves.toBe(false);
   });
 
+  test("a throttled roster read waits for Retry-After before asking again", async () => {
+    const headers = new Headers({ authorization: "Bearer throttled-caller" });
+    let calls = 0;
+    const throttled = (async () => {
+      calls += 1;
+      return new Response("slow down", { status: 429, headers: { "retry-after": "120" } });
+    }) as typeof fetch;
+    const ask = (now: number) => isDirectCallerEntitledToCodexModel(headers, DAYBREAK,
+      { fetcher: throttled, now, clientVersion: TEST_CLIENT_VERSION });
+    await expect(ask(1_000)).resolves.toBe(false);
+    await expect(ask(1_000 + 60_000)).resolves.toBe(false);
+    expect(calls).toBe(1);
+    await expect(ask(1_000 + 121_000)).resolves.toBe(false);
+    expect(calls).toBe(2);
+  });
+
+  test("a throttled roster read without Retry-After keeps the short failure retry", async () => {
+    const headers = new Headers({ authorization: "Bearer throttled-no-hint" });
+    let calls = 0;
+    const throttled = (async () => {
+      calls += 1;
+      return new Response("slow down", { status: 429 });
+    }) as typeof fetch;
+    const ask = (now: number) => isDirectCallerEntitledToCodexModel(headers, DAYBREAK,
+      { fetcher: throttled, now, clientVersion: TEST_CLIENT_VERSION });
+    await ask(1_000);
+    await ask(1_000 + 16_000);
+    expect(calls).toBe(2);
+  });
+
   test("Direct-caller rosters do not evict main/Pool entitlement evidence", async () => {
     // The catalog projects ONLY from main/Pool keys. Under a single shared LRU, a burst of
     // distinct Direct callers pushed those out and the gated row vanished from the catalog until
