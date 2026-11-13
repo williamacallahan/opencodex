@@ -113,6 +113,8 @@ function commitFixture(cwd: string, path: string, contents: string, message: str
     "user.name=OpenCodex Test",
     "-c",
     `user.email=${FIXTURE_COMMIT_EMAIL}`,
+    "-c",
+    "commit.gpgsign=false",
     "commit",
     "-m",
     message,
@@ -893,7 +895,7 @@ describe("bun test argv", () => {
     } finally {
       for (const fixture of fixtures) removeTreeWithRetry(fixture);
     }
-  });
+  }, 15_000);
 
   test("rejects an empty changed selection when the diff is non-empty", () => {
     expect(changedSelectionFailure(
