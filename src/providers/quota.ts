@@ -3,6 +3,7 @@ import { isAnthropicInstanceId, configuredAnthropicInstance } from "./anthropic-
 import { ANTIGRAVITY_OAUTH_STORE_KEY } from "./antigravity-quota-identity";
 import { fetchAnthropicAccountQuota } from "./quota/anthropic-account-quota";
 import { thrownQuotaFailure } from "./quota/failure-codes";
+import { redactSecretString } from "../lib/redact";
 import { resolveEnvValue } from "../config";
 import { getAccountCredential, getAccountSet } from "../oauth/store";
 import { apiKeyPoolEntryId } from "./api-keys";
@@ -123,41 +124,63 @@ async function maybeFetchProviderQuota(
 ): Promise<ProviderQuotaProbeResult> {
   if (provider.disabled === true) return null;
   try {
-    if (provider.adapter === "claude-cli") return await fetchClaudeCliObservedQuota(name, forceRefresh);
-    if (isBuiltInChatGptForwardProvider(name, provider)) {
-      return await fetchChatGptForwardQuota(config, name, provider, forceRefresh, prefetchedCodexSnapshot);
-    }
-    if (provider.authMode === "oauth" && explicitAccountReader(name)) return await fetchExplicitCurrentQuota(name, provider, config);
-    if (provider.authMode === "oauth" && configuredAnthropicInstance(config, name)) return await fetchAnthropicQuota(name, config);
-    if (provider.authMode === "oauth" && name === ANTIGRAVITY_OAUTH_STORE_KEY) return await fetchAntigravityQuota(name, { ...provider });
-    if (provider.authMode === "oauth" && name === "kiro") return await fetchKiroQuota(name);
-    // meta-muse: a device-logged-in account can be probed at the key endpoint; an
-    // imported or pasted one cannot, and falls back to its last in-band observation.
-    // The probe is tried first and its failure is never fatal to the row.
-    if (provider.authMode === "oauth" && hasPassiveAccountQuota(name)) {
-      return (await fetchMuseKeyQuota(name)) ?? await fetchPassiveProviderQuota(name);
-    }
-    const reader = keyQuotaReaderForProvider(name, provider);
-    // Keep destination/auth fields bound to the same request as the reader's captured
-    // bearer, even if the live provider object changes while the quota probe awaits.
-    return reader ? await reader(name, { ...provider }) : null;
+    const result = await probeProviderQuota(name, provider, config, forceRefresh, prefetchedCodexSnapshot);
+    if (result !== null) clearQuotaProbeWarnings(name);
+    return result;
   } catch (error) {
-    warnQuotaProbeFailureOnce(name, thrownQuotaFailure(error));
+    warnQuotaProbeFailureOnce(name, thrownQuotaFailure(error), error);
     return null;
   }
 }
 
+async function probeProviderQuota(
+  name: string,
+  provider: OcxProviderConfig,
+  config: OcxConfig,
+  forceRefresh: boolean,
+  prefetchedCodexSnapshot?: CodexAuthAccountsSnapshotPromise,
+): Promise<ProviderQuotaProbeResult> {
+  if (provider.adapter === "claude-cli") return await fetchClaudeCliObservedQuota(name, forceRefresh);
+  if (isBuiltInChatGptForwardProvider(name, provider)) {
+    return await fetchChatGptForwardQuota(config, name, provider, forceRefresh, prefetchedCodexSnapshot);
+  }
+  if (provider.authMode === "oauth" && explicitAccountReader(name)) return await fetchExplicitCurrentQuota(name, provider, config);
+  if (provider.authMode === "oauth" && configuredAnthropicInstance(config, name)) return await fetchAnthropicQuota(name, config);
+  if (provider.authMode === "oauth" && name === ANTIGRAVITY_OAUTH_STORE_KEY) return await fetchAntigravityQuota(name, { ...provider });
+  if (provider.authMode === "oauth" && name === "kiro") return await fetchKiroQuota(name);
+  // meta-muse: a device-logged-in account can be probed at the key endpoint; an
+  // imported or pasted one cannot, and falls back to its last in-band observation.
+  // The probe is tried first and its failure is never fatal to the row.
+  if (provider.authMode === "oauth" && hasPassiveAccountQuota(name)) {
+    return (await fetchMuseKeyQuota(name)) ?? await fetchPassiveProviderQuota(name);
+  }
+  const reader = keyQuotaReaderForProvider(name, provider);
+  // Keep destination/auth fields bound to the same request as the reader's captured
+  // bearer, even if the live provider object changes while the quota probe awaits.
+  return reader ? await reader(name, { ...provider }) : null;
+}
+
 const warnedQuotaProbeFailures = new Set<string>();
+
+const PROGRAMMING_ERROR_NAMES = new Set(["TypeError", "SyntaxError", "RangeError", "ReferenceError"]);
 
 /**
  * A failed probe becomes a null row so one provider never fails the whole report, but the
- * failure must stay visible: name the provider and its closed failure code once per process.
+ * failure must stay visible: name the provider and its closed failure code once per
+ * healthy-to-failing transition. A reader bug is named by its error class, never its text.
  */
-function warnQuotaProbeFailureOnce(name: string, code: QuotaFailureCode): void {
+function warnQuotaProbeFailureOnce(name: string, code: QuotaFailureCode, error: unknown): void {
   const key = `${name}\u0000${code}`;
   if (warnedQuotaProbeFailures.has(key)) return;
   warnedQuotaProbeFailures.add(key);
-  console.warn(`[opencodex] quota probe for provider ${JSON.stringify(name)} failed (${code}); the quota report keeps its last good row while that row is fresh, else omits it`);
+  const errorName = error instanceof Error && PROGRAMMING_ERROR_NAMES.has(error.name) ? `, ${error.name}` : "";
+  console.warn(`[opencodex] quota probe for provider ${JSON.stringify(redactSecretString(name))} failed (${code}${errorName}); the quota report keeps its last good row while that row is fresh, else omits it`);
+}
+
+function clearQuotaProbeWarnings(name: string): void {
+  for (const key of warnedQuotaProbeFailures) {
+    if (key.startsWith(`${name}\u0000`)) warnedQuotaProbeFailures.delete(key);
+  }
 }
 
 /**

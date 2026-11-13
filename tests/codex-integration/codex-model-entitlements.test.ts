@@ -329,6 +329,21 @@ describe("Codex account model entitlements", () => {
     expect(calls).toBe(2);
   });
 
+  test("a throttle hold keeps an already confirmed roster instead of refusing its grant", async () => {
+    const headers = new Headers({ authorization: "Bearer held-but-entitled" });
+    let throttle = false;
+    const fetcher = (async () => throttle
+      ? new Response("busy", { status: 503, headers: { "retry-after": "300" } })
+      : roster(DAYBREAK)) as typeof fetch;
+    const ask = (now: number) => isDirectCallerEntitledToCodexModel(headers, DAYBREAK,
+      { fetcher, now, clientVersion: TEST_CLIENT_VERSION });
+    await expect(ask(1_000)).resolves.toBe(true);
+    throttle = true;
+    // Past the 5-minute success TTL the refresh is throttled for 300 s; the grant stands.
+    await expect(ask(1_000 + 6 * 60_000)).resolves.toBe(true);
+    await expect(ask(1_000 + 8 * 60_000)).resolves.toBe(true);
+  });
+
   test("a throttled roster read without Retry-After keeps the short failure retry", async () => {
     const headers = new Headers({ authorization: "Bearer throttled-no-hint" });
     let calls = 0;

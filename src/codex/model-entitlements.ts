@@ -521,6 +521,25 @@ function accountIdOfCacheKey(key: string): string {
  * model disappearing for a reason the operator cannot see. Two budgets keep one class of caller
  * from erasing the other's evidence.
  */
+/**
+ * A throttle hold (a 429/503 whose Retry-After outlasts the failure TTL) says when to ask
+ * /models again, not that the account lost a grant. Keep the confirmed roster for the same
+ * credential and only move its refresh to the hold, so entitled callers are not refused for
+ * the whole hold; an upstream refusal still invalidates a grant that is really gone.
+ */
+function keepConfirmedRosterThroughThrottle(
+  accountId: string,
+  fetched: CachedAccountModels,
+  now: number,
+): CachedAccountModels {
+  const status = fetched.provenance?.kind === "http-error" ? fetched.provenance.httpStatus : undefined;
+  if (fetched.confirmed || (status !== 429 && status !== 503)) return fetched;
+  if (fetched.expiresAt - now <= MODEL_ROSTER_FAILURE_TTL_MS) return fetched;
+  const previous = accountModelsCache.get(cacheKeyFor(accountId, fetched.clientVersion));
+  if (!previous?.confirmed || previous.credentialIdentity !== fetched.credentialIdentity) return fetched;
+  return { ...previous, expiresAt: fetched.expiresAt };
+}
+
 function boundedCacheSet(accountId: string, value: CachedAccountModels): void {
   const key = cacheKeyFor(accountId, value.clientVersion);
   accountModelsCache.delete(key);
@@ -986,7 +1005,8 @@ async function modelsForCredential(
     };
   }
   const flight = fetchAccountModels(credential, fetcher, now, clientVersion)
-    .then(result => {
+    .then(fetched => {
+      const result = keepConfirmedRosterThroughThrottle(credential.accountId, fetched, now);
       if (
         currentCredentialIdentity(credential.accountId) === credential.credentialIdentity
         && (credentialMutationEpoch === undefined

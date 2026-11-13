@@ -19,7 +19,6 @@ export async function waitForApplyAdmission(admitted: Promise<void>, running: Pr
   if (first.kind === "rejected") throw new Error(`apply rejected before admission: ${first.code}`);
 }
 
-/** All npm config/cache/prefix/temp effects belong to root; no network or scripts. */
 /**
  * The Node binary itself, never a wrapper: the first `node` on PATH can be a shell shim
  * (a profile-free `#!/bin/sh` launcher), which cannot serve as a `#!` interpreter and
@@ -37,6 +36,7 @@ export function fixtureNodeToolchain(): { node: string; npm: string } {
   return { node, npm };
 }
 
+/** All npm config/cache/prefix/temp effects belong to root; no network or scripts. */
 export function privateNpm(root: string, args: string[]) {
   // Each command starts with a new empty cache, not the previous pack/install's.
   const work = mkdtempSync(join(root, "npm-work-"));
