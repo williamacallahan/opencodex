@@ -10,6 +10,8 @@ import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider } from "../../
 import { copyForwardedClientHeaders, forwardableClientHeaders } from "../../lib/provider-client-headers";
 import { AGENT_ASSERTION_HEADER } from "../../lib/authorization-scheme";
 import { openaiResponsesUrl } from "../openai-responses-url";
+import { isCodexLbProvider } from "../../providers/quota/codex-lb-url";
+import { agentServingThreadKey, oauthSessionKeyFromParts } from "../../oauth/session-affinity-key";
 
 export { FORWARD_HEADERS } from "../../codex/forward-transport-headers";
 
@@ -37,6 +39,28 @@ function stripTrailingSlashes(value: string): string {
   let end = value.length;
   while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
   return end === value.length ? value : value.slice(0, end);
+}
+
+/**
+ * Name a Claude Code agent's thread to codex-lb the way Codex CLI does: `session_id` is the root
+ * session, `thread-id` the per-agent serving key (main loop, each subagent, each fork). Both are
+ * the existing hashes, never the raw metadata.user_id or agent id. Leaves headers untouched for
+ * other providers, for clients that already name a thread, and when no session key exists.
+ */
+export function applyCodexLbThreadHeaders(
+  provider: OcxProviderConfig,
+  headers: Record<string, string>,
+  incoming: Headers,
+  identity: { sessionScopedCacheKey?: string; claudeAgentId?: string },
+): void {
+  if (!isCodexLbProvider(provider)) return;
+  if (["thread-id", "session_id", "session-id", "x-codex-turn-state"].some(name => incoming.has(name))) return;
+  const sessionKey = oauthSessionKeyFromParts({ promptCacheKey: identity.sessionScopedCacheKey });
+  if (!sessionKey) return;
+  const present = new Set(Object.keys(headers).map(name => name.toLowerCase()));
+  if (["thread-id", "session_id", "session-id"].some(name => present.has(name))) return;
+  headers.session_id = sessionKey;
+  headers["thread-id"] = agentServingThreadKey(sessionKey, identity.claudeAgentId);
 }
 
 /** Shared Responses URL/auth/header construction; capabilities never grant auth authority. */

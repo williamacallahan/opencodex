@@ -555,6 +555,7 @@ export async function prepareResponsesRequest(
     }
     parsed._promptCacheKeyIsSharedCohort = options.promptCacheKeyIsSharedCohort;
     if (options.sessionScopedCacheKey) parsed._sessionScopedCacheKey = options.sessionScopedCacheKey;
+    if (options.claudeAgentId !== undefined) parsed._claudeAgentId = options.claudeAgentId;
     // The body may have been rebuilt since the inbound observation (previous-response
     // expansion); alias the parsed raw body to the same draft so the outbound
     // observation at the adapter seam still finds it.
@@ -1217,6 +1218,7 @@ export async function prepareResponsesRequest(
             "_codexOwnThreadId",
             "_promptCacheKeyIsSharedCohort",
             "_sessionScopedCacheKey",
+            "_claudeAgentId",
             "_cursorClientThreadId",
             "_reasoningReplayScope",
             "_nativeReasoningRetention",

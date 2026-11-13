@@ -3,6 +3,11 @@ import type { OcxProviderConfig } from "../../types";
 const CODEX_BACKEND_PATH = "/backend-api/codex";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 
+/** True for a key-auth Responses provider that {@link codexLbUsageUrl} recognizes as a codex-lb relay. */
+export function isCodexLbProvider(provider: OcxProviderConfig): boolean {
+  return codexLbUsageUrl(provider) !== null;
+}
+
 /**
  * A key-auth Responses provider served on the Codex backend path of a host other than ChatGPT is
  * a pooling relay such as codex-lb. Its pool usage is `GET <origin>/v1/usage` with the same key,

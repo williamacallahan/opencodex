@@ -26,7 +26,7 @@ import { rewriteRoutedNamespaceToolsForUpstream } from "../../responses/namespac
 import { repairLegacyDottedToolCallNames } from "../../responses/legacy-dotted-tool-name-repair";
 import { preparePlaintextV2AgentMessages } from "../../responses/plaintext-v2-agent-messages";
 import { isMetaAiResponsesDestination, rewriteMuseToolNamesForUpstream } from "../../responses/muse-tool-name-alias";
-import { buildResponsesTransport } from "./transport";
+import { applyCodexLbThreadHeaders, buildResponsesTransport } from "./transport";
 import { poolReserveWireBody } from "../../codex/pool-reserve";
 export { FORWARD_HEADERS } from "./transport";
 import { normalizeResponsesCodeMode } from "../responses-code-mode";
@@ -167,6 +167,10 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
     buildRequest(parsed: OcxParsedRequest, incoming: IncomingMeta) {
       const translatorBudget = incoming.translatorBudget;
       const { url, headers } = buildResponsesTransport(provider, incoming);
+      applyCodexLbThreadHeaders(provider, headers, incoming.headers, {
+        sessionScopedCacheKey: parsed._sessionScopedCacheKey,
+        claudeAgentId: parsed._claudeAgentId,
+      });
 
       const forward = provider.authMode === "forward";
       let convertedRoutedCustomToolNames: Set<string> | undefined;
