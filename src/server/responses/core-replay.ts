@@ -344,6 +344,7 @@ function routeReasoningReplayIdentity(args: {
 export function mandatoryResponsesReasoningReplayUnavailable(args: {
   body: unknown;
   clientThreadId: string | undefined;
+  servingThreadId?: string;
   clientPrincipalId?: string;
   providerName: string;
   provider: OcxProviderConfig;
@@ -360,7 +361,9 @@ export function mandatoryResponsesReasoningReplayUnavailable(args: {
   ) return false;
 
   const current = routeReasoningReplayIdentity(args);
-  return reasoningReplayServingIdentityChanged({ clientThreadId, clientPrincipalId: args.clientPrincipalId, current });
+  return reasoningReplayServingIdentityChanged({
+    clientThreadId, servingThreadId: args.servingThreadId, clientPrincipalId: args.clientPrincipalId, current,
+  });
 }
 
 

@@ -613,7 +613,13 @@ export async function prepareResponsesRequest(
         promptCacheKeyIsSharedCohort: false,
       });
       if (normalizedCacheKey) {
-        parsed._reasoningReplayScope = { clientThreadId: normalizedCacheKey };
+        parsed._reasoningReplayScope = {
+          clientThreadId: normalizedCacheKey,
+          servingThreadId: anthropicSessionKeyFromParts({
+            promptCacheKey: parsed.options.promptCacheKey,
+            promptCacheKeyIsSharedCohort: false,
+          }) ?? undefined,
+        };
       }
     }
     if (cursorClientThreadId) parsed._cursorClientThreadId = cursorClientThreadId;

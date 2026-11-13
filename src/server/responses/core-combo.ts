@@ -136,6 +136,7 @@ import {
   streamingIncompleteResponse,
 } from "./context-overflow";
 import { mandatoryResponsesReasoningReplayUnavailable } from "./core-replay";
+import { anthropicSessionKeyFromParts } from "../../oauth/anthropic-routing";
 import { isReplayRefusalResponse, settleOperatorReplacement, UPSTREAM_RESET_REPLAY_REFUSED_CODE } from "../../lib/upstream-retry";
 import { attributeFinalRequest } from "../request-log-failure-attribution";
 import { createComboProtocolLanes, dispatchNativeComboChild } from "./core-combo-native";
@@ -496,17 +497,28 @@ export async function executeComboResponses(
       : undefined,
     recoveredPlaintext: false,
   };
-  const reasoningReplayConversationId = reasoningReplayConversationIdFromResponsesRequest({
-    clientThreadId: inboundClientThreadId,
-    threadIdHeader: req.headers.get("thread-id"),
-    sessionIdHeader: sessionIdHeaderFromRequest(req.headers),
-  });
+  const promptCacheKey = isPlainObject(body) && typeof body.prompt_cache_key === "string"
+    ? body.prompt_cache_key : undefined;
+  const servingThreadId = !inboundClientThreadId && options.inboundWire === "anthropic"
+    && options.promptCacheKeyIsSharedCohort !== true && promptCacheKey?.trim()
+    ? anthropicSessionKeyFromParts({ promptCacheKey, promptCacheKeyIsSharedCohort: false }) ?? undefined : undefined;
+  const reasoningReplayConversationId = servingThreadId
+    ? anthropicSessionKeyFromParts({
+      promptCacheKey: options.sessionScopedCacheKey ?? promptCacheKey,
+      promptCacheKeyIsSharedCohort: false,
+    }) ?? undefined
+    : reasoningReplayConversationIdFromResponsesRequest({
+      clientThreadId: inboundClientThreadId,
+      threadIdHeader: req.headers.get("thread-id"),
+      sessionIdHeader: sessionIdHeaderFromRequest(req.headers),
+    });
   const reasoningReplayEligible = (target: (typeof combo.targets)[number]): boolean => {
     try {
       const route = routeConcreteModel(config, `${target.provider}/${target.model}`);
       const unavailable = mandatoryResponsesReasoningReplayUnavailable({
         body,
         clientThreadId: reasoningReplayConversationId,
+        servingThreadId,
         clientPrincipalId: replayPrincipal.clientPrincipalId,
         providerName: route.providerName,
         provider: route.provider,

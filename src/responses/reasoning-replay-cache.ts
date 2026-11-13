@@ -168,7 +168,7 @@ function sweepExpiredServingIdentities(at: number): void {
 function servingIdentityFor(
   scope: OcxReasoningReplayScopeRef | undefined,
 ): { key: string; identity: string } | undefined {
-  const threadId = scope?.clientThreadId;
+  const threadId = scope?.servingThreadId ?? scope?.clientThreadId;
   const identityTuple = tupleForServingIdentity(scope?.current);
   if (!nonEmpty(threadId) || !identityTuple) return undefined;
   // Preserve physical safeguards for keyless callers in a separate namespace. A caller's

@@ -11,6 +11,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 
 import type { ProviderAdapter } from "../../src/adapters/base";
 import type { AdapterEvent, OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../../src/types";
+import { clearReasoningReplayCacheForTests, commitReasoningReplayServingIdentity } from "../../src/responses/reasoning-replay-cache";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 
 const actualResolver = await import("../../src/server/adapter-resolve");
@@ -40,6 +41,7 @@ afterEach(() => {
   releaseSpendHome?.();
   releaseSpendHome = undefined;
   adapterFactory = undefined;
+  clearReasoningReplayCacheForTests();
 });
 
 function captureAdapter(captured: OcxParsedRequest[]): ProviderAdapter {
@@ -66,7 +68,7 @@ function testConfig(): OcxConfig {
         baseUrl: "https://capture.test",
         authMode: "key",
         apiKey: "capture-key",
-        models: ["m1"],
+        models: ["m1", "m2"],
       },
     },
   } as OcxConfig;
@@ -76,13 +78,18 @@ async function drive(options: {
   promptCacheKey?: string;
   promptCacheKeyIsSharedCohort?: boolean;
   sessionScopedCacheKey?: string;
+  model?: string;
+  reasoning?: boolean;
 }): Promise<OcxParsedRequest> {
   const captured: OcxParsedRequest[] = [];
   adapterFactory = () => captureAdapter(captured);
   const body: Record<string, unknown> = {
-    model: "m1",
+    model: options.model ?? "m1",
     stream: true,
-    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }],
+    input: [
+      ...(options.reasoning ? [{ type: "reasoning", id: "rs_1", encrypted_content: "opaque", summary: [] }] : []),
+      { type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] },
+    ],
   };
   if (options.promptCacheKey !== undefined) body.prompt_cache_key = options.promptCacheKey;
 
@@ -121,6 +128,21 @@ describe("Claude Code Anthropic inbound reasoning-replay scope", () => {
       promptCacheKey: "per-agent-key", promptCacheKeyIsSharedCohort: false, sessionScopedCacheKey: "session-key-123",
     });
     expect(parsed._reasoningReplayScope?.clientThreadId).toBe("session-key-123");
+    expect(parsed._reasoningReplayScope?.servingThreadId).toBe("per-agent-key");
+  });
+
+  test("interleaved subagents keep their route while a fork changing models strips reasoning", async () => {
+    const shared = { sessionScopedCacheKey: "session-key-123", promptCacheKeyIsSharedCohort: false, reasoning: true };
+    const first = await drive({ ...shared, promptCacheKey: "agent-a", model: "m1" });
+    expect(first._reasoningReplayScope?.current?.credentialDurableIdentity).toBeDefined();
+    commitReasoningReplayServingIdentity(first._reasoningReplayScope);
+    const sibling = await drive({ ...shared, promptCacheKey: "agent-b", model: "m2" });
+    commitReasoningReplayServingIdentity(sibling._reasoningReplayScope);
+    const resumed = await drive({ ...shared, promptCacheKey: "agent-a", model: "m1" });
+    expect(resumed._reasoningReplayScope?.clientThreadId).toBe("session-key-123");
+    expect(resumed._stripReasoningEncryptedContent).not.toBe(true);
+    const fork = await drive({ ...shared, promptCacheKey: "agent-a", model: "m2" });
+    expect(fork._stripReasoningEncryptedContent).toBe(true);
   });
 
   test("the shared Desktop prompt_cache_key cohort does not create a scope", async () => {

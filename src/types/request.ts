@@ -43,6 +43,8 @@ export interface OcxReasoningReplayScopeRef {
    * hashed request-log conversation id.
    */
   readonly clientThreadId: string;
+  /** Transcript identity for route continuity; forks retain their parent's identity. */
+  readonly servingThreadId?: string;
   current?: Readonly<OcxReasoningReplayIdentity>;
 }
 
