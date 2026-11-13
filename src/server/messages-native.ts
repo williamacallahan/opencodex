@@ -66,6 +66,8 @@ import {
   markResponseNonReplayable,
   prepareSameTarget429Wait,
   REPLAY_REFUSED_STATUS,
+  REPLAY_REFUSAL_NO_RETRY_HEADER,
+  REPLAY_REFUSAL_NO_RETRY_VALUE,
   retainReplayRefusal,
   UpstreamRetryEvidenceError,
   TRANSIENT_RETRY_MAX_ATTEMPTS,
@@ -1381,6 +1383,9 @@ function nativeMessagesErrorResponse(response: Response, bodyText: string, finis
   if (clientRetryAfter) headers.set("Retry-After", clientRetryAfter);
   else if (transient) headers.set("Retry-After", "2");
   if (replayRefusal) applyReplayRefusalClientHeaders(headers);
+  else if (response.headers.get(REPLAY_REFUSAL_NO_RETRY_HEADER) === REPLAY_REFUSAL_NO_RETRY_VALUE) {
+    headers.set(REPLAY_REFUSAL_NO_RETRY_HEADER, REPLAY_REFUSAL_NO_RETRY_VALUE);
+  }
   // The native envelope keeps its shape (no added code); only an overflow's wording changes, so
   // Claude Code recognizes it and compacts (010).
   // Only a 400/413 refusal: the shared classifier also files a 429 "too many tokens per minute"

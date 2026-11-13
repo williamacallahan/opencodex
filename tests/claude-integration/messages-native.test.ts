@@ -400,6 +400,18 @@ describe("managed native Messages", () => {
     expect(seen.map(entry => entry.headers.get("x-api-key"))).toEqual(["fixture-key-alpha", "fixture-key-beta"]);
   });
 
+  for (const retryDirective of ["false", "true", undefined]) test(`native usage limit forwards only the false retry directive (${retryDirective ?? "absent"})`, async () => {
+    const port = startUpstream(() => Response.json(
+      { type: "error", error: { type: "rate_limit_error", code: "usage_limit_reached", message: "usage limit reached" } },
+      { status: 429, headers: { "retry-after": "300", ...(retryDirective ? { "x-should-retry": retryDirective } : {}) } },
+    ));
+    const { response, text } = await send(fixtureConfig(port), { ...SOURCE_BODY, stream: false });
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("300");
+    expect(response.headers.get("x-should-retry")).toBe(retryDirective === "false" ? "false" : null);
+    expect(JSON.parse(text).error.type).toBe("rate_limit_error");
+  });
+
   for (const { providerName, upstreamRetryAfter, expectedRetryAfter, upstreamMessage = "Rate limit exceeded", upstreamCode, expectedGuidance = providerName === "opencode-zen" } of [
     { providerName: "opencode-zen", upstreamRetryAfter: undefined, expectedRetryAfter: "15" },
     { providerName: "opencode-zen", upstreamRetryAfter: "37", expectedRetryAfter: "37" },

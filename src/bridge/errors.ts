@@ -4,6 +4,8 @@ import {
   isReplayRefusalCode,
   markResponseNonReplayable,
   REPLAY_REFUSED_STATUS,
+  REPLAY_REFUSAL_NO_RETRY_HEADER,
+  REPLAY_REFUSAL_NO_RETRY_VALUE,
   retainReplayRefusal,
 } from "../lib/upstream-retry";
 import { formatClientRetryAfter } from "../lib/client-retry-after";
@@ -166,5 +168,8 @@ export function formatUsageLimitReachedResponse(message: string, resetsAtMs: num
   const headers = new Headers({ "Content-Type": "application/json" });
   const advice = retryAfterSeconds !== null ? formatClientRetryAfter(retryAfterSeconds) : undefined;
   if (advice !== undefined) headers.set("Retry-After", advice);
+  if (resetsAtMs === null || resetsAtMs - Date.now() > 300_000) {
+    headers.set(REPLAY_REFUSAL_NO_RETRY_HEADER, REPLAY_REFUSAL_NO_RETRY_VALUE);
+  }
   return new Response(JSON.stringify({ error }), { status: 429, headers });
 }

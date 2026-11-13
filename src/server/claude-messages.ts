@@ -63,6 +63,8 @@ import {
   isReplayRefusalResponse,
   isTransientUpstreamStatus,
   REPLAY_REFUSED_STATUS,
+  REPLAY_REFUSAL_NO_RETRY_HEADER,
+  REPLAY_REFUSAL_NO_RETRY_VALUE,
   UPSTREAM_RESET_REPLAY_REFUSED_CODE,
 } from "../lib/upstream-retry";
 import { isClientClosedMessage, recognizedUpstreamError, UNDECLARED_TOOL_CALL_ERROR_CODE } from "../lib/errors";
@@ -1546,6 +1548,9 @@ async function handleClaudeMessagesWithBudget(
     if (clientRetryAfter) outHeaders.set("Retry-After", clientRetryAfter);
     else if (transient) outHeaders.set("Retry-After", "2");
     if (replayRefusal) applyReplayRefusalClientHeaders(outHeaders);
+    else if (response.headers.get(REPLAY_REFUSAL_NO_RETRY_HEADER) === REPLAY_REFUSAL_NO_RETRY_VALUE) {
+      outHeaders.set(REPLAY_REFUSAL_NO_RETRY_HEADER, REPLAY_REFUSAL_NO_RETRY_VALUE);
+    }
     const decidedCode = replayRefusal ? UPSTREAM_RESET_REPLAY_REFUSED_CODE : contextError ? "context_length_exceeded" : catalogRefusal ? UNDECLARED_TOOL_CALL_ERROR_CODE : undefined;
     const legacy = anthropicErrorBody(outStatus, message, undefined, decidedCode);
     const legacyBody = JSON.stringify(legacy);

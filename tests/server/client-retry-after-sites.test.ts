@@ -51,6 +51,11 @@ describe("client Retry-After is regenerated at every boundary", () => {
     expect(formatUsageLimitReachedResponse("spent", null, 900_000).headers.get("retry-after")).toBe("691200");
     expect(formatUsageLimitReachedResponse("spent", null, 84_692).headers.get("retry-after")).toBe("84692");
     expect(formatUsageLimitReachedResponse("spent", null, null).headers.get("retry-after")).toBeNull();
+    expect(formatUsageLimitReachedResponse("spent", null, null).headers.get("x-should-retry")).toBe("false");
+    const farReset = formatUsageLimitReachedResponse("spent", Date.now() + 600_000, 600);
+    expect(farReset.headers.get("retry-after")).toBe("600");
+    expect(farReset.headers.get("x-should-retry")).toBe("false");
+    expect(formatUsageLimitReachedResponse("spent", Date.now() + 299_000, 299).headers.get("x-should-retry")).toBeNull();
     expect(comboUnavailableResponse("none", { retryAfter: "900000" }).headers.get("retry-after")).toBe("691200");
     expect(comboUnavailableResponse("none", { retryAfter: NUMERIC_KEY }).headers.get("retry-after")).toBe("691200");
     expect(comboUnavailableResponse("none", { retryAfter: "must-not-echo" }).headers.get("retry-after")).toBeNull();

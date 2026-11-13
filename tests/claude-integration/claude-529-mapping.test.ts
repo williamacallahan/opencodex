@@ -104,6 +104,20 @@ test("transient 502 without Retry-After -> fallback Retry-After 2 on the 529 res
   expect(response.headers.get("retry-after")).toBe("2");
 }, 15_000);
 
+for (const retryDirective of ["false", "true", undefined]) test(`usage limit forwards only the false retry directive (${retryDirective ?? "absent"})`, async () => {
+  upstreamResponse = () => Response.json(
+    { error: { type: "usage_limit_reached", code: "usage_limit_reached", message: "usage limit reached" } },
+    { status: 429, headers: { "retry-after": "300", ...(retryDirective ? { "x-should-retry": retryDirective } : {}) } },
+  );
+  const response = await fetch(new URL("/v1/messages", proxy!.url), {
+    method: "POST", headers: { "content-type": "application/json" }, body: messagesBody(),
+  });
+  expect(response.status).toBe(429);
+  expect(response.headers.get("retry-after")).toBe("300");
+  expect(response.headers.get("x-should-retry")).toBe(retryDirective === "false" ? "false" : null);
+  expect((await response.json() as { error: { type: string } }).error.type).toBe("rate_limit_error");
+});
+
 test("non-transient upstream 400 stays 400 invalid_request_error; no retry", async () => {
   const response = await fetch(new URL("/v1/messages", proxy!.url), {
     method: "POST",
