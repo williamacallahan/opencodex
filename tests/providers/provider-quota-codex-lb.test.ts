@@ -66,6 +66,18 @@ function config(name: string, providerConfig: OcxProviderConfig): OcxConfig {
 }
 
 describe("codex-lb pooled usage quota", () => {
+  test("one rejected provider probe does not prevent other quota reports", async () => {
+    const failing = provider("https://lb.example.com/backend-api/codex", LIVE_USAGE, []);
+    failing.fetch = (async () => { throw new Error("fixture transport failure"); }) as typeof fetch;
+    const healthy = provider("https://lb.example.com/backend-api/codex", LIVE_USAGE, []);
+    const cfg = { defaultProvider: "healthy", providers: { failing, healthy } } as OcxConfig;
+    const url = new URL("http://localhost/api/provider-quotas?refresh=1");
+    const response = await handleManagementAPI(new ManagementRequest(url), url, cfg);
+    expect(response?.status).toBe(200);
+    const body = await response!.json();
+    expect(body.reports.map((row: { provider: string }) => row.provider)).toEqual(["healthy"]);
+  });
+
   test("a relay on the Codex backend path reports pool windows and the credit balance", async () => {
     const seen: Seen[] = [];
     const poolProvider = provider("https://lb.example.com/backend-api/codex", LIVE_USAGE, seen);
