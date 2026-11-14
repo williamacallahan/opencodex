@@ -18,7 +18,7 @@ import { INCOMPLETE_RETRY_MS, configuredCredentials } from "../../src/server/con
 import { setProviderKeychainEntryFactoryForTests } from "../../src/providers/api-key-resolve";
 import { classifyCodexUpstreamOutcome } from "../../src/codex/routing/cooldown-math";
 import { httpStatusFromTerminalError } from "../../src/lib/errors";
-import { addFinalRequestLog, httpStatusForRequestLogTerminal, inspectResponseLogJson, noteUpstreamRequestId, type RequestLogContext, type RequestLogEntry } from "../../src/server/request-log";
+import { addFinalRequestLog, httpStatusForRequestLogTerminal, inspectResponseLogJson, noteProviderAttemptSend, noteUpstreamRequestId, type RequestLogContext, type RequestLogEntry } from "../../src/server/request-log";
 
 function context(): RequestLogContext {
   return { model: "fixture-model", provider: "openai" };
@@ -1109,5 +1109,46 @@ describe("prompt_cache.outcome line", () => {
     expect(outcome).toHaveLength(1);
     expect(outcome[0]).toContain("provider_name=openai provider_id=openai namespace=openai requested_model=fixture-model served_model=fixture-model");
     expect(outcome[0]).toContain("telemetry=reported cache_eligible=true prompt_tokens=2000 cached_tokens=1536");
+  });
+  /** One request whose parsed response carries an explicit cached_tokens of 0, finalized by `answeredBy`. */
+  function coldTurnLine(sends: Array<{ name: string; provider: Parameters<typeof noteProviderAttemptSend>[2] }>): string {
+    const log = context();
+    log.usageWireParsed = true;
+    log.usage = { inputTokens: 166045, outputTokens: 1, cachedInputTokens: 0 };
+    for (const send of sends) {
+      log.provider = send.name;
+      log.providerAdapter = send.provider.adapter;
+      noteProviderAttemptSend(log, send.name, send.provider, 166045);
+    }
+    const home = mkdtempSync(join(tmpdir(), "ocx-cold-cache-"));
+    const previousHome = process.env.OPENCODEX_HOME;
+    process.env.OPENCODEX_HOME = home;
+    const info = console.info; const lines: string[] = [];
+    console.info = ((line: string) => { lines.push(String(line)); }) as typeof console.info;
+    try { addFinalRequestLog("req-cold-1", Date.now(), log, 200, undefined, () => {}); }
+    finally {
+      console.info = info;
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = previousHome;
+      removeTreeWithRetry(home);
+    }
+    const outcome = lines.filter(line => line.includes("event=prompt_cache.outcome"));
+    expect(outcome).toHaveLength(1);
+    return outcome[0]!;
+  }
+  const relay = { adapter: "openai-responses", baseUrl: "https://lb.example/backend-api/codex", authMode: "key" as const, reportsNativeCache: true };
+  const thirdParty = { adapter: "anthropic", baseUrl: "https://api.xiaomimimo.com/anthropic", authMode: "key" as const };
+  test("a declared relay's explicit cached 0 is a measured miss that stays in the denominator", () => {
+    expect(coldTurnLine([{ name: "codex-lb", provider: relay }]))
+      .toContain("telemetry=reported cache_eligible=true prompt_tokens=166045 cached_tokens=0");
+  });
+  test("an undeclared third-party host's default cached 0 stays unavailable", () => {
+    expect(coldTurnLine([{ name: "xiaomi", provider: thirdParty }]))
+      .toContain("telemetry=unavailable cache_eligible=false");
+  });
+  test("the declaration follows the provider that answered across a fallback binding", () => {
+    expect(coldTurnLine([{ name: "xiaomi", provider: thirdParty }, { name: "codex-lb", provider: relay }]))
+      .toContain("telemetry=reported cache_eligible=true");
+    expect(coldTurnLine([{ name: "codex-lb", provider: relay }, { name: "xiaomi", provider: thirdParty }]))
+      .toContain("telemetry=unavailable cache_eligible=false");
   });
 });

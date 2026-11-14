@@ -151,10 +151,10 @@ export interface RequestLogContext extends UpstreamErrorDiagnostics {
    */
   usageWireParsed?: boolean;
   /**
-   * Configured name of the codex-lb relay serving this request (`isCodexLbProvider`). Honoured only
-   * while it equals `provider`, so a failover to another provider cannot inherit it.
+   * Configured name of the provider that declared `reportsNativeCache` on the latest physical send
+   * (`noteProviderAttemptSend`), so a retry or fallback binding follows the provider that answered.
    */
-  cacheRelayProvider?: string;
+  nativeCacheProvider?: string;
   /**
    * Every affinity reason recorded for this request, in order. `affinityReason` keeps the final
    * one for the existing row shape; a request that moved twice has two causes and losing the
@@ -1676,7 +1676,7 @@ function writeFinalRequestLog(
     provider: isCombo ? "combo" : logCtx.provider,
     requestedModel: logCtx.requestedModel ?? logCtx.model,
     servedModel: logCtx.model,
-    nativeCacheWire: providerReportsNativeCache(logCtx.provider, logCtx.providerAdapter, logCtx.cacheRelayProvider),
+    nativeCacheWire: providerReportsNativeCache(logCtx.provider, logCtx.providerAdapter, logCtx.nativeCacheProvider),
     usage: answeringUsage,
     usageStatus,
     wireParsed: logCtx.usageWireParsed === true,
@@ -1847,6 +1847,8 @@ export function noteProviderAttemptSend(
 ): void {
   const attempt = logCtx.activeAttempt;
   const previous = attempt?.accountLogLabel;
+  if (provider.reportsNativeCache === true) logCtx.nativeCacheProvider = providerName;
+  else delete logCtx.nativeCacheProvider;
   stampApiKeyAccountLabel(logCtx, providerName, provider);
   const next = logCtx.accountLogLabel;
   if (attempt && usesApiKeyAccount(provider)) keyUsageOwners.add(attempt);

@@ -328,6 +328,7 @@ export const providerConfigSchema = z.object({
   anthropicAccountPool: anthropicAccountPoolSchema,
   // Raw diagnostics/writes reject malformed provenance; tolerant loads preserve the custom row.
   anthropicOAuthInstance: z.literal("anthropic2").optional().catch(undefined),
+  reportsNativeCache: z.boolean().optional(),
   modelCapabilities: modelCapabilitiesSchema.optional(),
   inputModalities: z.unknown().superRefine((value, ctx) => {
     const error = providerInputModalitiesConfigError(value);

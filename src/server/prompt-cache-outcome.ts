@@ -45,12 +45,12 @@ export function providerFamily(provider: string): string {
 export function providerReportsNativeCache(
   provider: string,
   adapter: string | undefined,
-  /** The configured provider this request stamped as a codex-lb relay (`isCodexLbProvider`), if any. */
-  relayProvider?: string,
+  /** Configured provider that declared `reportsNativeCache` on the physical send that answered, if any. */
+  declaredProvider?: string,
 ): boolean {
-  // codex-lb relays the ChatGPT backend and always sends a real cache counter, but it is an
-  // operator-named config row, not a registry entry, so it is recognised by its config shape.
-  if (relayProvider !== undefined && relayProvider === provider && adapter === "openai-responses") return true;
+  // An operator-declared host (codex-lb) sends a real counter, so its 0 is a measured miss. The
+  // declaration binds to the provider that answered; a failover to another provider cannot inherit it.
+  if (declaredProvider !== undefined && providerFamily(declaredProvider) === providerFamily(provider)) return true;
   const entry = getProviderRegistryEntry(providerFamily(provider));
   return entry?.reportsNativeCache === true && entry.adapter === adapter;
 }
