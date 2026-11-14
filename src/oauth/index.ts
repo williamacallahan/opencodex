@@ -64,6 +64,7 @@ import { providerModelsUrl, resolveProviderModelDiscoveryUrl } from "../provider
 import { resolveProviderTransport } from "../providers/xai-transport";
 import { detectGrokCliToken, hasComparableGrokIdentity, isSameGrokIdentity, shouldAdoptGrokGeneration } from "./local-token-detect";
 import { logOAuthEvent } from "./log";
+import { sanitizeLogMetadataString } from "../lib/redact";
 import { MAX_OAUTH_TOKEN_REFRESH_WAITERS, retireSettledOAuthRefreshFlight, tokenRefreshWaiters, type OAuthRefreshFlightEvidence } from "./refresh-flight-retirement";
 export { MAX_OAUTH_TOKEN_REFRESH_WAITERS };
 import { captureConfigGeneration, sweepExpiredOnWrite } from "../lib/state-store-sweeper";
@@ -765,11 +766,14 @@ function terminal(error:unknown):boolean{
   return isTerminalRefreshError(error);
 }
 
-/** Identifies a refresh failure without its message, which can carry the provider's description. */
+/**
+ * Identifies a refresh failure without its message, which can carry the provider's description.
+ * The token endpoint chooses `oauthError`, so every string is bounded to one log line.
+ */
 function refreshFailureFields(error: unknown): { httpStatus?: number; oauthError?: string; errorName?: string; errno?: string } {
-  if (error instanceof AnthropicTokenError) return { httpStatus: error.httpStatus, oauthError: error.oauthError };
-  const errno = typeof error === "object" && error !== null && "code" in error ? String(error.code) : undefined;
-  return { errorName: error instanceof Error ? error.name : typeof error, errno };
+  if (error instanceof AnthropicTokenError) return { httpStatus: error.httpStatus, oauthError: sanitizeLogMetadataString(error.oauthError) };
+  const errno = typeof error === "object" && error !== null && "code" in error ? sanitizeLogMetadataString(String(error.code)) : undefined;
+  return { errorName: sanitizeLogMetadataString(error instanceof Error ? error.name : typeof error), errno };
 }
 
 /**
@@ -923,12 +927,12 @@ export async function refreshAnthropicAccountWithLock(
       }
     }
     if (pendingIntent?.uncertain || pendingIntent?.generation === generation) {
-      const marked = await markAccountNeedsReauthIfGeneration(provider, accountId, generation, writerGeneration);
       // Logged on the transition only: every later attempt reaches this branch again.
-      if (marked && !account.needsReauth) {
+      if (await markAccountNeedsReauthIfGeneration(provider, accountId, generation, writerGeneration) === "marked") {
+        const earlierAttempt = new Date(pendingIntent.createdAt);
         logOAuthEvent("level=warn OAuth refresh refused; account needs reauth", {
           provider, accountId, cause: "earlier_attempt_outcome_unknown",
-          earlierAttemptAt: pendingIntent.createdAt > 0 ? new Date(pendingIntent.createdAt).toISOString() : undefined,
+          earlierAttemptAt: pendingIntent.createdAt > 0 && Number.isFinite(earlierAttempt.getTime()) ? earlierAttempt.toISOString() : undefined,
         });
       }
       throw new OAuthLoginRequiredError(provider);
@@ -995,7 +999,7 @@ export async function refreshAnthropicAccountWithLock(
         });
         throw error;
       }
-      if (await markAccountNeedsReauthIfGeneration(provider, accountId, generation, writerGeneration)) {
+      if (await markAccountNeedsReauthIfGeneration(provider, accountId, generation, writerGeneration) === "marked") {
         logOAuthEvent("level=warn OAuth refresh rejected; account needs reauth", {
           provider, accountId, cause: "refresh_rejected", ...refreshFailureFields(error),
         });

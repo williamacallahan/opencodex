@@ -1,4 +1,5 @@
 import { wasAccountAutoPaused } from "./account-auto-pause";
+import { logOAuthEvent } from "./log";
 import { anthropicModelFamily } from "./anthropic-model-quota";
 /** Narrow pre-output account recovery, fenced to the bearer that physically sent the turn. */
 import { readBoundedResponseBody, type BoundedBodyOptions } from "../lib/bounded-body";
@@ -140,7 +141,7 @@ export async function rotateAnthropicAccountOnResponseForInstance(
     if (!verdict) { verdict = isRevokedOAuthToken(response, options.signal, options.decodeBody); verdicts.set(response, verdict); }
     if (!await verdict || options.signal?.aborted || !ownedCurrent()) return null;
     options.currentDecision?.();
-    let marked: boolean;
+    let marked: false | "marked" | "already";
     try {
       marked = await markAccountNeedsReauthIfGeneration(instance, sent.accountId, sent.generation, undefined, undefined, store => {
         const row = store[instance]?.accounts.find(account => account.id === sent.accountId);
@@ -149,6 +150,11 @@ export async function rotateAnthropicAccountOnResponseForInstance(
           && (!sent.checkProviderUuid || row?.credential.accountId === sent.providerAccountUuid);
       });
     } catch { return null; }
+    if (marked === "marked") {
+      logOAuthEvent("level=warn Anthropic request refused; account needs reauth", {
+        provider: instance, accountId: sent.accountId, cause: "access_token_revoked", httpStatus: 401,
+      });
+    }
     if (!marked || configuredAnthropicInstance(options.config, instance) !== instance
       || !anthropicPhysicalSendOwnershipIsCurrent(sent)) return null;
     routing.clearAnthropicSessionAffinityForAccount(sent.accountId);

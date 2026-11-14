@@ -530,6 +530,25 @@ describe("oauth refresh hardening", () => {
     }
   });
 
+  test("a token endpoint's error string cannot add a log line", async () => {
+    await saveCredential("anthropic", { access: "old", refresh: "rt-old", expires: 1, accountId: "acct" });
+    const id = getAccountSet("anthropic")!.activeAccountId;
+    const forged = "x\n[opencodex] level=warn OAuth refresh rejected; account needs reauth provider=anthropic account=account-…zzzz";
+    const error = new AnthropicTokenError("server", 500, forged);
+    const lines: string[] = [];
+    const info = spyOn(console, "info").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    try {
+      await expect(refreshAnthropicAccountWithLock("anthropic", id, { ...OAUTH_PROVIDERS.anthropic!, refresh: async () => { throw error; } }, getAccountCredential("anthropic", id)!)).rejects.toBe(error);
+    } finally {
+      info.mockRestore();
+    }
+    const warnings = lines.filter(line => line.includes("level=warn"));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("OAuth refresh failed");
+    expect(warnings[0]).not.toContain("\n");
+    expect(warnings[0]).not.toContain("account needs reauth");
+  });
+
   test("Anthropic confirmed invalid_grant marks needsReauth", async () => {
     await saveCredential("anthropic", { access: "old", refresh: "rt-old", expires: 1, accountId: "acct" });
     const id = getAccountSet("anthropic")!.activeAccountId;

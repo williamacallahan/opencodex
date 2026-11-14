@@ -50,6 +50,20 @@ for (const instance of instances) {
       expect(await response.json()).toEqual(payload);
     });
   }
+  test(instance + ": a revoked token logs the account's reauth transition once", async () => {
+    const lines: string[] = [];
+    const info = spyOn(console, "info").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    try {
+      const { response } = await bound(instance);
+      await rotate(instance, response);
+    } finally {
+      info.mockRestore();
+    }
+    expect(lines.filter(line => line.includes("account needs reauth"))).toEqual([
+      expect.stringContaining(`Anthropic request refused; account needs reauth provider=${instance} account=account-…`),
+    ]);
+    expect(lines.join("\n")).toContain("cause=access_token_revoked httpStatus=401");
+  });
   test(instance + ": no eligible sibling still marks reauthentication", async () => {
     await f.store.setAccountPaused(instance, f.ids[1], true);
     const { response } = await bound(instance);
