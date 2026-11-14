@@ -3,6 +3,7 @@ import { normalizeRoutedAgentMessages } from "../routed-agent-messages";
 import { frameCompactionHistory } from "../../responses/compaction-history-framing";
 import { nameRoutedIdentity, repairIdentityInResponsesBody, stripRoutedIdentity } from "../identity";
 import { stripBracketedModelSuffix } from "../openai-chat";
+import { resolveSamplingDefaults } from "../sampling-defaults";
 import { isOpenCodeGoResponsesUrl, isXaiResponsesUrl, promoteResponsesAdditionalTools } from "../opencode-go-additional-tools";
 import { isXaiResponsesDestination } from "../../providers/xai-transport";
 import { applyGithubCopilotContextTier } from "../../providers/github-copilot-context";
@@ -258,6 +259,19 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       }
       if (adjacentToolResults) {
         outBody = normalizeResponsesToolResultAdjacency(outBody);
+      }
+      if (isPlainObject(outBody)) {
+        const model = typeof outBody.model === "string" ? outBody.model : parsed.modelId;
+        const wireModel = provider.modelSuffixBracketStrip ? stripBracketedModelSuffix(model) : model;
+        const sampling = resolveSamplingDefaults(provider, wireModel, {
+          temperature: typeof outBody.temperature === "number" ? outBody.temperature : undefined,
+          topP: typeof outBody.top_p === "number" ? outBody.top_p : undefined,
+        }, model);
+        outBody = {
+          ...outBody,
+          ...(outBody.temperature == null && sampling.temperature !== undefined ? { temperature: sampling.temperature } : {}),
+          ...(outBody.top_p == null && sampling.topP !== undefined ? { top_p: sampling.topP } : {}),
+        };
       }
       const hostedToolSubstitutions: NonNullable<AdapterRequest["hostedToolSubstitutions"]>[number][] = [];
       if (forward) {

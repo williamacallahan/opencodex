@@ -1,12 +1,31 @@
 import { describe, expect, test } from "bun:test";
 import { createResponsesPassthroughAdapter as createResponsesPassthroughAdapterProduction } from "../../src/adapters/openai-responses";
 import { selectForwardHeaders } from "../../src/server/ws-bridge";
+import type { OcxProviderConfig } from "../../src/types";
 import { withTestTranslatorBudget } from "../helpers/translator-budget";
 
 const createResponsesPassthroughAdapter = (...args: Parameters<typeof createResponsesPassthroughAdapterProduction>) =>
   withTestTranslatorBudget(createResponsesPassthroughAdapterProduction(...args));
 
 const forwardProvider = { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" as const };
+
+describe("Responses sampling defaults", () => {
+  test("fills missing values without replacing explicit sampling and preserves canonical stripping", () => {
+    const model = "deepseek-v4-1-flash-1017";
+    const defaults = { [model]: { temperature: 1, topP: 1 } };
+    const build = (provider: OcxProviderConfig, sampling: Record<string, number> = {}) => {
+      const adapter = createResponsesPassthroughAdapter(provider);
+      const request = adapter.buildRequest({ modelId: model, stream: false, context: { messages: [] }, options: {},
+        _rawBody: { model, input: "hi", ...sampling } }, { headers: new Headers() });
+      return JSON.parse(String(request.body));
+    };
+    const provider = { ...forwardProvider, authMode: undefined, baseUrl: "https://relay.example/v1", modelSamplingDefaults: defaults };
+    expect(build(provider)).toMatchObject({ temperature: 1, top_p: 1 });
+    expect(build(provider, { temperature: 0, top_p: 0.2 })).toMatchObject({ temperature: 0, top_p: 0.2 });
+    expect(build({ ...forwardProvider, modelSamplingDefaults: defaults })).not.toHaveProperty("temperature");
+    expect(build({ ...forwardProvider, modelSamplingDefaults: defaults })).not.toHaveProperty("top_p");
+  });
+});
 
 describe("passthrough token override", () => {
   test("buildRequest uses original auth when no override", () => {
