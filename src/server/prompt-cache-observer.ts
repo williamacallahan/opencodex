@@ -3,6 +3,7 @@ import { isRec } from "../claude/inbound-records";
 import { didRunOptionalShutdownHooks, registerOptionalShutdownHook } from "../lib/optional-shutdown-hooks";
 import { spawnWorker } from "../lib/worker-embed";
 import { hasUpstreamRewriters } from "../plugins/upstream-hooks";
+import type { NativeMessagesFinishLog } from "./messages-native";
 import type { NativeMessagesRequest } from "./messages-native-integrity";
 import { credentialDomainFor } from "../protocols/opaque-state";
 import { classifyCredential } from "../routing/identity-domains";
@@ -16,7 +17,7 @@ import type { RequestLogContext } from "./request-log";
 
 export interface PrefixWorkerRequest { id: number; bytes: Uint8Array; encoding: string | null }
 export type PrefixWorkerReply = { id: number; prefix: PrefixWalk } | { id: number; failed: true };
-type ObservationReason = "unsupported_transport" | "count_tokens" | "local_answer" | "combo_parent"
+type ObservationReason = "unsupported_transport" | "count_tokens" | "local_answer" | "combo_parent" | "combo_child"
   | "hidden_account" | "worker_failed" | "request_failed" | "model_mismatch" | "send_unavailable";
 export type NativeCacheReuse = Omit<ReuseClassification, "reuse_reason"> & {
   reuse_reason: ReuseClassification["reuse_reason"] | ObservationReason;
@@ -28,6 +29,7 @@ interface NativeSendOptions {
   provider: OcxProviderConfig;
   account?: NativeOAuthBinding["snapshot"];
   countTokens?: boolean;
+  comboChild?: boolean;
   sessionKey?: string | null;
 }
 interface ObservedSend {
@@ -69,6 +71,7 @@ class NativeCacheObserver {
     if (previous) this.release(previous);
     const send: ObservedSend = { id: ++this.nextId, provider: logCtx.provider, model: logCtx.model };
     this.bindings.set(logCtx, send);
+    if (options.comboChild) { send.failure = "combo_child"; return; }
     const url = new URL(options.wire.url);
     const body = options.wire.body;
     if (options.countTokens || url.pathname.endsWith("/count_tokens")) { send.failure = "count_tokens"; return; }
@@ -161,15 +164,16 @@ class NativeCacheObserver {
     const excluded = input.comboParent ? "combo_parent" : input.locallyAnswered ? "local_answer" : !input.succeeded ? "request_failed" : undefined;
     const reuse = excluded ? this.unknown(excluded) : send?.outcome ?? (send?.failure ? this.unknown(send.failure)
       : send?.ticket ? this.ledger.classify(send.ticket) : this.unknown(logCtx?.nativeCacheProvider !== undefined && logCtx.nativeCacheProvider === logCtx.sentProvider ? "hidden_account" : "unsupported_transport"));
-    if (send) {
-      send.outcome = reuse;
-      send.finished = true;
-      // A short response may end before hashing. Emit unknown now, but let the confirmed
-      // prefill finish warming the ledger for later sends without delaying this response.
-      if (send.postedAt === undefined) this.release(send);
-    }
+    if (send) send.outcome = reuse;
     return { reuse, ...(send?.usage && !excluded ? { physical: { provider: send.provider, servedModel: send.model,
       usage: send.usage, usageStatus: "reported", wireParsed: true, nativeCacheWire: true } } : {}) };
+  }
+  complete(logCtx: RequestLogContext): void {
+    const send = this.bindings.get(logCtx);
+    if (!send) return;
+    send.finished = true;
+    // Only an already-confirmed hashing job may outlive the native send's finish.
+    if (send.postedAt === undefined) this.release(send);
   }
   close(): void {
     this.detachShutdown();
@@ -186,6 +190,12 @@ const observations = () => observer ??= new NativeCacheObserver();
 /** Strict commit runs after final integrity checks; mutable plugin paths remain explicitly unknown. */
 export function observeNativePromptCacheSend(logCtx: RequestLogContext, options: NativeSendOptions): void {
   observations().capture(logCtx, options);
+}
+export function observeNativePromptCacheFinish(logCtx: RequestLogContext, finish: NativeMessagesFinishLog): NativeMessagesFinishLog {
+  return (status, message, meta) => {
+    try { finish(status, message, meta); }
+    finally { observer?.complete(logCtx); }
+  };
 }
 export function confirmNativePromptCachePrefill(logCtx: RequestLogContext, message: unknown): void {
   observer?.confirm(logCtx, message);

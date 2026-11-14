@@ -195,6 +195,26 @@ describe("native prompt cache observation paths", () => {
     expect(later.line).toContain("expected_cached_tokens=2048 lost_cached_tokens=0");
   });
 
+  test("a real buffered native combo child creates no cache observations", async () => {
+    config.claudeCode!.strictPassthrough = false;
+    config.combos = { "cache-child": { strategy: "failover", targets: [{ provider: "anthropic", model }] } };
+    saveConfig(config);
+    const result = await send(JSON.stringify({ ...requestBody(), model: "combo/cache-child" }), "/v1/messages");
+    expect(received.length).toBeGreaterThan(0);
+    expect(result.line).toContain("reuse_reason=combo_parent");
+    expect(retainedObservations()).toBe(0);
+  });
+
+  test("native completion without a final-log owner releases a failed send", async () => {
+    respond = () => Response.json({ type: "error", error: { type: "invalid_request_error", message: "synthetic rejection" } }, { status: 400 });
+    const response = await handleClaudeMessages(new Request("http://localhost/strict/v1/messages", {
+      method: "POST", body: JSON.stringify(requestBody()), headers: { "content-type": "application/json" },
+    }), config, { model: "", provider: "" });
+    await response.text();
+    expect(response.status).toBe(400);
+    expect(retainedObservations()).toBe(0);
+  });
+
   test("count-token requests cannot create cache entries", async () => {
     respond = () => Response.json({ input_tokens: 731 });
     const counted = await send(JSON.stringify(requestBody()), "/strict/v1/messages/count_tokens");

@@ -2,7 +2,7 @@ import { MessagesSseFrameContext, messagesSseEchoRenamedError, messagesSseFrameH
 import { createMessagesSseErrorFilter } from "./messages-sse-error-filter";
 import type { MessagesFailureVerdictSink } from "../claude/failure-verdict";
 import { isRec, type Rec } from "../claude/inbound-records";
-import { observeNativePromptCacheSend, confirmNativePromptCachePrefill } from "./prompt-cache-observer";
+import { observeNativePromptCacheSend, confirmNativePromptCachePrefill, observeNativePromptCacheFinish } from "./prompt-cache-observer";
 import { upstreamErrorIsLocal } from "./request-log-failure-detail";
 import { boundedMessagesDisplayCount, ownedDisabledModelResponse, ownedAnthropicErrorPayload, ownedAnthropicErrorResponse, messagesOverflowPresentation, messagesRelayedOverflowPresentation } from "../lib/messages-error-body";
 import { attachComboFailureEvidence, isProxyError, markProxyError } from "../lib/client-error-body";
@@ -434,12 +434,12 @@ export function handleNativeMessages(options: HandleNativeMessagesOptions): Prom
 
 /** Execute on the ingress or combo's existing attempt, never opening a second final-row owner. */
 async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemptHandle: InferenceAttempt): Promise<Response> {
-  const { req, config, logCtx, logIds, route, body, requestedModel, translatorBudget, finishLog } = options;
+  const { req, config, logCtx, logIds, route, body, requestedModel, translatorBudget, finishLog: finishNative } = options;
+  const finishLog = observeNativePromptCacheFinish(logCtx, finishNative);
   const onFirstOutput = options.onFirstOutput ?? (logIds ? () => recordFirstOutput(logCtx, logIds.start) : undefined);
   const nativeInstance = configuredAnthropicInstance(config, route.providerName);
   const requestedStream = body.stream === true;
-  const clientDeclaredEmptyToolCatalog = Array.isArray(body.tools) && body.tools.length === 0;
-  const declaredInlineTools = clientDeclaredEmptyToolCatalog ? nativeMessagesInlineToolNames(body) : undefined;
+  const declaredInlineTools = Array.isArray(body.tools) && body.tools.length === 0 ? nativeMessagesInlineToolNames(body) : undefined;
   logCtx.inboundProtocol = "messages";
   logCtx.model = route.modelId;
   logCtx.provider = route.providerName;
@@ -810,7 +810,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
               }
               noteProviderAttemptSend(logCtx, route.providerName, activeProvider, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
               observeNativePromptCacheSend(logCtx, { wire, provider: activeProvider, account: snapshot, strict: !!options.integrity,
-                bodyBytes: retainedRequestBytes, countTokens: options.integrity?.countTokens, sessionKey: options.sessionKey });
+                bodyBytes: retainedRequestBytes, countTokens: options.integrity?.countTokens, sessionKey: options.sessionKey, comboChild: options.sendBudget !== undefined });
               physicalSendsUsed++;
               sent = true;
             };
@@ -1133,7 +1133,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
     const frames = new MessagesSseFrameContext();
     const echoed = echoRequestedModel(renamed, options.echoModel ?? requestedModel, frames);
     let toolRefusal: string | undefined;
-    const source = clientDeclaredEmptyToolCatalog
+    const source = declaredInlineTools !== undefined
       ? guardNativeMessagesEmptyToolCatalog(echoed, translatorBudget, message => {
         toolRefusal = message;
         logCtx.errorCode = UNDECLARED_TOOL_CALL_ERROR_CODE;
@@ -1293,7 +1293,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
   const message = activeRequest.oauthToolNames
     ? restoreOAuthToolNamesInMessage(parsedMessage, activeRequest.oauthToolNames)
     : parsedMessage;
-  const undeclaredTool = clientDeclaredEmptyToolCatalog ? nativeMessagesClientToolName(message, declaredInlineTools) : undefined;
+  const undeclaredTool = declaredInlineTools !== undefined ? nativeMessagesClientToolName(message, declaredInlineTools) : undefined;
   if (undeclaredTool !== undefined) {
     logCtx.errorCode = UNDECLARED_TOOL_CALL_ERROR_CODE;
     return fail(502, undeclaredToolCallMessage(), "api_error", UNDECLARED_TOOL_CALL_ERROR_CODE);
