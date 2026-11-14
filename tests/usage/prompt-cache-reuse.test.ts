@@ -298,6 +298,19 @@ describe("prompt cache reuse evidence", () => {
     outcome(ledger, stillWarm, "reuse", "same_account_anchor");
   });
 
+  test.each([true, false])("capacity must not hide a current warm-prefix loss (healthy read: %s)", healthy => {
+    const { ledger, fill, send, ready } = fixture();
+    const other = prompt("other");
+    for (let index = 1; index < promptCacheReuseLimits.records; index++) fill(other);
+    fill();
+    const current = send();
+    ready(current, prompt(), healthy ? 1000 : 0, healthy ? 0 : 1000);
+    expect(outcome(ledger, current, "reuse", "same_account_anchor")).toMatchObject({
+      expected_cached_tokens: 1000, lost_cached_tokens: healthy ? 0 : 1000,
+    });
+    expect(ledger.coverage().records).toBe(16384);
+  });
+
   test("the ninth account evicts evidence instead of retaining an unbounded account roster", () => {
     const { ledger, fill } = fixture();
     const prefix = prompt();

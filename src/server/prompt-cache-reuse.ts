@@ -49,6 +49,7 @@ interface PendingSend {
   prefill?: Prefill;
   prefix?: Extract<PrefixWalk, { status: "supported" }>;
   failure?: "unsupported_shape" | "worker_backlog";
+  classification?: ReuseClassification;
 }
 interface Anchor {
   id: number;
@@ -223,6 +224,12 @@ export class PromptCacheReuseLedger {
       status: "supported", positions: prefix.positions.map(position => Object.freeze({ ...position })),
       breakpoints: prefix.breakpoints.map(point => Object.freeze({ ...point })),
     };
+    // A send's own write may evict history. Preserve its resolved expectation first;
+    // unknown observations may still improve when an earlier worker result arrives.
+    const classification = this.classify(send);
+    if (classification.reuse_expectation !== "unknown" || classification.reuse_reason === "history_unavailable") {
+      pending.classification = classification;
+    }
     this.#commit(send, pending.prefix, pending.prefill);
     return true;
   }
@@ -295,6 +302,7 @@ export class PromptCacheReuseLedger {
     if (send.rejected) return this.#result(send, "unknown", send.rejected);
     const pending = this.#pending.get(send);
     if (!pending) return this.#result(send, "unknown", "send_unavailable");
+    if (pending.classification) return pending.classification;
     if (!pending.prefill) return this.#result(send, "unknown", "prefill_unconfirmed");
     if (pending.failure) return this.#result(send, "unknown", pending.failure);
     if (!pending.prefix) return this.#result(send, "unknown", "hash_unavailable");
