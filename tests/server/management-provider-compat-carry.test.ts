@@ -25,6 +25,7 @@ import { parseRequest } from "../../src/responses/parser";
 import { clearReasoningReplayCacheForTests } from "../../src/responses/reasoning-replay-cache";
 import { rateLimitRetryPolicyFor, resetReplayPolicyFor, transientRetryPolicyFor } from "../../src/providers/key-failover";
 import { routeModel } from "../../src/router";
+import { providerReportsNativeCache } from "../../src/server/prompt-cache-outcome";
 import { startServer } from "../../src/server";
 import {
   PROVIDER_COMPAT_CARRY_FIELDS,
@@ -215,6 +216,11 @@ const CASES: Record<ProviderCompatCarryField, CarryCase> = {
     // The Anthropic adapter's server-tool plan for this (non-first-party) gateway.
     probe: provider => planAnthropicServerTools({ ...provider, adapter: "anthropic" },
       [{ type: "advisor_20260301", name: "advisor", model: "claude-opus-4-8" }], undefined, new Set(), false).declared,
+  },
+  reportsNativeCache: {
+    seed: { reportsNativeCache: true },
+    // The request log counts a declared host's cached 0 as a measured miss; an undeclared one is unavailable.
+    probe: provider => providerReportsNativeCache("relay", "openai-chat", provider.reportsNativeCache ? "relay" : undefined),
   },
 };
 

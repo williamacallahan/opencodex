@@ -66,6 +66,9 @@ export const PROVIDER_COMPAT_CARRY_FIELDS = [
   // Whether this gateway runs Claude Code's Advisor server tool (#8448): a fact about the upstream,
   // so a move to another gateway must not keep forwarding it there.
   "forwardAdvisorTool",
+  // Whether this host sends a real cache counter (codex-lb), so its 0 is a measured miss. The form
+  // cannot send it, and a save that dropped it turned the host's cache reporting back to unavailable.
+  "reportsNativeCache",
   ...RETRY_POLICY_FIELDS,
 ] as const satisfies readonly (keyof OcxProviderConfig)[];
 
@@ -197,6 +200,7 @@ export function providerCompatFieldConfigError(provider: Record<string, unknown>
   const promoteAdditionalTools = provider.promoteAdditionalTools;
   if (promoteAdditionalTools !== undefined && typeof promoteAdditionalTools !== "boolean") return "promoteAdditionalTools must be a boolean";
   if (provider.forwardAdvisorTool !== undefined && typeof provider.forwardAdvisorTool !== "boolean") return "forwardAdvisorTool must be a boolean";
+  if (provider.reportsNativeCache !== undefined && typeof provider.reportsNativeCache !== "boolean") return "reportsNativeCache must be a boolean";
   const wire = provider.reasoningWireFormat;
   if (wire !== undefined && !PROVIDER_REASONING_WIRE_FORMATS.includes(wire as never)) {
     return `reasoningWireFormat must be one of: ${PROVIDER_REASONING_WIRE_FORMATS.join(", ")}`;
@@ -222,6 +226,7 @@ const PROVIDER_PATCH_FIELDS: ReadonlySet<string> = new Set([
   "promoteAdditionalTools",
   "inferContextWindow",
   "reasoningWireFormat",
+  "reportsNativeCache",
   ...RETRY_POLICY_FIELDS,
 ]);
 
@@ -304,6 +309,13 @@ export function applyProviderCompatPatchFields(
     if (value === null) delete next.forwardAdvisorTool;
     else if (typeof value === "boolean") next.forwardAdvisorTool = value;
     else return { error: "forwardAdvisorTool must be a boolean" };
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "reportsNativeCache")) {
+    const value = rawBody.reportsNativeCache;
+    if (value === null) delete next.reportsNativeCache;
+    else if (typeof value === "boolean") next.reportsNativeCache = value;
+    else return { error: "reportsNativeCache must be a boolean or null" };
     touched = true;
   }
   if (Object.hasOwn(rawBody, "inferContextWindow")) {

@@ -37,21 +37,38 @@ export function providerFamily(provider: string): string {
 }
 
 /**
+ * A log label belongs to a configured provider when the label is the configured name, the same
+ * family, or an account label the pool appended to it. Hand-written account namespaces
+ * (`openai-work`) and collision-suffixed ones (`openai-main-2`) are not stripped by the label
+ * owner, so the configured name is what ties them back to the provider that sent.
+ */
+function answeredBy(logLabel: string, configuredProvider: string): boolean {
+  return logLabel === configuredProvider || logLabel.startsWith(`${configuredProvider}-`)
+    || providerFamily(logLabel) === providerFamily(configuredProvider);
+}
+
+/**
  * Whether this provider's cache counter is first-party: the registry marks the first-party hosts,
  * and the adapter must still be the one that registry entry serves. Adapter name alone is not
  * enough, because third-party hosts (z.ai, Xiaomi, Cloudflare AI Gateway, AgentRouter) also run
  * the `anthropic` and `openai-responses` adapters and send a default `cached_tokens: 0`.
+ *
+ * The registry is read by the configured provider name the send recorded, not by the
+ * account-qualified log label, which a namespace can make unrecognizable.
  */
 export function providerReportsNativeCache(
   provider: string,
   adapter: string | undefined,
   /** Configured provider that declared `reportsNativeCache` on the physical send that answered, if any. */
   declaredProvider?: string,
+  /** Configured provider name of the physical send that answered, when the log label may be account-qualified. */
+  sentProvider?: string,
 ): boolean {
   // An operator-declared host (codex-lb) sends a real counter, so its 0 is a measured miss. The
   // declaration binds to the provider that answered; a failover to another provider cannot inherit it.
-  if (declaredProvider !== undefined && providerFamily(declaredProvider) === providerFamily(provider)) return true;
-  const entry = getProviderRegistryEntry(providerFamily(provider));
+  if (declaredProvider !== undefined && answeredBy(provider, declaredProvider)) return true;
+  const configured = sentProvider !== undefined && answeredBy(provider, sentProvider) ? sentProvider : provider;
+  const entry = getProviderRegistryEntry(providerFamily(configured));
   return entry?.reportsNativeCache === true && entry.adapter === adapter;
 }
 
