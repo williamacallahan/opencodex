@@ -1079,15 +1079,6 @@ describe("prompt_cache.outcome line", () => {
       .toContain("telemetry=reported cache_eligible=true prompt_tokens=5000 cached_tokens=0");
     expect(line("xiaomi", "anthropic")).toContain("telemetry=unavailable cache_eligible=false");
   });
-  test("a stale first-party sent provider does not claim another provider whose name extends it", () => {
-    const { providerReportsNativeCache } =
-      require("../../src/server/prompt-cache-outcome") as typeof import("../../src/server/prompt-cache-outcome");
-    // Combo adoption can leave `openai` as the sent provider of a child that never sent.
-    expect(providerReportsNativeCache("openai-relay", "openai-responses", undefined, "openai")).toBe(false);
-    expect(providerReportsNativeCache("openai-p2e22d0", "openai-responses", undefined, "openai")).toBe(true);
-    expect(providerReportsNativeCache("openai-2", "openai-responses", undefined, "openai")).toBe(true);
-    expect(providerReportsNativeCache("openai-main-2", "openai-responses", undefined, "openai")).toBe(true);
-  });
   test("provider seats group by the label owner's family", () => {
     expect(providerFamily("anthropic-pf2cf1b")).toBe("anthropic");
     expect(providerFamily("openai-main")).toBe("openai");

@@ -7,6 +7,7 @@ import { executeComboResponses } from "../../src/server/responses/core-combo";
 import type { HandleResponsesOptions } from "../../src/server/responses/core-options";
 import type { RequestLogContext } from "../../src/server/request-log";
 import type { OcxConfig, OcxUsage } from "../../src/types";
+import { providerReportsNativeCache } from "../../src/server/prompt-cache-outcome";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 
 /**
@@ -75,9 +76,11 @@ async function runCombo(
   answer: (child: Child) => Response | Promise<Response>,
   options: Partial<HandleResponsesOptions> = {},
   client?: RequestLogContext["client"],
+  /** Fields the request context already carries when the combo runs (an earlier send of the same request). */
+  seed: Partial<RequestLogContext> = {},
 ): Promise<{ response: Promise<Response>; logCtx: RequestLogContext; children: Child[] }> {
   const children: Child[] = [];
-  const logCtx: RequestLogContext = { model: "", provider: "", client };
+  const logCtx: RequestLogContext = { model: "", provider: "", client, ...seed };
   const req = new Request("http://localhost/v1/responses", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -172,5 +175,43 @@ describe("combo hands the committed child's bridge usage to the request context"
     bind(run.children[0]!, usageOf(0.07));
     expect(run.logCtx.usage).toBeUndefined();
     expect(run.logCtx.usageFromBridge).toBeUndefined();
+  });
+});
+
+describe("combo adoption does not carry an earlier send identity onto a child that never sent", () => {
+  /** An earlier first-party `openai` send left its identity on the request context. */
+  const staleSend = { sentProvider: "openai", nativeCacheProvider: "openai" };
+  /** The answering `openai-relay` target never sent, so it records no send identity of its own. */
+  const relayAnswers = (child: Child): Response => {
+    child.log.provider = "openai-relay";
+    child.log.providerAdapter = "openai-responses";
+    return ok();
+  };
+
+  test("a committed child without a send clears the earlier sentProvider and nativeCacheProvider", async () => {
+    const run = await runCombo(relayAnswers, {}, undefined, staleSend);
+    expect((await run.response).status).toBe(200);
+    expect(run.logCtx.sentProvider).toBeUndefined();
+    expect(run.logCtx.nativeCacheProvider).toBeUndefined();
+    // Without the stale `openai`, the relay's default cached_tokens 0 is not a measured miss.
+    expect(providerReportsNativeCache("openai-relay", "openai-responses", run.logCtx.nativeCacheProvider, run.logCtx.sentProvider))
+      .toBe(false);
+  });
+
+  test("a committed child that did send keeps its own send identity", async () => {
+    const run = await runCombo(child => {
+      child.log.sentProvider = "openai-relay";
+      return ok();
+    }, {}, undefined, staleSend);
+    expect((await run.response).status).toBe(200);
+    expect(run.logCtx.sentProvider).toBe("openai-relay");
+    expect(run.logCtx.nativeCacheProvider).toBeUndefined();
+  });
+
+  test("a failed child without a send clears the earlier send identity on failure adoption", async () => {
+    const run = await runCombo(() => refused(), {}, undefined, staleSend);
+    expect((await run.response).status).toBe(429);
+    expect(run.logCtx.sentProvider).toBeUndefined();
+    expect(run.logCtx.nativeCacheProvider).toBeUndefined();
   });
 });

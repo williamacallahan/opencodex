@@ -158,6 +158,16 @@ export const COMBO_TARGET_BASE_SENDS = CODEX_TEXT_GUARDED_BUDGET_POLICY.baseSend
  * blockedModelRedirects. A target that does not resolve keeps its configured selector; its
  * dispatch fails on its own.
  */
+/**
+ * Adopting a child's log copies only the fields the child set, so a child that never sent would
+ * leave an earlier child's `sentProvider` / `nativeCacheProvider` on the parent and the cache
+ * outcome would credit the wrong provider's counter to the answering one.
+ */
+function dropStaleSendIdentity(logCtx: RequestLogContext, childLog: RequestLogContext): void {
+  if (childLog.sentProvider === undefined) delete logCtx.sentProvider;
+  if (childLog.nativeCacheProvider === undefined) delete logCtx.nativeCacheProvider;
+}
+
 function resolvedComboDestination(config: OcxConfig, target: { provider: string; model: string }): { provider: string; model: string } {
   try {
     const route = routeConcreteModel(config, `${target.provider}/${target.model}`);
@@ -555,6 +565,7 @@ export async function executeComboResponses(
       });
     }
     carryProxyErrorContext(childLog, logCtx);
+    dropStaleSendIdentity(logCtx, childLog);
     Object.assign(logCtx, childLog, {
       client: logCtx.client,
       requestedModel: responseModel,
@@ -1359,6 +1370,7 @@ export async function executeComboResponses(
       noteComboSuccess(comboId, combo, pick.target, pick.writerGeneration);
       settleComboReprobeSuccess(pick);
       carryProxyErrorContext(childLog, logCtx);
+      dropStaleSendIdentity(logCtx, childLog);
       Object.assign(logCtx, childLog, {
         client: logCtx.client,
         requestedModel: responseModel,
