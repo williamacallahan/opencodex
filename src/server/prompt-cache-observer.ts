@@ -3,6 +3,7 @@ import { isRec } from "../claude/inbound-records";
 import { didRunOptionalShutdownHooks, registerOptionalShutdownHook } from "../lib/optional-shutdown-hooks";
 import { spawnWorker } from "../lib/worker-embed";
 import { hasUpstreamRewriters } from "../plugins/upstream-hooks";
+import { isCredentialName } from "../lib/outbound-credential-registry";
 import type { NativeMessagesFinishLog } from "./messages-native";
 import type { NativeMessagesRequest } from "./messages-native-integrity";
 import { credentialDomainFor } from "../protocols/opaque-state";
@@ -18,7 +19,7 @@ import type { RequestLogContext } from "./request-log";
 export interface PrefixWorkerRequest { id: number; bytes: Uint8Array; encoding: string | null }
 export type PrefixWorkerReply = { id: number; prefix: PrefixWalk } | { id: number; failed: true };
 type ObservationReason = "unsupported_transport" | "count_tokens" | "local_answer" | "combo_parent" | "combo_child"
-  | "hidden_account" | "worker_failed" | "request_failed" | "model_mismatch" | "send_unavailable";
+  | "hidden_account" | "worker_failed" | "request_failed" | "model_mismatch" | "send_unavailable" | "credential_override";
 export type NativeCacheReuse = Omit<ReuseClassification, "reuse_reason"> & {
   reuse_reason: ReuseClassification["reuse_reason"] | ObservationReason;
 };
@@ -81,10 +82,11 @@ class NativeCacheObserver {
       send.failure = "unsupported_transport";
       return;
     }
+    if (Object.keys(options.provider.headers ?? {}).some(isCredentialName)) { send.failure = "credential_override"; return; }
     if (this.workerFailed) { send.failure = "worker_failed"; return; }
     const headers = new Headers(options.wire.headers);
     const credential = options.account
-      ? `oauth:${options.account.provider}:${options.account.accountId}`
+      ? `oauth:${options.account.provider}:${options.account.accountId}:${options.account.generation}`
       : options.provider.apiKey ? `key:${digest(options.provider.apiKey)}` : null;
     const cacheDomain = classifyCredential({ provider: "anthropic", credentialId: credential ?? "" }).cacheDomain;
     const conversation = options.sessionKey ?? logCtx.conversationId;

@@ -7,7 +7,10 @@ import { registerUpstreamRewriter } from "../../src/plugins/upstream-hooks";
 import { appOwnedBytesSnapshot } from "../../src/lib/app-owned-memory";
 import { clearKeyCooldowns } from "../../src/providers/key-failover";
 import { clearAnthropicAccountPoolState, forgetAnthropicFailoverQuorum } from "../../src/oauth/anthropic-routing";
-import { getAccountSet, saveCredential, setAccountPaused, setActiveAccount } from "../../src/oauth/store";
+import { getAccountSet, getAccountCredential, saveAccountCredential, saveCredential, setAccountPaused, setActiveAccount } from "../../src/oauth/store";
+import { routeModel } from "../../src/router";
+import { createTranslatorBudget } from "../../src/lib/translator-budget";
+import { handleNativeMessages } from "../../src/server/messages-native";
 import { handleClaudeMessages } from "../../src/server/claude-messages";
 import { beginInferenceAttempt } from "../../src/server/inference/attempt";
 import { stopNativePromptCacheObservations } from "../../src/server/prompt-cache-observer";
@@ -254,6 +257,47 @@ describe("native prompt cache observation paths", () => {
     expect(result.line).toContain("prompt_tokens=2050 cached_tokens=2048 cache_write_tokens=0");
     expect(result.line).toContain("reuse_expectation=reuse reuse_reason=same_account_anchor");
     expect(result.line).toContain("expected_cached_tokens=2048 lost_cached_tokens=0");
+  });
+
+  test("configured authentication headers cannot warm the selected key's identity", async () => {
+    config.claudeCode!.strictPassthrough = false;
+    config.providers["key-fixture"] = { adapter: "anthropic", authMode: "key", apiKey: accessToken("selected"),
+      baseUrl: "https://api.anthropic.com", models: [model] };
+    respond = () => streamingReply();
+    const sendKey = async (headers?: Record<string, string>) => {
+      config.providers["key-fixture"]!.headers = headers;
+      saveConfig(config);
+      const body = requestBody(true);
+      const request = new Request("http://localhost/v1/messages", { method: "POST", body: JSON.stringify(body) });
+      const budget = createTranslatorBudget();
+      try {
+        const response = await handleNativeMessages({ req: request, config, body, requestedModel: model,
+          route: routeModel(config, `key-fixture/${model}`), translatorBudget: budget,
+          logCtx: { model: "", provider: "" }, logIds: { requestId: crypto.randomUUID(), start: Date.now() } });
+        await response.text();
+        expect(response.status).toBe(200);
+        return lines.at(-1)!;
+      } finally { budget.dispose(); }
+    };
+    const overridden = await sendKey({ "X-Api-Key": accessToken("override") });
+    const selected = await sendKey();
+    expect(received.slice(-2).map(request => request.key)).toEqual([accessToken("override"), accessToken("selected")]);
+    expect(selected).toContain("reuse_expectation=unknown");
+    expect(overridden).toContain("reuse_reason=credential_override");
+    expect(overridden).not.toContain("expected_cached_tokens=");
+  });
+
+  test("an OAuth generation replacement cannot borrow the local slot's previous cache", async () => {
+    await warm();
+    const current = getAccountCredential("anthropic", accountIds[1]!);
+    if (!current) throw new Error("missing synthetic credential");
+    const { accountId: omitted, ...identityless } = current;
+    await saveAccountCredential("anthropic", accountIds[1]!, { ...identityless,
+      access: accessToken("replacement"), refresh: "synthetic-replacement-refresh", expires: Date.now() + 3600000 });
+    const result = await send(JSON.stringify(requestBody(true)));
+    expect(received.at(-1)?.key).toBe(authorization("replacement"));
+    expect(result.line).toContain("reuse_expectation=unknown reuse_reason=credential_changed");
+    expect(result.line).not.toContain("expected_cached_tokens=");
   });
 
   test("a mutable native plugin path cannot borrow the selected credential's cache", async () => {
