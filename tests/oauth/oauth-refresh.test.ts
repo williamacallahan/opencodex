@@ -534,8 +534,18 @@ describe("oauth refresh hardening", () => {
     await saveCredential("anthropic", { access: "old", refresh: "rt-old", expires: 1, accountId: "acct" });
     const id = getAccountSet("anthropic")!.activeAccountId;
     const credential = getAccountCredential("anthropic", id)!;
-    await expect(refreshAnthropicAccountWithLock("anthropic", id, { ...OAUTH_PROVIDERS.anthropic!, refresh: async () => { throw new AnthropicTokenError("bad grant", 400, "invalid_grant"); } }, credential)).rejects.toBeInstanceOf(OAuthLoginRequiredError);
+    const lines: string[] = [];
+    const info = spyOn(console, "info").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    try {
+      await expect(refreshAnthropicAccountWithLock("anthropic", id, { ...OAUTH_PROVIDERS.anthropic!, refresh: async () => { throw new AnthropicTokenError("bad grant", 400, "invalid_grant"); } }, credential)).rejects.toBeInstanceOf(OAuthLoginRequiredError);
+    } finally {
+      info.mockRestore();
+    }
     expect(getAccountSet("anthropic")!.accounts[0]!.needsReauth).toBe(true);
+    expect(lines.filter(line => line.includes("level=warn"))).toEqual([
+      expect.stringContaining("OAuth refresh rejected; account needs reauth provider=anthropic account=account-…"),
+    ]);
+    expect(lines.join("\n")).toContain("cause=refresh_rejected httpStatus=400 oauthError=invalid_grant");
   });
 
   /**

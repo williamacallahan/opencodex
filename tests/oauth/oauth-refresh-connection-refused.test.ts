@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -97,5 +97,24 @@ describe("a refused first connection stays retryable (#8577)", () => {
     expect(run.pendingAfterFirst).toMatchObject({ generation: credentialGeneration(run.credential) });
     expect((run.second as { error?: unknown }).error).toBeInstanceOf(OAuthLoginRequiredError);
     expect(run.tokenRequests()).toBe(1);
+  });
+
+  test("the lost answer and the lockout it causes are each logged once", async () => {
+    const lines: string[] = [];
+    const info = spyOn(console, "info").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    try {
+      const run = await twoRefreshes(async () => { throw Object.assign(new TypeError("ECONNRESET"), { code: "ECONNRESET", path: TOKEN_URL, errno: 0 }); });
+      await refreshAnthropicAccountWithLock("anthropic", run.id, OAUTH_PROVIDERS.anthropic!, run.credential).catch(() => undefined);
+      expect(getAccountSet("anthropic")!.accounts[0]!.needsReauth).toBe(true);
+      const warnings = lines.filter(line => line.includes("level=warn"));
+      expect(warnings).toHaveLength(2);
+      expect(warnings[0]).toContain("OAuth refresh failed");
+      expect(warnings[0]).toContain("errorName=TypeError errno=ECONNRESET outcome=unknown_after_dispatch");
+      expect(warnings[1]).toContain("OAuth refresh refused; account needs reauth");
+      expect(warnings[1]).toContain("cause=earlier_attempt_outcome_unknown");
+      expect(warnings.join("\n")).not.toContain("rt-old");
+    } finally {
+      info.mockRestore();
+    }
   });
 });

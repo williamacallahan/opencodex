@@ -765,6 +765,13 @@ function terminal(error:unknown):boolean{
   return isTerminalRefreshError(error);
 }
 
+/** Identifies a refresh failure without its message, which can carry the provider's description. */
+function refreshFailureFields(error: unknown): { httpStatus?: number; oauthError?: string; errorName?: string; errno?: string } {
+  if (error instanceof AnthropicTokenError) return { httpStatus: error.httpStatus, oauthError: error.oauthError };
+  const errno = typeof error === "object" && error !== null && "code" in error ? String(error.code) : undefined;
+  return { errorName: error instanceof Error ? error.name : typeof error, errno };
+}
+
 /**
  * True when the token endpoint definitively answered and rejected the request.
  *
@@ -916,7 +923,14 @@ export async function refreshAnthropicAccountWithLock(
       }
     }
     if (pendingIntent?.uncertain || pendingIntent?.generation === generation) {
-      await markAccountNeedsReauthIfGeneration(provider, accountId, generation, writerGeneration);
+      const marked = await markAccountNeedsReauthIfGeneration(provider, accountId, generation, writerGeneration);
+      // Logged on the transition only: every later attempt reaches this branch again.
+      if (marked && !account.needsReauth) {
+        logOAuthEvent("level=warn OAuth refresh refused; account needs reauth", {
+          provider, accountId, cause: "earlier_attempt_outcome_unknown",
+          earlierAttemptAt: pendingIntent.createdAt > 0 ? new Date(pendingIntent.createdAt).toISOString() : undefined,
+        });
+      }
       throw new OAuthLoginRequiredError(provider);
     }
     if (pendingIntent && !clearObservedAnthropicRefreshIntent(provider, accountId, pendingIntent)) {
@@ -975,9 +989,17 @@ export async function refreshAnthropicAccountWithLock(
             error,
           );
         }
+        logOAuthEvent("level=warn OAuth refresh failed", {
+          provider, accountId, ...refreshFailureFields(error),
+          outcome: requestNotSent ? "not_sent" : definitivelyAnswered(error) ? "rejected_retryable" : "unknown_after_dispatch",
+        });
         throw error;
       }
-      await markAccountNeedsReauthIfGeneration(provider, accountId, generation, writerGeneration);
+      if (await markAccountNeedsReauthIfGeneration(provider, accountId, generation, writerGeneration)) {
+        logOAuthEvent("level=warn OAuth refresh rejected; account needs reauth", {
+          provider, accountId, cause: "refresh_rejected", ...refreshFailureFields(error),
+        });
+      }
       if (attemptIntent) clearAnthropicRefreshIntentBestEffort(provider, accountId, attemptIntent);
       throw new OAuthLoginRequiredError(provider);
     }
