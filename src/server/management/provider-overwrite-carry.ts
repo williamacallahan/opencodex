@@ -227,6 +227,8 @@ const PROVIDER_PATCH_FIELDS: ReadonlySet<string> = new Set([
   "inferContextWindow",
   "reasoningWireFormat",
   "reportsNativeCache",
+  "unsupportedHostedToolsWithClientTools",
+  "forwardAdvisorTool",
   ...RETRY_POLICY_FIELDS,
 ]);
 
