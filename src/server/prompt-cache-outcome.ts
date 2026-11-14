@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { nativePromptCacheOutcome } from "./prompt-cache-observer";
 import type { RequestLogContext } from "./request-log";
+import { ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
 import { baseProviderLabel } from "../providers/label";
 import { getProviderRegistryEntry } from "../providers/registry";
 import { classifyCacheTelemetryProvenance, type CacheTelemetryProvenance, type UsageStatus } from "../usage/log";
@@ -39,21 +40,45 @@ export function providerFamily(provider: string): string {
 }
 
 /**
+ * A log label belongs to a configured provider when the label is the configured name, the same
+ * family, or the name plus an account log label or a collision number the pool appended to it
+ * (`openai-main-2`, which the label owner does not strip). A longer name that merely starts with
+ * the configured one (`openai-relay`) is a different provider.
+ */
+function answeredBy(logLabel: string, configuredProvider: string): boolean {
+  return logLabel === configuredProvider || isAccountSuffixOf(logLabel, configuredProvider)
+    || providerFamily(logLabel) === providerFamily(configuredProvider);
+}
+
+/** A bare name prefix is not enough: `openai-relay` is another provider, `openai-p2e22d0` and `openai-2` are seats of `openai`. */
+function isAccountSuffixOf(logLabel: string, configuredProvider: string): boolean {
+  if (!logLabel.startsWith(`${configuredProvider}-`)) return false;
+  const suffix = logLabel.slice(configuredProvider.length + 1);
+  return /^\d+$/.test(suffix) || ACCOUNT_LOG_LABEL_RE.test(suffix.replace(/-\d+$/, ""));
+}
+
+/**
  * Whether this provider's cache counter is first-party: the registry marks the first-party hosts,
  * and the adapter must still be the one that registry entry serves. Adapter name alone is not
  * enough, because third-party hosts (z.ai, Xiaomi, Cloudflare AI Gateway, AgentRouter) also run
  * the `anthropic` and `openai-responses` adapters and send a default `cached_tokens: 0`.
+ *
+ * The registry is read by the configured provider name the send recorded, not by the
+ * account-qualified log label, which a namespace can make unrecognizable.
  */
 export function providerReportsNativeCache(
   provider: string,
   adapter: string | undefined,
-  /** The configured provider this request stamped as a codex-lb relay (`isCodexLbProvider`), if any. */
-  relayProvider?: string,
+  /** Configured provider that declared `reportsNativeCache` on the physical send that answered, if any. */
+  declaredProvider?: string,
+  /** Configured provider name of the physical send that answered, when the log label may be account-qualified. */
+  sentProvider?: string,
 ): boolean {
-  // codex-lb relays the ChatGPT backend and always sends a real cache counter, but it is an
-  // operator-named config row, not a registry entry, so it is recognised by its config shape.
-  if (relayProvider !== undefined && relayProvider === provider && adapter === "openai-responses") return true;
-  const entry = getProviderRegistryEntry(providerFamily(provider));
+  // An operator-declared host (codex-lb) sends a real counter, so its 0 is a measured miss. The
+  // declaration binds to the provider that answered; a failover to another provider cannot inherit it.
+  if (declaredProvider !== undefined && answeredBy(provider, declaredProvider)) return true;
+  const configured = sentProvider !== undefined && answeredBy(provider, sentProvider) ? sentProvider : provider;
+  const entry = getProviderRegistryEntry(providerFamily(configured));
   return entry?.reportsNativeCache === true && entry.adapter === adapter;
 }
 

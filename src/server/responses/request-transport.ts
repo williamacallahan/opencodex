@@ -13,7 +13,6 @@ import { rebindPhysicalSend } from "../../lib/request-execution-budget";
 import { anthropicModelQuotaFor } from "../../oauth/anthropic-model-quota";
 import { anthropicRatePolicyFor } from "../../oauth/anthropic-rate-limit-policy";
 import { configuredAnthropicInstance } from "../../providers/anthropic-instance";
-import { isCodexLbProvider } from "../../providers/quota/codex-lb-url";
 import { resolveAnthropicMessagesUrl } from "../../adapters/anthropic";
 import { bindAnthropicRefusalCredentialForSend } from "../../oauth/anthropic-account-refusal";
 import { captureAnthropicPhysicalSendOwnership, anthropicPhysicalSendOwnershipIsCurrent, type AnthropicPhysicalSendOwnership } from "../../oauth/anthropic-send-ownership";
@@ -1364,8 +1363,6 @@ export async function prepareResponsesTransport(
   });
   assignNativeLogConversationId(logCtx, normalizeLogConversationId(parsed._cursorConversationId));
   if (!deferPhysicalAttribution) logCtx.providerAdapter = adapter.name;
-  if (isCodexLbProvider(adapterProvider)) logCtx.cacheRelayProvider = route.providerName;
-  else delete logCtx.cacheRelayProvider;
   // Ordinary requests receive one durable attempt only after their final initial
   // adapter is resolved. Combo children own their attempt and retries keep it.
   if (!options.comboAttempt && !logCtx.activeAttempt) {

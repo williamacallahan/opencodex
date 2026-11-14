@@ -1072,6 +1072,12 @@ export interface OcxProviderConfig {
    */
   promptCacheKey?: boolean;
   /**
+   * Declares that this host sends a real cache counter, so an explicit `cached_tokens: 0` is a
+   * measured miss that stays in the hit-rate denominator. Registry defaults mark first-party hosts;
+   * set it on a relay such as codex-lb that is not a registry entry. Third-party hosts leave it unset.
+   */
+  reportsNativeCache?: boolean;
+  /**
    * Opt-in: forward caller `service_tier` values to the upstream `/chat/completions` body.
    * On a classified route it governs foreign values (for example `flex`), not proxy-owned
    * canonical Fast after capability validation. On an unclassified route it governs every caller

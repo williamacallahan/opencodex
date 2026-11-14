@@ -37,7 +37,12 @@ and Reserve headers do not overwrite ordinary quota, even when an optional Pool 
 captured. The header publisher uses the normalized wire model and automatic Reserve request mode;
 writer availability does not determine which quota the response describes. Materialization and physical sends recheck the
 grant, including after credential-refresh context copies. Explicit Desktop Reserve and native-main
-authorization remain separate and unchanged. Coverage: `tests/codex-integration/codex-pool-reserve.test.ts`.
+authorization remain separate and unchanged.
+The native `__main__` login has no stored row, so pool Reserve selection never offers it: `reserveIds`
+in `poolLunaReserveSelection` holds stored seats only, and `__main__` is always outside the Reserve
+candidate set. Without a live credential it is never chosen at all. With one it joins only the included
+Luna fallback, after every seat that can serve Reserve, and it is still held at its own 100% usage.
+Coverage: `tests/codex-integration/codex-pool-reserve.test.ts` and `codex-pool-reserve-main.test.ts`.
 
 ## Bounded write deferral
 

@@ -354,6 +354,10 @@ describe("membership oracle", () => {
       // Lives under server/ with the other management-route tests; the advisor- seed names the
       // advisor SUBSYSTEM, not the domain this file's siblings live in.
       "advisor-routes.test.ts",
+      // Both start the hub or its management handler (`startServer`, `handleManagementAPI`), so they
+      // live in server/; the providers- and codex-integration- seeds name the subject, not the domain.
+      "muse-code-models.test.ts",
+      "selected-models-hub-named.test.ts",
     ]);
     const mismatches: string[] = [];
     let resolved = 0;
