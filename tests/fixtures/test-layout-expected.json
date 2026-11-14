@@ -1288,6 +1288,7 @@
   "request-log-served-model.test.ts": "usage", "request-log-model-filter.test.ts": "usage", "request-log-generation-window.test.ts": "usage",
   "request-log.test.ts": "usage", "request-log-normalization.test.ts": "usage", "request-outcome-agreement.test.ts": "usage",
   "upstream-failure-diagnostics.test.ts": "usage",
+  "compact-alternate-attempt-status.test.ts": "usage",
   "prompt-cache-compact-forward.test.ts": "usage",
   "prompt-cache-native-namespace.test.ts": "usage",
   "request-pacing.test.ts": "usage", "request-pacing-provenance.test.ts": "usage", "reserve-auth-context.test.ts": "codex-integration",

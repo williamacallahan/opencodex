@@ -115,6 +115,7 @@ import {
   fetchWithResetRetry,
   fetchWithTransientRetry,
   applyUpstreamRecoveryInit,
+  isTransientUpstreamStatus,
   isNonReplayableResponse,
   SendBudgetExhaustedError, errorDestinationLabel,
   TRANSIENT_RETRY_MAX_ATTEMPTS,
@@ -1197,6 +1198,8 @@ export async function handleResponsesCompact(
       recovery: "normal" | "single",
       sendAuthCtx: CodexAuthContext,
       onPhysicalDispatch?: () => void,
+      /** Why the first account's attempt is being sealed, when this send moves a request off it. */
+      moveRecovery?: AttemptRecoveryKind,
     ): Promise<Response> => {
       // Only the captured custom-tool contract: native compact keeps the provider's own wire.
       sendProvider = projectCapturedCustomToolPolicy(sendProvider, route.staticPolicy);
@@ -1314,7 +1317,7 @@ export async function handleResponsesCompact(
           // the log label can carry an account namespace the registry cannot resolve, so the
           // configured provider has to be recorded where the send leaves.
           onPhysicalDispatch: () => {
-            noteProviderAttemptSend(logCtx, route.providerName, sendProvider, logCtx.usageLogInputTokens, upstreamRecovery);
+            noteProviderAttemptSend(logCtx, route.providerName, sendProvider, logCtx.usageLogInputTokens, upstreamRecovery ?? moveRecovery);
             onPhysicalDispatch?.();
           },
         }),
@@ -1342,6 +1345,13 @@ export async function handleResponsesCompact(
         });
     };
 
+    // A move seals the first account's attempt with the answer that account returned and the recovery
+    // that moved off it, the contract core-codex-account.ts keeps for the regular path.
+    const sealFirstAttemptStatus = (status: number): void => {
+      if (logCtx.activeAttempt && logCtx.activeAttempt.status < 100) logCtx.activeAttempt.status = status;
+    };
+    const compactMoveRecovery = (status: number): AttemptRecoveryKind | undefined => status === 429 ? "oauth-account-429"
+      : status === 402 ? "oauth-account-402" : isTransientUpstreamStatus(status) ? "transient-5xx" : undefined;
     // The account each outcome belongs to. Reassigned only when the alternate send below
     // actually happens, so every recorder call names the context that produced it.
     let outcomeCtx = authCtx;
@@ -1623,7 +1633,9 @@ export async function handleResponsesCompact(
         logCtx.accountLogLabel = codexAuthContextLogLabel(alternate.authCtx, config);
         scrubCompactStateForAlternate(alternate.authCtx, alternate.headers);
         try {
-          upstream = await sendCompactAttempt(alternate.provider, alternate.headers, "single", alternate.authCtx);
+          sealFirstAttemptStatus(upstream.status);
+          upstream = await sendCompactAttempt(alternate.provider, alternate.headers, "single", alternate.authCtx,
+            undefined, compactMoveRecovery(upstream.status));
         } catch (err) {
           return failedAlternateCompactSend(err);
         }
@@ -1689,8 +1701,9 @@ export async function handleResponsesCompact(
         // spent budget, a dispatch guard such as disabled credits, a pacing refusal -- keeps A.
         let alternateDispatched = false;
         try {
+          sealFirstAttemptStatus(firstStatus);
           alternateResponse = await sendCompactAttempt(alternate.provider, alternate.headers, "single", alternate.authCtx,
-            () => { alternateDispatched = true; });
+            () => { alternateDispatched = true; }, compactMoveRecovery(firstStatus));
         } catch (err) {
           if (alternateDispatched) {
             recordFirstMove();
