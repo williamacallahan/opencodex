@@ -1,6 +1,8 @@
 import { MessagesSseFrameContext, messagesSseEchoRenamedError, messagesSseFrameHooks } from "../lib/messages-sse-error-presentation";
 import { createMessagesSseErrorFilter } from "./messages-sse-error-filter";
 import type { MessagesFailureVerdictSink } from "../claude/failure-verdict";
+import { isRec, type Rec } from "../claude/inbound-records";
+import { observeNativePromptCacheSend, confirmNativePromptCachePrefill } from "./prompt-cache-observer";
 import { upstreamErrorIsLocal } from "./request-log-failure-detail";
 import { boundedMessagesDisplayCount, ownedDisabledModelResponse, ownedAnthropicErrorPayload, ownedAnthropicErrorResponse, messagesOverflowPresentation, messagesRelayedOverflowPresentation } from "../lib/messages-error-body";
 import { attachComboFailureEvidence, isProxyError, markProxyError } from "../lib/client-error-body";
@@ -156,8 +158,6 @@ export {
   type NativeMessagesDeclineReason,
 } from "./messages-native-eligibility";
 
-type Rec = Record<string, unknown>;
-
 const MAX_NATIVE_MESSAGES_JSON_BYTES = 32 * 1024 * 1024;
 const MAX_NATIVE_MESSAGES_ERROR_BYTES = 64 * 1024;
 
@@ -178,10 +178,6 @@ class NativeOpaqueStateRefusal extends Error {
   constructor() {
     super("The selected route cannot carry thinking signatures or redacted_thinking blocks");
   }
-}
-
-function isRec(value: unknown): value is Rec {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 export interface HandleNativeMessagesOptions {
@@ -259,7 +255,6 @@ export async function handleStrictNativeMessages(
 }
 
 export type NativeMessagesFinishLog = (status: number, message?: string, meta?: FinalRequestLogMeta) => void;
-type FinishLog = NativeMessagesFinishLog;
 
 interface NativeMessagesExecution extends HandleNativeMessagesOptions {
   finishLog: NativeMessagesFinishLog;
@@ -427,7 +422,7 @@ export function handleNativeMessages(options: HandleNativeMessagesOptions): Prom
   const { logCtx, logIds, route } = options;
   const attemptHandle = beginInferenceAttempt(logCtx, { provider: route.providerName, model: route.modelId, adapter: "anthropic" });
   const finalLog = createFinalRequestLog(logIds, logCtx);
-  const finishLog: FinishLog = (status, message, meta = { closeReason: "non_stream" }) => {
+  const finishLog: NativeMessagesFinishLog = (status, message, meta = { closeReason: "non_stream" }) => {
     if (finalLog.finished()) return;
     if (message) logCtx.upstreamError = redactSecretString(message).slice(0, 500);
     // Counting consumes rate-limit capacity, not billed generation tokens, on every outcome.
@@ -814,6 +809,8 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
                 if (!physicalBudget.spendEnforced && !spendTracker.charge({ workflowAlreadyCounted: true })) throw new NativeMessagesSpendRefusal();
               }
               noteProviderAttemptSend(logCtx, route.providerName, activeProvider, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
+              observeNativePromptCacheSend(logCtx, { wire, provider: activeProvider, account: snapshot, strict: !!options.integrity,
+                bodyBytes: retainedRequestBytes, countTokens: options.integrity?.countTokens, sessionKey: options.sessionKey });
               physicalSendsUsed++;
               sent = true;
             };
@@ -1087,7 +1084,8 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
         finishLog(status, undefined, meta);
       }
       finally { releaseStreamTurn(); }
-    }, { ...guard, verbatim: { status: response.status, inspectSse: sse, contentEncoding: headers.get("content-encoding") } });
+    }, { ...guard, onPrefill: message => confirmNativePromptCachePrefill(logCtx, message),
+      verbatim: { status: response.status, inspectSse: sse, contentEncoding: headers.get("content-encoding") } });
     if (!relayed) { cleanupAbort(); releaseStreamTurn(); finishLog(response.status); }
     return new Response(relayed, { status: response.status, headers });
   }
@@ -1123,6 +1121,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
     // the client leaving and this lane's own abort read as a cancel, not as a failed stream.
     const bodyGuard = {
       ...resolvePassthroughBodyGuard(config, upstream.signal),
+      onPrefill: (message: unknown) => confirmNativePromptCachePrefill(logCtx, message),
       ...(activeProvider.anthropicEofTolerance === true ? { eofTolerant: true } : {}),
     };
     const replay = { committed: false, pending: false };
@@ -1290,6 +1289,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
   if (!isRec(parsedMessage) || parsedMessage.type !== "message") {
     return fail(502, "upstream response was not a Messages result", "api_error");
   }
+  confirmNativePromptCachePrefill(logCtx, parsedMessage);
   const message = activeRequest.oauthToolNames
     ? restoreOAuthToolNamesInMessage(parsedMessage, activeRequest.oauthToolNames)
     : parsedMessage;
@@ -1333,7 +1333,7 @@ function isNativeOverflowError(error: Rec, message: string): boolean {
  * Messages path, so a client sees the same contract on either lane: transient 5xx become 529
  * with a retry hint, and a proxy-side replay refusal keeps its no-retry marking.
  */
-function nativeMessagesErrorResponse(response: Response, bodyText: string, finishLog: FinishLog, providerName: string, provider: OcxProviderConfig): Response {
+function nativeMessagesErrorResponse(response: Response, bodyText: string, finishLog: NativeMessagesFinishLog, providerName: string, provider: OcxProviderConfig): Response {
   let upstreamType: string | undefined;
   let upstreamCode: string | undefined;
   let upstreamMessage: string | undefined;

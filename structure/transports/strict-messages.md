@@ -77,6 +77,10 @@ malformed, unsupported, oversized or interrupted bodies cannot authorize body-ba
 inspection never changes the original encoded response bytes or relaxes the separate usage-inspection limits.
 The private wire snapshot and the separate outbound copy each consume the existing 32 MiB retained-turn
 budget; inbound admission is a separate ceiling, not permission to exceed retained-memory limits.
+The final `commitSend` also captures cache observation identity without hashing or changing the body.
+Validated prefill schedules a separate worker copy; unavailable evidence never delays forwarding.
+The [prompt-cache reuse contract](../usage-client-attribution.md#prompt-cache-reuse) owns the event
+fields, coverage limitations, identity domains and accounting rules.
 
 The strict blocks in `tests/claude-integration/messages-native.test.ts` and
 `tests/claude-integration/messages-native-oauth.test.ts` use synthetic credentials and actual loopback

@@ -96,6 +96,7 @@ export interface PassthroughBodyGuard {
   eofTolerant?: boolean;
   /** Strict relay preserves wire bytes; decoding is bounded usage observation only. */
   verbatim?: { status: number; inspectSse: boolean; contentEncoding?: string | null };
+  onPrefill?: (message: unknown) => void;
 }
 
 export type PassthroughCloseReason = "terminal" | "client_cancel" | "body_stall" | "body_overflow";
@@ -182,6 +183,7 @@ export function tapAnthropicSseForLog(
     }
     recordGenerationEvent(logCtx, data.type);
     if (data.type === "message_start" && isRec(data.message) && isRec(data.message.usage)) {
+      if (delivered && named(event, data, "message_start")) guard?.onPrefill?.(data.message);
       usageAcc = { ...usageAcc, ...data.message.usage };
     } else if (data.type === "message_delta" && isRec(data.usage)) {
       usageAcc = { ...usageAcc, ...data.usage };
@@ -242,7 +244,10 @@ export function tapAnthropicSseForLog(
       if (!inspectionStopped) {
         try {
           const message: unknown = JSON.parse(text);
-          if (isRec(message) && isRec(message.usage)) usageAcc = message.usage;
+          if (isRec(message) && isRec(message.usage)) {
+            usageAcc = message.usage;
+            guard?.onPrefill?.(message);
+          }
         } catch { usageAcc = {}; }
       }
       return { terminalInTail: false, tailClean: true };
@@ -401,16 +406,10 @@ export function tapAnthropicSseForLog(
     try { tapController?.close(); } catch { /* downstream already torn down */ }
     reader.cancel(guard?.reqSignal?.reason).catch(() => {});
   };
-  const detachAbort = (() => {
-    const signal = guard?.reqSignal;
-    if (!signal) return () => {};
-    if (signal.aborted) {
-      queueMicrotask(onClientAbort);
-      return () => {};
-    }
-    signal.addEventListener("abort", onClientAbort, { once: true });
-    return () => signal.removeEventListener("abort", onClientAbort);
-  })();
+  const abortSignal = guard?.reqSignal;
+  const detachAbort = () => abortSignal?.removeEventListener("abort", onClientAbort);
+  if (abortSignal?.aborted) queueMicrotask(onClientAbort);
+  else abortSignal?.addEventListener("abort", onClientAbort, { once: true });
 
   return new ReadableStream<Uint8Array>({
     start(controller) {

@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { nativePromptCacheOutcome } from "./prompt-cache-observer";
+import type { RequestLogContext } from "./request-log";
 import { baseProviderLabel } from "../providers/label";
 import { getProviderRegistryEntry } from "../providers/registry";
 import { classifyCacheTelemetryProvenance, type CacheTelemetryProvenance, type UsageStatus } from "../usage/log";
@@ -87,7 +89,9 @@ function logfmtValue(value: string | number | boolean): string {
   return /^[A-Za-z0-9_.:\-/@]+$/.test(text) ? text : JSON.stringify(text);
 }
 
-export function promptCacheOutcomeLine(input: PromptCacheOutcomeInput): string {
+export function promptCacheOutcomeLine(input: PromptCacheOutcomeInput, logCtx?: RequestLogContext): string {
+  const { reuse, physical } = nativePromptCacheOutcome(logCtx, input);
+  if (physical) input = { ...input, ...physical };
   const provenance = classifyCacheTelemetryProvenance(input.usage, { wireParsed: input.wireParsed });
   // An all-zero detail read off a wire is ambiguous only where a bridge could have written zero
   // defaults. A native wire's own cached field of 0 is a measured miss: leaving it out of the
@@ -111,6 +115,15 @@ export function promptCacheOutcomeLine(input: PromptCacheOutcomeInput): string {
     ["prompt_tokens", prompt],
     ["cached_tokens", cached ?? 0],
     ["cache_write_tokens", input.usage?.cacheCreationInputTokens ?? 0],
+    ["reuse_schema", 1],
+    ["reuse_expectation", reuse.reuse_expectation],
+    ["reuse_reason", reuse.reuse_reason],
+    ["reuse_scope", reuse.reuse_scope],
+    ["reuse_epoch", reuse.reuse_epoch],
+    ["reuse_coverage", reuse.reuse_coverage],
+    ["reuse_coverage_reason", reuse.reuse_coverage_reason],
+    ["expected_cached_tokens", reuse.expected_cached_tokens],
+    ["lost_cached_tokens", reuse.lost_cached_tokens],
     ["key_hash", input.conversationId
       ? createHash("sha256").update(input.conversationId).digest("hex").slice(0, 16) : undefined],
   ];

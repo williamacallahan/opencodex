@@ -1684,7 +1684,7 @@ function writeFinalRequestLog(
     locallyAnswered: logCtx.localTerminalReason !== undefined,
     comboParent: isCombo,
     ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
-  }));
+  }, logCtx));
   // Formatted from the finalized snapshot, so the ring shows exactly what the ledger holds.
   for (const attempt of attempts ?? []) debugAttemptDeliverySummary(requestId, attempt);
   if (isUsageDebugEnabled()) {

@@ -199,3 +199,28 @@ tag; the row's tag comes from the row's provider in `src/server/request-log.ts`.
 and the request-log hydration keep only `p` plus six lowercase hex digits and drop anything else.
 Per-account summaries still key on `accountLogLabel` and ignore the tag
 (`tests/usage/request-log-anthropic-account-tag.test.ts`).
+
+## Prompt cache reuse
+
+`src/server/prompt-cache-outcome.ts` emits `reuse_schema=1` with a process epoch, expectation,
+reason and coverage alongside the existing usage fields. `src/server/prompt-cache-observer.ts`
+binds the final native physical send to its response and supplies its own reported usage;
+failed sends, local answers and combo-parent summaries do not supply expected-token denominators.
+Translated transports and relays with hidden accounts remain explicitly unknown.
+
+The native observer records dispatch identity before sending and readiness from a valid complete
+`message_start`, or a valid buffered Messages result. It copies the request only after that evidence
+and submits it to one resident `src/server/prompt-cache-observation-worker.ts`. Neither forwarding
+nor final logging waits for hashing: a fast buffered reply can report `hash_unavailable` while its
+confirmed prefill subsequently becomes evidence for a later request. Worker failure is terminal
+for that observer lifetime and lowers coverage rather than starting a retry loop.
+
+`src/server/prompt-cache-prefix.ts` owns byte-preserving position identities and unsupported shapes.
+`src/server/prompt-cache-reuse.ts` owns dispatch-time history, bounded pending memory, expiry and
+measured anchors. Exact credentials share their observed cache namespace; different credentials
+share only with evidence from `src/routing/identity-domains.ts`. With no workspace evidence a
+credential change reports `unknown/credential_changed`, not a proven cache-domain move.
+Expected and per-event lost tokens require a reachable, unexpired measured anchor. The
+`tests/usage/prompt-cache-reuse-paths.test.ts` boundary proves native byte preservation, prefill
+observation, answering-send attribution and exclusions; the two adjacent cache tests own hashing
+and ledger timing semantics.
