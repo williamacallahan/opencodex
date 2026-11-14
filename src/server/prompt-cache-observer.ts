@@ -12,7 +12,7 @@ import type { NativeMessagesRequest } from "./messages-native-integrity";
 import { credentialDomainFor } from "../protocols/opaque-state";
 import { classifyCredential } from "../routing/identity-domains";
 import type { OcxProviderConfig, OcxUsage } from "../types";
-import { anthropicUsageToOcx } from "./messages-shared";
+import { anthropicUsageToOcx, type PassthroughBodyGuard } from "./messages-shared";
 import type { NativeOAuthBinding } from "./messages-native-oauth";
 import type { PromptCacheOutcomeInput } from "./prompt-cache-outcome";
 import type { PrefixWalk } from "./prompt-cache-prefix";
@@ -22,7 +22,7 @@ import type { RequestLogContext } from "./request-log";
 export interface PrefixWorkerRequest { id: number; bytes: Uint8Array; encoding: string | null }
 export type PrefixWorkerReply = { id: number; prefix: PrefixWalk } | { id: number; failed: true };
 type ObservationReason = "unsupported_transport" | "count_tokens" | "local_answer" | "combo_parent" | "combo_child"
-  | "hidden_account" | "worker_failed" | "request_failed" | "model_mismatch" | "send_unavailable" | "credential_override" | "prefill_unavailable";
+  | "hidden_account" | "worker_failed" | "request_failed" | "model_mismatch" | "send_unavailable" | "credential_override" | "prefill_unavailable" | "usage_unavailable";
 export type NativeCacheReuse = Omit<ReuseClassification, "reuse_reason"> & {
   reuse_reason: ReuseClassification["reuse_reason"] | ObservationReason;
 };
@@ -44,6 +44,7 @@ interface ObservedSend {
   body?: string | Uint8Array;
   encoding?: string | null;
   usage?: OcxUsage;
+  finalUsage?: OcxUsage | null;
   rawStreamObserved?: true;
   failure?: ObservationReason;
   postedAt?: number;
@@ -221,11 +222,18 @@ class NativeCacheObserver {
   finish(logCtx: RequestLogContext | undefined, input: PromptCacheOutcomeInput): { reuse: NativeCacheReuse; physical?: Pick<PromptCacheOutcomeInput, "provider" | "servedModel" | "usage" | "usageStatus" | "wireParsed" | "nativeCacheWire"> } {
     const send = logCtx && this.bindings.get(logCtx);
     const excluded = input.comboParent ? "combo_parent" : input.locallyAnswered ? "local_answer" : !input.succeeded ? "request_failed" : undefined;
-    const reuse = excluded ? this.unknown(excluded) : send?.outcome ?? (send?.failure ? this.unknown(send.failure)
+    const usage = send?.finalUsage === undefined ? send?.usage : send.finalUsage ?? undefined;
+    let reuse = excluded ? this.unknown(excluded) : send?.outcome ?? (send?.failure ? this.unknown(send.failure)
       : send?.ticket ? this.ledger.classify(send.ticket) : this.unknown(logCtx?.nativeCacheProvider !== undefined && logCtx.nativeCacheProvider === logCtx.sentProvider ? "hidden_account" : "unsupported_transport"));
+    if (reuse.expected_cached_tokens !== undefined) {
+      const cached = usage?.cacheReadInputTokens ?? usage?.cachedInputTokens;
+      reuse = typeof cached === "number" && Number.isSafeInteger(cached) && cached >= 0
+        ? { ...reuse, lost_cached_tokens: Math.max(0, reuse.expected_cached_tokens - cached) }
+        : this.unknown("usage_unavailable");
+    }
     if (send) send.outcome = reuse;
-    return { reuse, ...(send?.usage && !excluded ? { physical: { provider: send.provider, servedModel: send.model,
-      usage: send.usage, usageStatus: "reported", wireParsed: true, nativeCacheWire: true } } : {}) };
+    return { reuse, ...(send && (send.usage || send.finalUsage !== undefined) && !excluded ? { physical: { provider: send.provider, servedModel: send.model,
+      usage, usageStatus: usage ? "reported" : "unreported", wireParsed: true, nativeCacheWire: true } } : {}) };
   }
   complete(logCtx: RequestLogContext): void {
     const send = this.bindings.get(logCtx);
@@ -259,6 +267,14 @@ export function observeNativePromptCacheFinish(logCtx: RequestLogContext, finish
 export function confirmNativePromptCachePrefill(logCtx: RequestLogContext, message: unknown): void {
   const send = observer?.bindings.get(logCtx);
   if (!send?.rawStreamObserved) observer?.confirm(send, message);
+}
+export function nativePromptCacheObservation(logCtx: RequestLogContext): PassthroughBodyGuard["onPrefill"] {
+  const owner = observer;
+  const send = owner?.bindings.get(logCtx);
+  if (!owner || !send?.ticket || send.ticket.rejected) return undefined;
+  return Object.assign((message: unknown) => {
+    if (!send.rawStreamObserved) owner.confirm(send, message);
+  }, { usage: (usage: OcxUsage | undefined) => { send.finalUsage = usage ? { ...usage } : null; } });
 }
 export function observeNativePromptCacheResponse(source: ReadableStream<Uint8Array>, logCtx: RequestLogContext): ReadableStream<Uint8Array> {
   return observer?.rawResponse(source, logCtx) ?? source;

@@ -2,7 +2,7 @@ import { MessagesSseFrameContext, messagesSseEchoRenamedError, messagesSseFrameH
 import { createMessagesSseErrorFilter } from "./messages-sse-error-filter";
 import type { MessagesFailureVerdictSink } from "../claude/failure-verdict";
 import { isRec, type Rec } from "../claude/inbound-records";
-import { observeNativePromptCacheSend, confirmNativePromptCachePrefill, observeNativePromptCacheFinish, observeNativePromptCacheResponse } from "./prompt-cache-observer";
+import { observeNativePromptCacheSend, confirmNativePromptCachePrefill, observeNativePromptCacheFinish, observeNativePromptCacheResponse, nativePromptCacheObservation } from "./prompt-cache-observer";
 import { upstreamErrorIsLocal } from "./request-log-failure-detail";
 import { boundedMessagesDisplayCount, ownedDisabledModelResponse, ownedAnthropicErrorPayload, ownedAnthropicErrorResponse, messagesOverflowPresentation, messagesRelayedOverflowPresentation } from "../lib/messages-error-body";
 import { attachComboFailureEvidence, isProxyError, markProxyError } from "../lib/client-error-body";
@@ -1084,7 +1084,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
         finishLog(status, undefined, meta);
       }
       finally { releaseStreamTurn(); }
-    }, { ...guard, onPrefill: message => confirmNativePromptCachePrefill(logCtx, message),
+    }, { ...guard, onPrefill: nativePromptCacheObservation(logCtx),
       verbatim: { status: response.status, inspectSse: sse, contentEncoding: headers.get("content-encoding") } });
     if (!relayed) { cleanupAbort(); releaseStreamTurn(); finishLog(response.status); }
     return new Response(relayed, { status: response.status, headers });
@@ -1121,7 +1121,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
     // the client leaving and this lane's own abort read as a cancel, not as a failed stream.
     const bodyGuard = {
       ...resolvePassthroughBodyGuard(config, upstream.signal),
-      onPrefill: (message: unknown) => confirmNativePromptCachePrefill(logCtx, message),
+      onPrefill: nativePromptCacheObservation(logCtx),
       ...(activeProvider.anthropicEofTolerance === true ? { eofTolerant: true } : {}),
     };
     const replay = { committed: false, pending: false };

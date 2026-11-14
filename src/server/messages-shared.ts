@@ -33,7 +33,7 @@ import { AnthropicRequestError, isRec, type Rec } from "../claude/inbound-record
 import type { RequestLogContext } from "./request-log";
 import { recordGenerationEvent } from "./request-log-generation-window";
 import { recordLocalFailureDetail } from "./request-log-failure-detail";
-import type { OcxConfig } from "../types";
+import type { OcxConfig, OcxUsage } from "../types";
 
 export function anthropicUsageToOcx(usage: Rec | undefined): { inputTokens: number; outputTokens: number; cachedInputTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number; cacheCreation1hInputTokens?: number } | undefined {
   if (!usage) return undefined;
@@ -96,7 +96,7 @@ export interface PassthroughBodyGuard {
   eofTolerant?: boolean;
   /** Strict relay preserves wire bytes; decoding is bounded usage observation only. */
   verbatim?: { status: number; inspectSse: boolean; contentEncoding?: string | null };
-  onPrefill?: (message: unknown) => void;
+  onPrefill?: ((message: unknown) => void) & { usage?: (usage: OcxUsage | undefined) => void };
 }
 
 export type PassthroughCloseReason = "terminal" | "client_cancel" | "body_stall" | "body_overflow";
@@ -339,6 +339,7 @@ export function tapAnthropicSseForLog(
   const close = () => { clientFilter?.finish(value => tapController!.enqueue(value)); tapController!.close(); };
   const recordUsage = () => {
     logCtx.usage = anthropicUsageToOcx(Object.keys(usageAcc).length > 0 ? usageAcc : undefined);
+    guard?.onPrefill?.usage?.(logCtx.usage);
   };
   const closeWithErrorFrame = (errType: string, message: string, origin: MessagesSseLocalOrigin) => {
     if (guard?.verbatim) {
@@ -359,7 +360,7 @@ export function tapAnthropicSseForLog(
     if (settled) return;
     settled = true;
     idle.cancel();
-    detachAbort();
+    abortSignal?.removeEventListener("abort", onClientAbort);
     if (guard?.verbatim) stopInspection();
     const { terminalInTail } = flushTail();
     recordUsage();
@@ -398,7 +399,7 @@ export function tapAnthropicSseForLog(
     if (settled) return;
     settled = true;
     idle.cancel();
-    detachAbort();
+    abortSignal?.removeEventListener("abort", onClientAbort);
     if (guard?.verbatim) stopInspection();
     recordUsage();
     finalize(499, { closeReason: "client_cancel" });
@@ -407,7 +408,6 @@ export function tapAnthropicSseForLog(
     reader.cancel(guard?.reqSignal?.reason).catch(() => {});
   };
   const abortSignal = guard?.reqSignal;
-  const detachAbort = () => abortSignal?.removeEventListener("abort", onClientAbort);
   if (abortSignal?.aborted) queueMicrotask(onClientAbort);
   else abortSignal?.addEventListener("abort", onClientAbort, { once: true });
 
@@ -437,7 +437,7 @@ export function tapAnthropicSseForLog(
             }
             settled = true;
             idle.cancel();
-            detachAbort();
+            abortSignal?.removeEventListener("abort", onClientAbort);
             const { terminalInTail, tailClean } = flushTail();
             recordUsage();
             if (guard?.verbatim) {
@@ -509,7 +509,7 @@ export function tapAnthropicSseForLog(
         }
         settled = true;
         idle.cancel();
-        detachAbort();
+        abortSignal?.removeEventListener("abort", onClientAbort);
         if (guard?.verbatim) stopInspection();
         const { terminalInTail } = flushTail();
         recordUsage();
@@ -560,7 +560,7 @@ export function tapAnthropicSseForLog(
       if (!settled) {
         settled = true;
         idle.cancel();
-        detachAbort();
+        abortSignal?.removeEventListener("abort", onClientAbort);
         if (guard?.verbatim) stopInspection();
         recordUsage();
         finalize(499, { closeReason: "client_cancel" });

@@ -219,6 +219,21 @@ describe("native prompt cache observation paths", () => {
     expect(result.line).toContain("reuse_expectation=unknown reuse_reason=model_mismatch");
   });
 
+  test("completed per-send usage replaces opening cache counters and determines loss", async () => {
+    await warm();
+    respond = () => new Response(new ReadableStream<Uint8Array>({ async start(controller) {
+      controller.enqueue(new TextEncoder().encode(frame("message_start", { type: "message_start", message: reply() })));
+      await Bun.sleep(40);
+      controller.enqueue(new TextEncoder().encode(frame("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" },
+        usage: { input_tokens: 7, output_tokens: 3, cache_read_input_tokens: 1024, cache_creation_input_tokens: 1024 } })
+        + frame("message_stop", { type: "message_stop" })));
+      controller.close();
+    } }), { headers: { "content-type": "text/event-stream" } });
+    const result = await send(JSON.stringify(requestBody(true)));
+    expect(result.line).toContain("prompt_tokens=2055 cached_tokens=1024 cache_write_tokens=1024");
+    expect(result.line).toContain("expected_cached_tokens=2048 lost_cached_tokens=1024");
+  });
+
   test("a real buffered native combo child creates no cache observations", async () => {
     config.claudeCode!.strictPassthrough = false;
     config.combos = { "cache-child": { strategy: "failover", targets: [{ provider: "anthropic", model }] } };
