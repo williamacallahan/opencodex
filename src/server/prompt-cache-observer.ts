@@ -160,7 +160,7 @@ class NativeCacheObserver {
     const send = logCtx && this.bindings.get(logCtx);
     const excluded = input.comboParent ? "combo_parent" : input.locallyAnswered ? "local_answer" : !input.succeeded ? "request_failed" : undefined;
     const reuse = excluded ? this.unknown(excluded) : send?.outcome ?? (send?.failure ? this.unknown(send.failure)
-      : send?.ticket ? this.ledger.classify(send.ticket) : this.unknown(logCtx?.cacheRelayProvider ? "hidden_account" : "unsupported_transport"));
+      : send?.ticket ? this.ledger.classify(send.ticket) : this.unknown(logCtx?.nativeCacheProvider !== undefined && logCtx.nativeCacheProvider === logCtx.sentProvider ? "hidden_account" : "unsupported_transport"));
     if (send) {
       send.outcome = reuse;
       send.finished = true;

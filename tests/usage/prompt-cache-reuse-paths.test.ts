@@ -254,11 +254,12 @@ describe("native prompt cache observation paths", () => {
   test("translated and hidden-account relay finalization remains explicitly unknown", () => {
     for (const context of [
       { provider: "anthropic", model, providerAdapter: "anthropic", inboundProtocol: "responses" as const },
-      { provider: "relay", model: "fixture-model", providerAdapter: "openai-responses", cacheRelayProvider: "relay" },
+      { provider: "relay", model: "fixture-model", providerAdapter: "openai-responses", nativeCacheProvider: "relay", sentProvider: "relay" },
+      { provider: "other", model: "fixture-model", providerAdapter: "openai-responses", nativeCacheProvider: "relay", sentProvider: "other" },
     ]) {
       addFinalRequestLog(crypto.randomUUID(), Date.now(), context, 200);
       expect(lines.at(-1)).toContain("reuse_expectation=unknown");
-      expect(lines.at(-1)).toContain(`reuse_reason=${"cacheRelayProvider" in context ? "hidden_account" : "unsupported_transport"}`);
+      expect(lines.at(-1)).toContain(`reuse_reason=${"nativeCacheProvider" in context && context.nativeCacheProvider === context.sentProvider ? "hidden_account" : "unsupported_transport"}`);
       expect(lines.at(-1)).not.toContain("expected_cached_tokens=");
     }
     expect(retainedObservations()).toBe(0);
