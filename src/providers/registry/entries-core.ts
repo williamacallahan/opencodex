@@ -151,6 +151,7 @@ function anthropicOAuthEntry(id: AnthropicInstanceId, label: string): ProviderRe
     modelSupportsServiceTier: { ...ANTHROPIC_FAST_MODELS },
     fastTierDescription: ANTHROPIC_FAST_TIER_DESCRIPTION,
     fastOptIn: true,
+    reportsNativeCache: true,
   });
 }
 
@@ -159,6 +160,7 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     id: "openai",
     label: "OpenAI (Codex login)",
     adapter: "openai-responses",
+    reportsNativeCache: true,
     baseUrl: "https://chatgpt.com/backend-api/codex",
     authKind: "forward",
     codexAccountMode: "pool",
@@ -572,6 +574,7 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     id: "anthropic-apikey",
     label: "Anthropic (API key)",
     adapter: "anthropic",
+    reportsNativeCache: true,
     baseUrl: "https://api.anthropic.com",
     authKind: "key",
     featured: true,
@@ -733,6 +736,7 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     id: "openai-apikey",
     label: "OpenAI API",
     adapter: "openai-responses",
+    reportsNativeCache: true,
     baseUrl: "https://api.openai.com/v1",
     authKind: "key",
     supportsServiceTier: true,

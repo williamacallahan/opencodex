@@ -366,6 +366,12 @@ export interface ProviderRegistryEntry {
   /** Opt this provider into forwarding prompt_cache_key (OpenAI-specific; strict backends reject it). */
   promptCacheKey?: boolean;
   /**
+   * The upstream is the first-party host of its wire and reports real cache counters, so an
+   * all-zero cache detail it returns is a measured miss. Third-party hosts that merely speak
+   * the same wire (z.ai, Xiaomi, Cloudflare AI Gateway) default the counter to 0 and stay unset.
+   */
+  reportsNativeCache?: boolean;
+  /**
    * Opt-in: forward `service_tier` on the `/chat/completions` wire. Same hazard as
    * `promptCacheKey` — an OpenAI-specific extension that strict gateways reject. Distinct from
    * `supportsServiceTier`, which governs the Responses wire.

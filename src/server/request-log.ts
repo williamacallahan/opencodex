@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { promptCacheOutcomeLine } from "./prompt-cache-outcome";
+import { promptCacheOutcomeLine, providerReportsNativeCache } from "./prompt-cache-outcome";
 import { normalizeRecordedClient, type UsageClient } from "../usage/client";
 import { anthropicAccountTagField, stampApiKeyAccountLabel, usesApiKeyAccount } from "../providers/label";
 import { KEY_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
@@ -1671,7 +1671,7 @@ function writeFinalRequestLog(
     provider: isCombo ? "combo" : logCtx.provider,
     requestedModel: logCtx.requestedModel ?? logCtx.model,
     servedModel: logCtx.model,
-    nativeCacheWire: logCtx.providerAdapter === "anthropic" || logCtx.providerAdapter === "openai-responses",
+    nativeCacheWire: providerReportsNativeCache(logCtx.provider, logCtx.providerAdapter),
     usage: answeringUsage,
     usageStatus,
     wireParsed: logCtx.usageWireParsed === true,

@@ -1045,6 +1045,27 @@ describe("prompt_cache.outcome line", () => {
     expect(promptCacheOutcomeLine({ ...base, usage: { inputTokens: 5000, outputTokens: 1 }, wireParsed: true, nativeCacheWire: true }))
       .toContain("telemetry=missing cache_eligible=false");
   });
+  test("only first-party hosts report a native cache counter, whatever adapter a third-party host runs", () => {
+    const { providerReportsNativeCache } =
+      require("../../src/server/prompt-cache-outcome") as typeof import("../../src/server/prompt-cache-outcome");
+    expect(providerReportsNativeCache("anthropic", "anthropic")).toBe(true);
+    expect(providerReportsNativeCache("anthropic-pf2cf1b", "anthropic")).toBe(true);
+    expect(providerReportsNativeCache("openai-main", "openai-responses")).toBe(true);
+    expect(providerReportsNativeCache("openai-apikey", "openai-responses")).toBe(true);
+    // Third-party hosts on the same adapters default cached_tokens to 0.
+    for (const [provider, adapter] of [["xiaomi", "anthropic"], ["cloudflare-ai-gateway", "anthropic"],
+      ["zai", "openai-responses"], ["agentrouter", "anthropic"], ["codex-lb", "openai-responses"]] as const) {
+      expect(providerReportsNativeCache(provider, adapter)).toBe(false);
+    }
+    expect(providerReportsNativeCache("anthropic", "openai-chat")).toBe(false);
+    expect(providerReportsNativeCache("anthropic", undefined)).toBe(false);
+    // The decision keeps a third-party default zero out of the hit-rate denominator.
+    const usage = { inputTokens: 5000, outputTokens: 1, cachedInputTokens: 0 };
+    const line = (provider: string, adapter: string) => promptCacheOutcomeLine({ ...base, provider, usage,
+      wireParsed: true, nativeCacheWire: providerReportsNativeCache(provider, adapter) });
+    expect(line("xiaomi", "anthropic")).toContain("telemetry=unavailable cache_eligible=false");
+    expect(line("anthropic-pf2cf1b", "anthropic")).toContain("telemetry=reported cache_eligible=true");
+  });
   test("provider seats group by the label owner's family", () => {
     expect(providerFamily("anthropic-pf2cf1b")).toBe("anthropic");
     expect(providerFamily("openai-main")).toBe("openai");

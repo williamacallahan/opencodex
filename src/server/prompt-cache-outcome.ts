@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { baseProviderLabel } from "../providers/label";
+import { getProviderRegistryEntry } from "../providers/registry";
 import { classifyCacheTelemetryProvenance, type CacheTelemetryProvenance, type UsageStatus } from "../usage/log";
 import type { OcxUsage } from "../types";
 
@@ -33,6 +34,17 @@ export function minimumCacheablePromptTokens(model: string): number {
 /** Pool dispatch logs `anthropic-<seat>` / `openai-main`; the existing label owner maps them to the family. */
 export function providerFamily(provider: string): string {
   return baseProviderLabel(provider);
+}
+
+/**
+ * Whether this provider's cache counter is first-party: the registry marks the first-party hosts,
+ * and the adapter must still be the one that registry entry serves. Adapter name alone is not
+ * enough, because third-party hosts (z.ai, Xiaomi, Cloudflare AI Gateway, AgentRouter) also run
+ * the `anthropic` and `openai-responses` adapters and send a default `cached_tokens: 0`.
+ */
+export function providerReportsNativeCache(provider: string, adapter: string | undefined): boolean {
+  const entry = getProviderRegistryEntry(providerFamily(provider));
+  return entry?.reportsNativeCache === true && entry.adapter === adapter;
 }
 
 const TELEMETRY: Record<CacheTelemetryProvenance, "reported" | "missing" | "unavailable"> = {

@@ -121,6 +121,7 @@ export const REGISTRY_FIELD_MODEL_ID_ROLES = {
   noStructuredOutputModels: NONE,
   parallelToolCalls: NONE,
   promptCacheKey: NONE,
+  reportsNativeCache: NONE,
   chatServiceTier: NONE,
   openaiChatEofTolerance: NONE,
   foldDeveloperRoleToSystem: NONE,
