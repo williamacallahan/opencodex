@@ -1,3 +1,4 @@
+import { applyChatSamplingDefaults } from "./sampling-defaults";
 import { applyChatDestinationPolicy } from "./openai-chat/destination-policy";
 import { withRequiredChatToolResult } from "./openai-chat/required-tool-result";
 import { copyForwardedClientHeaders } from "../lib/provider-client-headers";
@@ -147,12 +148,7 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
             : toolChoice;
         }
         if (maxTokens !== undefined) body.max_tokens = maxTokens;
-        if (parsed.options.temperature !== undefined && !modelInList(provider.noTemperatureModels, parsed.modelId)) {
-          body.temperature = parsed.options.temperature;
-        }
-        if (parsed.options.topP !== undefined && !modelInList(provider.noTopPModels, parsed.modelId)) {
-          body.top_p = parsed.options.topP;
-        }
+        applyChatSamplingDefaults(body, provider, parsed.modelId, parsed.options);
         if (parsed.options.stopSequences !== undefined && !modelInList(provider.noStopModels, parsed.modelId)) {
           body.stop = parsed.options.stopSequences;
         }

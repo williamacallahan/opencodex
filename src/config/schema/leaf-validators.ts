@@ -330,6 +330,10 @@ export const providerConfigSchema = z.object({
   anthropicOAuthInstance: z.literal("anthropic2").optional().catch(undefined),
   reportsNativeCache: z.boolean().optional(),
   modelCapabilities: modelCapabilitiesSchema.optional(),
+  modelSamplingDefaults: z.record(z.string().refine(key => key.trim().length > 0), z.object({
+    temperature: z.number().finite().min(0).max(2).optional(),
+    topP: z.number().finite().min(0).max(1).optional(),
+  }).strict()).optional(),
   inputModalities: z.unknown().superRefine((value, ctx) => {
     const error = providerInputModalitiesConfigError(value);
     if (error) ctx.addIssue({ code: "custom", message: error });

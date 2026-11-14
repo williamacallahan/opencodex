@@ -213,7 +213,7 @@ const PROVIDER_PATCH_FIELDS: ReadonlySet<string> = new Set([
   "disabled", "adapter", "baseUrl", "defaultModel", "authMode", "apiKeyTransport", "note", "allowPrivateNetwork",
   "liveModels", "annotateEmptyToolOutputs", "fastEnabled", "xaiResponsesOptIn", "requestPacing",
   "upstreamHttpVersion", "upstreamWebsocket", "contextWindow", "modelCapabilities", "modelContextTiers",
-  "modelContextWindows", "pinnedReasoningEffort", "modelPinnedReasoningEfforts", "autoReviewModel",
+  "modelContextWindows", "modelSamplingDefaults", "pinnedReasoningEffort", "modelPinnedReasoningEfforts", "autoReviewModel",
   "autoReviewModelOverrides", "modelAutoCompactTokenLimits", "modelSupportsServiceTier", "modelSuppressSyntheticMax",
   "noStructuredOutputModels", "noJsonSchemaModels", "unsupportedHostedTools", "retainModels",
   "omitReasoningEffortWithToolsModels", "headers",

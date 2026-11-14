@@ -1,4 +1,5 @@
 import { contextTierRecordConfigError, modelCapabilitiesConfigError, mergeModelCapabilities } from "../../config/provider-validation";
+import { applyProviderSamplingPatch, applyProviderWindowsPatch } from "./provider-sampling-patch";
 import { DECLARABLE_HOSTED_TOOL_TYPES } from "../../responses/hosted-tool-policy";
 import { randomUUID } from "node:crypto";
 import { cleanupRemovedGcpCredentials, providerGcpCredentialMarkers, snapshotProviderGcpCredentialMarkers } from "../../providers/gcp-credential-cleanup";
@@ -533,33 +534,13 @@ function applyProviderPatchFields(
     touched = true;
   }
   if (Object.hasOwn(rawBody, "modelContextWindows")) {
-    const value = rawBody.modelContextWindows;
-    if (value === null) {
-      delete next.modelContextWindows;
-    } else {
-      if (!isPlainRecord(value)) return { error: "modelContextWindows must be a plain object or null" };
-      // A prototype-named model id must survive the merge: assigning
-      // "__proto__" on an ordinary object invokes the inherited setter instead
-      // of creating an own property, so the PATCH would report success while
-      // silently dropping that override.
-      const windows: Record<string, number> = Object.assign(
-        Object.create(null),
-        next.modelContextWindows ?? {},
-      );
-      for (const [model, window] of Object.entries(value)) {
-        if (!model.trim()) return { error: "modelContextWindows keys must be nonblank model ids" };
-        if (window === null) {
-          delete windows[model];
-          continue;
-        }
-        if (typeof window !== "number" || !Number.isSafeInteger(window) || window <= 0) {
-          return { error: "modelContextWindows values must be positive safe integers or null" };
-        }
-        windows[model] = window;
-      }
-      if (Object.keys(windows).length > 0) next.modelContextWindows = windows;
-      else delete next.modelContextWindows;
-    }
+    const error = applyProviderWindowsPatch(next, rawBody.modelContextWindows);
+    if (error) return { error };
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "modelSamplingDefaults")) {
+    const error = applyProviderSamplingPatch(next, rawBody);
+    if (error) return { error };
     touched = true;
   }
   if (Object.hasOwn(rawBody, "pinnedReasoningEffort") || Object.hasOwn(rawBody, "modelPinnedReasoningEfforts")) {
@@ -937,6 +918,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       contextWindow: p.contextWindow,
       inferContextWindow: p.inferContextWindow,
       modelContextWindows: p.modelContextWindows,
+      modelSamplingDefaults: p.modelSamplingDefaults,
       modelContextTiers: p.modelContextTiers,
       modelCapabilities: p.modelCapabilities,
       pinnedReasoningEffort: p.pinnedReasoningEffort,

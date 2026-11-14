@@ -691,6 +691,8 @@ export interface OcxProviderConfig {
   contextWindow?: number;
   /** Per-model fallback when context metadata is absent; otherwise caps the reported window. */
   modelContextWindows?: Record<string, number>;
+  /** Per-model values used only when the client omits sampling parameters. */
+  modelSamplingDefaults?: Record<string, { temperature?: number; topP?: number }>;
   /**
    * Custom providers only, default off: fill a missing context window from bundled model-ID
    * metadata before the Context cap / 128k fallback. An estimate, not verified relay capacity.

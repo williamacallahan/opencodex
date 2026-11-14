@@ -93,6 +93,26 @@ describe("Devin output budget on the wire", () => {
     removeTreeWithRetry(home);
   });
 
+  test("per-model sampling defaults reach the protobuf without changing other models", async () => {
+    seed([{ uid: "deepseek-v4-1-flash-1017-high" }, { uid: "swe-2-high" }]);
+    const provider = { modelSamplingDefaults: { "deepseek-v4-1-flash-1017": { temperature: 1, topP: 1 } } };
+    const sentSampling = () => {
+      const completion = fields(fields(requests[0]!).get(8)!.value as Buffer);
+      return { temperature: (completion.get(5)!.value as Buffer).readDoubleLE(), topP: (completion.get(8)!.value as Buffer).readDoubleLE(), topK: completion.get(7)!.value };
+    };
+    await run(provider, {}, "deepseek-v4-1-flash-1017-high");
+    expect(sentSampling()).toEqual({ temperature: 1, topP: 1, topK: 40n });
+    requests = [];
+    await run(provider, { temperature: 0.2 }, "deepseek-v4-1-flash-1017-high");
+    expect(sentSampling().temperature).toBe(0.2);
+    requests = [];
+    await run(provider, { temperature: 0 }, "deepseek-v4-1-flash-1017-high");
+    expect(sentSampling().temperature).toBe(0.0001);
+    requests = [];
+    await run(provider, {}, "swe-2-high");
+    expect(sentSampling().temperature).toBe(0.7);
+  });
+
   test("a caller that names no cap still reaches the configured provider budget", async () => {
     // Codex never sends max_output_tokens, so this is the path every real turn
     // takes. Before the budget was wired the encoder's 8192 was the only cap a
