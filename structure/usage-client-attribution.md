@@ -204,16 +204,28 @@ Per-account summaries still key on `accountLogLabel` and ignore the tag
 
 `src/server/prompt-cache-outcome.ts` emits `reuse_schema=1` with a process epoch, expectation,
 reason and coverage alongside the existing usage fields. `src/server/prompt-cache-observer.ts`
-binds the final native physical send to its response and supplies its own reported usage;
-failed sends, local answers and combo-parent summaries do not supply expected-token denominators.
-Translated transports and relays with hidden accounts remain explicitly unknown.
+binds the final native physical send to its response and supplies its completed, merged usage;
+opening counters cannot replace later cache counters or determine final lost tokens. Failed sends,
+local answers and combo-parent summaries do not supply expected-token denominators. Combo children
+are excluded before capture. Translated transports and relays with hidden accounts remain explicitly
+unknown; relay detection uses the matching `nativeCacheProvider` and `sentProvider` context fields.
 
 The native observer records dispatch identity before sending and readiness from a valid complete
-`message_start`, or a valid buffered Messages result. It copies the request only after that evidence
-and submits it to one resident `src/server/prompt-cache-observation-worker.ts`. Neither forwarding
-nor final logging waits for hashing: a fast buffered reply can report `hash_unavailable` while its
-confirmed prefill subsequently becomes evidence for a later request. Worker failure is terminal
-for that observer lifetime and lowers coverage rather than starting a retry loop.
+`message_start`, or a valid buffered Messages result. Non-strict prefill is observed before OAuth
+name restoration and model echo, so a qualified client selector cannot hide or invent a model mismatch.
+Configured authentication headers remain unknown; OAuth identity includes the credential generation.
+Native completion releases captured observations even when no outcome log is emitted. Only a confirmed
+hashing job can outlive that completion, until its worker reply or bounded deadline releases it.
+
+Response chunks are forwarded before observation. Validated prefill yields to the event loop before
+copying or starting the resident `src/server/prompt-cache-observation-worker.ts`. Copying yields between
+256 KiB binary chunks or 32,768-code-unit string segments without splitting surrogate pairs. The worker
+concatenates transferred chunks and hashes them. Admission reserves the source, transferred chunks,
+worker concatenation and bounded scratch within the ledger's pending budget; insufficient capacity
+reports `worker_backlog` without rejecting the request. Neither forwarding nor final logging waits for
+hashing: a fast buffered reply can report `hash_unavailable` while its confirmed prefill subsequently
+becomes evidence for a later request. Worker failure is terminal for that observer lifetime and lowers
+coverage rather than starting a retry loop.
 
 `src/server/prompt-cache-prefix.ts` owns byte-preserving position identities and unsupported shapes.
 `src/server/prompt-cache-reuse.ts` owns dispatch-time history, bounded pending memory, expiry and

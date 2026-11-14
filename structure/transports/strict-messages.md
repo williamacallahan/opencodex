@@ -78,7 +78,9 @@ inspection never changes the original encoded response bytes or relaxes the sepa
 The private wire snapshot and the separate outbound copy each consume the existing 32 MiB retained-turn
 budget; inbound admission is a separate ceiling, not permission to exceed retained-memory limits.
 The final `commitSend` also captures cache observation identity without hashing or changing the body.
-Validated prefill schedules a separate worker copy; unavailable evidence never delays forwarding.
+The original response chunk is enqueued before usage inspection, including compressed inspection.
+Validated prefill schedules a bounded, yielding worker handoff after forwarding; unavailable cache
+evidence never delays forwarding. Native completion owns observation release, independently of logging.
 The [prompt-cache reuse contract](../usage-client-attribution.md#prompt-cache-reuse) owns the event
 fields, coverage limitations, identity domains and accounting rules.
 

@@ -19,7 +19,7 @@ import type { PrefixWalk } from "./prompt-cache-prefix";
 import { PromptCacheReuseLedger, type ReuseClassification, type SendObservation } from "./prompt-cache-reuse";
 import type { RequestLogContext } from "./request-log";
 
-export interface PrefixWorkerRequest { id: number; bytes: Uint8Array; encoding: string | null }
+export interface PrefixWorkerRequest { id: number; chunks: Uint8Array[]; encoding: string | null }
 export type PrefixWorkerReply = { id: number; prefix: PrefixWalk } | { id: number; failed: true };
 type ObservationReason = "unsupported_transport" | "count_tokens" | "local_answer" | "combo_parent" | "combo_child"
   | "hidden_account" | "worker_failed" | "request_failed" | "model_mismatch" | "send_unavailable" | "credential_override" | "prefill_unavailable" | "usage_unavailable";
@@ -42,6 +42,7 @@ interface ObservedSend {
   model: string;
   ticket?: SendObservation;
   body?: string | Uint8Array;
+  wireBytes?: number;
   encoding?: string | null;
   usage?: OcxUsage;
   finalUsage?: OcxUsage | null;
@@ -52,6 +53,8 @@ interface ObservedSend {
   outcome?: NativeCacheReuse;
 }
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
+
+const handoffLimits = { binaryChunkBytes: 262144, stringChunkUnits: 32768, chunkOverheadBytes: 256 };
 
 class NativeCacheObserver {
   readonly ledger = new PromptCacheReuseLedger();
@@ -95,14 +98,19 @@ class NativeCacheObserver {
       : options.provider.apiKey ? `key:${digest(options.provider.apiKey)}` : null;
     const cacheDomain = classifyCredential({ provider: "anthropic", credentialId: credential ?? "" }).cacheDomain;
     const conversation = options.sessionKey ?? logCtx.conversationId;
+    const sourceBytes = typeof body === "string" ? body.length * 2 : body.byteLength;
+    const chunkCount = Math.ceil(typeof body === "string" ? body.length / (handoffLimits.stringChunkUnits - 1) : body.byteLength / handoffLimits.binaryChunkBytes);
+    // Reserve the retained source, transferred chunks, worker concatenation, and bounded copy scratch.
+    const reservation = sourceBytes + options.bodyBytes * 2 + handoffLimits.binaryChunkBytes + chunkCount * handoffLimits.chunkOverheadBytes;
     const ticket = this.ledger.observeSend({ sendId: `${this.ledger.epoch}:${send.id}`, account: credential, cacheDomain,
       destination: JSON.stringify([url.origin + url.pathname + url.search, headers.get("anthropic-version"), headers.get("anthropic-beta")]),
-      model: send.model, bodyBytes: options.bodyBytes,
+      model: send.model, bodyBytes: reservation,
       ...(conversation && conversation.length <= 1024 ? { conversation: digest(conversation) } : {}),
     });
     send.ticket = ticket;
     if (ticket.rejected) return;
     send.body = body;
+    send.wireBytes = options.bodyBytes;
     send.encoding = headers.get("content-encoding");
     this.pending.set(send.id, send);
   }
@@ -116,22 +124,45 @@ class NativeCacheObserver {
     if (!this.ledger.confirmPrefill(send.ticket, { type: "message_start", message })) return;
     if (!isRec(message) || !isRec(message.usage)) return;
     send.usage = anthropicUsageToOcx(message.usage);
-    try {
-      if (!this.worker) {
-        const worker = spawnWorker(new URL("./prompt-cache-observation-worker.ts", import.meta.url).href, "prompt-cache-observation-worker");
-        this.worker = worker;
-        worker.onmessage = (event: MessageEvent<PrefixWorkerReply>) => this.accept(event.data);
-        worker.onerror = () => this.failWorker();
+    send.postedAt = performance.now();
+    this.armDeadline();
+    this.handoff(send).catch(() => this.failWorker());
+  }
+  async handoff(send: ObservedSend): Promise<void> {
+    // Yield before allocation or worker startup; a resolved Promise would not yield to I/O.
+    await Bun.sleep(0);
+    if (!this.pending.has(send.id) || send.body === undefined) return;
+    const body = send.body;
+    const chunks: Uint8Array[] = [];
+    const encoder = new TextEncoder();
+    let copied = 0;
+    for (let offset = 0; offset < body.length;) {
+      let chunk: Uint8Array;
+      if (typeof body === "string") {
+        let end = Math.min(offset + handoffLimits.stringChunkUnits, body.length);
+        const last = body.charCodeAt(end - 1);
+        if (end < body.length && last >= 0xd800 && last <= 0xdbff) end--;
+        chunk = encoder.encode(body.slice(offset, end));
+        offset = end;
+      } else {
+        chunk = new Uint8Array(body.subarray(offset, offset + handoffLimits.binaryChunkBytes));
+        offset += chunk.byteLength;
       }
-      // Copy only after valid prefill. Transfer this observation's copy, never transport ownership.
-      const bytes = typeof send.body === "string" ? new TextEncoder().encode(send.body) : new Uint8Array(send.body);
-      send.body = undefined;
-      send.postedAt = performance.now();
-      this.worker.postMessage({ id: send.id, bytes, encoding: send.encoding ?? null } satisfies PrefixWorkerRequest, [bytes.buffer]);
-      this.armDeadline();
-    } catch {
-      this.failWorker();
+      chunks.push(chunk);
+      copied += chunk.byteLength;
+      await Bun.sleep(0);
+      if (!this.pending.has(send.id)) return;
     }
+    if (copied !== send.wireBytes) throw new Error("observation_bytes_changed");
+    send.body = undefined;
+    if (!this.worker) {
+      const worker = spawnWorker(new URL("./prompt-cache-observation-worker.ts", import.meta.url).href, "prompt-cache-observation-worker");
+      this.worker = worker;
+      worker.onmessage = (event: MessageEvent<PrefixWorkerReply>) => this.accept(event.data);
+      worker.onerror = () => this.failWorker();
+    }
+    this.worker.postMessage({ id: send.id, chunks, encoding: send.encoding ?? null } satisfies PrefixWorkerRequest,
+      chunks.map(chunk => chunk.buffer));
   }
   // The log tap sees client-facing rewrites. This bounded raw prefill observation cannot
   // use that transformed model identity, and its budget must not consume the relay's budget.

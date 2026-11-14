@@ -11,6 +11,7 @@ import { getAccountSet, getAccountCredential, saveAccountCredential, saveCredent
 import { routeModel } from "../../src/router";
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
 import { handleNativeMessages } from "../../src/server/messages-native";
+import { tapAnthropicSseForLog } from "../../src/server/messages-shared";
 import { handleClaudeMessages } from "../../src/server/claude-messages";
 import { beginInferenceAttempt } from "../../src/server/inference/attempt";
 import { stopNativePromptCacheObservations } from "../../src/server/prompt-cache-observer";
@@ -47,6 +48,28 @@ function streamingReply(read = 0, write = 2048): Response {
 }
 const retainedObservations = () => Object.entries(appOwnedBytesSnapshot().stores)
   .filter(([id]) => id.startsWith("prompt-cache-reuse:")).reduce((count, [, store]) => count + store.count, 0);
+
+test("verbatim chunk readiness precedes observer-scheduled work", async () => {
+  const phases: string[] = [];
+  let source!: ReadableStreamDefaultController<Uint8Array>;
+  const upstream = new ReadableStream<Uint8Array>({ start(controller) { source = controller; } });
+  const response = tapAnthropicSseForLog(upstream, { model, provider: "anthropic" }, () => {}, {
+    stallMs: 0, maxBytes: 0, verbatim: { status: 200, inspectSse: true },
+    onPrefill: () => queueMicrotask(() => phases.push("observer")),
+  });
+  const reader = response.getReader();
+  try {
+    const first = reader.read().then(chunk => { phases.push("client"); return chunk; });
+    const opening = frame("message_start", { type: "message_start", message: reply() });
+    source.enqueue(new TextEncoder().encode(opening));
+    expect(new TextDecoder().decode((await first).value)).toBe(opening);
+    expect(phases).toEqual(["client", "observer"]);
+  } finally {
+    source.close();
+    await reader.cancel();
+    reader.releaseLock();
+  }
+});
 
 describe("native prompt cache observation paths", () => {
   let originalFetch: typeof fetch;
@@ -252,6 +275,47 @@ describe("native prompt cache observation paths", () => {
     await response.text();
     expect(response.status).toBe(400);
     expect(retainedObservations()).toBe(0);
+  });
+
+  test("pending admission reserves the handoff copy without blocking response delivery", async () => {
+    const body = requestBody(true);
+    body.messages[0]!.content[0]!.text = "x".repeat(8 * 1024 * 1024);
+    const raw = JSON.stringify(body);
+    const held: Response[] = [];
+    respond = () => received.length <= 3
+      ? new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(new TextEncoder().encode(": waiting for prefill\n\n"));
+      } }), { headers: { "content-type": "text/event-stream" } })
+      : streamingReply();
+    try {
+      for (let index = 0; index < 3; index++) {
+        const response = await handleClaudeMessages(new Request("http://localhost/strict/v1/messages", {
+          method: "POST", body: raw, headers: { "content-type": "application/json" },
+        }), config, { model: "", provider: "" });
+        expect(response.status).toBe(200);
+        held.push(response);
+      }
+      const result = await send(raw);
+      expect(result.bytes).toBe(sse(0, 2048));
+      expect(result.line).toContain("reuse_expectation=unknown reuse_reason=worker_backlog");
+      expect(received).toHaveLength(4);
+    } finally {
+      for (const response of held) await response.body?.cancel();
+    }
+  }, 20000);
+
+  test.each(["/strict/v1/messages", "/v1/messages"])("%s preserves Unicode across observation chunks", async path => {
+    config.claudeCode!.strictPassthrough = false;
+    saveConfig(config);
+    const body = requestBody(true);
+    body.messages[0]!.content[0]!.text = "界\u{10437}".repeat(40000);
+    const raw = JSON.stringify(body);
+    await warm(raw, path);
+    respond = () => streamingReply(2048, 0);
+    const result = await send(raw, path);
+    expect(result.bytes).toBe(sse(2048, 0));
+    expect(JSON.parse(received.at(-1)!.bytes.toString()).messages[0].content[0].text).toBe(body.messages[0]!.content[0]!.text);
+    expect(result.line).toContain("expected_cached_tokens=2048 lost_cached_tokens=0");
   });
 
   test("count-token requests cannot create cache entries", async () => {

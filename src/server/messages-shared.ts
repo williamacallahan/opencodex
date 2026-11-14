@@ -165,9 +165,8 @@ export function tapAnthropicSseForLog(
   const inspectFrame = (frame: string, delivered = true) => {
     const lines = frame.split("\n");
     // SSE dispatches on the last event field of a frame.
-    const eventLine = lines.map(l => sseFieldValue(l, "event")).findLast((v): v is string => v !== null);
     // The value is used as SSE delivers it (one leading space stripped, nothing trimmed).
-    const event = eventLine === undefined ? null : eventLine;
+    const event = lines.map(l => sseFieldValue(l, "event")).findLast((v): v is string => v !== null) ?? null;
     const dataLine = lines
       .map(l => sseFieldValue(l, "data"))
       .filter((v): v is string => v !== null)
@@ -485,6 +484,7 @@ export function tapAnthropicSseForLog(
               return;
             }
           }
+          const forwarded = guard?.verbatim ? enqueue(value) : 0;
           if (!guard?.verbatim) inspect(value);
           else if (!inspectionStopped) {
             try {
@@ -496,7 +496,7 @@ export function tapAnthropicSseForLog(
             } catch { stopInspection(); }
             if (settled) return;
           }
-          if (enqueue(value) > 0) return;
+          if (guard?.verbatim ? forwarded > 0 : enqueue(value) > 0) return;
         }
       } catch (err) {
         if (settled) return;
