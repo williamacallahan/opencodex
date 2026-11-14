@@ -1,3 +1,4 @@
+import { resolveSamplingDefaults } from "../sampling-defaults";
 import { applyChatDestinationPolicy, mistralNativeChatEffort } from "./destination-policy";
 import { protectGlmSummaryBudget } from "./summary-budget";
 import { openAIChatTransport, stripBracketedModelSuffix } from "./wire";
@@ -148,6 +149,12 @@ export function buildOpenAIChatPassthroughRequest(
   const vercelRouting = resolveVercelGatewayRouting(provider, modelId);
   if (vercelRouting) body.provider = vercelGatewayProviderPayload(vercelRouting);
 
+  const sampling = resolveSamplingDefaults(provider, String(body.model), {
+    temperature: typeof body.temperature === "number" ? body.temperature : undefined,
+    topP: typeof body.top_p === "number" ? body.top_p : undefined,
+  }, modelId);
+  if (body.temperature == null && sampling.temperature !== undefined) body.temperature = sampling.temperature;
+  if (body.top_p == null && sampling.topP !== undefined) body.top_p = sampling.topP;
   if (modelInList(provider.noTemperatureModels, modelId)) delete body.temperature;
   if (modelInList(provider.noTopPModels, modelId)) delete body.top_p;
   if (modelInList(provider.noStopModels, modelId)) delete body.stop;

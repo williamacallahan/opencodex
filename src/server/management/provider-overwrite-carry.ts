@@ -69,6 +69,7 @@ export const PROVIDER_COMPAT_CARRY_FIELDS = [
   // Whether this host sends a real cache counter (codex-lb), so its 0 is a measured miss. The form
   // cannot send it, and a save that dropped it turned the host's cache reporting back to unavailable.
   "reportsNativeCache",
+  "modelSamplingDefaults",
   ...RETRY_POLICY_FIELDS,
 ] as const satisfies readonly (keyof OcxProviderConfig)[];
 
@@ -213,7 +214,7 @@ const PROVIDER_PATCH_FIELDS: ReadonlySet<string> = new Set([
   "disabled", "adapter", "baseUrl", "defaultModel", "authMode", "apiKeyTransport", "note", "allowPrivateNetwork",
   "liveModels", "annotateEmptyToolOutputs", "fastEnabled", "xaiResponsesOptIn", "requestPacing",
   "upstreamHttpVersion", "upstreamWebsocket", "contextWindow", "modelCapabilities", "modelContextTiers",
-  "modelContextWindows", "pinnedReasoningEffort", "modelPinnedReasoningEfforts", "autoReviewModel",
+  "modelContextWindows", "modelSamplingDefaults", "pinnedReasoningEffort", "modelPinnedReasoningEfforts", "autoReviewModel",
   "autoReviewModelOverrides", "modelAutoCompactTokenLimits", "modelSupportsServiceTier", "modelSuppressSyntheticMax",
   "noStructuredOutputModels", "noJsonSchemaModels", "unsupportedHostedTools", "retainModels",
   "omitReasoningEffortWithToolsModels", "headers",

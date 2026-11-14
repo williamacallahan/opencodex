@@ -130,6 +130,13 @@ interface CarryCase {
 }
 
 const CASES: Record<ProviderCompatCarryField, CarryCase> = {
+  modelSamplingDefaults: {
+    seed: { modelSamplingDefaults: { [MODEL]: { temperature: 1, topP: 1 } } },
+    probe: provider => {
+      const body = nativeBody(provider, { messages: [{ role: "user", content: "hi" }] });
+      return { temperature: body.temperature, topP: body.top_p };
+    },
+  },
   singleLeadingSystemMessage: {
     seed: { singleLeadingSystemMessage: true },
     probe: provider => nativeBody(provider, {

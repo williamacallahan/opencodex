@@ -1204,6 +1204,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   contextWindow: "editor",
   inferContextWindow: "editor",
   modelContextWindows: "editor",
+  modelSamplingDefaults: "editor",
   modelContextTiers: "editor",
   modelInputModalities: "editor",
   inputModalities: "editor",
