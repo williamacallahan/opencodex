@@ -1,10 +1,11 @@
 import { registerRetainedStore, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
+import { classifyCredential, relateCacheDomain, type IdentityDomain } from "../routing/identity-domains";
 import { isCachePositionReachable, type CachePosition, type CacheTtl, type PrefixWalk } from "./prompt-cache-prefix";
 
 export const promptCacheReuseLimits = Object.freeze({ records: 16384, accountsPerPrefix: 8, pendingTickets: 64, pendingBytes: 64 * 1024 * 1024 });
 type CoverageReason = "tracking_horizon" | "startup" | "capacity_evicted" | "worker_backlog"
   | "unsupported_shape" | "hash_unavailable" | "unmeasured_anchor" | "prefill_unconfirmed";
-export type ReuseReason = CoverageReason | "same_account_anchor" | "account_changed" | "ttl_elapsed"
+export type ReuseReason = CoverageReason | "same_account_anchor" | "shared_cache_domain" | "cache_domain_changed" | "credential_changed" | "ttl_elapsed"
   | "prefill_overlap" | "no_observed_predecessor" | "prefill_unconfirmed" | "history_unavailable"
   | "lookback_gap" | "breakpoints_removed" | "prefix_changed" | "hidden_account" | "predecessor_pending"
   | "send_unavailable" | "epoch_changed";
@@ -23,6 +24,7 @@ export interface SendIdentity {
   readonly destination: string;
   /** Stable selected credential/account identity, never a secret or a display ordinal. */
   readonly account: string | null;
+  readonly cacheDomain?: IdentityDomain;
   readonly model: string;
   readonly bodyBytes: number;
   /** Optional opaque conversation digest; not needed to discover shared prefixes. */
@@ -30,6 +32,7 @@ export interface SendIdentity {
 }
 export type SendObservation = Readonly<SendIdentity & {
   epoch: string;
+  cacheDomain: IdentityDomain;
   dispatchedAt: number;
   sequence: number;
   coverage: CoverageReason;
@@ -55,6 +58,7 @@ interface Anchor {
   id: number;
   key: string;
   account: string;
+  cacheDomain: IdentityDomain;
   position: CachePosition;
   ttl: CacheTtl;
   tokens: number;
@@ -65,6 +69,11 @@ interface Anchor {
   storedAt: number;
   conversation?: string;
   bytes: number;
+}
+function cacheRelation(first: Pick<SendObservation, "account" | "cacheDomain">, second: Pick<SendObservation, "account" | "cacheDomain">) {
+  const relation = relateCacheDomain(first, second);
+  // A credential is in one workspace even when that workspace's name is unavailable.
+  return relation === "unknown" && first.account !== null && first.account === second.account ? "shared" : relation;
 }
 const horizon = 3600000;
 const tokenCount = (count: unknown): count is number => typeof count === "number" && Number.isSafeInteger(count) && count >= 0;
@@ -172,15 +181,16 @@ export class PromptCacheReuseLedger {
   observeSend(identity: SendIdentity): SendObservation {
     this.#prune();
     const dispatchedAt = this.#clock();
-    const valid = [identity.sendId, identity.destination, identity.model, identity.account ?? "", identity.conversation ?? ""]
+    const cacheDomain = identity.cacheDomain ?? classifyCredential({ provider: "anthropic", credentialId: identity.account ?? "" }).cacheDomain;
+    const valid = [identity.sendId, identity.destination, identity.model, identity.account ?? "", identity.conversation ?? "", cacheDomain.key]
       .every(label => label.length <= 1024) && tokenCount(identity.bodyBytes);
     const bytes = valid ? identity.bodyBytes + 512 + 2 * (identity.sendId.length + identity.destination.length
-      + identity.model.length + (identity.account?.length ?? 0) + (identity.conversation?.length ?? 0)) : 0;
+      + identity.model.length + (identity.account?.length ?? 0) + (identity.conversation?.length ?? 0) + cacheDomain.key.length) : 0;
     const rejected = this.#closed || !valid ? "send_unavailable" : !identity.account ? "hidden_account"
       : this.#pending.size >= promptCacheReuseLimits.pendingTickets || this.#pendingBytes + bytes > promptCacheReuseLimits.pendingBytes
         ? "worker_backlog" : undefined;
     if (rejected) this.#markGap(rejected === "worker_backlog" ? rejected : "unsupported_shape");
-    const send: SendObservation = Object.freeze({ ...identity, dispatchedAt, epoch: this.epoch,
+    const send: SendObservation = Object.freeze({ ...identity, cacheDomain: Object.freeze({ ...cacheDomain }), dispatchedAt, epoch: this.epoch,
       sequence: ++this.#sequence, coverage: this.#coverage(dispatchedAt), eviction: this.#evictions, gapSequence: this.#gapSequence,
       ...(rejected ? { rejected } : {}),
     });
@@ -243,8 +253,8 @@ export class PromptCacheReuseLedger {
     }
     while (this.#records.size >= promptCacheReuseLimits.records) this.#evictOldest();
     const conversation = this.#conversation(send);
-    const bytes = 384 + 2 * (key.length + send.account.length + (conversation?.length ?? 0));
-    const anchor: Anchor = { id: ++this.#recordId, key, account: send.account, position, ttl, tokens,
+    const bytes = 384 + 2 * (key.length + send.account.length + send.cacheDomain.key.length + (conversation?.length ?? 0));
+    const anchor: Anchor = { id: ++this.#recordId, key, account: send.account, cacheDomain: send.cacheDomain, position, ttl, tokens,
       dispatchedAt: send.dispatchedAt, dispatchSequence: send.sequence, readyAt: prefill.readyAt,
       readySequence: prefill.sequence, storedAt: this.#clock(), bytes, ...(conversation === undefined ? {} : { conversation }),
     };
@@ -274,7 +284,7 @@ export class PromptCacheReuseLedger {
     for (const position of prefix.positions) {
       if (!isCachePositionReachable(position.index, prefix.breakpoints)) continue;
       for (const anchor of this.#anchors(this.#key(send, position))) {
-        if (anchor.account === send.account && anchor.tokens === prefill.read && anchor.readySequence < send.sequence) {
+        if (cacheRelation(anchor, send) === "shared" && anchor.tokens === prefill.read && anchor.readySequence < send.sequence) {
           const previous = matches.get(anchor.key);
           if (!previous || previous.dispatchSequence < anchor.dispatchSequence) matches.set(anchor.key, anchor);
         }
@@ -313,6 +323,7 @@ export class PromptCacheReuseLedger {
     if (send.eviction !== this.#evictions) return this.#result(send, "unknown", "history_unavailable");
     let warm: Anchor | undefined;
     let moved = false;
+    let credentialChanged = false;
     let expired = false;
     let overlap = false;
     let unreachable = false;
@@ -322,18 +333,21 @@ export class PromptCacheReuseLedger {
         if (anchor.dispatchSequence >= send.sequence) continue;
         const ready = anchor.readySequence < send.sequence && anchor.readyAt <= send.dispatchedAt;
         const alive = send.dispatchedAt < anchor.dispatchedAt + anchor.ttl;
-        if (!reachable) { if (ready && alive && anchor.account === send.account) unreachable = true; continue; }
+        const relation = cacheRelation(anchor, send);
+        if (!reachable) { if (ready && alive && relation === "shared") unreachable = true; continue; }
         if (ready && alive) {
-          if (anchor.account !== send.account) moved = true;
+          if (relation === "distinct") moved = true;
+          else if (relation === "unknown") credentialChanged = true;
           else if (!warm || anchor.tokens > warm.tokens) warm = anchor;
-        } else if (anchor.account === send.account) {
+        } else if (relation === "shared") {
           if (!ready) overlap = true;
           else expired = true;
         }
       }
     }
-    if (warm) return this.#result(send, "reuse", "same_account_anchor", warm.tokens);
-    if (moved) return this.#result(send, "moved", "account_changed");
+    if (warm) return this.#result(send, "reuse", warm.account === send.account ? "same_account_anchor" : "shared_cache_domain", warm.tokens);
+    if (moved) return this.#result(send, "moved", "cache_domain_changed");
+    if (credentialChanged) return this.#result(send, "unknown", "credential_changed");
     if (overlap) return this.#result(send, "overlap", "prefill_overlap");
     if (expired) return this.#result(send, "expired", "ttl_elapsed");
     if (unreachable) return this.#result(send, "unknown", pending.prefix.breakpoints.length ? "lookback_gap" : "breakpoints_removed");

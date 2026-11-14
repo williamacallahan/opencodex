@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { classifyCredential } from "../../src/routing/identity-domains";
 import { appOwnedBytesSnapshot, configureAppOwnedMemoryBudget, enforceAppOwnedMemoryBudget, DEFAULT_APP_OWNED_MEMORY_BUDGET_BYTES } from "../../src/lib/app-owned-memory";
 import { walkPromptCachePrefix, type PrefixWalk } from "../../src/server/prompt-cache-prefix";
 import { PromptCacheReuseLedger, promptCacheReuseLimits, type SendIdentity, type SendObservation } from "../../src/server/prompt-cache-reuse";
@@ -190,12 +191,12 @@ describe("prompt cache reuse evidence", () => {
     outcome(ledger, next, "reuse", "same_account_anchor");
   });
 
-  test("seat changes are moved, but different destinations and models remain isolated", () => {
+  test("unknown workspace changes remain unknown, while destinations and models stay isolated", () => {
     const { ledger, send, fill, ready } = fixture();
     fill();
     const moved = send({ account: "seat-b" });
     ready(moved, prompt(), 0, 0);
-    outcome(ledger, moved, "moved", "account_changed");
+    outcome(ledger, moved, "unknown", "credential_changed");
     const other = send({ destination: "other" });
     ready(other, prompt(), 0, 0);
     outcome(ledger, other, "unknown", "no_observed_predecessor");
@@ -204,6 +205,20 @@ describe("prompt cache reuse evidence", () => {
     ledger.resolvePrefix(model, prompt());
     outcome(ledger, model, "unknown", "no_observed_predecessor");
     outcome(ledger, send({ account: null }), "unknown", "hidden_account");
+  });
+
+  test.each([
+    { workspace: "shared", next: "shared", expectation: "reuse", reason: "shared_cache_domain" },
+    { workspace: "first", next: "second", expectation: "moved", reason: "cache_domain_changed" },
+    { workspace: undefined, next: undefined, expectation: "unknown", reason: "credential_changed" },
+  ])("cache namespaces distinguish shared, distinct and unknown workspaces: %j", scenario => {
+    const { ledger, fill, send, ready } = fixture();
+    const first = { account: "key-a", cacheDomain: classifyCredential({ credentialId: "key-a", provider: "anthropic", workspaceId: scenario.workspace }).cacheDomain };
+    const second = { account: "key-b", cacheDomain: classifyCredential({ credentialId: "key-b", provider: "anthropic", workspaceId: scenario.next }).cacheDomain };
+    fill(prompt(), first);
+    const current = send(second);
+    ready(current, prompt(), 0, 0);
+    outcome(ledger, current, scenario.expectation, scenario.reason);
   });
 
   test.each([19, 20, 21])("matches identical content only within lookback at distance %i", distance => {
