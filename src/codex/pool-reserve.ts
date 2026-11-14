@@ -55,25 +55,36 @@ function hasFreshPoolReserve(accountId: string, now = Date.now()): boolean {
     && now - window.observedAt <= POOL_RESERVE_FRESHNESS_MS) === true;
 }
 
-/** A selected Reserve request must fail closed on expiry, even if credits could otherwise serve. */
+/**
+ * Whether a seat may be offered Luna Reserve: a fresh reported grant, or no Reserve window at all.
+ * ChatGPT serves `gpt-reserve` to seats whose usage response never lists a grant (openai/codex#40939),
+ * so an unreported seat is tried and the upstream stays the entitlement authority. A stored window
+ * that is exhausted, elapsed or stale is evidence against Reserve and keeps the seat out.
+ */
+function poolReserveOfferable(accountId: string, now: number): boolean {
+  return hasFreshPoolReserve(accountId, now) || !holdsPoolReserveWindow(accountId);
+}
+
+/** A selected Reserve request must fail closed on a stored exhausted or stale window, even if credits could otherwise serve. */
 export function poolReserveHoldResetAt(accountId: string, now = Date.now()): number | undefined {
-  if (hasFreshPoolReserve(accountId, now)) return undefined;
+  if (poolReserveOfferable(accountId, now)) return undefined;
   return now + 60_000;
 }
 
 // Stale evidence is deliberately not re-read on the request path. The hub's `quota-refresh` service
 // refreshes non-exhausted seats and seats holding a Reserve window on the 5-minute cadence, well inside
 // POOL_RESERVE_FRESHNESS_MS; an exhausted seat without a Reserve window is read every 15 minutes, so a
-// new Reserve grant on it is seen within that hold. A seat whose probe keeps failing is not helped by a
-// request waiting on it. A Luna request that meets a cold or
-// stale reading (a restart before the first probe) falls back to the unchanged selection for that
-// request only; a wait here was rejected twice in review for delaying or desynchronizing bursts.
+// reported window on it is seen within that hold. A seat whose probe keeps failing is not helped by a
+// request waiting on it. A seat holding only a stale window is skipped for that request, which falls
+// back to the unchanged selection; a wait here was rejected twice in review for delaying or
+// desynchronizing bursts.
 
 /**
- * Reserve is Luna-only while included quota is shared with Sol and Astra, so a fresh Reserve
- * goes before another seat's included quota. A thread bound to a seat that still has included
- * quota keeps Luna there, with its prompt cache. Selection keeps its pause, credential, health,
- * affinity and priority policies.
+ * Every Luna request goes first to Reserve on a seat whose included usage is spent. Only when no
+ * such seat can serve Reserve does it use Luna on a seat that still has included usage. A soft
+ * thread binding to an included seat does not outrank Reserve, and a seat whose Reserve scope is
+ * cooling from a refusal is skipped by the same selection. Selection keeps its pause, credential,
+ * health, affinity and priority policies.
  */
 export function poolLunaReserveSelection(
   config: OcxConfig, modelId: string | undefined, quotaScope: CodexQuotaScope | undefined,
@@ -82,11 +93,10 @@ export function poolLunaReserveSelection(
 ): { options: CodexAccountUsabilityOptions; quotaScope: CodexQuotaScope | undefined; reserve: boolean } {
   const unchanged = { options, quotaScope, reserve: false };
   if (modelId !== "gpt-6-luna") return unchanged;
-  // With no Reserve anywhere, selection must stay exactly as before (credit seats and affinity included).
   const reserveIds = new Set((config.codexAccounts ?? []).filter(account => account.id !== excludeId
     && (pinnedAccountId === undefined || account.id === pinnedAccountId)
     && codexUsageLimitResetAt(getAccountQuota(account.id), account.plan, now) !== undefined
-    && hasFreshPoolReserve(account.id, now)).map(account => account.id));
+    && poolReserveOfferable(account.id, now)).map(account => account.id));
   if (reserveIds.size === 0) return unchanged;
   const reserveOptions: CodexAccountUsabilityOptions = { ...options, modelEligibleAccountIds: reserveIds, poolCapacity: "reserve" };
   // An operator pin keeps its seat; it only chooses between that seat's own Reserve and the unchanged request.
@@ -94,31 +104,18 @@ export function poolLunaReserveSelection(
     return isCodexAccountSelectable(config, pinnedAccountId, now, "reserve", reserveOptions)
       ? { options: reserveOptions, quotaScope: "reserve", reserve: true } : unchanged;
   }
-  const includedOnly: CodexAccountUsabilityOptions = { ...options, poolCapacity: "included" };
-  const included = getEligiblePoolAccounts(config, excludeId, now, quotaScope, includedOnly);
-  const shared = affinityKey === undefined ? undefined : getThreadAffinity(affinityKey, quotaScope);
-  if (affinityKey !== undefined) {
-    const serving = getThreadAffinity(affinityKey, "reserve");
-    if (serving && (!shared || serving.lastUsedAt > shared.lastUsedAt)
-      && !isThreadAffinityExpired(serving, now) && isThreadAffinityGenerationLive(serving)
-      && isCodexAccountSelectable(config, serving.accountId, now, "reserve", reserveOptions)) {
-      return { options: reserveOptions, quotaScope: "reserve", reserve: true };
-    }
-  }
-  // The resolver's bound-reuse rule, not new-thread placement: a bound thread is never
-  // steered away by the failure window that only shapes where new threads land. A binding
-  // whose credential generation is stale is not a live owner — the resolver releases it —
-  // so taking the included-owner exception here would spend included quota while Reserve
-  // exists on another seat.
-  if (shared !== undefined && !isThreadAffinityExpired(shared, now) && isThreadAffinityGenerationLive(shared)
-    && shared.accountId !== excludeId
-    && isCodexAccountSelectable(config, shared.accountId, now, quotaScope, includedOnly)) {
-    return { ...unchanged, options: includedOnly };
+  // A thread already served by Reserve keeps its seat while that seat can still serve it.
+  const serving = affinityKey === undefined ? undefined : getThreadAffinity(affinityKey, "reserve");
+  if (serving && !isThreadAffinityExpired(serving, now) && isThreadAffinityGenerationLive(serving)
+    && isCodexAccountSelectable(config, serving.accountId, now, "reserve", reserveOptions)) {
+    return { options: reserveOptions, quotaScope: "reserve", reserve: true };
   }
   if (getEligiblePoolAccounts(config, excludeId, now, "reserve", reserveOptions).length > 0) {
     return { options: reserveOptions, quotaScope: "reserve", reserve: true };
   }
-  return included.length > 0 ? { ...unchanged, options: includedOnly } : unchanged;
+  const includedOnly: CodexAccountUsabilityOptions = { ...options, poolCapacity: "included" };
+  return getEligiblePoolAccounts(config, excludeId, now, quotaScope, includedOnly).length > 0
+    ? { ...unchanged, options: includedOnly } : unchanged;
 }
 
 /** The shared Responses serialization feeds both HTTP and WebSocket dispatch. */

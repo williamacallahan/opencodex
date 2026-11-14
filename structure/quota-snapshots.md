@@ -14,13 +14,21 @@ Pool WHAM reads opt in with `x-openai-codex-luna-reserve: 1`, including a 401 re
 `src/codex/pool-reserve.ts` reuses the Reserve grant predicates and stores an independently timed
 `Luna Reserve` custom window with its own `observedAt`. A non-granting response retracts that window
 without changing the ordinary weekly bar. The existing account DTO, persistence and dashboard carry it.
-Only automatic stored-account requests for `gpt-6-luna` may use it. Reserve is Luna-only while
-ordinary quota is shared with Sol and Astra, so fresh Reserve below 100% wins, then ordinary
-capacity, then previously consented fresh credits, then the existing refusal. A thread bound to a
-seat that still has ordinary capacity keeps Luna there.
-Before the selector changes scope, `src/codex/auth-context.ts` adopts a live legacy parent binding
-onto the current cohort key in the existing quota scope, so a code-swap thread keeps its ordinary
-seat when that seat still has capacity. A genuinely unbound thread can still select Reserve.
+Only automatic stored-account requests for `gpt-6-luna` may use it. Every such request goes first to
+Reserve on a seat whose included usage is spent; only when no such seat can serve Reserve does it use
+Luna on a seat with included usage, then previously consented fresh credits, then the existing refusal.
+A seat is offered Reserve when it has a fresh reported grant below 100% or no stored Reserve window at
+all: ChatGPT serves `gpt-reserve` to accounts whose usage response never lists a grant
+(openai/codex#40939), so an unreported seat is tried and upstream stays the entitlement authority. A
+stored window that is full, elapsed or stale keeps the seat out, and `poolReserveHoldResetAt` holds a
+selected seat in that state for 60 seconds rather than sending. A thread bound to a seat with included
+capacity does not keep Luna there: a soft binding never outranks Reserve, while a thread already
+served by Reserve keeps that seat. An operator pin keeps its seat and chooses only between that seat's
+own Reserve and the unchanged request.
+A Reserve refusal is recorded in the seat's `reserve` health scope only, whatever timing evidence the 429
+carries, so the same-request retry (which excludes the refused seat) reaches another depleted seat's Reserve
+and then included Luna, and the refused seat's shared scope is untouched.
+Before the selector changes scope, `src/codex/auth-context.ts` still adopts a live legacy parent binding onto the current cohort key in the existing quota scope; it decides the seat only when no seat is offerable for Reserve.
 The existing selector still enforces pause, plan, credential, failure-window and account-wide holds.
 Reserve uses its independent quota scope; shared Responses serialization changes only the wire model
 to `gpt-reserve` for HTTP and WebSocket. Ordinary headers cannot renew its five-minute WHAM observation,
@@ -49,4 +57,4 @@ Atomic replacement and account identity checks stay with the existing writer and
 controlled timers: idle debounce, consecutive sustained-update windows, cancellation and
 home reset, removed rows, latest provider callbacks, and recovery after a failed write.
 
-When Reserve is available, a continuing Luna thread keeps its eligible included owner through quota and reset-first preference checks. If its newer live binding is already in Reserve, that binding takes precedence over an older shared binding after the old owner's ordinary quota resets. The canonical legacy-lineage adoption preserves the original binding clocks, and the planner compares those last-use times; it creates no separate owner record.
+When Reserve is offerable on a depleted seat, a Luna thread moves to it even from an eligible included owner; a live Reserve binding keeps its seat after the old owner's ordinary quota resets. The canonical legacy-lineage adoption preserves the original binding clocks, and the planner compares those last-use times; it creates no separate owner record.

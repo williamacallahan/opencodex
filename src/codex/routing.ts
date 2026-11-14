@@ -1453,8 +1453,10 @@ export function recordCodexUpstreamOutcome(
     // A reset timestamp is an advisory quota-window announcement. When the
     // selected native model belongs to a confirmed independent group, preserve
     // it there so a different group (Reserve versus the shared native quota) can
-    // still reach upstream. Explicit Retry-After/default 429s remain account-wide.
-    if (source === "reset-derived" && quotaScope) {
+    // still reach upstream. Explicit Retry-After/default 429s remain account-wide, except an
+    // automatic pool Reserve attempt: its refusal speaks only for Reserve, and the seat's shared
+    // scope is what the fallback to included Luna depends on.
+    if (quotaScope && (source === "reset-derived" || meta.poolReserve)) {
       const prior = scopedHealthFor(accountId, quotaScope);
       const cooldownGeneration = (prior?.cooldownGeneration ?? 0) + 1;
       const ownsLease = meta.probeQuotaScope === quotaScope && ownsProbeLease(prior, meta);
