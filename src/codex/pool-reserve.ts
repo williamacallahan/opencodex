@@ -93,10 +93,12 @@ export function poolLunaReserveSelection(
 ): { options: CodexAccountUsabilityOptions; quotaScope: CodexQuotaScope | undefined; reserve: boolean } {
   const unchanged = { options, quotaScope, reserve: false };
   if (modelId !== "gpt-6-luna") return unchanged;
+  // A pin cannot move after a refusal, so it is offered Reserve only on a fresh reported grant.
   const reserveIds = new Set((config.codexAccounts ?? []).filter(account => account.id !== excludeId
     && (pinnedAccountId === undefined || account.id === pinnedAccountId)
     && codexUsageLimitResetAt(getAccountQuota(account.id), account.plan, now) !== undefined
-    && poolReserveOfferable(account.id, now)).map(account => account.id));
+    && (pinnedAccountId === undefined ? poolReserveOfferable(account.id, now) : hasFreshPoolReserve(account.id, now)))
+    .map(account => account.id));
   if (reserveIds.size === 0) return unchanged;
   const reserveOptions: CodexAccountUsabilityOptions = { ...options, modelEligibleAccountIds: reserveIds, poolCapacity: "reserve" };
   // An operator pin keeps its seat; it only chooses between that seat's own Reserve and the unchanged request.

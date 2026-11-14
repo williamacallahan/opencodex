@@ -1000,6 +1000,8 @@ export interface ResolveCodexAuthContextOptions {
   /** Live policy owner when the routing config is a caller-specific replay snapshot. */
   codexAuthPolicy?: CodexAuthPolicyConfig;
   excludeAccountId?: string;
+  /** The request's one account move follows a refused pool Reserve attempt: serve included Luna, not another Reserve. */
+  skipPoolReserve?: boolean;
   /** Resolve exactly this account without consulting or mutating Pool selection. */
   accountId?: string;
   /** Final native model selected for this request, used to select its quota group. */
@@ -1421,7 +1423,8 @@ async function resolveCodexAuthContextUnannotated(
       retainAccountForUploadedFiles: options.retainAccountForUploadedFiles === true,
     };
     // The native main login keeps its own per-request Reserve authorization, so only stored seats take part here.
-    const reserveModelId = !requestScopedMainCredential && fixedAccountId !== MAIN_CODEX_ACCOUNT_ID ? options.modelId : undefined;
+    const reserveModelId = !options.skipPoolReserve && !requestScopedMainCredential && fixedAccountId !== MAIN_CODEX_ACCOUNT_ID
+      ? options.modelId : undefined;
     const poolSelection = poolLunaReserveSelection(config, reserveModelId,
       quotaScope, selectionOptions, options.excludeAccountId, affinityKey, Date.now(), fixedAccountId);
     selectionOptions = poolSelection.options;

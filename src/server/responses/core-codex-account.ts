@@ -793,6 +793,9 @@ export async function retryCodexPoolOnAlternateAccount(
         "pool",
         {
           excludeAccountId: firstAuthCtx.accountId,
+          // A request gets one account move, so a refused Reserve attempt moves to included Luna;
+          // the other spent seats are asked on later requests while this seat's Reserve cools.
+          skipPoolReserve: firstAuthCtx.kind === "pool" && firstAuthCtx.poolReserve === true,
           signal: options.abortSignal,
           admission: options.admission,
           codexAuthPolicy: options.codexAuthPolicy,

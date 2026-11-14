@@ -23,11 +23,12 @@ all: ChatGPT serves `gpt-reserve` to accounts whose usage response never lists a
 stored window that is full, elapsed or stale keeps the seat out, and `poolReserveHoldResetAt` holds a
 selected seat in that state for 60 seconds rather than sending. A thread bound to a seat with included
 capacity does not keep Luna there: a soft binding never outranks Reserve, while a thread already
-served by Reserve keeps that seat. An operator pin keeps its seat and chooses only between that seat's
-own Reserve and the unchanged request.
+served by Reserve keeps that seat. An operator pin keeps its seat and is offered its own Reserve only on a fresh reported grant, because a
+pinned request cannot move after a refusal.
 A Reserve refusal is recorded in the seat's `reserve` health scope only, whatever timing evidence the 429
-carries, so the same-request retry (which excludes the refused seat) reaches another depleted seat's Reserve
-and then included Luna, and the refused seat's shared scope is untouched.
+carries, and the request's single account move (`maxAlternateTargetSends: 1`) goes to included Luna
+(`skipPoolReserve`); the other depleted seats are asked on later requests while the refused seat's Reserve
+cools, and its shared scope is untouched.
 Before the selector changes scope, `src/codex/auth-context.ts` still adopts a live legacy parent binding onto the current cohort key in the existing quota scope; it decides the seat only when no seat is offerable for Reserve.
 The existing selector still enforces pause, plan, credential, failure-window and account-wide holds.
 Reserve uses its independent quota scope; shared Responses serialization changes only the wire model

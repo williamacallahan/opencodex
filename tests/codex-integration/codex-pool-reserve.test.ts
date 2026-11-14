@@ -146,10 +146,8 @@ describe("Luna Reserve where selection used to skip it", () => {
     reserve(B); noReserve(A);
     await expect(buildPinned(A)).rejects.toBeInstanceOf(CodexPoolAccountCreditsOffError);
   });
-  test("a pinned depleted seat with no Reserve window serves Luna from its own Reserve (case e)", async () => {
-    const { ctx, request } = await buildPinned(A);
-    expect(ctx.accountId).toBe(A);
-    expect(JSON.parse(request.body).model).toBe("gpt-reserve");
+  test("a pinned depleted seat with no reported grant is not offered Reserve, since a pin cannot move after a refusal (case e)", async () => {
+    await expect(buildPinned(A)).rejects.toBeInstanceOf(CodexPoolAccountCreditsOffError);
   });
   test("a pin to a seat with included quota keeps ordinary Luna and never borrows a depleted seat's Reserve (case e)", async () => {
     ordinary(A, 40);
@@ -232,14 +230,19 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     expect(retry.ctx.accountId).toBe(A);
     expect(JSON.parse(retry.request.body).model).toBe("gpt-6-luna");
   });
-  test("a retry that excludes the refused seat moves to the next depleted seat's Reserve before included Luna", () => {
+  test("the one account move after a refused Reserve attempt serves included Luna, not another seat's Reserve", async () => {
     const cfg = config();
     const third = "pool-reserve-c";
     cfg.codexAccounts!.push({ id: third, email: "c@example.test", isMain: false, plan: "pro" });
-    ordinary(third);
-    const retry = poolLunaReserveSelection(cfg, "gpt-6-luna", "shared", {}, A, undefined, now);
-    expect(retry.reserve).toBe(true);
-    expect([...retry.options.modelEligibleAccountIds!].sort()).toEqual([B, third].sort());
+    saveCodexAccountCredential(third, { accessToken: "access-c", refreshToken: "refresh-c",
+      chatgptAccountId: `fixture-workspace-${third}`, expiresAt: now + 86_400_000 });
+    ordinary(third, 40);
+    // B is still depleted and offerable, but the request already spent its account move budget on A's Reserve.
+    const retry = await resolveCodexAuthContext(new Headers(), cfg, "pool", {
+      modelId: "gpt-6-luna", excludeAccountId: A, skipPoolReserve: true,
+    });
+    expect(retry.accountId).toBe(third);
+    expect(retry.kind === "pool" && retry.poolReserve === true).toBe(false);
   });
   test("a stale included-owner binding does not suppress Reserve", () => {
     reserve(); ordinary(A, 40);
