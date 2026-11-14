@@ -2,7 +2,7 @@ import { MessagesSseFrameContext, messagesSseEchoRenamedError, messagesSseFrameH
 import { createMessagesSseErrorFilter } from "./messages-sse-error-filter";
 import type { MessagesFailureVerdictSink } from "../claude/failure-verdict";
 import { isRec, type Rec } from "../claude/inbound-records";
-import { observeNativePromptCacheSend, confirmNativePromptCachePrefill, observeNativePromptCacheFinish } from "./prompt-cache-observer";
+import { observeNativePromptCacheSend, confirmNativePromptCachePrefill, observeNativePromptCacheFinish, observeNativePromptCacheResponse } from "./prompt-cache-observer";
 import { upstreamErrorIsLocal } from "./request-log-failure-detail";
 import { boundedMessagesDisplayCount, ownedDisabledModelResponse, ownedAnthropicErrorPayload, ownedAnthropicErrorResponse, messagesOverflowPresentation, messagesRelayedOverflowPresentation } from "../lib/messages-error-body";
 import { attachComboFailureEvidence, isProxyError, markProxyError } from "../lib/client-error-body";
@@ -1126,7 +1126,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
     };
     const replay = { committed: false, pending: false };
     const raw = options.sendBudget ? observeNativeMessagesReplayBoundary(response.body, logCtx, replay) : response.body;
-    const observed = logIds && onFirstOutput ? observeFirstChunk(raw, onFirstOutput) : raw;
+    const observed = observeNativePromptCacheResponse(logIds && onFirstOutput ? observeFirstChunk(raw, onFirstOutput) : raw, logCtx);
     const renamed = activeRequest.oauthToolNames
       ? restoreOAuthToolNamesInSse(observed, activeRequest.oauthToolNames, translatorBudget)
       : observed;

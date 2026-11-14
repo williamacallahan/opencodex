@@ -198,6 +198,27 @@ describe("native prompt cache observation paths", () => {
     expect(later.line).toContain("expected_cached_tokens=2048 lost_cached_tokens=0");
   });
 
+  test("provider-qualified selectors observe raw prefill before client model echo", async () => {
+    config.claudeCode!.strictPassthrough = false;
+    saveConfig(config);
+    await warm(JSON.stringify(requestBody(true)), "/v1/messages");
+    const result = await send(JSON.stringify({ ...requestBody(true), model: `anthropic/${model}` }), "/v1/messages");
+    expect(result.bytes).toContain(`"model":"anthropic/${model}"`);
+    expect(result.line).toContain(`served_model=${model}`);
+    expect(result.line).toContain("reuse_expectation=reuse reuse_reason=same_account_anchor");
+  });
+
+  test("client echo cannot hide an actual upstream model mismatch", async () => {
+    config.claudeCode!.strictPassthrough = false;
+    saveConfig(config);
+    respond = () => new Response(sse(0, 2048).replaceAll(`"model":"${model}"`, '"model":"different-model"'), {
+      headers: { "content-type": "text/event-stream" },
+    });
+    const result = await send(JSON.stringify(requestBody(true)), "/v1/messages");
+    expect(result.bytes).toContain(`"model":"${model}"`);
+    expect(result.line).toContain("reuse_expectation=unknown reuse_reason=model_mismatch");
+  });
+
   test("a real buffered native combo child creates no cache observations", async () => {
     config.claudeCode!.strictPassthrough = false;
     config.combos = { "cache-child": { strategy: "failover", targets: [{ provider: "anthropic", model }] } };

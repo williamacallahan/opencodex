@@ -4,6 +4,9 @@ import { didRunOptionalShutdownHooks, registerOptionalShutdownHook } from "../li
 import { spawnWorker } from "../lib/worker-embed";
 import { hasUpstreamRewriters } from "../plugins/upstream-hooks";
 import { isCredentialName } from "../lib/outbound-credential-registry";
+import { sseFieldValue } from "../lib/sse-decoder";
+import { createTranslatorBudget } from "../lib/translator-budget";
+import { createSseBlockBuffer, sseDataPayload } from "./sse-payload-rewrite";
 import type { NativeMessagesFinishLog } from "./messages-native";
 import type { NativeMessagesRequest } from "./messages-native-integrity";
 import { credentialDomainFor } from "../protocols/opaque-state";
@@ -19,7 +22,7 @@ import type { RequestLogContext } from "./request-log";
 export interface PrefixWorkerRequest { id: number; bytes: Uint8Array; encoding: string | null }
 export type PrefixWorkerReply = { id: number; prefix: PrefixWalk } | { id: number; failed: true };
 type ObservationReason = "unsupported_transport" | "count_tokens" | "local_answer" | "combo_parent" | "combo_child"
-  | "hidden_account" | "worker_failed" | "request_failed" | "model_mismatch" | "send_unavailable" | "credential_override";
+  | "hidden_account" | "worker_failed" | "request_failed" | "model_mismatch" | "send_unavailable" | "credential_override" | "prefill_unavailable";
 export type NativeCacheReuse = Omit<ReuseClassification, "reuse_reason"> & {
   reuse_reason: ReuseClassification["reuse_reason"] | ObservationReason;
 };
@@ -41,6 +44,7 @@ interface ObservedSend {
   body?: string | Uint8Array;
   encoding?: string | null;
   usage?: OcxUsage;
+  rawStreamObserved?: true;
   failure?: ObservationReason;
   postedAt?: number;
   finished?: true;
@@ -101,8 +105,7 @@ class NativeCacheObserver {
     send.encoding = headers.get("content-encoding");
     this.pending.set(send.id, send);
   }
-  confirm(logCtx: RequestLogContext, message: unknown): void {
-    const send = this.bindings.get(logCtx);
+  confirm(send: ObservedSend | undefined, message: unknown): void {
     if (!send?.ticket || send.failure || send.usage || send.body === undefined) return;
     if (isRec(message) && typeof message.model === "string" && message.model !== send.model) {
       send.failure = "model_mismatch";
@@ -128,6 +131,60 @@ class NativeCacheObserver {
     } catch {
       this.failWorker();
     }
+  }
+  // The log tap sees client-facing rewrites. This bounded raw prefill observation cannot
+  // use that transformed model identity, and its budget must not consume the relay's budget.
+  rawResponse(source: ReadableStream<Uint8Array>, logCtx: RequestLogContext): ReadableStream<Uint8Array> {
+    const send = this.bindings.get(logCtx);
+    if (!send?.ticket || send.ticket.rejected || send.failure) return source;
+    send.rawStreamObserved = true;
+    const budget = createTranslatorBudget();
+    const decoder = new TextDecoder();
+    const frames = createSseBlockBuffer(budget, bytes => {
+      if (bytes > 65536) throw new Error("prefill_observation_limit");
+    });
+    let remaining = 65536;
+    let scanning = true;
+    const stop = () => { if (!scanning) return; scanning = false; frames.clear(); budget.dispose(); };
+    const inspect = (chunk: Uint8Array) => {
+      const length = Math.min(remaining, chunk.byteLength);
+      remaining -= length;
+      frames.append(decoder.decode(chunk.subarray(0, length), { stream: true }));
+      let frame;
+      while ((frame = frames.next()) !== null) {
+        const event = frame.block.split(/\r\n?|\n/).map(line => sseFieldValue(line, "event")).findLast(name => name !== null);
+        if (event !== undefined && event !== "message_start") continue;
+        const text = sseDataPayload(frame.block);
+        if (!text) continue;
+        let payload: unknown;
+        try { payload = JSON.parse(text); } catch { continue; }
+        if (isRec(payload) && payload.type === "message_start") this.confirm(send, payload.message);
+        if (send.usage || send.failure) { stop(); return; }
+      }
+      frames.compact();
+      if (remaining === 0) throw new Error("prefill_observation_limit");
+    };
+    const reader = source.getReader();
+    return new ReadableStream<Uint8Array>({
+      pull: async controller => {
+        let next: Awaited<ReturnType<typeof reader.read>>;
+        try { next = await reader.read(); }
+        catch (error) { stop(); reader.releaseLock(); throw error; }
+        if (next.done) { stop(); reader.releaseLock(); controller.close(); return; }
+        controller.enqueue(next.value);
+        if (!scanning) return;
+        try { inspect(next.value); }
+        catch {
+          send.failure = "prefill_unavailable";
+          this.release(send);
+          stop();
+        }
+      },
+      cancel: async reason => {
+        stop();
+        try { await reader.cancel(reason); } finally { reader.releaseLock(); }
+      },
+    });
   }
   accept(reply: PrefixWorkerReply): void {
     const send = this.pending.get(reply.id);
@@ -200,7 +257,11 @@ export function observeNativePromptCacheFinish(logCtx: RequestLogContext, finish
   };
 }
 export function confirmNativePromptCachePrefill(logCtx: RequestLogContext, message: unknown): void {
-  observer?.confirm(logCtx, message);
+  const send = observer?.bindings.get(logCtx);
+  if (!send?.rawStreamObserved) observer?.confirm(send, message);
+}
+export function observeNativePromptCacheResponse(source: ReadableStream<Uint8Array>, logCtx: RequestLogContext): ReadableStream<Uint8Array> {
+  return observer?.rawResponse(source, logCtx) ?? source;
 }
 export function nativePromptCacheOutcome(logCtx: RequestLogContext | undefined, input: PromptCacheOutcomeInput) {
   return observations().finish(logCtx, input);
