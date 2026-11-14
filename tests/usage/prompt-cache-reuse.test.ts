@@ -240,6 +240,30 @@ describe("prompt cache reuse evidence", () => {
     outcome(ledger, later, "unknown", "unmeasured_anchor");
   });
 
+  test("a later five-minute marker does not shorten an explicit one-hour read checkpoint", () => {
+    const { ledger, fill, send, ready, time } = fixture();
+    const hour = prompt("shared", 0, "1h");
+    fill(hour);
+    const extended = prompt("shared", 1);
+    if (extended.status !== "supported") throw new Error("invalid fixture");
+    time(50 * 60000);
+    const refresh = send();
+    ready(refresh, { ...extended, breakpoints: [{ index: 0, ttl: 3600000 }, { index: 1, ttl: 300000 }] }, 1000, 0);
+    ledger.releaseSend(refresh);
+    time(62 * 60000);
+    const later = send();
+    ready(later, hour, 0, 0);
+    outcome(ledger, later, "reuse", "same_account_anchor");
+  });
+
+  test("an ambiguous read TTL lowers coverage without inserting a guessed refresh", () => {
+    const { ledger, fill, send, ready, time } = fixture();
+    fill(prompt("shared", 0, "1h"));
+    time(50 * 60000);
+    ready(send(), prompt("shared", 1), 1000, 0);
+    expect(ledger.coverage()).toMatchObject({ records: 1, reason: "unmeasured_anchor", complete: false });
+  });
+
   test("read-only usage without a matching measured anchor cannot invent an entry", () => {
     const { ledger, send, ready } = fixture();
     const first = send();

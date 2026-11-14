@@ -285,9 +285,13 @@ export class PromptCacheReuseLedger {
       return;
     }
     const anchor = matches.values().next().value!;
-    const ttl = prefix.breakpoints.some(point => isCachePositionReachable(anchor.position.index, [point]) && point.ttl < anchor.ttl)
-      ? 300000 : anchor.ttl;
-    this.#insert(send, prefill, anchor.position, ttl, anchor.tokens);
+    const checkpoint = prefix.breakpoints.find(point => point.index === anchor.position.index);
+    const candidates = checkpoint ? [checkpoint] : prefix.breakpoints.filter(point => isCachePositionReachable(anchor.position.index, [point]));
+    if (candidates.some(point => point.ttl !== anchor.ttl)) {
+      this.#markGap("unmeasured_anchor");
+      return;
+    }
+    this.#insert(send, prefill, anchor.position, anchor.ttl, anchor.tokens);
   }
   #result(send: SendObservation, expectation: ReuseClassification["reuse_expectation"], reason: ReuseReason, expected?: number): ReuseClassification {
     const read = this.#pending.get(send)?.prefill?.read;
