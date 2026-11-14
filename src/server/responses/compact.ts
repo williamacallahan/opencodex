@@ -1303,7 +1303,6 @@ export async function handleResponsesCompact(
               stampApiKeyAccountLabel(logCtx, route.providerName, sendProvider);
               if (!rebindPhysicalSend(sendBudget, { poolId: logCtx.spendPoolId ?? route.providerName,
                 identityId: logCtx.accountLogLabel })) throw new SendBudgetExhaustedError(errorDestinationLabel(compactUrl));
-              noteProviderAttemptSend(logCtx, route.providerName, sendProvider, logCtx.usageLogInputTokens, upstreamRecovery);
               const physicalFetch = ((input, physicalInit) => sendWithConnectionPolicy(
                 distributedKeyPhysicalFetch((sendProvider as { fetch?: typeof fetch }).fetch ?? execute, route.providerName, sendProvider, compactUrl), String(input),
                 physicalInit, { providerName: route.providerName, provider: sendProvider })) as typeof fetch;
@@ -1311,7 +1310,13 @@ export async function handleResponsesCompact(
                 { ...init, headers: sendHeaders, body: JSON.stringify(buildCompactSendBody()) },
                 init.signal ?? req.signal, connectMs(), false, physicalFetch);
             } : undefined,
-          ...(onPhysicalDispatch ? { onPhysicalDispatch } : {}),
+          // The one place a compact send stamps its attempt identity, for key and forward sends alike:
+          // the log label can carry an account namespace the registry cannot resolve, so the
+          // configured provider has to be recorded where the send leaves.
+          onPhysicalDispatch: () => {
+            noteProviderAttemptSend(logCtx, route.providerName, sendProvider, logCtx.usageLogInputTokens, upstreamRecovery);
+            onPhysicalDispatch?.();
+          },
         }),
         // Every credential-bearing forward send gets manual redirects, not only
         // pool sends: direct mode carries the caller's credential too (#914).
