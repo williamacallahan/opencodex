@@ -1057,6 +1057,9 @@ describe("prompt_cache.outcome line", () => {
       ["zai", "openai-responses"], ["agentrouter", "anthropic"], ["codex-lb", "openai-responses"]] as const) {
       expect(providerReportsNativeCache(provider, adapter)).toBe(false);
     }
+    // codex-lb is recognised by its config shape, which the request stamps as the relay provider.
+    expect(providerReportsNativeCache("codex-lb", "openai-responses", "codex-lb")).toBe(true);
+    expect(providerReportsNativeCache("zai", "openai-responses", "codex-lb")).toBe(false);
     expect(providerReportsNativeCache("anthropic", "openai-chat")).toBe(false);
     expect(providerReportsNativeCache("anthropic", undefined)).toBe(false);
     // The decision keeps a third-party default zero out of the hit-rate denominator.
@@ -1065,6 +1068,16 @@ describe("prompt_cache.outcome line", () => {
       wireParsed: true, nativeCacheWire: providerReportsNativeCache(provider, adapter) });
     expect(line("xiaomi", "anthropic")).toContain("telemetry=unavailable cache_eligible=false");
     expect(line("anthropic-pf2cf1b", "anthropic")).toContain("telemetry=reported cache_eligible=true");
+  });
+  test("a codex-lb cold turn with cached 0 is reported and eligible, a third-party anthropic host's default 0 is not", () => {
+    const { providerReportsNativeCache } =
+      require("../../src/server/prompt-cache-outcome") as typeof import("../../src/server/prompt-cache-outcome");
+    const usage = { inputTokens: 5000, outputTokens: 1, cachedInputTokens: 0 };
+    const line = (provider: string, adapter: string, relay?: string) => promptCacheOutcomeLine({ ...base, provider, usage,
+      wireParsed: true, nativeCacheWire: providerReportsNativeCache(provider, adapter, relay) });
+    expect(line("codex-lb", "openai-responses", "codex-lb"))
+      .toContain("telemetry=reported cache_eligible=true prompt_tokens=5000 cached_tokens=0");
+    expect(line("xiaomi", "anthropic")).toContain("telemetry=unavailable cache_eligible=false");
   });
   test("provider seats group by the label owner's family", () => {
     expect(providerFamily("anthropic-pf2cf1b")).toBe("anthropic");

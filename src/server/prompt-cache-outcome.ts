@@ -42,7 +42,15 @@ export function providerFamily(provider: string): string {
  * enough, because third-party hosts (z.ai, Xiaomi, Cloudflare AI Gateway, AgentRouter) also run
  * the `anthropic` and `openai-responses` adapters and send a default `cached_tokens: 0`.
  */
-export function providerReportsNativeCache(provider: string, adapter: string | undefined): boolean {
+export function providerReportsNativeCache(
+  provider: string,
+  adapter: string | undefined,
+  /** The configured provider this request stamped as a codex-lb relay (`isCodexLbProvider`), if any. */
+  relayProvider?: string,
+): boolean {
+  // codex-lb relays the ChatGPT backend and always sends a real cache counter, but it is an
+  // operator-named config row, not a registry entry, so it is recognised by its config shape.
+  if (relayProvider !== undefined && relayProvider === provider && adapter === "openai-responses") return true;
   const entry = getProviderRegistryEntry(providerFamily(provider));
   return entry?.reportsNativeCache === true && entry.adapter === adapter;
 }

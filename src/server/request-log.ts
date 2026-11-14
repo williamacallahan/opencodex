@@ -151,6 +151,11 @@ export interface RequestLogContext extends UpstreamErrorDiagnostics {
    */
   usageWireParsed?: boolean;
   /**
+   * Configured name of the codex-lb relay serving this request (`isCodexLbProvider`). Honoured only
+   * while it equals `provider`, so a failover to another provider cannot inherit it.
+   */
+  cacheRelayProvider?: string;
+  /**
    * Every affinity reason recorded for this request, in order. `affinityReason` keeps the final
    * one for the existing row shape; a request that moved twice has two causes and losing the
    * first one loses the more expensive half of the story.
@@ -1671,7 +1676,7 @@ function writeFinalRequestLog(
     provider: isCombo ? "combo" : logCtx.provider,
     requestedModel: logCtx.requestedModel ?? logCtx.model,
     servedModel: logCtx.model,
-    nativeCacheWire: providerReportsNativeCache(logCtx.provider, logCtx.providerAdapter),
+    nativeCacheWire: providerReportsNativeCache(logCtx.provider, logCtx.providerAdapter, logCtx.cacheRelayProvider),
     usage: answeringUsage,
     usageStatus,
     wireParsed: logCtx.usageWireParsed === true,
