@@ -238,7 +238,7 @@ export class PromptCacheReuseLedger {
         lost_cached_tokens: Math.max(0, pending.classification.expected_cached_tokens - read) };
     }
     if (pending.prefix) this.#commit(send, pending.prefix, pending.prefill);
-    if (read + write === 0 || (pending.prefix && !pending.anchors.length)) this.#markGap("unmeasured_anchor");
+    if (read + write === 0 || (pending.prefix && !pending.prefix.reuseBoundary && !pending.anchors.length)) this.#markGap("unmeasured_anchor");
   }
   #failPrefix(pending: PendingSend, reason: NonNullable<PendingSend["failure"]>): void {
     pending.failure = reason;
@@ -266,7 +266,6 @@ export class PromptCacheReuseLedger {
       breakpoints: prefix.breakpoints.map(point => Object.freeze({ ...point })),
       ...(prefix.reuseBoundary !== undefined ? { reuseBoundary: prefix.reuseBoundary } : {}),
     };
-    if (prefix.reuseBoundary) this.#markGap("unmeasured_anchor");
     // A send's own write may evict history. Preserve its resolved expectation first;
     // unknown observations may still improve when an earlier worker result arrives.
     const classification = this.classify(send);
@@ -312,14 +311,14 @@ export class PromptCacheReuseLedger {
     if (prefill.write > 0 && prefix.breakpoints.length > 0) {
       const point = prefix.breakpoints.at(-1)!;
       const position = prefix.positions[point.index];
+      // A final marker behind a reuse boundary stays unmeasured for this send only.
       if (position && position.index >= (prefix.reuseBoundary ?? 0)) this.#insert(send, prefill, position, point.ttl, prefill.read + prefill.write);
-      else this.#markGap("unmeasured_anchor");
     } else if (prefill.write > 0) this.#markGap("unmeasured_anchor");
     if (!prefill.read || !this.#pending.get(send)!.finalized) return;
     const matches = new Map<string, Anchor>();
     for (const position of prefix.positions) {
       if (position.index < (prefix.reuseBoundary ?? 0)) continue;
-      if (!isCachePositionReachable(position.index, prefix.breakpoints)) continue;
+      if (!isCachePositionReachable(position.index, prefix.breakpoints, prefix.positions)) continue;
       for (const anchor of this.#anchors(this.#key(send, position))) {
         if (anchor.finalized && cacheRelation(anchor, send) === "shared" && anchor.tokens === prefill.read && anchor.readySequence < send.sequence) {
           const previous = matches.get(anchor.key);
@@ -328,12 +327,13 @@ export class PromptCacheReuseLedger {
       }
     }
     if (matches.size !== 1) {
-      this.#markGap("unmeasured_anchor");
+      // A boundary send is unknown for itself only; it must not reset coverage for other sends.
+      if (!prefix.reuseBoundary) this.#markGap("unmeasured_anchor");
       return;
     }
     const anchor = matches.values().next().value!;
     const checkpoint = prefix.breakpoints.find(point => point.index === anchor.position.index);
-    const candidates = checkpoint ? [checkpoint] : prefix.breakpoints.filter(point => isCachePositionReachable(anchor.position.index, [point]));
+    const candidates = checkpoint ? [checkpoint] : prefix.breakpoints.filter(point => isCachePositionReachable(anchor.position.index, [point], prefix.positions));
     if (candidates.some(point => point.ttl !== anchor.ttl)) {
       this.#markGap("unmeasured_anchor");
       return;
@@ -367,7 +367,7 @@ export class PromptCacheReuseLedger {
     let unreachable = false;
     for (const position of pending.prefix.positions) {
       if (position.index < (pending.prefix.reuseBoundary ?? 0)) continue;
-      const reachable = isCachePositionReachable(position.index, pending.prefix.breakpoints);
+      const reachable = isCachePositionReachable(position.index, pending.prefix.breakpoints, pending.prefix.positions);
       let measured: number | undefined;
       for (const anchor of this.#anchors(this.#key(send, position))) {
         if (anchor.dispatchSequence >= send.sequence) continue;
@@ -411,6 +411,7 @@ export class PromptCacheReuseLedger {
         && !observation.failure) return this.#result(send, "unknown", "predecessor_pending");
     }
     if (send.gapSequence !== this.#gapSequence) return this.#result(send, "unknown", this.#gap);
+    if (pending.prefix.reuseBoundary) return this.#result(send, "unknown", "unmeasured_anchor");
     return send.coverage === "tracking_horizon" ? this.#result(send, "fill", "tracking_horizon")
       : this.#result(send, "unknown", send.coverage === "startup" ? "no_observed_predecessor" : send.coverage);
   }

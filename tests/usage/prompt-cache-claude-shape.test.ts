@@ -48,7 +48,9 @@ describe("Claude Code cache request shapes", () => {
     for (const [before, after] of [["synthetic-thinking-signature", "changed-signature"], ["synthetic-redacted-state", "changed-redaction"],
       ["Synthetic document body", "changed document"], ["iVBORw0KGgo", "iVBORw0KGgp"]]) {
       const changed = walkPromptCachePrefix(Buffer.from(bytes.toString().replace(before!, after!)));
-      expect(changed.status === "supported" && changed.positions.at(-1)?.digest).not.toBe(prefix.positions.at(-1)?.digest);
+      expect(changed.status).toBe("supported");
+      if (changed.status !== "supported") throw new Error("unreachable");
+      expect(changed.positions.at(-1)?.digest).not.toBe(prefix.positions.at(-1)?.digest);
     }
   });
 
@@ -56,7 +58,7 @@ describe("Claude Code cache request shapes", () => {
     expect(supported({ ...fixture, diagnostics: { previous_message_id: "msg_next" } }).positions).toEqual(supported(fixture).positions);
     const scoped = simple([{ type: "text", text: "same", cache_control: { ...marker, scope: "global" } }]);
     const privateScope = simple([{ type: "text", text: "same", cache_control: marker }]);
-    expect(supported(scoped).positions).not.toEqual(supported(privateScope).positions);
+    expect(supported(scoped).positions[0]?.digest).not.toBe(supported(privateScope).positions[0]?.digest);
   });
 
   test("automatic caching walks back past thinking and explicit thinking markers remain invalid", () => {
@@ -132,6 +134,97 @@ describe("Claude Code cache request shapes", () => {
       ledger.confirmPrefill(send, event(0, 1500));
       ledger.resolvePrefix(send, prefix);
       expect(ledger.classify(send)).toMatchObject({ reuse_expectation: "unknown", reuse_reason: "invalid_marker", reuse_coverage: "partial" });
+    } finally { ledger.close(); }
+  });
+
+  const reminder = { type: "text", text: "<system-reminder>synthetic</system-reminder>" };
+  const toolTurn = (user: object[]) => [{ role: "assistant", content: [{ type: "tool_use", id: "call_next", name: "Read", input: { file_path: "next.txt" } }] },
+    { role: "user", content: user }];
+  const result = (extra: object = {}) => ({ type: "tool_result", tool_use_id: "call_next", content: "Small new tool output", ...extra });
+
+  test("a user message that mixes tool_result with other blocks sets the thinking-strip boundary", () => {
+    const only = supported({ ...fixture, messages: [...withoutMessageMarkers, ...toolTurn([result({ cache_control: marker })])] });
+    const mixed = supported({ ...fixture, messages: [...withoutMessageMarkers, ...toolTurn([result(), { ...reminder, cache_control: marker }])] });
+    expect(only.reuseBoundary).toBe(supported({ ...fixture, messages: withoutMessageMarkers }).reuseBoundary);
+    expect(mixed.reuseBoundary).toBeGreaterThan(only.reuseBoundary ?? 0);
+  });
+
+  test("a warm follow-up whose user turn mixes tool_result and reminder text is never reuse", () => {
+    const ledger = new PromptCacheReuseLedger();
+    const next = { ...fixture, messages: [...withoutMessageMarkers, ...toolTurn([result(), { ...reminder, cache_control: marker }])] };
+    try {
+      const first = ledger.observeSend({ sendId: "first", destination: "direct", model: fixture.model, account: "synthetic-seat", bodyBytes: wire(fixture).length });
+      ledger.confirmPrefill(first, event(180000, 1500));
+      ledger.resolvePrefix(first, supported(fixture));
+      ledger.reconcileUsage(first, { read: 180000, write: 1500 });
+      ledger.releaseSend(first);
+      const second = ledger.observeSend({ sendId: "next", destination: "direct", model: fixture.model, account: "synthetic-seat", bodyBytes: wire(next).length });
+      ledger.confirmPrefill(second, event(181500, 500));
+      ledger.resolvePrefix(second, supported(next));
+      ledger.reconcileUsage(second, { read: 181500, write: 500 });
+      expect(ledger.classify(second)).toMatchObject({ reuse_expectation: "unknown", reuse_reason: "unmeasured_anchor" });
+    } finally { ledger.close(); }
+  });
+
+  test("a reuse boundary on one send leaves another send's coverage untouched", () => {
+    const ledger = new PromptCacheReuseLedger();
+    const boundary = { ...fixture, messages: [...withoutMessageMarkers, ...toolTurn([result(), { ...reminder, cache_control: marker }])] };
+    const plain = simple([{ type: "text", text: "plain", cache_control: marker }]);
+    try {
+      const other = ledger.observeSend({ sendId: "other", destination: "direct", model: "claude-other", account: "other-seat", bodyBytes: 100 });
+      const edge = ledger.observeSend({ sendId: "edge", destination: "direct", model: fixture.model, account: "synthetic-seat", bodyBytes: wire(boundary).length });
+      ledger.confirmPrefill(other, event(0, 10));
+      ledger.confirmPrefill(edge, event(0, 181500));
+      ledger.resolvePrefix(other, supported(plain));
+      const before = ledger.classify(other);
+      ledger.resolvePrefix(edge, supported(boundary));
+      ledger.reconcileUsage(edge, { read: 0, write: 181500 });
+      ledger.reconcileUsage(other, { read: 0, write: 10 });
+      expect(ledger.classify(other)).toEqual(before);
+    } finally { ledger.close(); }
+  });
+
+  const parallel = (count: number, extra: object = {}) => [
+    { role: "assistant", content: Array.from({ length: count }, (_, index) => ({ type: "tool_use", id: `p${index}`, name: "Read", input: { index } })) },
+    { role: "user", content: Array.from({ length: count }, (_, index) => ({ type: "tool_result", tool_use_id: `p${index}`,
+      content: [{ type: "text", text: `out ${index}` }], ...(index === count - 1 ? extra : {}) })) },
+  ];
+
+  test("a predecessor marker behind eight parallel tool calls and their results is a lookback gap", () => {
+    const ledger = new PromptCacheReuseLedger();
+    const base = simple([{ type: "text", text: "synthetic cached history", cache_control: marker }]);
+    const next = { ...base, messages: [{ role: "assistant", content: [{ type: "text", text: "synthetic cached history" }] }, ...parallel(8, { cache_control: marker })] };
+    try {
+      const first = ledger.observeSend({ sendId: "first", destination: "direct", model: fixture.model, account: "synthetic-seat", bodyBytes: wire(base).length });
+      ledger.confirmPrefill(first, event(0, 180000));
+      ledger.resolvePrefix(first, supported(base));
+      ledger.reconcileUsage(first, { read: 0, write: 180000 });
+      ledger.releaseSend(first);
+      const second = ledger.observeSend({ sendId: "second", destination: "direct", model: fixture.model, account: "synthetic-seat", bodyBytes: wire(next).length });
+      ledger.confirmPrefill(second, event(180000, 500));
+      ledger.resolvePrefix(second, supported(next));
+      ledger.reconcileUsage(second, { read: 180000, write: 500 });
+      expect(ledger.classify(second)).toMatchObject({ reuse_expectation: "unknown", reuse_reason: "lookback_gap" });
+    } finally { ledger.close(); }
+  });
+
+  test("a multi-marker reader more than nineteen blocks past the predecessor still reuses through its own earlier marker", () => {
+    const ledger = new PromptCacheReuseLedger();
+    const base = simple([{ type: "text", text: "synthetic cached history", cache_control: marker }]);
+    const next = { ...base, messages: [...base.messages, ...parallel(8, { cache_control: marker })] };
+    try {
+      const first = ledger.observeSend({ sendId: "first", destination: "direct", model: fixture.model, account: "synthetic-seat", bodyBytes: wire(base).length });
+      ledger.confirmPrefill(first, event(0, 180000));
+      ledger.resolvePrefix(first, supported(base));
+      ledger.reconcileUsage(first, { read: 0, write: 180000 });
+      ledger.releaseSend(first);
+      const second = ledger.observeSend({ sendId: "second", destination: "direct", model: fixture.model, account: "synthetic-seat", bodyBytes: wire(next).length });
+      ledger.confirmPrefill(second, event(180000, 500));
+      const walked = supported(next);
+      expect(walked.positions.at(-1)!.blockEnd - walked.positions[0]!.blockEnd).toBeGreaterThan(19);
+      ledger.resolvePrefix(second, walked);
+      ledger.reconcileUsage(second, { read: 180000, write: 500 });
+      expect(ledger.classify(second)).toMatchObject({ reuse_expectation: "reuse", expected_cached_tokens: 180000, lost_cached_tokens: 0 });
     } finally { ledger.close(); }
   });
 });

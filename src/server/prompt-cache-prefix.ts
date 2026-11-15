@@ -3,7 +3,7 @@ import { decodeRequestBody, DecompressedBodyTooLargeError } from "./request-deco
 
 export type CacheTier = "tools" | "system" | "messages";
 export type CacheTtl = 300000 | 3600000;
-export interface CachePosition { readonly digest: string; readonly tier: CacheTier; readonly index: number }
+export interface CachePosition { readonly digest: string; readonly tier: CacheTier; readonly index: number; readonly blockEnd: number }
 export interface CacheBreakpoint { readonly index: number; readonly ttl: CacheTtl }
 export type PrefixUnsupportedReason =
   | "invalid_json" | "body_limit" | "structure_limit" | "content_encoding"
@@ -132,9 +132,15 @@ function markerTtl(bytes: Buffer, node: ByteNode): CacheTtl {
   }
 }
 
-/** A breakpoint searches itself and nineteen preceding positions, not twenty preceding ones. */
-export function isCachePositionReachable(index: number, breakpoints: readonly CacheBreakpoint[]): boolean {
-  return breakpoints.some(point => point.index >= index && point.index - index < 20);
+/** A breakpoint searches itself and nineteen preceding content blocks. Distance is counted in
+ * blocks (each tool_use, tool_result and nested result child), never in collapsed positions;
+ * overcounting only yields a false miss, undercounting would yield a false loss. */
+export function isCachePositionReachable(index: number, breakpoints: readonly CacheBreakpoint[], positions: readonly CachePosition[]): boolean {
+  const candidate = positions[index];
+  return candidate !== undefined && breakpoints.some(point => {
+    const end = positions[point.index];
+    return end !== undefined && point.index >= index && end.blockEnd - candidate.blockEnd < 20;
+  });
 }
 
 /** Run in the resident observation worker, after confirmed prefill, never before forwarding.
@@ -225,8 +231,17 @@ export function walkPromptCachePrefix(input: Uint8Array, contentEncoding: string
       const node = field(root, key);
       if (node) frame(`parameter:${key}`, [bytes.subarray(node.start, node.end)]);
     }
+    let blockEnd = 0;
+    function blockWeight(node: ByteNode): number {
+      let weight = 1;
+      for (const container of [field(node, "content"), field(field(node, "source") ?? node, "content")]) {
+        if (container?.children) for (const child of container.children) weight += blockWeight(child);
+      }
+      return weight;
+    }
     function position(tier: CacheTier, blocks: readonly ByteNode[], cacheable = true): void {
       if (positions.length >= 16384) refuse("structure_limit");
+      for (const block of blocks) blockEnd += blockWeight(block);
       let ttl: CacheTtl | undefined;
       for (const [index, block] of blocks.entries()) {
         const candidate = field(block, "cache_control");
@@ -239,7 +254,7 @@ export function walkPromptCachePrefix(input: Uint8Array, contentEncoding: string
         frame(tier, spansWithoutMarker(bytes, block));
       }
       const index = positions.length;
-      positions.push({ digest: state.copy().digest("hex"), tier, index });
+      positions.push({ digest: state.copy().digest("hex"), tier, index, blockEnd });
       if (cacheable) lastCacheable = index;
       if (ttl !== undefined) breakpoints.push({ index, ttl });
     }
@@ -284,9 +299,10 @@ export function walkPromptCachePrefix(input: Uint8Array, contentEncoding: string
       const content = field(message, "content");
       if (!role || !content || !["user", "assistant", "system"].includes(stringScalar(bytes, role) ?? "")) refuse("unsupported_shape");
       if (stringScalar(bytes, role) === "user" && hasThinking
-        && !content.children?.some(block => stringScalar(bytes, field(block, "type")) === "tool_result")) {
-        // Older models strip prior thinking on non-tool user turns. Do not claim reuse
-        // across that boundary without a model-specific preservation guarantee.
+        && !content.children?.every(block => stringScalar(bytes, field(block, "type")) === "tool_result")) {
+        // Older models strip prior thinking once a user message carries anything besides
+        // tool results (e.g. a system-reminder text beside one). Do not claim reuse across
+        // that boundary without a model-specific preservation guarantee.
         reuseBoundary = positions.length;
       }
       frame("message", [bytes.subarray(role.start, role.end)]);

@@ -19,7 +19,7 @@ describe("prompt cache byte prefixes", () => {
     const request = body(Array.from({ length: distance + 1 }, (_, index) => text(`${index}`)), { cache_control: marker });
     const prefix = walk(request);
     expect(prefix.breakpoints).toEqual([{ index: distance, ttl: 300000 }]);
-    expect(isCachePositionReachable(0, prefix.breakpoints)).toBe(distance === 19);
+    expect(isCachePositionReachable(0, prefix.breakpoints, prefix.positions)).toBe(distance === 19);
   });
 
   test.each(["tool_use", "tool_result"])("collapses %s runs without dropping any block's bytes", kind => {
