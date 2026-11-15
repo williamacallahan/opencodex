@@ -10,7 +10,8 @@ export type PrefixUnsupportedReason =
   | "unsupported_shape" | "invalid_marker" | "ttl_order" | "breakpoint_limit"
   | "tool_run_breakpoint" | "unsupported_request_field" | "context_transform"
   | "unsupported_tool" | "unsupported_block" | "unsupported_media_source"
-  | "unsupported_message_field" | "unresolved_tool_reference";
+  | "unsupported_message_field" | "unresolved_tool_reference"
+  | "missing_messages" | "invalid_tools" | "invalid_system" | "invalid_message" | "invalid_message_content";
 export type PrefixWalk =
   | { readonly status: "supported"; readonly positions: readonly CachePosition[]; readonly breakpoints: readonly CacheBreakpoint[]; readonly reuseBoundary?: number }
   | { readonly status: "unsupported"; readonly reason: PrefixUnsupportedReason };
@@ -132,6 +133,14 @@ function markerTtl(bytes: Buffer, node: ByteNode): CacheTtl {
   }
 }
 
+function isKeepAllThinkingEdit(bytes: Buffer, node: ByteNode): boolean {
+  const edits = field(node, "edits");
+  if (node.properties?.length !== 1 || edits?.children?.length !== 1) return false;
+  const edit = edits.children[0]!;
+  return edit.properties?.length === 2 && stringScalar(bytes, field(edit, "type")) === "clear_thinking_20251015"
+    && stringScalar(bytes, field(edit, "keep")) === "all";
+}
+
 /** A breakpoint searches itself and nineteen preceding content blocks. Distance is counted in
  * blocks (each tool_use, tool_result and nested result child), never in collapsed positions;
  * overcounting only yields a false miss, undercounting would yield a false loss. */
@@ -160,11 +169,15 @@ export function walkPromptCachePrefix(input: Uint8Array, contentEncoding: string
     if (!isUtf8(bytes)) refuse("invalid_json");
     const root = parseBytes(bytes);
     const messages = field(root, "messages");
-    if (!root.properties || !messages?.children) refuse("unsupported_shape");
+    if (!root.properties || !messages?.children) refuse("missing_messages");
+    // Only the exact keep-all thinking edit leaves the cache untouched; every other edit
+    // (tool clearing, thinking_turns, compaction, unknown types or fields) rewrites the prefix.
+    const contextManagement = field(root, "context_management");
+    const keepsAllThinking = contextManagement !== undefined && isKeepAllThinkingEdit(bytes, contextManagement);
     for (const property of root.properties) {
-      if (["context_management", "thread", "compaction"].includes(property.key)) refuse("context_transform");
+      if (property.key === "context_management" ? !keepsAllThinking : ["thread", "compaction"].includes(property.key)) refuse("context_transform");
       if (!["model", "tools", "system", "messages", "cache_control", "thinking", "output_config", "speed",
-        "tool_choice", "max_tokens", "stream", "metadata", "temperature", "top_p", "top_k", "stop_sequences", "service_tier", "diagnostics"].includes(property.key)) refuse("unsupported_request_field");
+        "tool_choice", "max_tokens", "stream", "metadata", "temperature", "top_p", "top_k", "stop_sequences", "service_tier", "diagnostics", "context_management"].includes(property.key)) refuse("unsupported_request_field");
     }
     const diagnostics = field(root, "diagnostics");
     if (diagnostics && (!diagnostics.properties || diagnostics.properties.some(property => property.key !== "previous_message_id"))) refuse("unsupported_request_field");
@@ -262,9 +275,9 @@ export function walkPromptCachePrefix(input: Uint8Array, contentEncoding: string
     const automaticScope = automatic && field(automatic, "scope");
     if (automaticScope) frame("automatic-cache-scope", [bytes.subarray(automaticScope.start, automaticScope.end)]);
     // Thinking/effort placement is model-specific: conservatively invalidate every tier.
-    for (const key of ["model", "thinking", "output_config"]) parameter(key);
+    for (const key of ["model", "thinking", "output_config", "context_management"]) parameter(key);
     const tools = field(root, "tools");
-    if (tools && !tools.children) refuse("unsupported_shape");
+    if (tools && !tools.children) refuse("invalid_tools");
     for (const tool of tools?.children ?? []) {
       const type = stringScalar(bytes, field(tool, "type"));
       const name = stringScalar(bytes, field(tool, "name"));
@@ -289,7 +302,7 @@ export function walkPromptCachePrefix(input: Uint8Array, contentEncoding: string
         position("system", [block]);
       }
     } else if (system) {
-      if (stringScalar(bytes, system) === undefined) refuse("unsupported_shape");
+      if (stringScalar(bytes, system) === undefined) refuse("invalid_system");
       position("system", [system]);
     }
     parameter("tool_choice");
@@ -297,8 +310,8 @@ export function walkPromptCachePrefix(input: Uint8Array, contentEncoding: string
       if (!message.properties || message.properties.some(property => !["role", "content", "output_config"].includes(property.key))) refuse("unsupported_message_field");
       const role = field(message, "role");
       const content = field(message, "content");
-      if (!role || !content || !["user", "assistant", "system"].includes(stringScalar(bytes, role) ?? "")) refuse("unsupported_shape");
-      if (stringScalar(bytes, role) === "user" && hasThinking
+      if (!role || !content || !["user", "assistant", "system"].includes(stringScalar(bytes, role) ?? "")) refuse("invalid_message");
+      if (stringScalar(bytes, role) === "user" && hasThinking && !keepsAllThinking
         && !content.children?.every(block => stringScalar(bytes, field(block, "type")) === "tool_result")) {
         // Older models strip prior thinking once a user message carries anything besides
         // tool results (e.g. a system-reminder text beside one). Do not claim reuse across
@@ -313,7 +326,7 @@ export function walkPromptCachePrefix(input: Uint8Array, contentEncoding: string
         if (content.children?.length === 0) position("messages", [content], false);
       }
       if (!content.children) {
-        if (stringScalar(bytes, content) === undefined) refuse("unsupported_shape");
+        if (stringScalar(bytes, content) === undefined) refuse("invalid_message_content");
         position("messages", [content]);
         continue;
       }

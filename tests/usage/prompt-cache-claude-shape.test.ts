@@ -227,4 +227,45 @@ describe("Claude Code cache request shapes", () => {
       expect(ledger.classify(second)).toMatchObject({ reuse_expectation: "reuse", expected_cached_tokens: 180000, lost_cached_tokens: 0 });
     } finally { ledger.close(); }
   });
+
+  const keepAll = { edits: [{ type: "clear_thinking_20251015", keep: "all" }] };
+  const mixedTurn = (extra: object) => ({ ...fixture, ...extra, messages: [...withoutMessageMarkers, ...toolTurn([result(), { ...reminder, cache_control: marker }])] });
+  function followUp(extra: object) {
+    const ledger = new PromptCacheReuseLedger();
+    const initial = { ...fixture, ...extra };
+    const next = mixedTurn(extra);
+    try {
+      const first = ledger.observeSend({ sendId: "first", destination: "direct", model: fixture.model, account: "synthetic-seat", bodyBytes: wire(initial).length });
+      ledger.confirmPrefill(first, event(180000, 1500));
+      ledger.resolvePrefix(first, walkPromptCachePrefix(wire(initial)));
+      ledger.reconcileUsage(first, { read: 180000, write: 1500 });
+      ledger.releaseSend(first);
+      const second = ledger.observeSend({ sendId: "next", destination: "direct", model: fixture.model, account: "synthetic-seat", bodyBytes: wire(next).length });
+      ledger.confirmPrefill(second, event(181500, 500));
+      ledger.resolvePrefix(second, walkPromptCachePrefix(wire(next)));
+      ledger.reconcileUsage(second, { read: 181500, write: 500 });
+      return ledger.classify(second);
+    } finally { ledger.close(); }
+  }
+
+  test("a keep-all clear_thinking edit keeps thinking, so a mixed tool_result and reminder turn still reuses", () => {
+    expect(followUp({ context_management: keepAll })).toMatchObject({ reuse_expectation: "reuse", expected_cached_tokens: 181500, lost_cached_tokens: 0 });
+    expect(followUp({})).toMatchObject({ reuse_expectation: "unknown", reuse_reason: "unmeasured_anchor" });
+  });
+
+  test("the keep-all edit is part of the prefix identity", () => {
+    const withEdit = supported({ ...fixture, context_management: keepAll });
+    expect(withEdit.positions.at(-1)?.digest).not.toBe(supported(fixture).positions.at(-1)?.digest);
+  });
+
+  test.each([
+    ["clear_tool_uses", { edits: [{ type: "clear_thinking_20251015", keep: "all" }, { type: "clear_tool_uses_20250919", trigger: { type: "input_tokens", value: 30000 }, keep: { type: "tool_uses", value: 3 } }] }],
+    ["thinking_turns", { edits: [{ type: "clear_thinking_20251015", keep: { type: "thinking_turns", value: 1 } }] }],
+    ["unknown edit field", { edits: [{ type: "clear_thinking_20251015", keep: "all", extra: true }] }],
+    ["unknown top field", { edits: [{ type: "clear_thinking_20251015", keep: "all" }], other: 1 }],
+    ["unknown edit type", { edits: [{ type: "compact_20260112" }] }],
+  ])("%s context management is a context transform and stays unknown", (_name, contextManagement) => {
+    expect(walkPromptCachePrefix(wire({ ...fixture, context_management: contextManagement }))).toEqual({ status: "unsupported", reason: "context_transform" });
+    expect(followUp({ context_management: contextManagement })).toMatchObject({ reuse_expectation: "unknown", reuse_reason: "context_transform" });
+  });
 });
