@@ -46,7 +46,10 @@ import { formatCodexProviderForLog } from "../codex/routing";
 import { cancelBodyOnAbort, signalWithTimeout } from "../lib/abort";
 import { sidecarEnter } from "../lib/sidecar-tracker";
 import { hardenSecretPath } from "../lib/windows-secret-acl";
-import type { OcxConfig } from "../types";
+import type { OcxConfig, OcxProviderConfig } from "../types";
+import { providerEgressRefusalResponse } from "./admitted-http-turn";
+import { InvalidProviderEgressError, providerEgressFetchInit, resolveProviderEgress } from "../lib/provider-egress";
+import { configuredOutboundFetch } from "../lib/proxy-env";
 import {
   resolveCallerOwnedOpenAiSidecar,
   resolveFirstUsableOpenAiSidecar,
@@ -317,6 +320,8 @@ export type LiveSidebandTarget =
   | { style: "frameless-standalone"; query: string };
 
 export type LiveRelayTarget = {
+  providerName: string;
+  provider: OcxProviderConfig;
   headers: Record<string, string>;
   authContext?: CodexAuthContext;
   providerBaseUrl: string;
@@ -779,6 +784,8 @@ export async function resolveLiveRelay(
     const selectedHeaders = mergeCodexSelectedHeaders({ ...headers, ...provider.headers }, forward.headers);
     logCtx.model = "gpt-live";
     return {
+      providerName: forward.providerName,
+      provider,
       headers: Object.fromEntries(selectedHeaders),
       authContext: forward.authContext,
       releaseProbeLease: forward.releaseProbeLease,
@@ -802,6 +809,8 @@ export async function resolveLiveRelay(
     logCtx.provider = providerName;
     logCtx.model = "gpt-live";
     return {
+      providerName,
+      provider,
       headers,
       providerBaseUrl: provider.baseUrl,
       usesBackendShape: false,
@@ -875,7 +884,10 @@ export async function handleLive(
       }
       if (isolated !== parsed) outboundBody = new TextEncoder().encode(JSON.stringify(isolated)).buffer as ArrayBuffer;
     }
-    const upstreamResponse = await fetch(url, {
+    const egress = resolveProviderEgress({ providerName: relay.providerName, provider: relay.provider, url });
+    const send = egress.kind === "inherit" ? fetch : configuredOutboundFetch;
+    const upstreamResponse = await send(url, {
+      ...providerEgressFetchInit(egress),
       method: "POST",
       headers,
       body: outboundBody,
@@ -918,6 +930,10 @@ export async function handleLive(
     }
     return new Response(payload, { status: upstreamResponse.status, headers: relayHeaders });
   } catch (err) {
+    if (err instanceof InvalidProviderEgressError) {
+      relay.releaseProbeLease?.();
+      throw err;
+    }
     if (req.signal.aborted) {
       return formatErrorResponse(499, "client_closed_request", "live request canceled by client");
     }
@@ -956,10 +972,24 @@ export async function resolveLiveSidebandUpgrade(
     ...("callId" in target ? { callerOwnedCallId: target.callId } : {}),
   });
   if (relay instanceof Response) return relay;
+  let upstreamWsUrl: string;
+  try {
+    upstreamWsUrl = buildLiveSidebandUpstreamWsUrl(target, config.experimentalRealtimeWsBaseUrl);
+    const egress = resolveProviderEgress({ providerName: relay.providerName, provider: relay.provider, url: upstreamWsUrl.replace(/^wss:/, "https:") });
+    if (egress.kind === "proxy") {
+      relay.releaseProbeLease?.();
+      return formatErrorResponse(502, "upstream_error", `Provider ${relay.providerName} cannot use its egress proxy for the live sideband`);
+    }
+  } catch (error) {
+    relay.releaseProbeLease?.();
+    const refusal = providerEgressRefusalResponse(error);
+    if (refusal) return refusal;
+    throw error;
+  }
   return {
     authContext: relay.authContext,
     headers: relay.headers,
-    upstreamWsUrl: buildLiveSidebandUpstreamWsUrl(target, config.experimentalRealtimeWsBaseUrl),
+    upstreamWsUrl,
     recordOutcome: relay.recordOutcome,
   };
 }

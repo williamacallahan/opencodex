@@ -1,4 +1,12 @@
 import { normalizeMessagesProxyRefusal } from "../lib/messages-error-body";
+import { InvalidProviderEgressError } from "../lib/provider-egress";
+import { formatErrorResponse } from "../bridge";
+
+export function providerEgressRefusalResponse(error: unknown): Response | undefined {
+  return error instanceof InvalidProviderEgressError
+    ? formatErrorResponse(502, "upstream_error", "Provider egress configuration prevents this request")
+    : undefined;
+}
 import { withCors, type RequestPolicyView } from "./auth-cors";
 import { runAdmittedBodyWork } from "./inbound-body-admission";
 import { tryAdmitTurn, type ActiveTurnLease } from "./lifecycle";
@@ -53,7 +61,13 @@ export function createAdmittedHttpTurn(
       return response;
     } catch (error) {
       lease.release();
-      throw error;
+      const response = providerEgressRefusalResponse(error);
+      if (!response) throw error;
+      if (refusalLog) {
+        addFinalRequestLog(refusalLog.requestId, refusalLog.start, refusalLog.logCtx, response.status);
+        refusalLog.onLogged?.();
+      }
+      return withCors(map(response), req, policy);
     }
   };
 }

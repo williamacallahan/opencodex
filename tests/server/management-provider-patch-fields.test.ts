@@ -93,6 +93,12 @@ describe("provider PATCH field mask", () => {
         rows = await (await list()).json();
         expect(rows.find((row: { name: string }) => row.name === "relay").proxy).toBe(reference);
         expect(JSON.stringify(rows)).not.toContain("user:pass");
+        delete process.env[name];
+        expect(loadConfig().providers.relay?.proxy).toBe(reference);
+        const missing = await patch({ proxy: reference });
+        expect(missing.status).toBe(400);
+        expect(await missing.text()).toContain(`environment variable ${name} is unset or empty`);
+        process.env[name] = "http://user:pass@egress.test:3128";
         for (const proxy of ["not a URL", "privatevalue:pass", 42, "${OCX_TEST_MISSING_PROVIDER_PROXY}"]) {
           const rejected = await patch({ proxy });
           expect(rejected.status).toBe(400);

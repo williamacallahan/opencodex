@@ -285,14 +285,12 @@ const modelCapabilitiesSchema = z.unknown().superRefine((value, ctx) => {
 /**
  * Per-provider egress fields, validated by the resolver the transports themselves use.
  *
- * Calling `providerEgressConfigError` rather than restating the accepted forms keeps one
- * definition of a usable value: a proxy the config loader admits is one the transport can
- * carry, and a value rejected here is rejected at request time for the identical reason.
- * Each field is checked on its own because neither depends on the other's value to be
- * well-formed; how they combine is decided per request against the destination.
+ * Literal values use the transport validator; environment references are checked for syntax
+ * here and resolved at the physical send. Each field is checked on its own because neither
+ * depends on the other's value to be well-formed.
  */
 const providerProxySchema = z.unknown().superRefine((value, ctx) => {
-  const error = providerEgressConfigError({ proxy: value as string | null | undefined });
+  const error = providerEgressConfigError({ proxy: value as string | null | undefined }, { syntaxOnly: true });
   if (error) ctx.addIssue({ code: "custom", message: error });
 }).transform(value => value as string | null | undefined);
 

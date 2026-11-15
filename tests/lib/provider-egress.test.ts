@@ -10,6 +10,7 @@ import {
   sanitizeProxyUrlForLog,
 } from "../../src/lib/provider-egress";
 import { PROXY_ENV_KEYS, configuredOutboundFetch } from "../../src/lib/proxy-env";
+import { configSchema } from "../../src/config/schema/config-schema";
 
 const proxyKeys = PROXY_ENV_KEYS.flatMap(key => [key, key.toLowerCase()]);
 const originalProxyEnv = Object.fromEntries(proxyKeys.map(key => [key, process.env[key]]));
@@ -74,10 +75,31 @@ describe("provider egress resolution", () => {
         expect(() => resolve({ proxy: reference })).toThrow(InvalidProviderEgressError);
         expect(providerEgressConfigError({ proxy: reference })).toContain(name);
         expect(providerEgressConfigError({ proxy: reference })).not.toContain("user:pass");
+        expect(providerEgressConfigError({ proxy: reference }, { syntaxOnly: true })).toBeNull();
       }
     } finally {
       if (previous === undefined) delete process.env[name];
       else process.env[name] = previous;
+    }
+  });
+
+  test("configuration loads an unset proxy reference without losing other providers", () => {
+    const reference = "${OCX_TEST_MISSING_EGRESS_REFERENCE}";
+    const previous = process.env.OCX_TEST_MISSING_EGRESS_REFERENCE;
+    delete process.env.OCX_TEST_MISSING_EGRESS_REFERENCE;
+    try {
+      const result = configSchema.safeParse({ defaultProvider: "review", providers: {
+        review: { adapter: "openai-responses", baseUrl: TARGET, proxy: reference },
+        other: { adapter: "openai-responses", baseUrl: TARGET },
+      } });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.providers.review?.proxy).toBe(reference);
+        expect(result.data.providers.other).toBeDefined();
+      }
+      expect(() => resolve({ proxy: reference })).toThrow(InvalidProviderEgressError);
+    } finally {
+      if (previous !== undefined) process.env.OCX_TEST_MISSING_EGRESS_REFERENCE = previous;
     }
   });
 

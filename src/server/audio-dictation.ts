@@ -6,6 +6,8 @@ import type { AudioClient } from "./audio-client";
 import { resolveAudioUpstream, TRANSCRIPTION_MODEL, type AudioUpstream } from "./audio-upstream";
 import type { RequestLogContext } from "./request-log";
 import { authorizationCredential } from "../lib/authorization-scheme";
+import { providerEgressRefusalResponse } from "./admitted-http-turn";
+import { resolveProviderEgress } from "../lib/provider-egress";
 
 export const DICTATION_SESSION_MAX_MS = 600_000;
 export const DICTATION_FINALIZATION_MAX_MS = 60_000;
@@ -88,6 +90,18 @@ export async function resolveDictationSocket(
   if (relay.keyed) {
     relay.release();
     return formatErrorResponse(400, "invalid_request_error", "Streaming dictation requires a connected ChatGPT account");
+  }
+  try {
+    const egress = resolveProviderEgress({ providerName: relay.providerName, provider: relay.provider, url: "https://chatgpt.com/backend-api/dictation/stream" });
+    if (egress.kind === "proxy") {
+      relay.release();
+      return formatErrorResponse(502, "upstream_error", `Provider ${relay.providerName} cannot use its egress proxy for streaming dictation`);
+    }
+  } catch (error) {
+    relay.release();
+    const refusal = providerEgressRefusalResponse(error);
+    if (refusal) return refusal;
+    throw error;
   }
   const headers = new Headers(relay.headers);
   const token = authorizationCredential(headers);

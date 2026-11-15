@@ -54,6 +54,11 @@ describe("redactSecretString", () => {
         .toBe(`${scheme}://${REDACTED_SECRET}@proxy.test:1080/path`);
     }
     expect(redactSecretString("https://proxy.test/path")).toBe("https://proxy.test/path");
+    expect(redactSecretString("socks5://user:prefix@password-suffix@proxy.example:1080"))
+      .toBe(`socks5://${REDACTED_SECRET}@proxy.example:1080`);
+    for (const value of ["https://example.test?owner=contact@example.test", "contact@example.test", "git@github.com:o/r.git"]) {
+      expect(redactSecretString(value)).toBe(value);
+    }
   });
 
   test("preserves non-secret diagnostic text", () => {

@@ -15,6 +15,7 @@ import * as nativeMainRefresh from "../../src/codex/native-main-refresh-mode";
 import { startServer } from "../../src/server";
 import { handleAudioTranscriptions, AUDIO_BODY_MAX_BYTES, AUDIO_FILE_MAX_BYTES } from "../../src/server/audio-transcriptions";
 import { resetLifecycleDrainStateForTests } from "../../src/server/lifecycle";
+import { clearRequestLogsForTests, getRequestLogEntries } from "../../src/server/request-log";
 import { acquireNativeMainProfileDrain, abortAndReleaseAllTurns, getActiveTurnCount, tryAdmitTurn } from "../../src/server/lifecycle";
 import type { OcxConfig } from "../../src/types";
 import { fakeChatGptJwt } from "../helpers/fake-chatgpt-jwt";
@@ -111,6 +112,32 @@ afterEach(async () => {
 });
 
 describe("standalone transcription API", () => {
+  test("invalid provider egress returns sanitized responses and logs for audio and images", async () => {
+    const cfg = config();
+    cfg.providers["openai-apikey"]!.proxy = "${OCX_AUDIO_INVALID_PROXY}";
+    const previous = process.env.OCX_AUDIO_INVALID_PROXY;
+    process.env.OCX_AUDIO_INVALID_PROXY = "ftp://user:password@proxy.test:3128";
+    try {
+      saveConfig(cfg);
+      clearRequestLogsForTests();
+      const audio = await request();
+      expect(audio.status).toBe(502);
+      expect(audio.headers.has("access-control-allow-origin")).toBe(true);
+      expect(await audio.text()).not.toContain("password");
+      const image = await originalFetch(new URL("/v1/images/generations", server!.url), {
+        method: "POST", headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-image-1", prompt: "example" }),
+      });
+      expect(image.status).toBe(502);
+      expect(image.headers.has("access-control-allow-origin")).toBe(true);
+      expect(await image.text()).not.toContain("password");
+      expect(captured).toHaveLength(0);
+      expect(getRequestLogEntries().filter(row => row.status === 502)).toHaveLength(2);
+    } finally {
+      if (previous === undefined) delete process.env.OCX_AUDIO_INVALID_PROXY;
+      else process.env.OCX_AUDIO_INVALID_PROXY = previous;
+    }
+  });
   test("forwards multipart bytes with upstream credentials and returns only transcript", async () => {
     respond = () => Response.json({ text: "synthetic transcript", internal: "must not escape" });
     const response = await request(form({ prompt: "technical terms", language: "ko" }));

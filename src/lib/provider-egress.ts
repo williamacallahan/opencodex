@@ -315,16 +315,17 @@ const EGRESS_VALIDATION_URL = "https://validation.invalid/";
 /**
  * The configuration error for a provider's egress fields, or null when they are usable.
  *
- * Delegates to `resolveProviderEgress` so configuration and request time cannot drift apart:
- * a value accepted by `ocx config set` or the dashboard is one the transport will accept, and
- * one rejected here is rejected there for the identical reason. Restating the rules would give
- * this repository two definitions of a valid proxy value and no check that they agree.
+ * Delegates to `resolveProviderEgress` for literals and management writes. Schema loading
+ * may defer a syntactically valid environment reference until the physical send.
  */
 export function providerEgressConfigError(
   provider: Pick<OcxProviderConfig, "proxy" | "noProxy">,
+  options?: { syntaxOnly?: boolean },
 ): string | null {
   try {
-    resolveProviderEgress({ providerName: "<validation>", provider, url: EGRESS_VALIDATION_URL });
+    const validationProvider = options?.syntaxOnly && typeof provider.proxy === "string" && PROVIDER_PROXY_ENV_REFERENCE.test(provider.proxy)
+      ? { ...provider, proxy: undefined } : provider;
+    resolveProviderEgress({ providerName: "<validation>", provider: validationProvider, url: EGRESS_VALIDATION_URL });
     return null;
   } catch (error) {
     if (error instanceof InvalidProviderEgressError) return `${error.field} is invalid: ${error.reason}`;

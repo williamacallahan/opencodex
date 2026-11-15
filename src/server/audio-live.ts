@@ -5,7 +5,8 @@ import { isolateCodexPoolClientMetadata } from "../codex/forward-transport-heade
 import { CodexInstallationIdUnavailableError } from "../codex/installation-id";
 import { cancelBodyOnAbort, clearableDeadline } from "../lib/abort";
 import type { AdmissionLease } from "../lib/admission";
-import { InvalidProviderEgressError, providerEgressFetchInit, providerEgressIsExplicit, resolveProviderEgress } from "../lib/provider-egress";
+import { providerEgressRefusalResponse } from "./admitted-http-turn";
+import { InvalidProviderEgressError, providerEgressFetchInit, resolveProviderEgress } from "../lib/provider-egress";
 import { configuredOutboundFetch } from "../lib/proxy-env";
 import { captureExplicitOpenAiCallerAuth } from "../providers/openai-sidecar";
 import type { OcxConfig } from "../types";
@@ -192,7 +193,7 @@ export async function resolveExternalLiveSocket(
     // HTTPS has the same default port and bypass matching as WSS.
     const egressUrl = upstreamWsUrl.replace(/^wss:/, "https:");
     const egress = resolveProviderEgress({ providerName: relay.providerName, provider: relay.provider, url: egressUrl });
-    if (providerEgressIsExplicit(egress)) {
+    if (egress.kind === "proxy") {
       relay.release();
       return formatErrorResponse(502, "upstream_error", `Provider ${relay.providerName} cannot use its egress proxy for the live sideband`);
     }
@@ -205,7 +206,7 @@ export async function resolveExternalLiveSocket(
     };
   } catch (error) {
     relay.release();
-    if (error instanceof InvalidProviderEgressError) throw error;
-    return formatErrorResponse(400, "invalid_request_error", "Invalid live endpoint configuration");
+    return providerEgressRefusalResponse(error)
+      ?? formatErrorResponse(400, "invalid_request_error", "Invalid live endpoint configuration");
   }
 }

@@ -1,6 +1,7 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createAdmittedHttpTurn } from "../../src/server/admitted-http-turn";
+import { InvalidProviderEgressError } from "../../src/lib/provider-egress";
 import { getDefaultConfig } from "../../src/config";
 import { MAX_CONFIGURABLE_INBOUND_BODY_BYTES } from "../../src/server/request-decompress";
 import { inboundBodyBudget, configureInboundBodyBudget, MAX_QUEUED_INBOUND_BODIES } from "../../src/server/inbound-body-budget";
@@ -49,6 +50,22 @@ test("admission cancellation owns the row and releases the turn on an immediate 
   assert.equal(getActiveTurnCount(), before);
   assert.equal(inboundBodyBudget.snapshot().activeLeases, 0);
   configureInboundBodyBudget();
+});
+
+test("provider egress refusals return sanitized JSON with CORS and one final log", async () => {
+  clearRequestLogsForTests();
+  let logged = 0;
+  const before = getActiveTurnCount();
+  const run = createAdmittedHttpTurn(() => undefined, busy);
+  const response = await run(request(), policy, async () => {
+    throw new InvalidProviderEgressError("proxy", "invalid", "http://user:password@proxy.test");
+  }, log("egress", () => logged++));
+  assert.equal(response.status, 502);
+  assert.ok(response.headers.has("access-control-allow-origin"));
+  assert.doesNotMatch(await response.text(), /password|proxy\.test/);
+  assert.equal(rows("egress").length, 1);
+  assert.equal(logged, 1);
+  assert.equal(getActiveTurnCount(), before);
 });
 
 test("active-turn refusal maps without a row or callback, then recovers", async () => {

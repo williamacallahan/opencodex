@@ -6,7 +6,10 @@ import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { clearAccountQuota } from "../../src/codex/auth-api";
 import { clearCodexUpstreamHealth, clearThreadAccountMap } from "../../src/codex/routing";
 import * as routing from "../../src/codex/routing";
-import { saveConfig } from "../../src/config";
+import { loadConfig, saveConfig } from "../../src/config";
+import { resolveAudioClient } from "../../src/server/audio-client";
+import { resolveDictationSocket } from "../../src/server/audio-dictation";
+import { tryAdmitTurn } from "../../src/server/lifecycle";
 import { startServer } from "../../src/server";
 import { createDictationFrameValidator, DICTATION_SESSION_MAX_MS, DICTATION_FINALIZATION_MAX_MS } from "../../src/server/audio-dictation";
 import { attachLiveSidebandUpstream, beginAudioFinalization } from "../../src/server/index/live-sideband";
@@ -337,6 +340,46 @@ describe("external audio sockets", () => {
     clients.add(ws);
     await receive(ws, "native-echo", "native-echo");
     expect(fixture.handshakes[0]!.headers.get("authorization")).toBe("Bearer sk-fixture-native");
+  });
+  test("dictation refuses proxied sockets and permits direct routes", async () => {
+    const config = loadConfig();
+    const req = new Request("http://localhost/v1/audio/transcriptions/stream", { headers: { authorization: `Bearer ${KEY}` } });
+    const client = resolveAudioClient(req, config, true);
+    if (!client || client instanceof Response) throw new Error("audio client was not admitted");
+    for (const route of [{ proxy: "http://proxy.test:3128" }, { proxy: "direct" }, { noProxy: "chatgpt.com" }, {}]) {
+      Object.assign(config.providers.openai!, { proxy: undefined, noProxy: undefined }, route);
+      const lease = tryAdmitTurn();
+      if (!lease) throw new Error("turn not admitted");
+      try {
+        const result = await resolveDictationSocket(client, config, { model: "unknown", provider: "unknown" }, lease);
+        if ("proxy" in route && route.proxy !== "direct") {
+          expect(result).toBeInstanceOf(Response);
+          expect((result as Response).status).toBe(502);
+        } else {
+          expect(result).not.toBeInstanceOf(Response);
+          if (!(result instanceof Response)) result.finish();
+        }
+      } finally { lease.release(); }
+    }
+  });
+  test("invalid dictation egress returns a sanitized refusal without dialing", async () => {
+    const config = loadConfig();
+    config.providers.openai!.proxy = "${OCX_TEST_DICTATION_MISSING_PROXY}";
+    const previous = process.env.OCX_TEST_DICTATION_MISSING_PROXY;
+    delete process.env.OCX_TEST_DICTATION_MISSING_PROXY;
+    try {
+      saveConfig(config);
+      fixture = createFixture();
+      const response = await fetchOriginal(new URL("/v1/audio/transcriptions/stream", fixture.server.url), {
+        headers: { authorization: `Bearer ${KEY}`, upgrade: "websocket", connection: "upgrade" },
+      });
+      expect(response.status).toBe(502);
+      expect(response.headers.has("access-control-allow-origin")).toBe(true);
+      expect(await response.text()).not.toContain("OCX_TEST_DICTATION_MISSING_PROXY");
+      expect(fixture.handshakes).toHaveLength(0);
+    } finally {
+      if (previous !== undefined) process.env.OCX_TEST_DICTATION_MISSING_PROXY = previous;
+    }
   });
   test("browser key carrier relays the actual dictation protocol without exposing upstream credentials", async () => {
     fixture = createFixture();

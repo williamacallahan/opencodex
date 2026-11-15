@@ -14,6 +14,7 @@ import { MODEL_NOT_ALLOWED_FOR_KEY } from "../../src/server/admission-model-scop
 import { resolveAudioClient, type AudioClient } from "../../src/server/audio-client";
 import { resolveDictationSocket } from "../../src/server/audio-dictation";
 import { handleExternalLive, resolveExternalLiveSocket } from "../../src/server/audio-live";
+import { handleLive, resolveLiveSidebandUpgrade } from "../../src/server/live";
 import { handleAudioTranscriptions } from "../../src/server/audio-transcriptions";
 import { LIVE_AUDIO_MODEL, TRANSCRIPTION_MODEL } from "../../src/server/audio-upstream";
 import { LiveCallBindings } from "../../src/server/live-call-bindings";
@@ -163,19 +164,37 @@ test("transcription and live call creation use the provider route", async () => 
   }
 });
 
-test("live sideband refuses an explicit provider route before opening a socket", async () => {
-  for (const route of [{ proxy: "http://proxy.example:8080" }, { proxy: "direct" }, { noProxy: "api.openai.com" }]) {
+test("live sideband refuses proxy routes but allows direct and inherited routes", async () => {
+  for (const route of [{ proxy: "http://proxy.example:8080" }, { proxy: "direct" }, { noProxy: "api.openai.com" }, {}]) {
     const cfg = config({});
     Object.assign(cfg.providers["openai-apikey"]!, route);
     const result = await resolveExternalLiveSocket(client(cfg), cfg, logContext(),
       { style: "realtime-standalone", query: "model=" + LIVE_AUDIO_MODEL },
       { lease: lease(), bindings: new LiveCallBindings() });
-    expect(result).toBeInstanceOf(Response);
-    if (!(result instanceof Response)) throw new Error("sideband was not refused");
-    expect(result.status).toBe(502);
-    expect(await result.text()).toContain("Provider openai-apikey cannot use its egress proxy for the live sideband");
+    if ("proxy" in route && route.proxy !== "direct") {
+      expect(result).toBeInstanceOf(Response);
+      if (!(result instanceof Response)) throw new Error("sideband was not refused");
+      expect(result.status).toBe(502);
+      expect(await result.text()).toContain("Provider openai-apikey cannot use its egress proxy for the live sideband");
+    } else {
+      expect(result).not.toBeInstanceOf(Response);
+      if (!(result instanceof Response)) result.finish();
+    }
     expect(upstreamCalls).toEqual([]);
   }
+});
+
+test("native live HTTP honors its provider route and its socket refuses proxy routes", async () => {
+  const cfg = config({});
+  cfg.providers["openai-apikey"]!.proxy = "http://proxy.test:3128";
+  const req = new Request("http://localhost/v1/live", { method: "POST", headers: { "content-type": "application/sdp" }, body: "v=0" });
+  const response = await handleLive(req, cfg, logContext(), lease());
+  expect(response.status).toBe(201);
+  expect(upstreamInit.at(-1)?.proxy).toBe("http://proxy.test:3128/");
+  const socket = await resolveLiveSidebandUpgrade(new Request("http://localhost/v1/realtime"), cfg, logContext(),
+    { style: "realtime-standalone", query: "model=" + LIVE_AUDIO_MODEL }, lease());
+  expect(socket).toBeInstanceOf(Response);
+  expect((socket as Response).status).toBe(502);
 });
 
 test("provider noProxy forces direct audio requests and malformed routes never send", async () => {
