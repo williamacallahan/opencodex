@@ -169,6 +169,20 @@ describe("stored Pool duplicate of native main", () => {
     native("other-account");
     expect(codexAccountUnusableReason(config, poolId)).toBeUndefined();
   });
+  test("a duplicate serves while the observed native main login cannot serve, and not after it recovers", async () => {
+    native();
+    unlinkSync(join(process.env.CODEX_HOME!, "auth.json"));
+    expect(codexAccountUnusableReason(config, "__main__")).toBe("main_credential_unavailable");
+    expect(codexAccountUnusableReason(config, poolId)).toBeUndefined();
+    expect(dto().selectionExcludedReason).toBeUndefined();
+    const ctx = await resolveCodexAuthContext(new Headers(), config, "pool", {
+      accountId: poolId, primeCodexPoolQuotas: async () => {},
+    });
+    expect(ctx).toMatchObject({ kind: "pool", accountId: poolId });
+    native();
+    expect(codexAccountUnusableReason(config, poolId)).toBe("duplicate_main");
+    expect(isCodexAuthContextUsable(ctx, config)).toBe(false);
+  });
   test("automatic selection cannot fall back to a duplicate when main is excluded", async () => {
     native();
     await expect(resolveCodexAuthContext(new Headers(), config, "pool", {
@@ -354,9 +368,13 @@ describe("stored Pool duplicate of native main", () => {
     native();
     writeFileSync(join(process.env.CODEX_HOME!, "auth.json"), "{");
     reconcileMainCodexAccountRuntimeState();
+    // Main cannot serve from an unreadable file, so the copy serves meanwhile on retained evidence.
+    expect(codexAccountUnusableReason(config, poolId)).toBeUndefined();
+    native("shared-account", "plus", email, false);
     expect(codexAccountUnusableReason(config, poolId)).toBe("duplicate_main");
     unlinkSync(join(process.env.CODEX_HOME!, "auth.json"));
     reconcileMainCodexAccountRuntimeState();
+    native("shared-account", "plus", email, false);
     expect(codexAccountUnusableReason(config, poolId)).toBeUndefined();
   });
   test("confirmed transition and identity generation retirement clear collision evidence", () => {

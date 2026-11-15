@@ -110,14 +110,7 @@ export function codexAccountUnusableReason(
     if (options.requestOwnedMainCredential) {
       return options.isMainAccountTokenLive?.() === false ? "main_credential_unavailable" : undefined;
     }
-    const credential = getMainAccountCredentialStatus();
-    if (credential.refreshGrantRejected) return "needs_reauth";
-    if (isAccountNeedsReauth(accountId) && !credential.hasRefreshGrant) return "needs_reauth";
-    // Main account: a refresh grant is enough to route; materialization refreshes before I/O.
-    const mainLive = options.isMainAccountTokenLive
-      ? options.isMainAccountTokenLive()
-      : credential.usable;
-    return mainLive ? undefined : "main_credential_unavailable";
+    return mainCredentialUnusableReason(options);
   }
   const exists = (config.codexAccounts ?? [])
     .some(account => isSelectableCodexPoolAccount(account) && account.id === accountId);
@@ -127,8 +120,39 @@ export function codexAccountUnusableReason(
   if (!record?.credential) return "missing_credential";
   if (record.deletedAt != null) return "deleted";
   if (record.codexValidationPending) return "validation_pending";
-  if (configuredCodexMainDuplicate(config, accountId)) return "duplicate_main";
+  if (isCodexMainDuplicateExcluded(config, accountId, options)) return "duplicate_main";
   return undefined;
+}
+
+/** Whether the native main login itself can serve, apart from routing policy such as hard locks. */
+function mainCredentialUnusableReason(
+  options: CodexAccountUsabilityOptions,
+): "needs_reauth" | "main_credential_unavailable" | undefined {
+  const credential = getMainAccountCredentialStatus();
+  if (credential.refreshGrantRejected) return "needs_reauth";
+  if (isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID) && !credential.hasRefreshGrant) return "needs_reauth";
+  // Main account: a refresh grant is enough to route; materialization refreshes before I/O.
+  const mainLive = options.isMainAccountTokenLive
+    ? options.isMainAccountTokenLive()
+    : credential.usable;
+  return mainLive ? undefined : "main_credential_unavailable";
+}
+
+/**
+ * A stored Pool copy of the native main login is excluded only while that login can serve, because
+ * only then would the copy drain main's quota under another name (#7398). With main logged out or
+ * refused, the copy is the one working route to that subscription. A main hard lock keeps the
+ * exclusion: the copy shares main's quota, so serving it would defeat the lock.
+ */
+export function isCodexMainDuplicateExcluded(
+  config: OcxConfig,
+  accountId: string,
+  options: CodexAccountUsabilityOptions = {},
+): boolean {
+  if (!configuredCodexMainDuplicate(config, accountId)) return false;
+  // These scopes must not read physical stored-main state, so they keep the exclusion.
+  if (options.nativeMainSelectionOnly || options.requestOwnedMainCredential) return true;
+  return mainCredentialUnusableReason(options) === undefined;
 }
 
 export function isCodexAccountUsable(

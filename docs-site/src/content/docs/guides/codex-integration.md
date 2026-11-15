@@ -61,7 +61,9 @@ a different identity. Different workspaces, distinct workspace members, and sepa
 and workspace subscriptions remain supported. A failed usage lookup does not discard the
 subscription plan carried by the login token.
 
-Existing duplicates remain stored but cannot be selected as a second Pool account. The account
+Existing duplicates remain stored but cannot be selected as a second Pool account while the native
+main login can serve. When that login cannot serve (signed out, refused, or unreadable), the stored
+duplicate serves in its place; a main hard lock keeps it excluded, because it shares main's quota. The account
 list exposes `selectionExcludedReason: "duplicate_main"` and an actionable `selectionExcludedAction`. Use native main explicitly,
 or sign native Codex into a different account before reusing the stored entry. Detection follows
 the latest owned native-login observation, including a later native relogin; passive account

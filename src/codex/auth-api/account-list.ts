@@ -39,7 +39,8 @@ import { configuredAdminToken } from "../../lib/admin-secrets";
 import { nativeUserIdClaims } from "../reserve-availability";
 import { extractAccountIdClaims } from "../../oauth/chatgpt";
 import { codexUpstreamAccountKey } from "./account-identity";
-import { CODEX_MAIN_DUPLICATE_ACTION, configuredCodexMainDuplicate, getObservedMainCodexCollisionIdentity } from "../collision-identity";
+import { CODEX_MAIN_DUPLICATE_ACTION, getObservedMainCodexCollisionIdentity } from "../collision-identity";
+import { isCodexMainDuplicateExcluded } from "../account-usability";
 
 export function quotaForPlan<T extends Omit<StoredAccountQuota, "updatedAt"> | StoredAccountQuota | null>(
   quota: T,
@@ -153,7 +154,7 @@ export function poolAccountDto(
   // health projection. Emitting only the boolean is what left #4212's reporter guessing which
   // account took their model away and why, so name the cause they actually have to act on.
   const reauthReason: CodexAccountReauthReason | undefined = rawReauthReason ?? (health.status === "reauth_required" ? health.reason : undefined);
-  const duplicateMain = configuredCodexMainDuplicate(config, account.id);
+  const duplicateMain = isCodexMainDuplicateExcluded(config, account.id);
   const record = storeRecord !== undefined ? storeRecord : readPoolRecordOnce(account.id);
   const weeklyQuotaConflicts = getAccountWeeklyQuotaConflicts(account.id, record);
   return {

@@ -27,7 +27,7 @@ import {
 import { isAccountNeedsReauth, markAccountNeedsReauth } from "./account-runtime-state";
 import { ConfigMutationLockError } from "../config";
 import { NativeProfileError } from "./native-profile-types";
-import { codexAccountUnusableReason, codexPoolOnlyExcludesMain, isCodexAccountUsable, type CodexAccountUsabilityOptions } from "./account-usability";
+import { codexAccountUnusableReason, codexPoolOnlyExcludesMain, isCodexAccountUsable, isCodexMainDuplicateExcluded, type CodexAccountUsabilityOptions } from "./account-usability";
 import { reconcileMainCodexAccountRuntimeState } from "./account-lifecycle";
 import {
   MAIN_CODEX_ACCOUNT_ID,
@@ -104,7 +104,7 @@ import { CODEX_RESERVE_HELPER_UNSUPPORTED_MESSAGE, isCodexReserveHelperUnsupport
 import type { DataPlaneAdmission } from "../server/auth-cors";
 import { getMainReserveAuthorization, isMainReserveAuthorizationLive, nativeUserIdClaims, type MainReserveAuthorization } from "./reserve-availability";
 import { UpstreamRetryEvidenceError } from "../lib/upstream-retry";
-import { CODEX_MAIN_DUPLICATE_ACTION, configuredCodexMainDuplicate } from "./collision-identity";
+import { CODEX_MAIN_DUPLICATE_ACTION } from "./collision-identity";
 import { AgentAssertionUnsupportedError, authorizationCredential, hasAgentAssertionAuthorization } from "../lib/authorization-scheme";
 
 /**
@@ -1627,7 +1627,7 @@ async function resolveCodexAuthContextUnannotated(
   // deferred credential must never become request auth through that fallback.
   try {
     assertCodexAccountValidationReady(accountId);
-    if (configuredCodexMainDuplicate(config, accountId)) throw new CodexPoolAuthenticationError(CODEX_MAIN_DUPLICATE_ACTION);
+    if (isCodexMainDuplicateExcluded(config, accountId)) throw new CodexPoolAuthenticationError(CODEX_MAIN_DUPLICATE_ACTION);
     assertPoolAccountCredits(accountId, poolCreditHoldResetAt(policy, accountId, config, Date.now(), poolReserve), poolCreditRecoveryNeeded(policy, accountId), quotaScope);
   } catch (cause) {
     // Nothing will reach upstream, so give the trial back instead of leaving the held account
@@ -1760,7 +1760,7 @@ async function resolveCodexAuthContextUnannotated(
   try {
     const token = await getValidCodexToken(accountId, { signal: options.signal });
     assertCodexAccountValidationReady(accountId);
-    if (configuredCodexMainDuplicate(config, accountId)) throw new CodexPoolAuthenticationError(CODEX_MAIN_DUPLICATE_ACTION);
+    if (isCodexMainDuplicateExcluded(config, accountId)) throw new CodexPoolAuthenticationError(CODEX_MAIN_DUPLICATE_ACTION);
     assertPoolAccountCredits(accountId, poolCreditHoldResetAt(policy, accountId, config, Date.now(), poolReserve), poolCreditRecoveryNeeded(policy, accountId), quotaScope);
     return bindPoolCreditPolicy({
       kind: "pool",
