@@ -4,6 +4,7 @@
  * Distinct from `ocx logs` (the recent ring) and `ocx logs explain` (route-decision).
  */
 import { REQUEST_HISTORY_DEFAULT_PAGE_SIZE, REQUEST_HISTORY_MAX_PAGE_SIZE } from "../routing/history/indexer";
+import { formatTokenShare, tokenBreakdown } from "../usage/token-breakdown";
 import { parseUsageTimeWindow } from "../usage/time-range";
 import {
   CliUsageError,
@@ -60,13 +61,28 @@ function formatCost(row: Record<string, unknown>): string {
   return typeof total === "number" && Number.isFinite(total) ? `~$${total.toFixed(4)}` : "";
 }
 
+/** Compact ` in<N> out<N> c<N>(<share>) w<N>(<share>)`; `-` is unknown and `w-` is a write count the upstream never reported. */
+function historySplit(usage: Record<string, unknown>): string {
+  const num = (value: unknown) => typeof value === "number" ? value : undefined;
+  const parts = tokenBreakdown({
+    inputTokens: num(usage.inputTokens),
+    outputTokens: num(usage.outputTokens),
+    cacheReadInputTokens: num(usage.cacheReadInputTokens),
+    cachedInputTokens: num(usage.cachedInputTokens),
+    cacheCreationInputTokens: num(usage.cacheCreationInputTokens),
+  });
+  const count = (value: number | undefined) => value === undefined ? "-" : String(value);
+  const withShare = (value: number | undefined, share: number | undefined) =>
+    value === undefined ? "-" : `${value}(${formatTokenShare(share)})`;
+  return ` in${count(parts.sent)} out${count(parts.received)} c${withShare(parts.cacheRead, parts.cacheReadShare)} w${withShare(parts.cacheWrite, parts.cacheWriteShare)}`;
+}
+
 function formatHistoryRow(row: LogRow, formatRow: (row: LogRow) => string): string {
   const tokens = typeof row.totalTokens === "number" && Number.isFinite(row.totalTokens)
     ? `${row.totalTokens}tok`
     : "";
   const usage = record(row.usage) ? row.usage : undefined;
-  const count = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? String(value) : "-";
-  const split = tokens && usage ? ` in${count(usage.inputTokens)} out${count(usage.outputTokens)} c${count(usage.cacheReadInputTokens ?? usage.cachedInputTokens)} w${count(usage.cacheCreationInputTokens)}` : "";
+  const split = tokens && usage ? historySplit(usage) : "";
   return [formatRow(row), tokens + split, formatCost(row)].filter(Boolean).join("  ");
 }
 

@@ -28,6 +28,8 @@ export interface UsageSummaryTotals {
   cachedInputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
+  /** `false` means no request reported a cache-write count; see `TokenBreakdownSource`. */
+  cacheCreationReported?: boolean;
   reasoningOutputTokens: number;
   totalTokens: number;
   coverageRatio: number;
@@ -71,6 +73,7 @@ export interface UsageModel {
   cachedInputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
+  cacheCreationReported?: boolean;
   cacheHitRate?: number | null;
   /** Input tokens whose cache detail was observed; hit rate is not model-wide below inputTokens. */
   cacheObservedInputTokens?: number;

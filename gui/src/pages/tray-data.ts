@@ -3,7 +3,7 @@ import type { CompanionSettings } from './usage-companion-utils';
 import type { AccountQuota } from '../codex-quota-utils';
 import { normalizeQuotaForPlan } from '../codex-quota-utils';
 
-export type TrayTotals = Partial<Record<'requests' | 'totalTokens' | 'inputTokens' | 'outputTokens' | 'cachedInputTokens' | 'cacheReadInputTokens' | 'cacheCreationInputTokens' | 'estimatedCostUsd' | 'measuredRequests' | 'pricedRequests' | 'coverageRatio', number>>;
+export type TrayTotals = Partial<Record<'requests' | 'totalTokens' | 'inputTokens' | 'outputTokens' | 'cachedInputTokens' | 'cacheReadInputTokens' | 'cacheCreationInputTokens' | 'estimatedCostUsd' | 'measuredRequests' | 'pricedRequests' | 'coverageRatio', number>> & { cacheCreationReported?: boolean };
 export type TrayModel = TrayTotals & { model: string; provider: string };
 export interface TrayUsage { summary: TrayTotals; models: TrayModel[]; customWindow?: boolean; since?: number; until?: number; usageIncomplete?: boolean; historyTruncated?: boolean; entriesTruncated?: boolean }
 /**
@@ -138,6 +138,7 @@ export function filterUsage(usage: TrayUsage, settings: CompanionSettings): Tray
   for (const key of ['requests', 'totalTokens', 'inputTokens', 'outputTokens', 'cachedInputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens', 'estimatedCostUsd', 'measuredRequests', 'pricedRequests'] as const) {
     if (models.length && models.every(row => finite(row[key]))) summary[key] = models.reduce((sum, row) => sum + row[key]!, 0);
   }
+  if (summary.cacheCreationInputTokens !== undefined) summary.cacheCreationReported = models.some(row => row.cacheCreationReported !== false);
   return { ...usage, models, summary };
 }
 

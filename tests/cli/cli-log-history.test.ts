@@ -85,10 +85,21 @@ describe("ocx logs history", () => {
     expect(url.searchParams.get("to")).toBe("2000");
     expect(url.searchParams.get("limit")).toBe("50");
     expect(result.out).toContain("id=req/1");
-    expect(result.out).toContain("120tok in100 out20 c80 w-");
+    expect(result.out).toContain("120tok in100 out20 c80(80%) w-");
     expect(result.out).toContain("~$0.0123");
     expect(result.out).toContain("nextCursor=cursor-2");
     expect(result.out).toContain("indexedRows=9");
+  });
+
+  test("history suffix shows both cache shares of sent tokens and splits legacy combined counts", async () => {
+    const entry = (usage: Record<string, unknown>) => ({ requestId: "r", timestamp: 1, status: 200, provider: "xai", model: "m", durationMs: 1, totalTokens: 120, usage });
+    const both = await run(["logs", "history"], page({ entries: [entry({ inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 80, cacheCreationInputTokens: 10 })] }));
+    expect(both.out).toContain("120tok in100 out20 c80(80%) w10(10%)");
+    const legacy = await run(["logs", "history"], page({ entries: [entry({ inputTokens: 100, outputTokens: 10, cachedInputTokens: 70, cacheCreationInputTokens: 20 })] }));
+    expect(legacy.out).toContain("in100 out10 c50(50%) w20(20%)");
+    const noUsage = await run(["logs", "history"], page({ entries: [{ requestId: "r", timestamp: 1, status: 200, provider: "xai", model: "m", durationMs: 1, totalTokens: 5 }] }));
+    expect(noUsage.out).toContain("5tok");
+    expect(noUsage.out).not.toContain(" in");
   });
 
   test("JSON keeps the management payload and JSONL sends the cursor to stderr", async () => {

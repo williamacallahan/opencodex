@@ -41,6 +41,8 @@ export interface UsageSummaryTotals {
   cachedInputTokens: number;
   cacheReadInputTokens: number;
   cacheCreationInputTokens: number;
+  /** True when a contributing request reported a cache-write count (an explicit 0 counts); false means the 0 above is "not reported". */
+  cacheCreationReported?: boolean;
   reasoningOutputTokens: number;
   totalTokens: number;
   coverageRatio: number;
@@ -98,6 +100,7 @@ export interface UsageDay {
   outputTokens: number;
   cacheReadInputTokens: number;
   cacheCreationInputTokens: number;
+  cacheCreationReported?: boolean;
   totalTokens: number;
   /** Display-time estimated cost for this local day, summed from its model rows. */
   estimatedCostUsd: number;
@@ -116,6 +119,7 @@ export interface UsageDayModel {
   outputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
+  cacheCreationReported?: boolean;
   cacheHitRate?: number | null;
   /** Denominator behind `cacheHitRate`: input tokens whose cache detail was observed. */
   cacheObservedInputTokens?: number;
@@ -143,6 +147,7 @@ export interface UsageModel {
   cachedInputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
+  cacheCreationReported?: boolean;
   cacheHitRate?: number | null;
   /** Denominator behind `cacheHitRate`; below `inputTokens` whenever some rows never measured cache. */
   cacheObservedInputTokens?: number;
@@ -172,6 +177,7 @@ export interface UsageProvider {
   cachedInputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
+  cacheCreationReported?: boolean;
   cacheHitRate?: number | null;
   /** Denominator behind `cacheHitRate`; below `inputTokens` whenever some rows never measured cache. */
   cacheObservedInputTokens?: number;
@@ -195,6 +201,7 @@ export interface UsageAccount {
   outputTokens: number;
   cacheReadInputTokens: number;
   cacheCreationInputTokens: number;
+  cacheCreationReported?: boolean;
   reasoningOutputTokens: number;
   totalTokens: number;
   usageCoverageRatio: number;
@@ -431,6 +438,7 @@ function blankTotals(): UsageSummaryTotals {
     cachedInputTokens: 0,
     cacheReadInputTokens: 0,
     cacheCreationInputTokens: 0,
+    cacheCreationReported: false,
     reasoningOutputTokens: 0,
     totalTokens: 0,
     coverageRatio: 0,
@@ -538,6 +546,7 @@ function projectedComboUsage(
   let cachedInputTokens = 0;
   let cacheReadInputTokens = 0;
   let cacheCreationInputTokens = 0;
+  let hasCacheCreation = false;
   let cacheCreation1hInputTokens = 0;
   let hasCacheWrite1h = false;
   let reasoningOutputTokens = 0;
@@ -559,7 +568,10 @@ function projectedComboUsage(
         cachedInputTokens += cache.read;
         cacheReadInputTokens += cache.read;
       }
-      if (typeof cache.creation === "number") cacheCreationInputTokens += cache.creation;
+      if (typeof cache.creation === "number") {
+        hasCacheCreation = true;
+        cacheCreationInputTokens += cache.creation;
+      }
       if (typeof attempt.usage.cacheCreation1hInputTokens === "number") {
         hasCacheWrite1h = true;
         cacheCreation1hInputTokens += attempt.usage.cacheCreation1hInputTokens;
@@ -582,7 +594,8 @@ function projectedComboUsage(
     ? {
       inputTokens,
       outputTokens,
-      ...(hasCacheTelemetry ? { cachedInputTokens, cacheReadInputTokens, cacheCreationInputTokens } : {}),
+      ...(hasCacheTelemetry ? { cachedInputTokens, cacheReadInputTokens } : {}),
+      ...(hasCacheCreation ? { cacheCreationInputTokens } : {}),
       ...(hasCacheWrite1h ? { cacheCreation1hInputTokens } : {}),
       ...(hasReasoningTelemetry ? { reasoningOutputTokens } : {}),
       ...(estimated ? { estimated: true } : {}),
@@ -615,7 +628,10 @@ function addTokens(
     totals.cachedInputTokens += read;
     totals.cacheReadInputTokens += read;
   }
-  if (typeof creation === "number") totals.cacheCreationInputTokens += creation;
+  if (typeof creation === "number") {
+    totals.cacheCreationInputTokens += creation;
+    totals.cacheCreationReported = true;
+  }
   if (typeof entry.usage.reasoningOutputTokens === "number") totals.reasoningOutputTokens += entry.usage.reasoningOutputTokens;
   totals.totalTokens += usageDisplayTotalTokens(entry.usage, entry.totalTokens) ?? 0;
 }
@@ -745,6 +761,7 @@ interface UsageModelAccumulator {
   outputTokens: number;
   cacheReadInputTokens: number;
   cacheCreationInputTokens: number;
+  cacheCreationReported: boolean;
   cacheObserved: boolean;
   /** Input tokens from attributions with OBSERVED cache detail; the hit-rate denominator. */
   cacheObservedInputTokens: number;
@@ -771,6 +788,7 @@ interface UsageAccountAccumulator {
   outputTokens: number;
   cacheReadInputTokens: number;
   cacheCreationInputTokens: number;
+  cacheCreationReported: boolean;
   reasoningOutputTokens: number;
   totalTokens: number;
   estimatedCostUsd?: number;
@@ -921,6 +939,7 @@ function mergeTotals(target: UsageSummaryTotals, source: UsageSummaryTotals): vo
   target.cachedInputTokens += source.cachedInputTokens;
   target.cacheReadInputTokens += source.cacheReadInputTokens;
   target.cacheCreationInputTokens += source.cacheCreationInputTokens;
+  if (source.cacheCreationReported) target.cacheCreationReported = true;
   target.reasoningOutputTokens += source.reasoningOutputTokens;
   target.totalTokens += source.totalTokens;
   target.estimatedCostUsd += source.estimatedCostUsd;
@@ -965,6 +984,7 @@ function blankModelAccumulator(
     outputTokens: 0,
     cacheReadInputTokens: 0,
     cacheCreationInputTokens: 0,
+    cacheCreationReported: false,
     cacheObserved: false,
     cacheObservedInputTokens: 0,
     throughputOutputTokens: 0,
@@ -996,6 +1016,7 @@ function mergeModelAccumulator(target: UsageModelAccumulator, source: UsageModel
   target.outputTokens += source.outputTokens;
   target.cacheReadInputTokens += source.cacheReadInputTokens;
   target.cacheCreationInputTokens += source.cacheCreationInputTokens;
+  target.cacheCreationReported ||= source.cacheCreationReported;
   target.cacheObserved ||= source.cacheObserved;
   target.cacheObservedInputTokens += source.cacheObservedInputTokens;
   target.throughputOutputTokens += source.throughputOutputTokens;
@@ -1042,6 +1063,7 @@ function mergeAccountAccumulator(target: UsageAccountAccumulator, source: UsageA
   target.outputTokens += source.outputTokens;
   target.cacheReadInputTokens += source.cacheReadInputTokens;
   target.cacheCreationInputTokens += source.cacheCreationInputTokens;
+  target.cacheCreationReported ||= source.cacheCreationReported;
   target.reasoningOutputTokens += source.reasoningOutputTokens;
   target.totalTokens += source.totalTokens;
   if (source.estimatedCostUsd !== undefined) {
@@ -1178,6 +1200,7 @@ function buildDayModels(
     outputTokens: model.outputTokens,
     cacheReadInputTokens: model.cacheReadInputTokens,
     cacheCreationInputTokens: model.cacheCreationInputTokens,
+    cacheCreationReported: model.cacheCreationReported,
     cacheHitRate: calculateCacheHitRate(model.cacheObserved, model.cacheObservedInputTokens, model.cacheReadInputTokens),
     cacheObservedInputTokens: model.cacheObservedInputTokens,
     ...(model.estimatedCostUsd !== undefined ? { estimatedCostUsd: model.estimatedCostUsd } : {}),
@@ -1217,6 +1240,7 @@ function buildUsageModels(
       cachedInputTokens: model.cacheReadInputTokens,
       cacheReadInputTokens: model.cacheReadInputTokens,
       cacheCreationInputTokens: model.cacheCreationInputTokens,
+      cacheCreationReported: model.cacheCreationReported,
       cacheHitRate: calculateCacheHitRate(model.cacheObserved, model.cacheObservedInputTokens, model.cacheReadInputTokens),
       cacheObservedInputTokens: model.cacheObservedInputTokens,
       priceCoverageRatio: requests > 0 ? counts.pricedRequests / requests : 0,
@@ -1262,6 +1286,7 @@ function buildUsageProviders(
         cachedInputTokens: provider.cacheReadInputTokens,
         cacheReadInputTokens: provider.cacheReadInputTokens,
         cacheCreationInputTokens: provider.cacheCreationInputTokens,
+        cacheCreationReported: provider.cacheCreationReported,
         cacheHitRate: calculateCacheHitRate(provider.cacheObserved, provider.cacheObservedInputTokens, provider.cacheReadInputTokens),
         cacheObservedInputTokens: provider.cacheObservedInputTokens,
         priceCoverageRatio: requests > 0 ? counts.pricedRequests / requests : 0,
@@ -1289,6 +1314,7 @@ function buildUsageAccounts(accounts: Map<string, UsageAccountAccumulator>): Usa
       outputTokens: account.outputTokens,
       cacheReadInputTokens: account.cacheReadInputTokens,
       cacheCreationInputTokens: account.cacheCreationInputTokens,
+      cacheCreationReported: account.cacheCreationReported,
       reasoningOutputTokens: account.reasoningOutputTokens,
       totalTokens: account.totalTokens,
       usageCoverageRatio: account.attemptCount === 0 ? 0 : account.measuredAttempts / account.attemptCount,
@@ -1478,7 +1504,10 @@ class StreamingUsageSummaryAccumulator implements UsageSummaryAccumulator {
         breakdown.cacheObservedInputTokens += attribution.usage.inputTokens;
       }
       if (typeof read === "number") breakdown.cacheReadInputTokens += read;
-      if (typeof creation === "number") breakdown.cacheCreationInputTokens += creation;
+      if (typeof creation === "number") {
+        breakdown.cacheCreationInputTokens += creation;
+        breakdown.cacheCreationReported = true;
+      }
       breakdown.summaryTotalTokens += usageDisplayTotalTokens(attribution.usage, attribution.totalTokens) ?? 0;
     }
     breakdown.dayTotalTokens += usageDisplayTotalTokens(attribution.usage, attribution.totalTokens) ?? 0;
@@ -1575,6 +1604,7 @@ class StreamingUsageSummaryAccumulator implements UsageSummaryAccumulator {
         outputTokens: 0,
         cacheReadInputTokens: 0,
         cacheCreationInputTokens: 0,
+        cacheCreationReported: false,
         reasoningOutputTokens: 0,
         totalTokens: 0,
         pricedAttempts: 0,
@@ -1595,7 +1625,10 @@ class StreamingUsageSummaryAccumulator implements UsageSummaryAccumulator {
     account.outputTokens += attribution.usage.outputTokens;
     const { read, creation } = cacheTokensFromUsage(attribution.usage);
     if (typeof read === "number") account.cacheReadInputTokens += read;
-    if (typeof creation === "number") account.cacheCreationInputTokens += creation;
+    if (typeof creation === "number") {
+      account.cacheCreationInputTokens += creation;
+      account.cacheCreationReported = true;
+    }
     if (typeof attribution.usage.reasoningOutputTokens === "number") {
       account.reasoningOutputTokens += attribution.usage.reasoningOutputTokens;
     }
@@ -1788,6 +1821,7 @@ class StreamingUsageSummaryAccumulator implements UsageSummaryAccumulator {
         outputTokens: day.totals.outputTokens,
         cacheReadInputTokens: day.totals.cacheReadInputTokens,
         cacheCreationInputTokens: day.totals.cacheCreationInputTokens,
+        cacheCreationReported: day.totals.cacheCreationReported,
         totalTokens: day.totals.totalTokens,
         estimatedCostUsd: day.totals.estimatedCostUsd,
         models: buildDayModels(day.models, day.modelOverlaps),
@@ -1805,7 +1839,7 @@ class StreamingUsageSummaryAccumulator implements UsageSummaryAccumulator {
       providers: buildUsageProviders(this.mode === "row-unique" ? providers : models, totals.totalTokens),
       apps: [...apps].map(([client, app]) => ({ client, requests: app.requests, measuredRequests: app.measuredRequests,
         inputTokens: app.inputTokens, outputTokens: app.outputTokens, cacheReadInputTokens: app.cacheReadInputTokens,
-        cacheCreationInputTokens: app.cacheCreationInputTokens, totalTokens: app.totalTokens, ...(app.pricedRequests ? { estimatedCostUsd: app.estimatedCostUsd } : {}), pricedRequests: app.pricedRequests,
+        cacheCreationInputTokens: app.cacheCreationInputTokens, cacheCreationReported: app.cacheCreationReported, totalTokens: app.totalTokens, ...(app.pricedRequests ? { estimatedCostUsd: app.estimatedCostUsd } : {}), pricedRequests: app.pricedRequests,
         unpricedRequests: app.unpricedRequests + app.unmeteredRequests, shareRatio: totals.totalTokens === 0 ? 0 : Math.min(1, app.totalTokens / totals.totalTokens) })),
       accounts: buildUsageAccounts(accounts),
       ...(this.filter?.sourceFilter ? { sourceFilter: { client: this.filter.sourceFilter.client,

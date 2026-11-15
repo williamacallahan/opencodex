@@ -89,9 +89,9 @@ describe("combo stats read-only observations", () => {
     expect(text).toContain("No recorded JEV decisions");
     expect(text).toContain("unavailable");
     expect(text).toContain("measured attempts: 0/0");
-    expect(text).toContain("Sent 0 | Received 0 | Cache read 0 (—) | Cache write 0 (—)");
+    expect(text).toContain("Sent 0 | Received 0 | Cache read 0 (—) | Cache write not reported");
     expect(text).toContain("Sent 0 | Received 0 | Cache read - (—) | Cache write not reported");
-    expect(text).toContain("Sent 0 | Received 0 | Cache read 0 (—) | Cache write 0 (—)");
+    expect(text).toContain("Sent 0 | Received 0 | Cache read 0 (—) | Cache write not reported");
     expect(text).toContain("Sent 0 | Received 0 | Cache read - (—) | Cache write not reported");
   });
   test("incomplete observations remain visible and return a successful read", async () => {

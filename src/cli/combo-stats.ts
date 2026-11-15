@@ -33,6 +33,10 @@ function nullable(value: unknown, max = Number.MAX_SAFE_INTEGER): number | null 
 function boolean(value: unknown): boolean {
   return typeof value === "boolean" ? value : invalid();
 }
+/** Optional presence flag; a proxy that predates it omits the field and its 0 stays a reported count. */
+function reportedFlag(value: Record<string, unknown>): { cacheCreationReported?: boolean } {
+  return Object.hasOwn(value, "cacheCreationReported") ? { cacheCreationReported: boolean(value.cacheCreationReported) } : {};
+}
 function identity(value: unknown, empty = false): string {
   if (typeof value !== "string" || (!empty && !value.trim()) || value.length > 512
     || /[\u0000-\u001f\u007f]/u.test(value)) return invalid();
@@ -54,6 +58,7 @@ function projectStats(value: unknown, id: string, range: string) {
   const rawSummary = record(dto.summary);
   const summary = {
     ...counts(rawSummary, SUMMARY_COUNTS),
+    ...reportedFlag(rawSummary),
     // Absent means zero: a proxy started before session pins (#7525) does not report the field.
     pinnedRequests: Object.hasOwn(rawSummary, "pinnedRequests") ? number(rawSummary.pinnedRequests) : 0,
     averageLatencyMs: nullable(rawSummary.averageLatencyMs),
@@ -74,7 +79,7 @@ function projectStats(value: unknown, id: string, range: string) {
       if (item.effort !== null && (typeof item.effort !== "string" || !EFFORTS.includes(item.effort))) return invalid();
       return { effort: item.effort as string | null, picks: number(item.picks) };
     });
-    return { provider: identity(row.provider, overflow), model: identity(row.model, overflow), overflow, ...counts(row, MODEL_COUNTS), efforts };
+    return { provider: identity(row.provider, overflow), model: identity(row.model, overflow), overflow, ...counts(row, MODEL_COUNTS), ...reportedFlag(row), efforts };
   });
   const incomplete: { usageIncomplete?: boolean; usageIncompleteReason?: "oversized_rows" } = {};
   if (Object.hasOwn(dto, "usageIncomplete")) incomplete.usageIncomplete = boolean(dto.usageIncomplete);
@@ -117,7 +122,7 @@ export async function handleComboStatsCommand(argv: string[], deps: RuntimeApiDe
       ...(summary.pinnedRequests > 0 ? [`Session-pinned requests (no decision call): ${summary.pinnedRequests}`] : []),
       `Successful requests: ${summary.successfulRequests}; requests with model fallback: ${summary.requestsWithModelFallback}`,
       `Model tokens: ${summary.modelTotalTokens}; measured attempts: ${summary.measuredModelAttempts}/${summary.modelAttempts}`,
-      tokenBreakdownLine({ inputTokens: summary.modelInputTokens, outputTokens: summary.modelOutputTokens, cacheReadInputTokens: summary.modelCacheReadTokens, cacheCreationInputTokens: summary.modelCacheWriteTokens }, String),
+      tokenBreakdownLine({ inputTokens: summary.modelInputTokens, outputTokens: summary.modelOutputTokens, cacheReadInputTokens: summary.modelCacheReadTokens, cacheCreationInputTokens: summary.modelCacheWriteTokens, cacheCreationReported: summary.cacheCreationReported }, String),
       `Decision tokens: ${summary.decisionTotalTokens}; decisions reporting usage: ${summary.decisionUsageReported}/${summary.decisions}`,
       tokenBreakdownLine({ inputTokens: summary.decisionInputTokens, outputTokens: summary.decisionOutputTokens }, String),
       `Average decision latency: ${summary.averageLatencyMs === null ? "unavailable" : `${summary.averageLatencyMs} ms`}`,

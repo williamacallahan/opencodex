@@ -188,6 +188,7 @@ describe("JEV decision telemetry", () => {
         reasoningTokens: 8,
         cacheReadTokens: 30,
         cacheWriteTokens: 0,
+        cacheCreationReported: false,
         totalTokens: 175,
         efforts: [
           { effort: "high", picks: 1 },
@@ -208,6 +209,7 @@ describe("JEV decision telemetry", () => {
         reasoningTokens: 0,
         cacheReadTokens: 0,
         cacheWriteTokens: 4,
+        cacheCreationReported: true,
         totalTokens: 90,
         efforts: [],
       },

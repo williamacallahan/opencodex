@@ -34,6 +34,31 @@ describe("usage client attribution", () => {
     expect(accumulator.summarize("30d", now).apps.some(row => row.client === "grok")).toBe(false);
   });
 
+  test("cacheCreationReported separates an unreported cache write from a reported zero through add, clone and merge", () => {
+    const now = Date.now();
+    const base = { provider: "openai", model: "gpt-test", status: 200, durationMs: 10, usageStatus: "reported" as const, client: "codex_cli" as const };
+    const unreported = { ...base, timestamp: now, requestId: "a", usage: { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 80 } };
+    const zero = { ...base, timestamp: now - 2 * 86_400_000, requestId: "b", usage: { inputTokens: 10, outputTokens: 2, cacheReadInputTokens: 5, cacheCreationInputTokens: 0 } };
+    const first = createUsageSummaryAccumulator({});
+    first.add(unreported);
+    const only = first.summarize("30d", now);
+    expect(only.summary.cacheCreationInputTokens).toBe(0);
+    expect(only.summary.cacheCreationReported).toBe(false);
+    expect([only.apps[0], only.models[0], only.providers[0], ...only.accounts].map(row => row?.cacheCreationReported)).not.toContain(true);
+    expect(only.days.find(day => day.requests === 1)).toMatchObject({ cacheCreationInputTokens: 0, cacheCreationReported: false });
+    expect(only.days.flatMap(day => day.models).map(model => model.cacheCreationReported)).toEqual([false]);
+    const merged = first.clone();
+    merged.add(zero);
+    const report = merged.summarize("30d", now);
+    expect(report.summary.cacheCreationReported).toBe(true);
+    expect(report.summary.cacheCreationInputTokens).toBe(0);
+    expect(report.apps[0]?.cacheCreationReported).toBe(true);
+    expect(report.models[0]?.cacheCreationReported).toBe(true);
+    expect(report.providers[0]?.cacheCreationReported).toBe(true);
+    expect(report.days.filter(day => day.requests > 0).map(day => day.cacheCreationReported).sort()).toEqual([false, true]);
+    expect(first.summarize("30d", now).summary.cacheCreationReported).toBe(false);
+  });
+
   test("app totals follow projected combo attempts and inclusive custom bounds", () => {
     const now = Date.now();
     const combo = { timestamp: now, requestId: "combo", provider: "combo", model: "combo", client: "claude_code" as const,

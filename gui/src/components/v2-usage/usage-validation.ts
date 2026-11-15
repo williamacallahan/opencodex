@@ -5,6 +5,7 @@ const record = (value: unknown): value is Record<string, unknown> => !!value && 
 const integer = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 const finite = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0;
 const optional = (row: Record<string, unknown>, names: string[], check: (value: unknown) => boolean) => names.every(name => row[name] === undefined || check(row[name]));
+const flag = (value: unknown) => typeof value === "boolean";
 const numeric = (row: Record<string, unknown>, names: string[]) => names.every(name => integer(row[name]));
 const appClients = new Set<string>(USAGE_APPS);
 
@@ -17,6 +18,7 @@ function validApps(value: unknown): boolean {
       || !numeric(row, ["requests", "measuredRequests", "pricedRequests", "unpricedRequests"])
       || !finite(row.totalTokens) || !finite(row.shareRatio) || (row.shareRatio as number) > 1
       || !optional(row, ["inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"], finite)
+      || !optional(row, ["cacheCreationReported"], flag)
       || !(row.estimatedCostUsd === undefined && row.pricedRequests === 0 || finite(row.estimatedCostUsd))) return false;
     seen.add(row.client);
     return true;
@@ -47,16 +49,18 @@ export function isUsageReport(value: unknown): value is UsageResponse {
     || !optional(summary, ["cacheReadInputTokens", "cacheCreationInputTokens", "cacheObservedInputTokens", "throughputOutputTokens", "throughputDurationMs"], finite)
     || !optional(summary, ["pricedRequests", "unpricedRequests", "unmeteredRequests", "throughputSamples", "attemptCount", "sends", "settledSends", "unresolvedSends", "spendRequests", "cacheObservedRequests", "cacheSynthesizedRequests", "cacheUnknownRequests"], integer)
     || !optional(summary, ["estimatedCostUsd", "throughputTokensPerSec"], finite)
+    || !optional(summary, ["cacheCreationReported"], flag)
     || !optional(value, ["legacyUnclassifiedRequests"], integer)) return false;
   if (!value.days.every(day => record(day) && typeof day.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(day.date)
-    && numeric(day, ["requests", "measuredRequests", "reportedRequests"]) && finite(day.totalTokens) && optional(day, ["estimatedCostUsd", "inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"], finite)
-    && Array.isArray(day.models) && day.models.every((model: unknown) => record(model) && typeof model.model === "string" && typeof model.provider === "string" && numeric(model, ["requests"]) && finite(model.totalTokens) && optional(model, ["attemptCount"], integer) && optional(model, ["inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens", "cacheObservedInputTokens"], finite)))) return false;
+    && numeric(day, ["requests", "measuredRequests", "reportedRequests"]) && finite(day.totalTokens) && optional(day, ["estimatedCostUsd", "inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"], finite) && optional(day, ["cacheCreationReported"], flag)
+    && Array.isArray(day.models) && day.models.every((model: unknown) => record(model) && typeof model.model === "string" && typeof model.provider === "string" && numeric(model, ["requests"]) && finite(model.totalTokens) && optional(model, ["attemptCount"], integer) && optional(model, ["inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens", "cacheObservedInputTokens"], finite) && optional(model, ["cacheCreationReported"], flag)))) return false;
   const validRow = (row: unknown, model: boolean) => record(row) && typeof row.provider === "string" && (!model || typeof row.model === "string")
     && numeric(row, ["requests", "measuredRequests", "reportedRequests", "estimatedRequests"]) && finite(row.totalTokens)
     && finite(row.shareRatio)
     && optional(row, ["inputTokens", "outputTokens", "cachedInputTokens", "cacheReadInputTokens", "cacheCreationInputTokens", "cacheObservedInputTokens"], finite)
     && optional(row, ["pricedRequests", "unpricedRequests", "unmeteredRequests", "throughputSamples", "attemptCount"], integer)
     && optional(row, ["estimatedCostUsd", "throughputTokensPerSec"], finite)
+    && optional(row, ["cacheCreationReported"], flag)
     && (row.cacheHitRate === undefined || row.cacheHitRate === null || finite(row.cacheHitRate))
     && (row.resolvedModel === undefined || typeof row.resolvedModel === "string");
   return value.models.every(model => validRow(model, true)) && value.providers.every(provider => validRow(provider, false));

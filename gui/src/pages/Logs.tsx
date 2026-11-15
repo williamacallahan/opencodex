@@ -4,6 +4,8 @@ import { useI18n, LOCALES, type TFn } from "../i18n/shared";
 import { formatProviderDisplayName } from "../provider-icons";
 import { formatTokens } from "../format-tokens";
 import { TokenBreakdown } from "../components/token-breakdown";
+import { LogTokensCell } from "./logs-token-cell";
+import { sumTokenSplits } from "./logs-token-split";
 import { hashLogConversationQuery } from "../log-conversation-id";
 import { statusCodeInfo } from "../status-codes";
 import { IconChevron, IconX } from "../icons";
@@ -459,7 +461,7 @@ function summarizeFilteredLogs(entries: LogEntry[]): {
   return {
     requests: entries.length,
     totalTokens,
-    ...Object.fromEntries((["inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"] satisfies Array<"inputTokens" | "outputTokens" | "cacheReadInputTokens" | "cacheCreationInputTokens">).map(key => [key, entries.every(entry => (key === "cacheReadInputTokens" ? entry.usage?.cacheReadInputTokens ?? entry.usage?.cachedInputTokens : entry.usage?.[key]) !== undefined) ? entries.reduce((sum, entry) => sum + ((key === "cacheReadInputTokens" ? entry.usage?.cacheReadInputTokens ?? entry.usage?.cachedInputTokens : entry.usage?.[key]) ?? 0), 0) : undefined])),
+    ...sumTokenSplits(entries.map(entry => ({ total: displayTokenTotal(entry), usage: entry.usage }))),
     ...summarizeEstimatedCosts(entries),
   };
 }
@@ -981,8 +983,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
                       return tokenTotal !== undefined
                         ? (
                             <span className="logs-stack-end">
-                              <span>{log.usageStatus === "estimated" ? "~" : ""}{formatTokens(tokenTotal, locale)}</span>
-                              <TokenBreakdown source={log.usage ?? {}} locale={locale} variant="stack" />
+                              <LogTokensCell requestTotal={displayTokenTotal(log)} contextTotal={tokenTotal} usage={log.usage} estimated={log.usageStatus === "estimated"} locale={locale} />
                               {(log.usageStatus === "estimated" && read === undefined && write === undefined) && (
                                 <span className="text-[11.5px] leading-tight text-fg-subtle">
                                   {t(isCursorUsageProvider(log.provider) ? "logs.tokens.noCacheCursor" : "logs.tokens.noCache")}
@@ -1378,7 +1379,7 @@ function LogDetailDialog({
             <span className="muted">{t("logs.tokens.cacheRead")}</span><span className="mono">{tokenSplit.read !== undefined ? formatTokens(tokenSplit.read, localeCode) : "\u2014"}</span>
             <span className="muted">{t("logs.tokens.cacheWrite")}</span><span className="mono">{tokenSplit.write !== undefined ? formatTokens(tokenSplit.write, localeCode) : "\u2014"}</span>
             <span className="muted">{t("logs.tokens.reasoning")}</span><span className="mono">{detail.usage?.reasoningOutputTokens !== undefined ? formatTokens(detail.usage.reasoningOutputTokens, localeCode) : "\u2014"}</span>
-            <span className="muted">{t("logs.detail.totalTokens")}</span><span className="mono">{displayContextTokenTotal(detail) !== undefined ? formatTokens(displayContextTokenTotal(detail)!, localeCode) : "\u2014"}<TokenBreakdown source={detail.usage ?? {}} locale={localeCode} variant="detail" /></span>
+            <span className="muted">{t("logs.detail.totalTokens")}</span><span className="mono">{displayTokenTotal(detail) !== undefined ? formatTokens(displayTokenTotal(detail)!, localeCode) : "\u2014"}<TokenBreakdown source={detail.usage ?? {}} locale={localeCode} variant="detail" /></span>
             {detail.usage?.contextTotalTokens !== undefined && (
               <>
                 <span className="muted">{t("logs.tokens.contextTotal")}</span>

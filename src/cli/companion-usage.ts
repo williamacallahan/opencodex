@@ -5,7 +5,7 @@ import { printData, rejectArgs, runCliAction, takeFlag } from "./runtime-api";
 
 const USAGE = "Usage: ocx companion usage [--json]";
 const TOTAL_FIELDS = ["requests", "totalTokens", "inputTokens", "outputTokens", "cachedInputTokens", "cacheReadInputTokens", "cacheCreationInputTokens", "estimatedCostUsd", "measuredRequests", "pricedRequests", "coverageRatio"] as const;
-type Totals = Partial<Record<typeof TOTAL_FIELDS[number], number>>;
+type Totals = Partial<Record<typeof TOTAL_FIELDS[number], number>> & { cacheCreationReported?: boolean };
 type Model = Totals & { model: string; provider: string };
 interface Usage {
   summary: Totals;
@@ -48,6 +48,7 @@ function parseTotals(value: unknown): Totals {
     if (typeof metric !== "number" || !Number.isFinite(metric) || metric < 0) throw new ObservationError("Invalid companion usage metrics. Check the runtime and retry the command.");
     totals[key] = metric;
   }
+  if (typeof row.cacheCreationReported === "boolean") totals.cacheCreationReported = row.cacheCreationReported;
   return totals;
 }
 
@@ -91,6 +92,7 @@ function filterUsage(usage: Usage, filters: Filters): Usage {
     if (key === "coverageRatio") continue;
     if (models.length && models.every(row => row[key] !== undefined)) summary[key] = models.reduce((sum, row) => sum + row[key]!, 0);
   }
+  if (summary.cacheCreationInputTokens !== undefined) summary.cacheCreationReported = models.some(row => row.cacheCreationReported !== false);
   return { ...usage, models, summary };
 }
 

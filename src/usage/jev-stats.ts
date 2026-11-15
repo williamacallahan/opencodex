@@ -70,6 +70,8 @@ export interface JevStatsModelRow {
   reasoningTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /** True when a contributing attempt reported a cache-write count; false means 0 is "not reported". */
+  cacheCreationReported: boolean;
   totalTokens: number;
   efforts: Array<{ effort: OcxComboDefaultEffort | null; picks: number }>;
 }
@@ -104,6 +106,8 @@ export interface JevStatsResponse {
     modelReasoningTokens: number;
     modelCacheReadTokens: number;
     modelCacheWriteTokens: number;
+    /** Same meaning as the model rows' flag, over every contributing attempt. */
+    cacheCreationReported: boolean;
     modelTotalTokens: number;
     decisionUsageReported: number;
     decisionInputTokens: number;
@@ -296,6 +300,7 @@ function blankModelRow(provider: string, model: string, overflow = false): Mutab
     reasoningTokens: 0,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
+    cacheCreationReported: false,
     totalTokens: 0,
     effortCounts: new Map(),
   };
@@ -336,6 +341,7 @@ class StreamingJevStatsAccumulator implements JevStatsAccumulator {
   private modelReasoningTokens = 0;
   private modelCacheReadTokens = 0;
   private modelCacheWriteTokens = 0;
+  private modelCacheCreationReported = false;
   private modelTotalTokens = 0;
   private decisionUsageReported = 0;
   private decisionInputTokens = 0;
@@ -470,6 +476,10 @@ class StreamingJevStatsAccumulator implements JevStatsAccumulator {
       this.modelReasoningTokens = saturatingAdd(this.modelReasoningTokens, reasoningTokens);
       this.modelCacheReadTokens = saturatingAdd(this.modelCacheReadTokens, readTokens);
       this.modelCacheWriteTokens = saturatingAdd(this.modelCacheWriteTokens, writeTokens);
+      if (typeof attempt.usage.cacheCreationInputTokens === "number") {
+        model.cacheCreationReported = true;
+        this.modelCacheCreationReported = true;
+      }
       this.modelTotalTokens = saturatingAdd(this.modelTotalTokens, totalTokens);
     }
   }
@@ -498,6 +508,7 @@ class StreamingJevStatsAccumulator implements JevStatsAccumulator {
     cloned.modelReasoningTokens = this.modelReasoningTokens;
     cloned.modelCacheReadTokens = this.modelCacheReadTokens;
     cloned.modelCacheWriteTokens = this.modelCacheWriteTokens;
+    cloned.modelCacheCreationReported = this.modelCacheCreationReported;
     cloned.modelTotalTokens = this.modelTotalTokens;
     cloned.decisionUsageReported = this.decisionUsageReported;
     cloned.decisionInputTokens = this.decisionInputTokens;
@@ -541,6 +552,7 @@ class StreamingJevStatsAccumulator implements JevStatsAccumulator {
         modelReasoningTokens: this.modelReasoningTokens,
         modelCacheReadTokens: this.modelCacheReadTokens,
         modelCacheWriteTokens: this.modelCacheWriteTokens,
+        cacheCreationReported: this.modelCacheCreationReported,
         modelTotalTokens: this.modelTotalTokens,
         decisionUsageReported: this.decisionUsageReported,
         decisionInputTokens: this.decisionInputTokens,

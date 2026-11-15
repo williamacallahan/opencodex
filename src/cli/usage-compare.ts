@@ -40,7 +40,7 @@ export type UsageCompareDeps = RuntimeApiDeps & Pick<LocalManagementReadDeps, "d
 
 const METRICS = ["requests", "totalTokens", "inputTokens", "outputTokens", "cachedInputTokens", "cacheReadInputTokens", "cacheCreationInputTokens", "estimatedCostUsd"] as const;
 type Metric = typeof METRICS[number];
-type Totals = Partial<Record<Metric, number>>;
+type Totals = Partial<Record<Metric, number>> & { cacheCreationReported?: boolean };
 type ScopedUsage = {
   customWindow?: boolean;
   since?: number | null;
@@ -92,12 +92,13 @@ function metric(value: unknown): number | undefined {
 }
 
 function totalsOf(report: ScopedUsage): Totals {
-  const row = report.summary ?? {};
+  const row: Totals = report.summary ?? {};
   const totals: Totals = {};
   for (const key of METRICS) {
-    const value = metric((row as Totals)[key]);
+    const value = metric(row[key]);
     if (value !== undefined) totals[key] = value;
   }
+  if (typeof row.cacheCreationReported === "boolean") totals.cacheCreationReported = row.cacheCreationReported;
   return totals;
 }
 

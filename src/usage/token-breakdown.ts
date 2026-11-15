@@ -14,6 +14,12 @@ export interface TokenBreakdownSource {
   cachedInputTokens?: number | null;
   /** Absent means the upstream reported no cache-write count, which is not the same as zero. */
   cacheCreationInputTokens?: number | null;
+  /**
+   * Aggregate rows only: `false` says no contributing request reported a cache-write count, so a
+   * numeric `cacheCreationInputTokens` of 0 is an accumulator default, not a measurement. A source
+   * without the flag (a per-request row, an older proxy) treats a present number as reported.
+   */
+  cacheCreationReported?: boolean | null;
 }
 
 export interface TokenBreakdown {
@@ -38,8 +44,13 @@ function shareOf(part: number | undefined, sent: number | undefined): number | u
 
 export function tokenBreakdown(source: TokenBreakdownSource): TokenBreakdown {
   const sent = count(source.inputTokens);
-  const cacheRead = count(source.cacheReadInputTokens) ?? count(source.cachedInputTokens);
-  const cacheWrite = count(source.cacheCreationInputTokens);
+  const creation = count(source.cacheCreationInputTokens);
+  const cacheWrite = source.cacheCreationReported === false ? undefined : creation;
+  // Same rule as `cacheTokensFromUsage` (src/usage/summary.ts): the legacy `cachedInputTokens`
+  // alias counts writes too once a write count exists, so reads are what remains.
+  const legacyCached = count(source.cachedInputTokens);
+  const cacheRead = count(source.cacheReadInputTokens)
+    ?? (legacyCached !== undefined && creation !== undefined ? Math.max(0, legacyCached - creation) : legacyCached);
   return {
     sent,
     received: count(source.outputTokens),

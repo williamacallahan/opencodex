@@ -42,6 +42,7 @@ interface UsageReportInput {
     cachedInputTokens?: number;
     cacheReadInputTokens?: number;
     cacheCreationInputTokens?: number;
+    cacheCreationReported?: boolean;
     estimatedCostUsd?: number;
     unpricedRequests?: number;
     unmeteredRequests?: number;
@@ -64,6 +65,7 @@ interface UsageReportInput {
     outputTokens?: number;
     cacheReadInputTokens?: number;
     cacheCreationInputTokens?: number;
+    cacheCreationReported?: boolean;
     ambiguous?: boolean;
     requests: number;
     totalTokens: number;

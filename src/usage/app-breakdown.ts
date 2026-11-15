@@ -19,6 +19,7 @@ export interface UsageAppSummary {
   outputTokens: number;
   cacheReadInputTokens: number;
   cacheCreationInputTokens: number;
+  cacheCreationReported?: boolean;
   totalTokens: number;
   estimatedCostUsd?: number;
   pricedRequests: number;

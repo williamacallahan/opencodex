@@ -120,7 +120,7 @@ function DayBars({ bars, locale, t }: { bars: UsageDay[]; locale: Locale; t: TFn
           {activeDay.models.slice(0, 8).map(model => (
             <div key={`${model.provider}/${model.model}`} className="daybar-tip-row">
               <span className="daybar-tip-name">{modelLabel(model.model)}</span>
-              <span className="daybar-tip-val">{formatTokens(model.totalTokens, locale)}<TokenBreakdown source={model} locale={locale} variant="detail" /></span>
+              <span className="daybar-tip-val">{formatTokens(model.totalTokens, locale)}<TokenBreakdown source={model} locale={locale} variant="stack" /></span>
             </div>
           ))}
         </UsageChartOverlay>

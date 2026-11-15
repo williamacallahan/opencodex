@@ -29,6 +29,7 @@ interface JevStatsResponse extends UsageReadMetadata {
     modelReasoningTokens: number;
     modelCacheReadTokens: number;
     modelCacheWriteTokens: number;
+    cacheCreationReported?: boolean;
     modelTotalTokens: number;
     decisionUsageReported: number;
     decisionInputTokens: number;
@@ -55,6 +56,7 @@ interface JevStatsResponse extends UsageReadMetadata {
     reasoningTokens: number;
     cacheReadTokens: number;
     cacheWriteTokens: number;
+    cacheCreationReported?: boolean;
     totalTokens: number;
     efforts: Array<{ effort: string | null; picks: number }>;
   }>;
@@ -163,7 +165,7 @@ export function JevStatsPanel({
                 <div className="stat">
                   <div className="muted">{t("cws.jev.stats.modelTokens")}</div>
                   <div className="stat-value">{formatTokens(data.summary.modelTotalTokens, locale)}</div>
-                  <TokenBreakdown variant="card" locale={locale} source={{ inputTokens: data.summary.modelInputTokens, outputTokens: data.summary.modelOutputTokens, cacheReadInputTokens: data.summary.modelCacheReadTokens, cacheCreationInputTokens: data.summary.modelCacheWriteTokens }} />
+                  <TokenBreakdown variant="card" locale={locale} source={{ inputTokens: data.summary.modelInputTokens, outputTokens: data.summary.modelOutputTokens, cacheReadInputTokens: data.summary.modelCacheReadTokens, cacheCreationInputTokens: data.summary.modelCacheWriteTokens, cacheCreationReported: data.summary.cacheCreationReported }} />
                   <div className="muted text-caption">
                     {t("cws.jev.stats.measuredAttempts", {
                       measured: data.summary.measuredModelAttempts,
@@ -273,7 +275,7 @@ export function JevStatsPanel({
                         <td className="num mono">{formatTokens(model.outputTokens, locale)}</td>
                         <td className="num mono">{formatTokens(model.reasoningTokens, locale)}</td>
                         <td className="num mono">{formatTokens(model.cacheReadTokens, locale)} / {formatTokens(model.cacheWriteTokens, locale)}</td>
-                        <td className="num mono">{formatTokens(model.totalTokens, locale)}<TokenBreakdown variant="stack" locale={locale} source={{ inputTokens: model.inputTokens, outputTokens: model.outputTokens, cacheReadInputTokens: model.cacheReadTokens, cacheCreationInputTokens: model.cacheWriteTokens }} /></td>
+                        <td className="num mono">{formatTokens(model.totalTokens, locale)}<TokenBreakdown variant="stack" locale={locale} source={{ inputTokens: model.inputTokens, outputTokens: model.outputTokens, cacheReadInputTokens: model.cacheReadTokens, cacheCreationInputTokens: model.cacheWriteTokens, cacheCreationReported: model.cacheCreationReported }} /></td>
                       </tr>
                     ))}
                   </tbody>
