@@ -32,7 +32,7 @@ test("only producer identity preserves a local sentence", () => {
 });
 test("literal vocabulary covers the writer families without accepting local bypass types", () => {
   expect(ANTHROPIC_ERROR_TYPES.size).toBe(12);
-  expect(ANTHROPIC_ERROR_CODES.size).toBe(80);
+  expect(ANTHROPIC_ERROR_CODES.size).toBe(81);
   for (const code of ["translation_buffer_limit", "context_length_exceeded", "unsupported_feature", "send_budget_exhausted", "desktop_model_mapping_unavailable", "thread_unsupported_request", "upstream_reset_replay_refused", "undeclared_tool_call"]) expect(ANTHROPIC_ERROR_CODES.get(code)).toBe(code);
   for (const type of ["server_error", "model_not_allowed_for_key", "not_found"]) expect(ANTHROPIC_ERROR_TYPES.has(type)).toBe(false);
   const sourceRows: [string, string[]][] = [
