@@ -108,8 +108,8 @@ describe("codex-lb pooled usage quota", () => {
     }]);
 
     body = { ...LIVE_USAGE, luna_reserve: { seats: 0, remaining_percent: null, reset_at: null } };
-    expect((await fetchProviderQuotaReports(cfg, true)).reports[0]!.quota.customWindows)
-      .toEqual([{ label: "Luna Reserve: none offered", percent: 100, modelId: "gpt-reserve" }]);
+    // No reporting seat is not proof of no Reserve: ChatGPT serves it to seats that never list it.
+    expect((await fetchProviderQuotaReports(cfg, true)).reports[0]!.quota.customWindows).toBeUndefined();
     // A spent or absent Reserve never reads as provider exhaustion.
     expect(getCachedProviderRoutingQuota("my-pool", poolProvider, Date.now())).toBeNull();
 

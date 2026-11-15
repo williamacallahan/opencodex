@@ -26,15 +26,15 @@ function usedFromRemaining(value: unknown): number | undefined {
 const LUNA_RESERVE_MODEL = "gpt-reserve";
 
 /**
- * Luna Reserve across the relay's seats. A pool where no seat reports a Reserve bucket shows a
- * spent "none offered" row, because 0 seats means no Luna capacity beyond ordinary usage. The
- * Reserve model id keeps the row display-only: windows carrying a model never gate routing.
+ * Luna Reserve across the relay's seats that report a Reserve bucket. ChatGPT serves Reserve to
+ * seats whose usage reads never list one, so a pool with no reporting seat shows no row: zero
+ * reporting seats is not evidence that Reserve is absent, and a spent "none offered" row said it
+ * was. The Reserve model id keeps the row display-only: windows carrying a model never gate routing.
  */
 function lunaReserveWindow(value: unknown): ProviderQuota["customWindows"] {
   const reserve = asRecord(value);
   const seats = toFiniteNumber(reserve?.seats);
-  if (!reserve || seats === undefined || seats < 0) return undefined;
-  if (seats === 0) return [{ label: "Luna Reserve: none offered", percent: 100, modelId: LUNA_RESERVE_MODEL }];
+  if (!reserve || seats === undefined || seats <= 0) return undefined;
   const used = usedFromRemaining(reserve.remaining_percent);
   if (used === undefined) return undefined;
   const resetAt = normalizeResetAt(reserve.reset_at);

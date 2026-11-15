@@ -1948,8 +1948,9 @@ slash) shows the relay's available pool windows. With **Codex credits** enabled,
 the pool credit balance, including negative balances. If the relay reports missing workspace
 balances, the credit balance is hidden while available quota windows remain visible. A relay
 that reports Luna Reserve also shows a **Luna Reserve** row: the remaining share across the seats
-that hold Reserve, with the earliest reset, or **Luna Reserve: none offered** when no seat holds
-any. The row is informational and never stops requests to other models.
+that report a Reserve bucket, with the earliest reset. A pool where no seat reports one shows no
+row: ChatGPT serves Reserve to seats that never list it, so judge Reserve by the relay's served
+`gpt-reserve` requests. The row is informational and never stops requests to other models.
 
 **Kimi Coding Plan quota.** Account login and API-key providers on the canonical
 `https://api.kimi.com/coding/v1` endpoint read `/usages`. API-key providers on the regional
