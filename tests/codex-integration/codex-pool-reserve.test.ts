@@ -158,6 +158,40 @@ describe("Luna Reserve where selection used to skip it", () => {
 });
 
 describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model", () => {
+  // ChatGPT never reports Reserve availability, so a served `gpt-reserve` request proves Reserve
+  // works only when the seat could not have served it from included usage. Every pairing of seat
+  // states is therefore pinned: Reserve goes to a depleted seat or is not requested at all.
+  const seatStates = [
+    { name: "included usage, no Reserve window", ordinaryPercent: 40, reservePercent: undefined },
+    { name: "included usage, usable Reserve window", ordinaryPercent: 40, reservePercent: 25 },
+    { name: "included usage, spent Reserve window", ordinaryPercent: 40, reservePercent: 100 },
+    { name: "depleted, no Reserve window", ordinaryPercent: 100, reservePercent: undefined },
+    { name: "depleted, usable Reserve window", ordinaryPercent: 100, reservePercent: 25 },
+    { name: "depleted, spent Reserve window", ordinaryPercent: 100, reservePercent: 100 },
+  ] as const;
+  test.each(seatStates.flatMap(a => seatStates.map(b => [a.name, b.name, a, b] as const)))(
+    "Reserve is requested only on a depleted seat: A %s, B %s", async (_aName, _bName, a, b) => {
+      const seats = [[A, a], [B, b]] as const;
+      for (const [id, state] of seats) {
+        ordinary(id, state.ordinaryPercent);
+        if (state.reservePercent !== undefined) reserve(id, state.reservePercent);
+      }
+      const reserveSeats = seats.filter(([, state]) => state.ordinaryPercent === 100 && state.reservePercent !== 100).map(([id]): string => id);
+      const includedSeats = seats.filter(([, state]) => state.ordinaryPercent < 100).map(([id]): string => id);
+      const outcome = await build().then(
+        built => ({ accountId: built.ctx.accountId, model: JSON.parse(built.request.body).model as string }),
+        (error: unknown) => error,
+      );
+      if (reserveSeats.length > 0) {
+        expect(outcome).toMatchObject({ model: "gpt-reserve" });
+        expect(reserveSeats).toContain((outcome as { accountId: string }).accountId);
+      } else if (includedSeats.length > 0) {
+        expect(outcome).toMatchObject({ model: "gpt-6-luna" });
+        expect(includedSeats).toContain((outcome as { accountId: string }).accountId);
+      } else {
+        expect(outcome).toBeInstanceOf(Error);
+      }
+    });
   test("all ordinary-held seats use the fresh Reserve seat on HTTP and WebSocket", async () => {
     reserve(); noReserve(A);
     const { ctx, request, raw } = await build();
