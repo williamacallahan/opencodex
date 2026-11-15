@@ -1,4 +1,7 @@
 {
+  "prompt-cache-prefix.test.ts": "usage",
+  "prompt-cache-reuse.test.ts": "usage",
+  "prompt-cache-reuse-paths.test.ts": "usage",
   "usage-client-attribution.test.ts": "usage",
   "usage-filter-index.test.ts": "usage",
   "usage-filter-paging.test.ts": "usage",

@@ -364,7 +364,7 @@ export function relateQuotaDomain(a: CredentialIdentity, b: CredentialIdentity):
   return relateDomains(a.quotaDomain, b.quotaDomain);
 }
 
-export function relateCacheDomain(a: CredentialIdentity, b: CredentialIdentity): DomainRelation {
+export function relateCacheDomain(a: Pick<CredentialIdentity, "cacheDomain">, b: Pick<CredentialIdentity, "cacheDomain">): DomainRelation {
   return relateDomains(a.cacheDomain, b.cacheDomain);
 }
 

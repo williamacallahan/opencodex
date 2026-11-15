@@ -33,7 +33,7 @@ import { AnthropicRequestError, isRec, type Rec } from "../claude/inbound-record
 import type { RequestLogContext } from "./request-log";
 import { recordGenerationEvent } from "./request-log-generation-window";
 import { recordLocalFailureDetail } from "./request-log-failure-detail";
-import type { OcxConfig } from "../types";
+import type { OcxConfig, OcxUsage } from "../types";
 
 export function anthropicUsageToOcx(usage: Rec | undefined): { inputTokens: number; outputTokens: number; cachedInputTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number; cacheCreation1hInputTokens?: number } | undefined {
   if (!usage) return undefined;
@@ -96,6 +96,7 @@ export interface PassthroughBodyGuard {
   eofTolerant?: boolean;
   /** Strict relay preserves wire bytes; decoding is bounded usage observation only. */
   verbatim?: { status: number; inspectSse: boolean; contentEncoding?: string | null };
+  onPrefill?: ((message: unknown) => void) & { usage?: (usage: OcxUsage | undefined) => void };
 }
 
 export type PassthroughCloseReason = "terminal" | "client_cancel" | "body_stall" | "body_overflow";
@@ -164,9 +165,8 @@ export function tapAnthropicSseForLog(
   const inspectFrame = (frame: string, delivered = true) => {
     const lines = frame.split("\n");
     // SSE dispatches on the last event field of a frame.
-    const eventLine = lines.map(l => sseFieldValue(l, "event")).findLast((v): v is string => v !== null);
     // The value is used as SSE delivers it (one leading space stripped, nothing trimmed).
-    const event = eventLine === undefined ? null : eventLine;
+    const event = lines.map(l => sseFieldValue(l, "event")).findLast((v): v is string => v !== null) ?? null;
     const dataLine = lines
       .map(l => sseFieldValue(l, "data"))
       .filter((v): v is string => v !== null)
@@ -182,6 +182,7 @@ export function tapAnthropicSseForLog(
     }
     recordGenerationEvent(logCtx, data.type);
     if (data.type === "message_start" && isRec(data.message) && isRec(data.message.usage)) {
+      if (delivered && named(event, data, "message_start")) guard?.onPrefill?.(data.message);
       usageAcc = { ...usageAcc, ...data.message.usage };
     } else if (data.type === "message_delta" && isRec(data.usage)) {
       usageAcc = { ...usageAcc, ...data.usage };
@@ -242,7 +243,10 @@ export function tapAnthropicSseForLog(
       if (!inspectionStopped) {
         try {
           const message: unknown = JSON.parse(text);
-          if (isRec(message) && isRec(message.usage)) usageAcc = message.usage;
+          if (isRec(message) && isRec(message.usage)) {
+            usageAcc = message.usage;
+            guard?.onPrefill?.(message);
+          }
         } catch { usageAcc = {}; }
       }
       return { terminalInTail: false, tailClean: true };
@@ -334,6 +338,7 @@ export function tapAnthropicSseForLog(
   const close = () => { clientFilter?.finish(value => tapController!.enqueue(value)); tapController!.close(); };
   const recordUsage = () => {
     logCtx.usage = anthropicUsageToOcx(Object.keys(usageAcc).length > 0 ? usageAcc : undefined);
+    guard?.onPrefill?.usage?.(logCtx.usage);
   };
   const closeWithErrorFrame = (errType: string, message: string, origin: MessagesSseLocalOrigin) => {
     if (guard?.verbatim) {
@@ -354,7 +359,7 @@ export function tapAnthropicSseForLog(
     if (settled) return;
     settled = true;
     idle.cancel();
-    detachAbort();
+    abortSignal?.removeEventListener("abort", onClientAbort);
     if (guard?.verbatim) stopInspection();
     const { terminalInTail } = flushTail();
     recordUsage();
@@ -393,7 +398,7 @@ export function tapAnthropicSseForLog(
     if (settled) return;
     settled = true;
     idle.cancel();
-    detachAbort();
+    abortSignal?.removeEventListener("abort", onClientAbort);
     if (guard?.verbatim) stopInspection();
     recordUsage();
     finalize(499, { closeReason: "client_cancel" });
@@ -401,16 +406,9 @@ export function tapAnthropicSseForLog(
     try { tapController?.close(); } catch { /* downstream already torn down */ }
     reader.cancel(guard?.reqSignal?.reason).catch(() => {});
   };
-  const detachAbort = (() => {
-    const signal = guard?.reqSignal;
-    if (!signal) return () => {};
-    if (signal.aborted) {
-      queueMicrotask(onClientAbort);
-      return () => {};
-    }
-    signal.addEventListener("abort", onClientAbort, { once: true });
-    return () => signal.removeEventListener("abort", onClientAbort);
-  })();
+  const abortSignal = guard?.reqSignal;
+  if (abortSignal?.aborted) queueMicrotask(onClientAbort);
+  else abortSignal?.addEventListener("abort", onClientAbort, { once: true });
 
   return new ReadableStream<Uint8Array>({
     start(controller) {
@@ -438,7 +436,7 @@ export function tapAnthropicSseForLog(
             }
             settled = true;
             idle.cancel();
-            detachAbort();
+            abortSignal?.removeEventListener("abort", onClientAbort);
             const { terminalInTail, tailClean } = flushTail();
             recordUsage();
             if (guard?.verbatim) {
@@ -486,6 +484,7 @@ export function tapAnthropicSseForLog(
               return;
             }
           }
+          const forwarded = guard?.verbatim ? enqueue(value) : 0;
           if (!guard?.verbatim) inspect(value);
           else if (!inspectionStopped) {
             try {
@@ -497,7 +496,7 @@ export function tapAnthropicSseForLog(
             } catch { stopInspection(); }
             if (settled) return;
           }
-          if (enqueue(value) > 0) return;
+          if (guard?.verbatim ? forwarded > 0 : enqueue(value) > 0) return;
         }
       } catch (err) {
         if (settled) return;
@@ -510,7 +509,7 @@ export function tapAnthropicSseForLog(
         }
         settled = true;
         idle.cancel();
-        detachAbort();
+        abortSignal?.removeEventListener("abort", onClientAbort);
         if (guard?.verbatim) stopInspection();
         const { terminalInTail } = flushTail();
         recordUsage();
@@ -561,7 +560,7 @@ export function tapAnthropicSseForLog(
       if (!settled) {
         settled = true;
         idle.cancel();
-        detachAbort();
+        abortSignal?.removeEventListener("abort", onClientAbort);
         if (guard?.verbatim) stopInspection();
         recordUsage();
         finalize(499, { closeReason: "client_cancel" });
