@@ -19,7 +19,12 @@ Reserve on a seat whose included usage is spent; only when no such seat can serv
 Luna on a seat with included usage, then previously consented fresh credits, then the existing refusal.
 A seat is offered Reserve when it has a fresh reported grant below 100% or no stored Reserve window at
 all: ChatGPT serves `gpt-reserve` to accounts whose usage response never lists a grant
-(openai/codex#40939), so an unreported seat is tried and upstream stays the entitlement authority. A
+(openai/codex#40939), so an unreported seat is tried and upstream stays the entitlement authority.
+The same holds for every Reserve judgment: a missing grant window, a `pro_rate_limit_reached` banner,
+an absent catalog row or one refused request never shows that Reserve is unavailable; only served
+`gpt-reserve` requests show that it works. The hub's request log records the requested `gpt-6-luna`
+for an automatic pool Reserve turn, not the wire model, so it cannot count them; codex-lb's request
+log can, and its `/v1/usage` `luna_reserve.served_*` fields report them for the codex-lb route. A
 stored window that is full, elapsed or stale keeps the seat out, and `poolReserveHoldResetAt` holds a
 selected seat in that state for 60 seconds rather than sending. A thread bound to a seat with included
 capacity does not keep Luna there: a soft binding never outranks Reserve, while a thread already
