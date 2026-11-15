@@ -4,6 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveConfig } from "../../src/config";
+import { providerConfigSchema } from "../../src/config/schema/leaf-validators";
 import * as destinationPolicy from "../../src/lib/destination-policy";
 import { startServer } from "../../src/server";
 import type { OcxProviderConfig } from "../../src/types";
@@ -44,12 +45,31 @@ async function withRelay(run: (patch: (body: unknown) => Promise<Response>) => P
 }
 
 describe("provider PATCH field mask", () => {
+  test("rejects nonfinite and out-of-range sampling settings at config load", () => {
+    for (const record of [{ " ": { topP: 1 } }, { m: { temperature: Infinity } }, { m: { temperature: -0.1 } }, { m: { topP: 1.1 } }]) {
+      expect(providerConfigSchema.safeParse({ adapter: "openai-chat", baseUrl: "https://example.test", modelSamplingDefaults: record }).success).toBe(false);
+    }
+  });
   test("refuses a field it would drop and stores nothing from that request", async () => {
     await withRelay(async patch => {
       const response = await patch({ modelContextWindows: { "relay-model": 200_000 }, modelMaxOutputTokens: { "relay-model": 8_000 } });
       expect(response.status).toBe(400);
       expect(await response.json()).toEqual({ error: "unrecognized provider fields: modelMaxOutputTokens" });
       expect(loadConfig().providers.relay?.modelContextWindows).toBeUndefined();
+    });
+  });
+
+  test("validates and persists per-model sampling defaults", async () => {
+    await withRelay(async patch => {
+      expect((await patch({ modelSamplingDefaults: { model: { temperature: 1, topP: 1 } } })).status).toBe(200);
+      expect(loadConfig().providers.relay?.modelSamplingDefaults).toEqual({ model: { temperature: 1, topP: 1 } });
+      expect((await patch({ modelSamplingDefaults: { other: { temperature: 0 } } })).status).toBe(200);
+      expect(loadConfig().providers.relay?.modelSamplingDefaults).toEqual({ model: { temperature: 1, topP: 1 }, other: { temperature: 0 } });
+      for (const invalid of [{ " ": { temperature: 1 } }, { model: { temperature: 3 } }, { model: { topP: -1 } }]) {
+        expect((await patch({ modelSamplingDefaults: invalid })).status).toBe(400);
+      }
+      expect((await patch({ modelSamplingDefaults: { model: null } })).status).toBe(200);
+      expect(loadConfig().providers.relay?.modelSamplingDefaults).toEqual({ other: { temperature: 0 } });
     });
   });
 

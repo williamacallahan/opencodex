@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { nativePromptCacheOutcome } from "./prompt-cache-observer";
 import type { RequestLogContext } from "./request-log";
-import { ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
 import { baseProviderLabel } from "../providers/label";
 import { getProviderRegistryEntry } from "../providers/registry";
 import { classifyCacheTelemetryProvenance, type CacheTelemetryProvenance, type UsageStatus } from "../usage/log";
@@ -41,20 +40,13 @@ export function providerFamily(provider: string): string {
 
 /**
  * A log label belongs to a configured provider when the label is the configured name, the same
- * family, or the name plus an account log label or a collision number the pool appended to it
- * (`openai-main-2`, which the label owner does not strip). A longer name that merely starts with
- * the configured one (`openai-relay`) is a different provider.
+ * family, or an account label the pool appended to it. Hand-written account namespaces
+ * (`openai-work`) and collision-suffixed ones (`openai-main-2`) are not stripped by the label
+ * owner, so the configured name is what ties them back to the provider that sent.
  */
 function answeredBy(logLabel: string, configuredProvider: string): boolean {
-  return logLabel === configuredProvider || isAccountSuffixOf(logLabel, configuredProvider)
+  return logLabel === configuredProvider || logLabel.startsWith(`${configuredProvider}-`)
     || providerFamily(logLabel) === providerFamily(configuredProvider);
-}
-
-/** A bare name prefix is not enough: `openai-relay` is another provider, `openai-p2e22d0` and `openai-2` are seats of `openai`. */
-function isAccountSuffixOf(logLabel: string, configuredProvider: string): boolean {
-  if (!logLabel.startsWith(`${configuredProvider}-`)) return false;
-  const suffix = logLabel.slice(configuredProvider.length + 1);
-  return /^\d+$/.test(suffix) || ACCOUNT_LOG_LABEL_RE.test(suffix.replace(/-\d+$/, ""));
 }
 
 /**

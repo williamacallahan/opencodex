@@ -8,6 +8,7 @@
  */
 import type { AdapterEvent, OcxAssistantMessage, OcxContentPart, OcxMessage, OcxParsedRequest, OcxProviderConfig, OcxTool, OcxToolCall, OcxToolResultMessage, OcxUsage } from "../types";
 import { namespacedToolName } from "../types";
+import { resolveSamplingDefaults } from "./sampling-defaults";
 import type { IncomingMeta, ProviderAdapter } from "./base";
 import { streamChatEventsWithResetRetry, devinStatedResetWaitMs, allocateCascadeId, CloudChatError, type ChatHistoryItem, type ToolDef } from "./devin/cloud-direct";
 import type { CloudChatEvent, ContentPart } from "./devin/cloud-direct/chat";
@@ -827,6 +828,9 @@ export function createDevinAdapter(
         const unsignedMessages = hasAnthropicSignature(signedMessages, parsed.modelId)
           ? mapOcxMessagesToDevin(parsed, { withholdAnthropicSignatures: true })
           : undefined;
+        const familyUid = catalog?.byUid.get(modelUid)?.familyUid;
+        const sampling = resolveSamplingDefaults(provider, modelUid, parsed.options,
+          familyUid ? devinFamilyBaseId(familyUid) : collapseDevinModelUid(modelUid));
         const request = (messages: ChatHistoryItem[]) => streamChatEventsWithResetRetry({
           apiKey,
           apiServerUrl: host,
@@ -838,8 +842,8 @@ export function createDevinAdapter(
           trajectoryId,
           completionOpts: {
             ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
-            ...(typeof parsed.options.temperature === "number" ? { temperature: parsed.options.temperature } : {}),
-            ...(typeof parsed.options.topP === "number" ? { topP: parsed.options.topP } : {}),
+            ...(sampling.temperature !== undefined ? { temperature: sampling.temperature } : {}),
+            ...(sampling.topP !== undefined ? { topP: sampling.topP } : {}),
           },
           signal: incoming.abortSignal,
         }, {

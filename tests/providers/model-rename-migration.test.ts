@@ -66,6 +66,13 @@ describe("registry model rename migration (#1610)", () => {
     expect(config.providers[RENAME.provider]!.responseTierAuthoritative).toBe(authority);
   });
 
+  test("carries sampling defaults when a model is renamed", () => {
+    const stale = staleConfig();
+    stale.providers[RENAME.provider]!.modelSamplingDefaults = { [RENAME.from]: { temperature: 1, topP: 1 } };
+    const { config } = projectModelRenames(stale, [RENAME]);
+    expect(config.providers[RENAME.provider]!.modelSamplingDefaults).toEqual({ [RENAME.to]: { temperature: 1, topP: 1 } });
+  });
+
   test("rewrites every model-keyed field, preserving list order", () => {
     const { config, changed, warnings } = projectModelRenames(staleConfig(), [RENAME]);
     const prov = config.providers["alibaba-token-plan-intl"]!;

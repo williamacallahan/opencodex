@@ -52,6 +52,26 @@ function buildToolCallBody(modelId: string, reasoning: string): {
   };
 }
 
+describe("per-model sampling defaults", () => {
+  test("fills omitted values on translated and passthrough Chat without replacing explicit values", async () => {
+    const config = configFor("deepseek-v4.1-flash");
+    config.providers["opencode-go"]!.modelSamplingDefaults = { "deepseek-v4.1-flash": { temperature: 1, topP: 1 } };
+    const route = routeModel(config, "opencode-go/deepseek-v4.1-flash");
+    const adapter = createOpenAIChatAdapter(route.provider);
+    const build = (modelId: string, temperature?: number) => JSON.parse(adapter.buildRequest({
+      modelId, context: { messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+      stream: false, options: { temperature },
+    }).body as string);
+    expect(build(route.modelId)).toMatchObject({ temperature: 1, top_p: 1 });
+    expect(build(route.modelId, 0.2)).toMatchObject({ temperature: 0.2, top_p: 1 });
+    expect(build(route.modelId, 0)).toMatchObject({ temperature: 0, top_p: 1 });
+    expect(build("unrelated").temperature).toBeUndefined();
+    const { buildOpenAIChatPassthroughRequest } = await import("../../src/adapters/openai-chat");
+    const body = JSON.parse(buildOpenAIChatPassthroughRequest(route.provider, { messages: [], temperature: 0 }, route.modelId, false).body as string);
+    expect(body).toMatchObject({ temperature: 0, top_p: 1 });
+  });
+});
+
 describe("opencode-go DeepSeek V4 thinking mode", () => {
   test("normalizes Desktop-style root composition schemas for Console Go", () => {
     const route = routeModel(configFor("deepseek-v4.1-flash"), "opencode-go/deepseek-v4.1-flash");
