@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { clearComboTargetCooldowns, coolComboTarget } from "../../src/combos";
 import { loadConfig, saveConfig } from "../../src/config";
 import { buildDesktop3pRegistry, desktop3pAlias } from "../../src/claude/desktop-3p";
 import { clearAnthropicAccountPoolState, forgetAnthropicFailoverQuorum } from "../../src/oauth/anthropic-routing";
@@ -402,6 +403,18 @@ describe("hybrid Messages public HTTP transport", () => {
     }
     expect(bridgeCalls.map(call => JSON.parse(new TextDecoder().decode(call.bytes)).model)).toEqual(["gpt-fixture", "vendor/gpt-fixture"]);
     expect(nativeCalls).toHaveLength(0);
+  });
+
+  test("hybrid answers a combo whose targets are all cooling with retryable 529 overload, not an incompatible-model 400", async () => {
+    const targets = [{ provider: "gpt-pool", model: "gpt-fixture" }, { provider: "gpt-pool", model: "vendor/gpt-fixture" }];
+    await launch(false, config => { config.combos = { hybrid: { strategy: "failover", targets } }; });
+    try {
+      for (const target of targets) coolComboTarget("hybrid", target, { cooldownMs: 60_000 });
+      const response = await post("/hybrid/v1/messages", encode(raw.replace(nativeModel, "ocx-claude-combo--hybrid")));
+      expect(response.status).toBe(529);
+      expect(JSON.stringify(await response.json())).not.toContain("incompatible");
+      expect(bridgeCalls).toHaveLength(0);
+    } finally { clearComboTargetCooldowns("hybrid"); }
   });
 
   for (const provider of ["anthropic", "commandcode"]) test(`hybrid refuses a combo with an Anthropic wire target (${provider})`, async () => {

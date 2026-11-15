@@ -46,7 +46,7 @@ import { AnthropicRequestError, callerCacheRetention, claudeCodeAgentId, claudeS
 import { nativeReasoningTag, type NativeReasoningOwner } from "../responses/reasoning-replay-cache";
 import { isKnownDesktop3pModelId, resolveDesktop3pAlias } from "../claude/desktop-3p";
 import { resolveAlias, claudeCodeNativeAlias, legacyAliasForNative } from "../claude/alias";
-import { getCombo } from "../combos";
+import { getCombo, NoAvailableComboTargetsError } from "../combos";
 import { recordDesktopRequest } from "../claude/desktop-health";
 import { stripOneMillionMarker } from "../claude/context-windows";
 import { captureAdmissionPolicy } from "./capture-admission-policy";
@@ -678,10 +678,11 @@ async function handleClaudeMessagesWithBudget(
     candidate.providerName, candidate.modelId, candidate.provider, "anthropic",
   ).adapter !== "anthropic"
     && !configuredAnthropicInstance(config, candidate.providerName) && candidate.routeKind !== "policy"
-    && (!candidate.combo || !!getCombo(config, candidate.combo.comboId)?.targets.every(target => {
-      const route = previewRouteModel(config, `${target.provider}/${target.model}`);
-      return !route.combo && bridgeRouteAllowed(route);
-    }));
+    && (!candidate.combo || comboTargetsBridgeAllowed(candidate.combo.comboId));
+  const comboTargetsBridgeAllowed = (comboId: string): boolean => !!getCombo(config, comboId)?.targets.every(target => {
+    const route = previewRouteModel(config, `${target.provider}/${target.model}`);
+    return !route.combo && bridgeRouteAllowed(route);
+  });
   if (ingress.hybridMessages) {
     let wire: Uint8Array | undefined;
     let strict = false;
@@ -694,13 +695,21 @@ async function handleClaudeMessagesWithBudget(
       const model = body.model;
       hybridRefusalMessage = `Hybrid Messages model ${redactSecretString(model).slice(0, 200)} is incompatible; accepted forms are native Claude ids and ocx-claude- or ocx-claude2- routed ids`;
       const routedAlias = resolveAlias(model) !== null;
-      const route = previewRouteModel(config, routedAlias ? resolveInboundModel(model, cc) : model);
+      // A combo whose targets are all cooling throws here; that is availability, not compatibility. Check its
+      // targets directly and let dispatch answer with the retryable 429/503 instead of a terminal 400.
+      let route: RouteResult | undefined;
+      let coolingComboId: string | undefined;
+      try { route = previewRouteModel(config, routedAlias ? resolveInboundModel(model, cc) : model); } catch (error) {
+        if (!(routedAlias && error instanceof NoAvailableComboTargetsError)) throw error;
+        coolingComboId = error.comboId;
+      }
       const modelMapped = [cc?.modelMap?.[model], cc?.modelMap?.[model.replace(/-\d{8}$/, "")]]
         .some(mapped => typeof mapped === "string" && mapped.length > 0);
-      strict = !routedAlias && !resolveDesktop3pAlias(model) && !modelMapped
+      strict = route !== undefined && !routedAlias && !resolveDesktop3pAlias(model) && !modelMapped
         && model.startsWith("claude-") && route.modelId === model
         && nativeMessagesDeclineReason(route, body, config, { strict: true }) === undefined;
-      if (!strict && !(routedAlias && bridgeRouteAllowed(route))) {
+      const bridgeAllowed = route ? bridgeRouteAllowed(route) : !!coolingComboId && comboTargetsBridgeAllowed(coolingComboId);
+      if (!strict && !(routedAlias && bridgeAllowed)) {
         throw markProxyError(new AnthropicRequestError("incompatible model"));
       }
       hybridBody = body;
