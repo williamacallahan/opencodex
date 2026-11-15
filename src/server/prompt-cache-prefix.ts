@@ -8,9 +8,11 @@ export interface CacheBreakpoint { readonly index: number; readonly ttl: CacheTt
 export type PrefixUnsupportedReason =
   | "invalid_json" | "body_limit" | "structure_limit" | "content_encoding"
   | "unsupported_shape" | "invalid_marker" | "ttl_order" | "breakpoint_limit"
-  | "tool_run_breakpoint";
+  | "tool_run_breakpoint" | "unsupported_request_field" | "context_transform"
+  | "unsupported_tool" | "unsupported_block" | "unsupported_media_source"
+  | "unsupported_message_field" | "unresolved_tool_reference";
 export type PrefixWalk =
-  | { readonly status: "supported"; readonly positions: readonly CachePosition[]; readonly breakpoints: readonly CacheBreakpoint[] }
+  | { readonly status: "supported"; readonly positions: readonly CachePosition[]; readonly breakpoints: readonly CacheBreakpoint[]; readonly reuseBoundary?: number }
   | { readonly status: "unsupported"; readonly reason: PrefixUnsupportedReason };
 
 interface ByteNode {
@@ -117,8 +119,10 @@ function spansWithoutMarker(bytes: Buffer, node: ByteNode): Buffer[] {
   return [bytes.subarray(node.start, start), bytes.subarray(end, node.end)];
 }
 function markerTtl(bytes: Buffer, node: ByteNode): CacheTtl {
-  if (!node.properties || node.properties.some(property => !["type", "ttl"].includes(property.key))
+  if (!node.properties || node.properties.some(property => !["type", "ttl", "scope"].includes(property.key))
     || stringScalar(bytes, field(node, "type")) !== "ephemeral") refuse("invalid_marker");
+  const scope = field(node, "scope");
+  if (scope && stringScalar(bytes, scope) !== "global") refuse("invalid_marker");
   const ttl = field(node, "ttl");
   if (!ttl) return 300000;
   switch (stringScalar(bytes, ttl)) {
@@ -152,12 +156,67 @@ export function walkPromptCachePrefix(input: Uint8Array, contentEncoding: string
     const messages = field(root, "messages");
     if (!root.properties || !messages?.children) refuse("unsupported_shape");
     for (const property of root.properties) {
+      if (["context_management", "thread", "compaction"].includes(property.key)) refuse("context_transform");
       if (!["model", "tools", "system", "messages", "cache_control", "thinking", "output_config", "speed",
-        "tool_choice", "max_tokens", "stream", "metadata", "temperature", "top_p", "top_k", "stop_sequences", "service_tier"].includes(property.key)) refuse("unsupported_shape");
+        "tool_choice", "max_tokens", "stream", "metadata", "temperature", "top_p", "top_k", "stop_sequences", "service_tier", "diagnostics"].includes(property.key)) refuse("unsupported_request_field");
     }
+    const diagnostics = field(root, "diagnostics");
+    if (diagnostics && (!diagnostics.properties || diagnostics.properties.some(property => property.key !== "previous_message_id"))) refuse("unsupported_request_field");
+    const automatic = field(root, "cache_control");
+    const automaticTtl = automatic ? markerTtl(bytes, automatic) : undefined;
     const state = new Bun.CryptoHasher("sha256");
     const positions: CachePosition[] = [];
     const breakpoints: CacheBreakpoint[] = [];
+    const toolNames = new Set<string>();
+    let reuseBoundary = 0;
+    let lastCacheable = -1;
+    let hasThinking = false;
+    const isString = (node: ByteNode | undefined): boolean => node !== undefined && bytes[node.start] === 34;
+    function inspectBlock(block: ByteNode, nested = false): void {
+      const kind = stringScalar(bytes, field(block, "type"));
+      if (nested && field(block, "cache_control")) refuse("invalid_marker");
+      if (kind === "text") {
+        if (!isString(field(block, "text"))) refuse("unsupported_block");
+      } else if (kind === "thinking" || kind === "redacted_thinking") {
+        if (nested || !isString(field(block, kind === "thinking" ? "thinking" : "data"))
+          || kind === "thinking" && !isString(field(block, "signature"))) refuse("unsupported_block");
+        hasThinking = true;
+      } else if (kind === "tool_use") {
+        if (nested) refuse("unsupported_block");
+      } else if (kind === "tool_result") {
+        if (nested) refuse("unsupported_block");
+        const content = field(block, "content");
+        if (content?.children) for (const child of content.children) inspectBlock(child, true);
+        else if (content && !isString(content)) refuse("unsupported_block");
+      } else if (kind === "tool_reference") {
+        const name = stringScalar(bytes, field(block, "tool_name"));
+        if (!nested || !name || !toolNames.has(name)) refuse("unresolved_tool_reference");
+        // Definitions can expand outside the visible block positions. Only prefixes after
+        // this complete result remain attributable; retain all physical markers for validation.
+        reuseBoundary = positions.length;
+      } else if (kind === "image" || kind === "document") {
+        const source = field(block, "source");
+        if (!source?.properties) refuse("unsupported_media_source");
+        const sourceType = stringScalar(bytes, field(source, "type"));
+        if (sourceType === "base64" || kind === "document" && sourceType === "text") {
+          if (!isString(field(source, "data")) || !isString(field(source, "media_type"))) refuse("unsupported_media_source");
+        } else if (kind === "document" && sourceType === "content") {
+          const content = field(source, "content");
+          if (content?.children) for (const child of content.children) {
+            if (!["text", "image"].includes(stringScalar(bytes, field(child, "type")) ?? "")) refuse("unsupported_block");
+            inspectBlock(child, true);
+          }
+          else if (!isString(content)) refuse("unsupported_media_source");
+        } else refuse("unsupported_media_source");
+      } else if (kind === "search_result") {
+        const content = field(block, "content");
+        if (!content?.children) refuse("unsupported_block");
+        for (const child of content.children) {
+          if (stringScalar(bytes, field(child, "type")) !== "text") refuse("unsupported_block");
+          inspectBlock(child, true);
+        }
+      } else refuse("unsupported_block");
+    }
     function frame(name: string, parts: readonly Buffer[]): void {
       state.update(`${name}:${parts.reduce((sum, part) => sum + part.length, 0)}:`);
       for (const part of parts) state.update(part);
@@ -166,30 +225,39 @@ export function walkPromptCachePrefix(input: Uint8Array, contentEncoding: string
       const node = field(root, key);
       if (node) frame(`parameter:${key}`, [bytes.subarray(node.start, node.end)]);
     }
-    function position(tier: CacheTier, blocks: readonly ByteNode[]): void {
+    function position(tier: CacheTier, blocks: readonly ByteNode[], cacheable = true): void {
       if (positions.length >= 16384) refuse("structure_limit");
-      let marker: ByteNode | undefined;
+      let ttl: CacheTtl | undefined;
       for (const [index, block] of blocks.entries()) {
         const candidate = field(block, "cache_control");
         // A marker inside a collapsed run cannot be attributed to the run's final digest.
         if (candidate && index !== blocks.length - 1) refuse("tool_run_breakpoint");
-        marker = candidate;
+        ttl = candidate ? markerTtl(bytes, candidate) : undefined;
+        if (candidate && !cacheable) refuse("invalid_marker");
+        const scope = candidate && field(candidate, "scope");
+        if (scope) frame("cache-scope", [bytes.subarray(scope.start, scope.end)]);
         frame(tier, spansWithoutMarker(bytes, block));
       }
       const index = positions.length;
       positions.push({ digest: state.copy().digest("hex"), tier, index });
-      if (marker) breakpoints.push({ index, ttl: markerTtl(bytes, marker) });
+      if (cacheable) lastCacheable = index;
+      if (ttl !== undefined) breakpoints.push({ index, ttl });
     }
     frame("version", [Buffer.from("1")]);
+    const automaticScope = automatic && field(automatic, "scope");
+    if (automaticScope) frame("automatic-cache-scope", [bytes.subarray(automaticScope.start, automaticScope.end)]);
     // Thinking/effort placement is model-specific: conservatively invalidate every tier.
     for (const key of ["model", "thinking", "output_config"]) parameter(key);
     const tools = field(root, "tools");
     if (tools && !tools.children) refuse("unsupported_shape");
     for (const tool of tools?.children ?? []) {
       const type = stringScalar(bytes, field(tool, "type"));
-      if (!tool.properties || !field(tool, "name") || !field(tool, "input_schema")
-        || field(tool, "type") && type !== "custom" || field(tool, "defer_loading")) refuse("unsupported_shape");
-      position("tools", [tool]);
+      const name = stringScalar(bytes, field(tool, "name"));
+      const deferred = field(tool, "defer_loading");
+      if (!tool.properties || !name || !field(tool, "input_schema") || field(tool, "type") && type !== "custom"
+        || deferred && ![102, 116].includes(bytes[deferred.start]!)) refuse("unsupported_tool");
+      toolNames.add(name);
+      position("tools", [tool], !deferred || bytes[deferred.start] !== 116);
     }
     // A changed tool catalog invalidates even a breakpoint before the changed tool.
     // Bind snapshots to the complete catalog without rereading its bytes per prefix.
@@ -202,7 +270,7 @@ export function walkPromptCachePrefix(input: Uint8Array, contentEncoding: string
     const system = field(root, "system");
     if (system?.children) {
       for (const block of system.children) {
-        if (stringScalar(bytes, field(block, "type")) !== "text") refuse("unsupported_shape");
+        if (stringScalar(bytes, field(block, "type")) !== "text") refuse("unsupported_block");
         position("system", [block]);
       }
     } else if (system) {
@@ -211,11 +279,23 @@ export function walkPromptCachePrefix(input: Uint8Array, contentEncoding: string
     }
     parameter("tool_choice");
     for (const message of messages.children) {
-      if (!message.properties || message.properties.some(property => !["role", "content"].includes(property.key))) refuse("unsupported_shape");
+      if (!message.properties || message.properties.some(property => !["role", "content", "output_config"].includes(property.key))) refuse("unsupported_message_field");
       const role = field(message, "role");
       const content = field(message, "content");
       if (!role || !content || !["user", "assistant", "system"].includes(stringScalar(bytes, role) ?? "")) refuse("unsupported_shape");
+      if (stringScalar(bytes, role) === "user" && hasThinking
+        && !content.children?.some(block => stringScalar(bytes, field(block, "type")) === "tool_result")) {
+        // Older models strip prior thinking on non-tool user turns. Do not claim reuse
+        // across that boundary without a model-specific preservation guarantee.
+        reuseBoundary = positions.length;
+      }
       frame("message", [bytes.subarray(role.start, role.end)]);
+      const output = field(message, "output_config");
+      if (output) {
+        if (stringScalar(bytes, role) !== "system" || !output.properties || output.properties.some(property => property.key !== "effort")) refuse("unsupported_message_field");
+        frame("message-output-config", [bytes.subarray(output.start, output.end)]);
+        if (content.children?.length === 0) position("messages", [content], false);
+      }
       if (!content.children) {
         if (stringScalar(bytes, content) === undefined) refuse("unsupported_shape");
         position("messages", [content]);
@@ -224,26 +304,19 @@ export function walkPromptCachePrefix(input: Uint8Array, contentEncoding: string
       for (let cursor = 0; cursor < content.children.length;) {
         const block = content.children[cursor++]!;
         const kind = stringScalar(bytes, field(block, "type"));
-        // Images/documents, signed thinking and server tools can change provider rendering
-        // or accounting outside these byte spans. Report the coverage gap, not false warmth.
-        if (!kind || !["text", "tool_use", "tool_result"].includes(kind)) refuse("unsupported_shape");
         const run = [block];
         if (kind === "tool_use" || kind === "tool_result") {
           while (cursor < content.children.length && stringScalar(bytes, field(content.children[cursor]!, "type")) === kind) {
             run.push(content.children[cursor++]!);
           }
         }
-        if (kind === "tool_result") for (const resultBlock of run) {
-          const result = field(resultBlock, "content");
-          if (result?.children && result.children.some(child => stringScalar(bytes, field(child, "type")) !== "text")) refuse("unsupported_shape");
-        }
-        position("messages", run);
+        for (const entry of run) inspectBlock(entry);
+        position("messages", run, kind !== "thinking" && kind !== "redacted_thinking");
       }
     }
-    const automatic = field(root, "cache_control");
-    if (automatic && positions.length) {
-      const ttl = markerTtl(bytes, automatic);
-      const index = positions.length - 1;
+    if (automaticTtl !== undefined && lastCacheable >= 0) {
+      const ttl = automaticTtl;
+      const index = lastCacheable;
       const previous = breakpoints.find(point => point.index === index);
       if (previous && previous.ttl !== ttl) refuse("invalid_marker");
       if (!previous) breakpoints.push({ index, ttl });
@@ -252,7 +325,7 @@ export function walkPromptCachePrefix(input: Uint8Array, contentEncoding: string
     for (let index = 1; index < breakpoints.length; index++) {
       if (breakpoints[index - 1]!.ttl < breakpoints[index]!.ttl) refuse("ttl_order");
     }
-    return { status: "supported", positions, breakpoints };
+    return { status: "supported", positions, breakpoints, ...(reuseBoundary > 0 ? { reuseBoundary } : {}) };
   } catch (error) {
     if (error instanceof UnsupportedPrefix) return { status: "unsupported", reason: error.reason };
     if (error instanceof SyntaxError) return { status: "unsupported", reason: "invalid_json" };

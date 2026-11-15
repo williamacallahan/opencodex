@@ -1,0 +1,45 @@
+{
+  "model": "claude-opus-4-7",
+  "max_tokens": 4096,
+  "stream": false,
+  "thinking": { "type": "adaptive" },
+  "output_config": { "effort": "high" },
+  "metadata": { "user_id": "synthetic-cache-shape-session" },
+  "diagnostics": { "previous_message_id": "msg_synthetic_previous" },
+  "tools": [
+    { "name": "Read", "description": "Read a local file", "input_schema": { "type": "object", "properties": { "file_path": { "type": "string" } } }, "defer_loading": false },
+    { "name": "mcp__fixture__lookup", "description": "Look up a fixture record", "input_schema": { "type": "object", "properties": { "query": { "type": "string" } } }, "defer_loading": true },
+    { "name": "ToolSearch", "description": "Select tools", "input_schema": { "type": "object", "properties": { "query": { "type": "string" } } }, "cache_control": { "type": "ephemeral", "ttl": "1h" } }
+  ],
+  "system": [
+    { "type": "text", "text": "Synthetic coding assistant system prefix", "cache_control": { "type": "ephemeral", "ttl": "1h", "scope": "global" } },
+    { "type": "text", "text": "Preserve source files and explain changes." }
+  ],
+  "messages": [
+    { "role": "user", "content": [ { "type": "text", "text": "synthetic cached history" } ] },
+    { "role": "assistant", "content": [
+      { "type": "thinking", "thinking": "Inspect the available tools first.", "signature": "synthetic-thinking-signature" },
+      { "type": "redacted_thinking", "data": "synthetic-redacted-state" },
+      { "type": "tool_use", "id": "call_search", "name": "ToolSearch", "input": { "query": "lookup" } }
+    ] },
+    { "role": "user", "content": [
+      { "type": "tool_result", "tool_use_id": "call_search", "content": [
+        { "type": "tool_reference", "tool_name": "mcp__fixture__lookup" }
+      ], "cache_control": { "type": "ephemeral", "ttl": "1h" } }
+    ] },
+    { "role": "assistant", "content": [
+      { "type": "thinking", "thinking": "Read the two relevant inputs.", "signature": "synthetic-second-signature" },
+      { "type": "tool_use", "id": "call_image", "name": "Read", "input": { "file_path": "fixture.png" } },
+      { "type": "tool_use", "id": "call_document", "name": "Read", "input": { "file_path": "fixture.txt" } }
+    ] },
+    { "role": "user", "content": [
+      { "type": "tool_result", "tool_use_id": "call_image", "content": [
+        { "type": "text", "text": "Synthetic image output" },
+        { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jC1kAAAAASUVORK5CYII=" } }
+      ] },
+      { "type": "tool_result", "tool_use_id": "call_document", "content": [
+        { "type": "document", "source": { "type": "content", "content": [ { "type": "text", "text": "Synthetic document body" } ] }, "title": "Fixture document", "citations": { "enabled": true } }
+      ], "cache_control": { "type": "ephemeral", "ttl": "1h" } }
+    ] }
+  ]
+}

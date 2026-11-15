@@ -254,17 +254,14 @@ describe("prompt cache reuse evidence", () => {
     outcome(ledger, edited, "unknown", "prefix_changed");
   });
 
-  test("aggregate writes at multiple or mixed TTL markers cannot measure individual anchors", () => {
+  test("aggregate writes at multiple or mixed TTL markers measure only the final marked prefix", () => {
     const { ledger, send, ready } = fixture();
     const prefix = prompt("shared", 1);
     if (prefix.status !== "supported") throw new Error("invalid fixture");
     const ticket = send();
     ready(ticket, { ...prefix, breakpoints: [{ index: 0, ttl: 3600000 }, { index: 1, ttl: 300000 }] });
     ledger.reconcileUsage(ticket, { read: 0, write: 1000 });
-    expect(ledger.coverage().records).toBe(0);
-    const later = send();
-    ready(later, prefix, 0, 0);
-    outcome(ledger, later, "unknown", "unmeasured_anchor");
+    expect(ledger.coverage().records).toBe(1);
   });
 
   test("a later five-minute marker does not shorten an explicit one-hour read checkpoint", () => {

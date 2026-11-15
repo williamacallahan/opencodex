@@ -148,13 +148,15 @@ describe("prompt cache byte prefixes", () => {
     expect(walkPromptCachePrefix(Buffer.from(wire))).toEqual({ status: "unsupported", reason: "invalid_json" });
   });
 
-  test("provider transformations and unknown content reduce coverage explicitly", () => {
-    for (const request of [
-      body([{ type: "thinking", thinking: "opaque", signature: "signed" }]),
-      body([{ type: "image", source: { type: "url", url: "https://example.com/image.png" } }]),
-      body([text("x")], { context_management: { edits: [] } }),
-      body([text("x")], { tools: [{ type: "web_search", name: "web_search" }] }),
-      body([{ type: "tool_result", tool_use_id: "a", content: [{ type: "image" }] }]),
-    ]) expect(walkPromptCachePrefix(Buffer.from(JSON.stringify(request)))).toEqual({ status: "unsupported", reason: "unsupported_shape" });
+  test("provider transformations and unknown content reduce coverage with their specific reason", () => {
+    for (const [request, reason] of [
+      [body([{ type: "image", source: { type: "url", url: "https://example.com/image.png" } }]), "unsupported_media_source"],
+      [body([text("x")], { context_management: { edits: [] } }), "context_transform"],
+      [body([text("x")], { tools: [{ type: "web_search", name: "web_search" }] }), "unsupported_tool"],
+      [body([{ type: "tool_result", tool_use_id: "a", content: [{ type: "image" }] }]), "unsupported_media_source"],
+      [body([{ type: "thinking", thinking: "opaque" }]), "unsupported_block"],
+      [body([{ type: "server_tool_use", id: "a", name: "web_search", input: {} }]), "unsupported_block"],
+      [body([text("x")], { unknown_field: 1 }), "unsupported_request_field"],
+    ] as const) expect(walkPromptCachePrefix(Buffer.from(JSON.stringify(request)))).toEqual({ status: "unsupported", reason });
   });
 });

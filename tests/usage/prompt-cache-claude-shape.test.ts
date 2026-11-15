@@ -1,0 +1,137 @@
+import { describe, expect, test } from "bun:test";
+import fixture from "../fixtures/claude-code-cache-shape.json";
+import { walkPromptCachePrefix } from "../../src/server/prompt-cache-prefix";
+import { PromptCacheReuseLedger } from "../../src/server/prompt-cache-reuse";
+
+// Sanitized shape reconstructed from Claude Code 2.1.321's XZ, hGr, yGr and JGr
+// builders and request-block schemas. No captured prompt, signature or credential is retained.
+const marker = { type: "ephemeral", ttl: "1h" };
+const wire = (request: object) => Buffer.from(JSON.stringify(request).replace("synthetic cached history", "cached context ".repeat(50000)));
+const simple = (content: object[], extra: object = {}) => ({ model: fixture.model, messages: [{ role: "assistant", content }], ...extra });
+function supported(request: object) {
+  const result = walkPromptCachePrefix(wire(request));
+  if (result.status !== "supported") throw new Error(`fixture rejected: ${result.reason}`);
+  return result;
+}
+function event(read: number, write: number) {
+  return { type: "message_start", message: { id: "msg_shape", type: "message", role: "assistant", model: fixture.model,
+    usage: { input_tokens: 24, output_tokens: 1, cache_read_input_tokens: read, cache_creation_input_tokens: write } } };
+}
+const withoutMessageMarkers = fixture.messages.map(message => ({ ...message, content: message.content.map(block => {
+  if (!("cache_control" in block)) return block;
+  const { cache_control, ...content } = block;
+  return content;
+}) }));
+
+describe("Claude Code cache request shapes", () => {
+  test.each([
+    simple([{ type: "text", text: "system", cache_control: { ...marker, scope: "global" } }]),
+    simple([{ type: "thinking", thinking: "inspect", signature: "synthetic-signature" }, { type: "redacted_thinking", data: "synthetic-redaction" }]),
+    simple([{ type: "tool_result", tool_use_id: "read", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } }] }]),
+    simple([{ type: "tool_result", tool_use_id: "read", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "report" } }] }]),
+    simple([{ type: "tool_result", tool_use_id: "search", content: [{ type: "tool_reference", tool_name: "lookup" }] }],
+      { tools: [{ name: "lookup", input_schema: { type: "object" }, defer_loading: true }] }),
+    simple([{ type: "text", text: "normal" }], { diagnostics: { previous_message_id: "msg_synthetic" } }),
+  ])("supports a client-emitted component without changing bytes: %j", request => {
+    const bytes = wire(request), original = Buffer.from(bytes);
+    expect(walkPromptCachePrefix(bytes).status).toBe("supported");
+    expect(bytes).toEqual(original);
+  });
+
+  test("the complete long-history fixture keeps all four physical markers", () => {
+    const bytes = wire(fixture), original = Buffer.from(bytes);
+    const prefix = supported(fixture);
+    expect(bytes.byteLength).toBeGreaterThan(512 * 1024);
+    expect(prefix.breakpoints.map(point => point.ttl)).toEqual([3600000, 3600000, 3600000, 3600000]);
+    expect(prefix.reuseBoundary).toBeGreaterThan(0);
+    expect(bytes).toEqual(original);
+    for (const [before, after] of [["synthetic-thinking-signature", "changed-signature"], ["synthetic-redacted-state", "changed-redaction"],
+      ["Synthetic document body", "changed document"], ["iVBORw0KGgo", "iVBORw0KGgp"]]) {
+      const changed = walkPromptCachePrefix(Buffer.from(bytes.toString().replace(before!, after!)));
+      expect(changed.status === "supported" && changed.positions.at(-1)?.digest).not.toBe(prefix.positions.at(-1)?.digest);
+    }
+  });
+
+  test("diagnostic ids do not invalidate content, but global and private scopes cannot alias", () => {
+    expect(supported({ ...fixture, diagnostics: { previous_message_id: "msg_next" } }).positions).toEqual(supported(fixture).positions);
+    const scoped = simple([{ type: "text", text: "same", cache_control: { ...marker, scope: "global" } }]);
+    const privateScope = simple([{ type: "text", text: "same", cache_control: marker }]);
+    expect(supported(scoped).positions).not.toEqual(supported(privateScope).positions);
+  });
+
+  test("automatic caching walks back past thinking and explicit thinking markers remain invalid", () => {
+    const thought = { type: "thinking", thinking: "inspect", signature: "synthetic-signature" };
+    expect(supported(simple([{ type: "text", text: "before" }, thought], { cache_control: marker })).breakpoints).toEqual([{ index: 0, ttl: 3600000 }]);
+    expect(walkPromptCachePrefix(wire(simple([{ ...thought, cache_control: marker }])))).toEqual({ status: "unsupported", reason: "invalid_marker" });
+  });
+
+  test("multiple markers measure only the final prefix: a warm history plus a small new turn", () => {
+    const ledger = new PromptCacheReuseLedger();
+    const initial = simple([{ type: "text", text: "synthetic cached history", cache_control: marker }], {
+      tools: [{ name: "Read", input_schema: { type: "object" }, cache_control: marker }], system: [{ type: "text", text: "system", cache_control: marker }],
+    });
+    try {
+      const first = ledger.observeSend({ sendId: "first", destination: "direct", model: fixture.model, account: "synthetic-seat", bodyBytes: wire(initial).length });
+      ledger.confirmPrefill(first, event(180000, 1500));
+      ledger.resolvePrefix(first, supported(initial));
+      ledger.reconcileUsage(first, { read: 180000, write: 1500 });
+      ledger.releaseSend(first);
+      expect(ledger.coverage().records).toBe(1);
+      const next = { ...initial, messages: [...initial.messages, { role: "user", content: [{ type: "text", text: "small new turn", cache_control: marker }] }] };
+      const second = ledger.observeSend({ sendId: "second", destination: "direct", model: fixture.model, account: "synthetic-seat", bodyBytes: wire(next).length });
+      ledger.confirmPrefill(second, event(181500, 500));
+      ledger.resolvePrefix(second, supported(next));
+      ledger.reconcileUsage(second, { read: 181500, write: 500 });
+      expect(ledger.classify(second)).toMatchObject({ reuse_expectation: "reuse", expected_cached_tokens: 181500, lost_cached_tokens: 0 });
+    } finally { ledger.close(); }
+  });
+
+  test("realistic tool-result turns reuse the final measured prefix, not an expanded tool reference", () => {
+    const ledger = new PromptCacheReuseLedger();
+    const next = { ...fixture, messages: [...withoutMessageMarkers,
+      { role: "assistant", content: [{ type: "tool_use", id: "call_next", name: "Read", input: { file_path: "next.txt" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "call_next", content: "Small new tool output", cache_control: marker }] },
+    ] };
+    try {
+      const first = ledger.observeSend({ sendId: "first", destination: "direct", model: fixture.model, account: "synthetic-seat", bodyBytes: wire(fixture).length });
+      ledger.confirmPrefill(first, event(180000, 1500));
+      ledger.resolvePrefix(first, supported(fixture));
+      ledger.reconcileUsage(first, { read: 180000, write: 1500 });
+      ledger.releaseSend(first);
+      const second = ledger.observeSend({ sendId: "next", destination: "direct", model: fixture.model, account: "synthetic-seat", bodyBytes: wire(next).length });
+      ledger.confirmPrefill(second, event(181500, 500));
+      ledger.resolvePrefix(second, supported(next));
+      ledger.reconcileUsage(second, { read: 181500, write: 500 });
+      expect(ledger.classify(second)).toMatchObject({ reuse_expectation: "reuse", expected_cached_tokens: 181500, lost_cached_tokens: 0 });
+    } finally { ledger.close(); }
+  });
+
+  test("a genuine change inside the cached history is not classified as reuse", () => {
+    const ledger = new PromptCacheReuseLedger();
+    const changed = { ...fixture, system: [{ ...fixture.system[0]!, text: "A different system prefix" }, fixture.system[1]!] };
+    try {
+      const first = ledger.observeSend({ sendId: "first", destination: "direct", model: fixture.model, account: "synthetic-seat", bodyBytes: wire(fixture).length });
+      ledger.confirmPrefill(first, event(180000, 1500));
+      ledger.resolvePrefix(first, supported(fixture));
+      ledger.reconcileUsage(first, { read: 180000, write: 1500 });
+      ledger.releaseSend(first);
+      const second = ledger.observeSend({ sendId: "changed", destination: "direct", model: fixture.model, account: "synthetic-seat", bodyBytes: wire(changed).length });
+      ledger.confirmPrefill(second, event(0, 181500));
+      ledger.resolvePrefix(second, supported(changed));
+      ledger.reconcileUsage(second, { read: 0, write: 181500 });
+      expect(ledger.classify(second).reuse_expectation).not.toBe("reuse");
+    } finally { ledger.close(); }
+  });
+
+  test("the actual walker refusal survives the ledger boundary", () => {
+    const prefix = walkPromptCachePrefix(wire(simple([{ type: "text", text: "x", cache_control: { ...marker, evict_on_complete: true } }])));
+    expect(prefix).toEqual({ status: "unsupported", reason: "invalid_marker" });
+    const ledger = new PromptCacheReuseLedger();
+    try {
+      const send = ledger.observeSend({ sendId: "bad-marker", destination: "direct", model: fixture.model, account: "synthetic-seat", bodyBytes: 100 });
+      ledger.confirmPrefill(send, event(0, 1500));
+      ledger.resolvePrefix(send, prefix);
+      expect(ledger.classify(send)).toMatchObject({ reuse_expectation: "unknown", reuse_reason: "invalid_marker", reuse_coverage: "partial" });
+    } finally { ledger.close(); }
+  });
+});

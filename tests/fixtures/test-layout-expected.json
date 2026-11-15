@@ -2,6 +2,7 @@
     "prompt-cache-prefix.test.ts": "usage",
     "prompt-cache-reuse.test.ts": "usage",
     "prompt-cache-reuse-paths.test.ts": "usage",
+    "prompt-cache-claude-shape.test.ts": "usage",
     "codex-installation-live-content.test.ts": "codex-integration",
     "codex-installation-invalid-account.test.ts": "codex-integration",
     "codex-installation-sidecars.test.ts": "codex-integration",

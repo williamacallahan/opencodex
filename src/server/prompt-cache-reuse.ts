@@ -1,11 +1,11 @@
 import { registerRetainedStore, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
 import { classifyCredential, relateCacheDomain, type IdentityDomain } from "../routing/identity-domains";
-import { isCachePositionReachable, type CachePosition, type CacheTtl, type PrefixWalk } from "./prompt-cache-prefix";
+import { isCachePositionReachable, type CachePosition, type CacheTtl, type PrefixWalk, type PrefixUnsupportedReason } from "./prompt-cache-prefix";
 
 export const promptCacheReuseLimits = Object.freeze({ records: 16384, accountsPerPrefix: 8, pendingTickets: 64, pendingBytes: 64 * 1024 * 1024 });
 type CoverageReason = "tracking_horizon" | "startup" | "capacity_evicted" | "worker_backlog"
   | "unsupported_shape" | "hash_unavailable" | "unmeasured_anchor" | "prefill_unconfirmed";
-export type ReuseReason = CoverageReason | "same_account_anchor" | "shared_cache_domain" | "cache_domain_changed" | "credential_changed" | "ttl_elapsed"
+export type ReuseReason = CoverageReason | PrefixUnsupportedReason | "same_account_anchor" | "shared_cache_domain" | "cache_domain_changed" | "credential_changed" | "ttl_elapsed"
   | "prefill_overlap" | "no_observed_predecessor" | "prefill_unconfirmed" | "history_unavailable"
   | "lookback_gap" | "breakpoints_removed" | "prefix_changed" | "hidden_account" | "predecessor_pending"
   | "send_unavailable" | "epoch_changed";
@@ -51,7 +51,7 @@ interface PendingSend {
   metadataBytes: number;
   prefill?: Prefill;
   prefix?: Extract<PrefixWalk, { status: "supported" }>;
-  failure?: "unsupported_shape" | "worker_backlog" | "unmeasured_anchor";
+  failure?: PrefixUnsupportedReason | "worker_backlog" | "unmeasured_anchor";
   anchors: number[];
   finalized: boolean;
   classification?: ReuseClassification;
@@ -244,14 +244,14 @@ export class PromptCacheReuseLedger {
     pending.failure = reason;
     this.#pendingBytes -= pending.bytes - pending.metadataBytes;
     pending.bytes = pending.metadataBytes;
-    this.#markGap(reason);
+    this.#markGap(reason === "worker_backlog" ? reason : "unsupported_shape");
   }
   /** Deliver once, from the resident worker. Body ownership stays outside this ledger. */
   resolvePrefix(send: SendObservation, prefix: PrefixWalk): boolean {
     const pending = this.#pending.get(send);
     if (!pending?.prefill || pending.prefix || pending.failure) return false;
     if (prefix.status === "unsupported") {
-      this.#failPrefix(pending, "unsupported_shape");
+      this.#failPrefix(pending, prefix.reason);
       return true;
     }
     const bytes = pending.metadataBytes + prefix.positions.length * 192 + prefix.breakpoints.length * 32;
@@ -264,7 +264,9 @@ export class PromptCacheReuseLedger {
     pending.prefix = {
       status: "supported", positions: prefix.positions.map(position => Object.freeze({ ...position })),
       breakpoints: prefix.breakpoints.map(point => Object.freeze({ ...point })),
+      ...(prefix.reuseBoundary !== undefined ? { reuseBoundary: prefix.reuseBoundary } : {}),
     };
+    if (prefix.reuseBoundary) this.#markGap("unmeasured_anchor");
     // A send's own write may evict history. Preserve its resolved expectation first;
     // unknown observations may still improve when an earlier worker result arrives.
     const classification = this.classify(send);
@@ -305,16 +307,18 @@ export class PromptCacheReuseLedger {
     this.#recordBytes += bytes;
   }
   #commit(send: SendObservation, prefix: Extract<PrefixWalk, { status: "supported" }>, prefill: Prefill): void {
-    // Aggregate writes anchor the final breakpoint only in the single-breakpoint,
-    // supported-shape case. Multiple/mixed markers never manufacture per-point counts.
-    if (prefill.write > 0 && prefix.breakpoints.length === 1) {
-      const point = prefix.breakpoints[0]!;
+    // Input tokens are the tail after the last marker: read + write measures that
+    // final prefix, even with multiple TTLs. Earlier markers receive no invented count.
+    if (prefill.write > 0 && prefix.breakpoints.length > 0) {
+      const point = prefix.breakpoints.at(-1)!;
       const position = prefix.positions[point.index];
-      if (position) this.#insert(send, prefill, position, point.ttl, prefill.read + prefill.write);
+      if (position && position.index >= (prefix.reuseBoundary ?? 0)) this.#insert(send, prefill, position, point.ttl, prefill.read + prefill.write);
+      else this.#markGap("unmeasured_anchor");
     } else if (prefill.write > 0) this.#markGap("unmeasured_anchor");
     if (!prefill.read || !this.#pending.get(send)!.finalized) return;
     const matches = new Map<string, Anchor>();
     for (const position of prefix.positions) {
+      if (position.index < (prefix.reuseBoundary ?? 0)) continue;
       if (!isCachePositionReachable(position.index, prefix.breakpoints)) continue;
       for (const anchor of this.#anchors(this.#key(send, position))) {
         if (anchor.finalized && cacheRelation(anchor, send) === "shared" && anchor.tokens === prefill.read && anchor.readySequence < send.sequence) {
@@ -362,6 +366,7 @@ export class PromptCacheReuseLedger {
     let overlap = false;
     let unreachable = false;
     for (const position of pending.prefix.positions) {
+      if (position.index < (pending.prefix.reuseBoundary ?? 0)) continue;
       const reachable = isCachePositionReachable(position.index, pending.prefix.breakpoints);
       let measured: number | undefined;
       for (const anchor of this.#anchors(this.#key(send, position))) {
