@@ -51,7 +51,9 @@ interface PendingSend {
   metadataBytes: number;
   prefill?: Prefill;
   prefix?: Extract<PrefixWalk, { status: "supported" }>;
-  failure?: "unsupported_shape" | "worker_backlog";
+  failure?: "unsupported_shape" | "worker_backlog" | "unmeasured_anchor";
+  anchors: number[];
+  finalized: boolean;
   classification?: ReuseClassification;
 }
 interface Anchor {
@@ -62,6 +64,7 @@ interface Anchor {
   position: CachePosition;
   ttl: CacheTtl;
   tokens: number;
+  finalized: boolean;
   dispatchedAt: number;
   dispatchSequence: number;
   readyAt: number;
@@ -195,7 +198,7 @@ export class PromptCacheReuseLedger {
       ...(rejected ? { rejected } : {}),
     });
     if (!rejected) {
-      this.#pending.set(send, { bytes, metadataBytes: bytes - identity.bodyBytes });
+      this.#pending.set(send, { bytes, metadataBytes: bytes - identity.bodyBytes, anchors: [], finalized: false });
       this.#pendingBytes += bytes;
     }
     return send;
@@ -208,6 +211,34 @@ export class PromptCacheReuseLedger {
     if (!usage) return false;
     pending.prefill = { ...usage, readyAt: this.#clock(), sequence: ++this.#sequence };
     return true;
+  }
+  /** Settle this send's measurements without moving its prefill readiness or TTL origin. */
+  reconcileUsage(send: SendObservation, usage: Partial<Pick<Prefill, "read" | "write">> | undefined): void {
+    const pending = this.#pending.get(send);
+    if (!pending?.prefill || pending.failure || pending.finalized) return;
+    pending.finalized = true;
+    const read = usage?.read, write = usage?.write;
+    const valid = tokenCount(read) && tokenCount(write) && Number.isSafeInteger(read + write);
+    // At most a write and a read refresh belong to one send; no scan of retained history.
+    const superseded = pending.anchors.splice(0);
+    for (const id of superseded) {
+      const anchor = this.#records.get(id);
+      if (anchor) this.#remove(anchor, false);
+    }
+    if (!valid) {
+      pending.classification = undefined;
+      pending.failure = "unmeasured_anchor";
+      this.#markGap("unmeasured_anchor");
+      return;
+    }
+    pending.prefill.read = read;
+    pending.prefill.write = write;
+    if (pending.classification?.expected_cached_tokens !== undefined) {
+      pending.classification = { ...pending.classification,
+        lost_cached_tokens: Math.max(0, pending.classification.expected_cached_tokens - read) };
+    }
+    if (pending.prefix) this.#commit(send, pending.prefix, pending.prefill);
+    if (read + write === 0 || (pending.prefix && !pending.anchors.length)) this.#markGap("unmeasured_anchor");
   }
   #failPrefix(pending: PendingSend, reason: NonNullable<PendingSend["failure"]>): void {
     pending.failure = reason;
@@ -255,10 +286,12 @@ export class PromptCacheReuseLedger {
     const conversation = this.#conversation(send);
     const bytes = 384 + 2 * (key.length + send.account.length + send.cacheDomain.key.length + (conversation?.length ?? 0));
     const anchor: Anchor = { id: ++this.#recordId, key, account: send.account, cacheDomain: send.cacheDomain, position, ttl, tokens,
+      finalized: this.#pending.get(send)!.finalized,
       dispatchedAt: send.dispatchedAt, dispatchSequence: send.sequence, readyAt: prefill.readyAt,
       readySequence: prefill.sequence, storedAt: this.#clock(), bytes, ...(conversation === undefined ? {} : { conversation }),
     };
     this.#records.set(anchor.id, anchor);
+    this.#pending.get(send)!.anchors.push(anchor.id);
     const prefixes = this.#prefixes.get(key) ?? new Map<string, Set<number>>();
     const versions = prefixes.get(send.account) ?? new Set<number>();
     versions.add(anchor.id);
@@ -279,12 +312,12 @@ export class PromptCacheReuseLedger {
       const position = prefix.positions[point.index];
       if (position) this.#insert(send, prefill, position, point.ttl, prefill.read + prefill.write);
     } else if (prefill.write > 0) this.#markGap("unmeasured_anchor");
-    if (!prefill.read) return;
+    if (!prefill.read || !this.#pending.get(send)!.finalized) return;
     const matches = new Map<string, Anchor>();
     for (const position of prefix.positions) {
       if (!isCachePositionReachable(position.index, prefix.breakpoints)) continue;
       for (const anchor of this.#anchors(this.#key(send, position))) {
-        if (cacheRelation(anchor, send) === "shared" && anchor.tokens === prefill.read && anchor.readySequence < send.sequence) {
+        if (anchor.finalized && cacheRelation(anchor, send) === "shared" && anchor.tokens === prefill.read && anchor.readySequence < send.sequence) {
           const previous = matches.get(anchor.key);
           if (!previous || previous.dispatchSequence < anchor.dispatchSequence) matches.set(anchor.key, anchor);
         }
@@ -322,6 +355,7 @@ export class PromptCacheReuseLedger {
     if (!pending.prefix) return this.#result(send, "unknown", "hash_unavailable");
     if (send.eviction !== this.#evictions) return this.#result(send, "unknown", "history_unavailable");
     let warm: Anchor | undefined;
+    let predecessorPending = false;
     let moved = false;
     let credentialChanged = false;
     let expired = false;
@@ -329,6 +363,7 @@ export class PromptCacheReuseLedger {
     let unreachable = false;
     for (const position of pending.prefix.positions) {
       const reachable = isCachePositionReachable(position.index, pending.prefix.breakpoints);
+      let measured: number | undefined;
       for (const anchor of this.#anchors(this.#key(send, position))) {
         if (anchor.dispatchSequence >= send.sequence) continue;
         const ready = anchor.readySequence < send.sequence && anchor.readyAt <= send.dispatchedAt;
@@ -336,15 +371,21 @@ export class PromptCacheReuseLedger {
         const relation = cacheRelation(anchor, send);
         if (!reachable) { if (ready && alive && relation === "shared") unreachable = true; continue; }
         if (ready && alive) {
+          if (!anchor.finalized) { predecessorPending = true; continue; }
           if (relation === "distinct") moved = true;
           else if (relation === "unknown") credentialChanged = true;
-          else if (!warm || anchor.tokens > warm.tokens) warm = anchor;
+          else {
+            if (measured !== undefined && measured !== anchor.tokens) return this.#result(send, "unknown", "unmeasured_anchor");
+            measured = anchor.tokens;
+            if (!warm || anchor.tokens > warm.tokens) warm = anchor;
+          }
         } else if (relation === "shared") {
           if (!ready) overlap = true;
           else expired = true;
         }
       }
     }
+    if (predecessorPending) return this.#result(send, "unknown", "predecessor_pending");
     if (warm) return this.#result(send, "reuse", warm.account === send.account ? "same_account_anchor" : "shared_cache_domain", warm.tokens);
     if (moved) return this.#result(send, "moved", "cache_domain_changed");
     if (credentialChanged) return this.#result(send, "unknown", "credential_changed");
@@ -361,7 +402,8 @@ export class PromptCacheReuseLedger {
     }
     for (const [other, observation] of this.#pending) {
       if (other.sequence < send.sequence && other.destination === send.destination && other.model === send.model
-        && !observation.prefix && !observation.failure) return this.#result(send, "unknown", "predecessor_pending");
+        && (!observation.prefix || (!observation.finalized && observation.prefill && observation.prefill.read + observation.prefill.write > 0))
+        && !observation.failure) return this.#result(send, "unknown", "predecessor_pending");
     }
     if (send.gapSequence !== this.#gapSequence) return this.#result(send, "unknown", this.#gap);
     return send.coverage === "tracking_horizon" ? this.#result(send, "fill", "tracking_horizon")
@@ -372,6 +414,11 @@ export class PromptCacheReuseLedger {
     if (!pending) return;
     if (!pending.prefill) this.#markGap("prefill_unconfirmed");
     else if (!pending.prefix && !pending.failure) this.#markGap("hash_unavailable");
+    else if (!pending.finalized && !pending.failure) this.#markGap("unmeasured_anchor");
+    if (!pending.finalized) for (const id of pending.anchors) {
+      const anchor = this.#records.get(id);
+      if (anchor) this.#remove(anchor, false);
+    }
     this.#pendingBytes -= pending.bytes;
     this.#pending.delete(send);
   }

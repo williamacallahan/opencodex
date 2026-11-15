@@ -24,6 +24,7 @@ function fixture() {
   const fill = (prefix = prompt(), identity: Partial<SendIdentity> = {}) => {
     const ticket = send(identity);
     ready(ticket, prefix);
+    ledger.reconcileUsage(ticket, { read: 0, write: 1000 });
     ledger.releaseSend(ticket);
     return ticket;
   };
@@ -63,7 +64,7 @@ describe("prompt cache reuse evidence", () => {
     expect(result.reuse_coverage).toBe("complete");
   });
 
-  test("confirmed prefill is readable before generation finishes and clips loss per physical send", () => {
+  test("prefill fixes readiness but only finalized measurements authorize a loss denominator", () => {
     const { ledger, send, ready, time } = fixture();
     const writing = send();
     time(10);
@@ -71,7 +72,10 @@ describe("prompt cache reuse evidence", () => {
     const reading = send();
     time(20);
     ready(reading, prompt(), 400, 600);
+    outcome(ledger, reading, "unknown", "predecessor_pending");
+    ledger.reconcileUsage(writing, { read: 0, write: 1000 });
     expect(outcome(ledger, reading, "reuse", "same_account_anchor")).toMatchObject({ expected_cached_tokens: 1000, lost_cached_tokens: 600 });
+    ledger.reconcileUsage(reading, { read: 400, write: 600 });
     const another = send();
     ready(another, prompt(), 1200, 0);
     expect(outcome(ledger, another, "reuse", "same_account_anchor").lost_cached_tokens).toBe(0);
@@ -83,8 +87,10 @@ describe("prompt cache reuse evidence", () => {
     const writing = send();
     const overlap = send();
     ready(writing);
+    ledger.reconcileUsage(writing, { read: 0, write: 1000 });
     ready(overlap);
     outcome(ledger, overlap, "overlap", "prefill_overlap");
+    ledger.reconcileUsage(overlap, { read: 0, write: 1000 });
     const later = send();
     ready(later, prompt(), 1000, 0);
     outcome(ledger, later, "reuse", "same_account_anchor");
@@ -96,6 +102,7 @@ describe("prompt cache reuse evidence", () => {
     const writing = send();
     time(10000);
     ready(writing, prefix);
+    ledger.reconcileUsage(writing, { read: 0, write: 1000 });
     ledger.releaseSend(writing);
     time(ttl - 1);
     const warm = send();
@@ -115,6 +122,7 @@ describe("prompt cache reuse evidence", () => {
     const read = send();
     time(299999);
     ready(read, prompt(), 1000, 0);
+    ledger.reconcileUsage(read, { read: 1000, write: 0 });
     ledger.releaseSend(read);
     time(589999);
     const unconfirmed = send();
@@ -165,6 +173,9 @@ describe("prompt cache reuse evidence", () => {
     outcome(ledger, reading, "unknown", "predecessor_pending");
     time(30);
     expect(ledger.resolvePrefix(writing, prompt())).toBe(true);
+    outcome(ledger, reading, "unknown", "predecessor_pending");
+    time(40);
+    ledger.reconcileUsage(writing, { read: 0, write: 1000 });
     outcome(ledger, reading, "reuse", "same_account_anchor");
   });
 
@@ -249,6 +260,7 @@ describe("prompt cache reuse evidence", () => {
     if (prefix.status !== "supported") throw new Error("invalid fixture");
     const ticket = send();
     ready(ticket, { ...prefix, breakpoints: [{ index: 0, ttl: 3600000 }, { index: 1, ttl: 300000 }] });
+    ledger.reconcileUsage(ticket, { read: 0, write: 1000 });
     expect(ledger.coverage().records).toBe(0);
     const later = send();
     ready(later, prefix, 0, 0);
@@ -264,6 +276,7 @@ describe("prompt cache reuse evidence", () => {
     time(50 * 60000);
     const refresh = send();
     ready(refresh, { ...extended, breakpoints: [{ index: 0, ttl: 3600000 }, { index: 1, ttl: 300000 }] }, 1000, 0);
+    ledger.reconcileUsage(refresh, { read: 1000, write: 0 });
     ledger.releaseSend(refresh);
     time(62 * 60000);
     const later = send();
@@ -275,7 +288,9 @@ describe("prompt cache reuse evidence", () => {
     const { ledger, fill, send, ready, time } = fixture();
     fill(prompt("shared", 0, "1h"));
     time(50 * 60000);
-    ready(send(), prompt("shared", 1), 1000, 0);
+    const reading = send();
+    ready(reading, prompt("shared", 1), 1000, 0);
+    ledger.reconcileUsage(reading, { read: 1000, write: 0 });
     expect(ledger.coverage()).toMatchObject({ records: 1, reason: "unmeasured_anchor", complete: false });
   });
 
@@ -283,10 +298,71 @@ describe("prompt cache reuse evidence", () => {
     const { ledger, send, ready } = fixture();
     const first = send();
     ready(first, prompt(), 1000, 0);
+    ledger.reconcileUsage(first, { read: 1000, write: 0 });
     expect(ledger.coverage().records).toBe(0);
     const later = send();
     ready(later, prompt(), 0, 0);
     outcome(ledger, later, "unknown", "unmeasured_anchor");
+  });
+
+  test.each([true, false])("final usage reconciles anchors and pending expectations without moving readiness (hash first: %s)", hashFirst => {
+    const { ledger, send, ready, time } = fixture();
+    const writing = send();
+    time(10);
+    expect(ledger.confirmPrefill(writing, event(0, 1000))).toBe(true);
+    if (hashFirst) ledger.resolvePrefix(writing, prompt());
+    time(20);
+    const reading = send();
+    ready(reading, prompt(), 500, 0);
+    time(30);
+    ledger.reconcileUsage(writing, { read: 0, write: 500 });
+    if (!hashFirst) ledger.resolvePrefix(writing, prompt());
+    expect(outcome(ledger, reading, "reuse", "same_account_anchor")).toMatchObject({ expected_cached_tokens: 500, lost_cached_tokens: 0 });
+    ledger.releaseSend(writing);
+    ledger.releaseSend(reading);
+    time(300000);
+    const expired = send();
+    ready(expired, prompt(), 0, 0);
+    outcome(ledger, expired, "expired", "ttl_elapsed");
+  });
+
+  test.each([undefined, { read: 0 }, { read: -1, write: 0 }, { read: 0, write: 0 }, { read: 500, write: 0 }])(
+    "missing, contradictory or unattributable final usage removes provisional anchors: %j", usage => {
+      for (const hashFirst of [true, false]) {
+        const { ledger, send, ready } = fixture();
+        const writing = send();
+        ledger.confirmPrefill(writing, event(0, 1000));
+        if (hashFirst) ledger.resolvePrefix(writing, prompt());
+        const pendingRead = send();
+        ready(pendingRead, prompt(), 0, 0);
+        ledger.reconcileUsage(writing, usage);
+        if (!hashFirst) ledger.resolvePrefix(writing, prompt());
+        outcome(ledger, pendingRead, "unknown", "unmeasured_anchor");
+        ledger.releaseSend(writing);
+        const next = send();
+        ready(next, prompt(), 0, 0);
+        outcome(ledger, next, "unknown", "unmeasured_anchor");
+      }
+    });
+
+  test("final reads also reconcile the current cached loss", () => {
+    const { ledger, fill, send, ready } = fixture();
+    fill();
+    const reading = send();
+    ready(reading, prompt(), 0, 0);
+    ledger.reconcileUsage(reading, { read: 1000, write: 0 });
+    expect(outcome(ledger, reading, "reuse", "same_account_anchor")).toMatchObject({ expected_cached_tokens: 1000, lost_cached_tokens: 0 });
+  });
+
+  test("contradictory finalized sizes cannot choose the larger loss denominator", () => {
+    const { ledger, fill, send, ready } = fixture();
+    fill();
+    const changed = send();
+    ready(changed, prompt(), 0, 500);
+    ledger.reconcileUsage(changed, { read: 0, write: 500 });
+    const next = send();
+    ready(next, prompt(), 500, 0);
+    outcome(ledger, next, "unknown", "unmeasured_anchor");
   });
 
   test("restart has a new epoch, rejects old tickets, and still admits new positive evidence", () => {
@@ -344,6 +420,7 @@ describe("prompt cache reuse evidence", () => {
     fill();
     const current = send();
     ready(current, prompt(), healthy ? 1000 : 0, healthy ? 0 : 1000);
+    ledger.reconcileUsage(current, { read: healthy ? 1000 : 0, write: healthy ? 0 : 1000 });
     expect(outcome(ledger, current, "reuse", "same_account_anchor")).toMatchObject({
       expected_cached_tokens: 1000, lost_cached_tokens: healthy ? 0 : 1000,
     });
@@ -408,6 +485,7 @@ describe("prompt cache reuse evidence", () => {
     if (prefix.status !== "supported") throw new Error("invalid fixture");
     const mutable = { ...prefix, positions: prefix.positions.map(position => ({ ...position })) };
     ready(first, mutable);
+    ledger.reconcileUsage(first, { read: 0, write: 1000 });
     mutable.positions[0]!.digest = "changed";
     const next = send();
     ready(next, prompt(), 0, 0);

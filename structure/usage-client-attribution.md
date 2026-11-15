@@ -205,7 +205,12 @@ Per-account summaries still key on `accountLogLabel` and ignore the tag
 `src/server/prompt-cache-outcome.ts` emits `reuse_schema=1` with a process epoch, expectation,
 reason and coverage alongside the existing usage fields. `src/server/prompt-cache-observer.ts`
 binds the final native physical send to its response and supplies its completed, merged usage;
-opening counters cannot replace later cache counters or determine final lost tokens. Failed sends,
+opening counters cannot replace later cache counters or determine final lost tokens. Final usage also
+reconciles the ledger anchors created by that physical send, preserving their original prefill readiness
+and dispatch-based expiry. A reader finishing before its matching predecessor finalizes reports
+`unknown/predecessor_pending` without expected or lost tokens; prefill alone does not authorize a
+loss denominator. Missing, contradictory or unattributable final measurements leave the affected
+prefix unknown rather than retain or select an opening denominator. Failed sends,
 local answers and combo-parent summaries do not supply expected-token denominators. Combo children
 are excluded before capture. Translated transports and relays with hidden accounts remain explicitly
 unknown; relay detection uses the matching `nativeCacheProvider` and `sentProvider` context fields.

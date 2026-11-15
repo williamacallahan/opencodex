@@ -257,6 +257,48 @@ describe("native prompt cache observation paths", () => {
     expect(result.line).toContain("expected_cached_tokens=2048 lost_cached_tokens=1024");
   });
 
+  test("the next request uses the preceding send's finalized anchor size", async () => {
+    respond = () => new Response(new ReadableStream<Uint8Array>({ async start(controller) {
+      controller.enqueue(new TextEncoder().encode(frame("message_start", { type: "message_start", message: reply() })));
+      await Bun.sleep(40);
+      controller.enqueue(new TextEncoder().encode(frame("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" },
+        usage: { input_tokens: 2, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 1024 } })
+        + frame("message_stop", { type: "message_stop" })));
+      controller.close();
+    } }), { headers: { "content-type": "text/event-stream" } });
+    const raw = JSON.stringify(requestBody(true));
+    const written = await send(raw);
+    expect(written.line).toContain("cache_write_tokens=1024");
+    respond = () => streamingReply(1024, 0);
+    const next = await send(raw);
+    expect(next.line).toContain("cached_tokens=1024 cache_write_tokens=0");
+    expect(next.line).toContain("expected_cached_tokens=1024 lost_cached_tokens=0");
+  });
+
+  test("a reader finishing before its predecessor finalizes has no loss denominator", async () => {
+    let finishWriter!: () => void;
+    respond = () => received.length === 1 ? new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(frame("message_start", { type: "message_start", message: reply() })));
+      finishWriter = () => { controller.enqueue(new TextEncoder().encode(frame("message_stop", { type: "message_stop" }))); controller.close(); };
+    } }), { headers: { "content-type": "text/event-stream" } }) : streamingReply(1024, 0);
+    const raw = JSON.stringify(requestBody(true));
+    const writing = await handleClaudeMessages(new Request("http://localhost/strict/v1/messages", {
+      method: "POST", body: raw, headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
+    }), config, { model: "", provider: "" });
+    const reader = writing.body!.getReader();
+    try {
+      await reader.read();
+      const next = await send(raw);
+      expect(next.line).toContain("reuse_expectation=unknown reuse_reason=predecessor_pending");
+      expect(next.line).not.toContain("expected_cached_tokens=");
+      expect(next.line).not.toContain("lost_cached_tokens=");
+    } finally {
+      finishWriter();
+      while (!(await reader.read()).done) { /* drain the writer after the reader's outcome */ }
+      reader.releaseLock();
+    }
+  });
+
   test("a real buffered native combo child creates no cache observations", async () => {
     config.claudeCode!.strictPassthrough = false;
     config.combos = { "cache-child": { strategy: "failover", targets: [{ provider: "anthropic", model }] } };

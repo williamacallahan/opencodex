@@ -305,7 +305,12 @@ export function nativePromptCacheObservation(logCtx: RequestLogContext): Passthr
   if (!owner || !send?.ticket || send.ticket.rejected) return undefined;
   return Object.assign((message: unknown) => {
     if (!send.rawStreamObserved) owner.confirm(send, message);
-  }, { usage: (usage: OcxUsage | undefined) => { send.finalUsage = usage ? { ...usage } : null; } });
+  }, { usage: (usage: OcxUsage | undefined) => {
+    send.finalUsage = usage ? { ...usage } : null;
+    if (send.ticket) owner.ledger.reconcileUsage(send.ticket, usage && {
+      read: usage.cacheReadInputTokens ?? usage.cachedInputTokens, write: usage.cacheCreationInputTokens,
+    });
+  } });
 }
 export function observeNativePromptCacheResponse(source: ReadableStream<Uint8Array>, logCtx: RequestLogContext): ReadableStream<Uint8Array> {
   return observer?.rawResponse(source, logCtx) ?? source;
