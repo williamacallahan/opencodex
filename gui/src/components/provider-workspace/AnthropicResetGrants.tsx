@@ -346,6 +346,7 @@ export function AnthropicResetGrantModal({ accountId, accountLabel, entry, contr
     setBusy(false);
     setConfirming(null);
     setOutcome(result.kind === "unknown" ? null : outcomeOf(result));
+    if (result.kind === "refused") void controller.refresh(accountId);
   };
 
   const recheck = async () => {

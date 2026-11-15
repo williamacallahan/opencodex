@@ -73,7 +73,7 @@ const MAX_READS_IN_FLIGHT = 3;
 const NO_ENTRIES: Record<string, AnthropicGrantEntry> = {};
 const WINDOWS: readonly AnthropicResetWindow[] = ["five_hour", "seven_day", "seven_day_overage_included"];
 const UNKNOWN_CODES = new Set(["unknown_outcome", "journal_write_failed", "in_flight"]);
-const RELEASES_HELD = new Set(["unknown_outcome_expired", "operation_identity_mismatch"]);
+const RELEASES_HELD = new Set(["unknown_outcome_expired", "operation_identity_mismatch", "unresolved_prior_operation"]);
 // Like Grok's controller-owned holds, these survive every modal and panel remount.
 // Anthropic permits an explicit same-ID retry; a GET never proves settlement.
 let grantHolds: ReadonlyMap<string, AnthropicGrantAttempt> = new Map();
