@@ -8,6 +8,9 @@
  * rate-limit / auth failures from transient errors.
  */
 
+import { providerEgressFetchInit, resolveProviderEgress, type ProviderEgressBinding } from "../lib/provider-egress";
+import { configuredOutboundFetch } from "../lib/proxy-env";
+
 export interface XaiVideoSubmitRequest {
   prompt: string;
   model?: string; // default "grok-imagine-video"
@@ -64,7 +67,7 @@ async function readBoundedText(resp: Response): Promise<string> {
  */
 export async function submitVideoJob(
   req: XaiVideoSubmitRequest,
-  auth: { baseUrl: string; token: string },
+  auth: { baseUrl: string; token: string; egress?: ProviderEgressBinding },
   signal?: AbortSignal,
 ): Promise<XaiVideoSubmitResult> {
   const body: Record<string, unknown> = {
@@ -78,7 +81,11 @@ export async function submitVideoJob(
   const timeout = AbortSignal.timeout(SUBMIT_TIMEOUT_MS);
   const linkedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
 
-  const resp = await fetch(`${auth.baseUrl}/videos/generations`, {
+  const url = `${auth.baseUrl}/videos/generations`;
+  const egress = auth.egress && resolveProviderEgress({ ...auth.egress, url });
+  const send = !egress || egress.kind === "inherit" ? fetch : configuredOutboundFetch;
+  const resp = await send(url, {
+    ...(egress ? providerEgressFetchInit(egress) : {}),
     method: "POST",
     redirect: "manual",
     headers: {
@@ -111,13 +118,17 @@ export async function submitVideoJob(
  */
 export async function pollVideoJob(
   requestId: string,
-  auth: { baseUrl: string; token: string },
+  auth: { baseUrl: string; token: string; egress?: ProviderEgressBinding },
   signal?: AbortSignal,
 ): Promise<XaiVideoPollResult> {
   const timeout = AbortSignal.timeout(POLL_TIMEOUT_MS);
   const linkedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
 
-  const resp = await fetch(`${auth.baseUrl}/videos/${encodeURIComponent(requestId)}`, {
+  const url = `${auth.baseUrl}/videos/${encodeURIComponent(requestId)}`;
+  const egress = auth.egress && resolveProviderEgress({ ...auth.egress, url });
+  const send = !egress || egress.kind === "inherit" ? fetch : configuredOutboundFetch;
+  const resp = await send(url, {
+    ...(egress ? providerEgressFetchInit(egress) : {}),
     method: "GET",
     redirect: "manual",
     headers: {

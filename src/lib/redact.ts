@@ -283,6 +283,7 @@ function maskCredentialHeadersOnce(value: string, decodeEscapes: boolean): strin
 }
 
 const SECRET_VALUE_PATTERNS: Array<[RegExp, string]> = [
+  [/(\b(?:https?|socks5h?):\/\/)[^\s\/@"'<>]+@/gi, `$1${REDACTED_SECRET}@`],
   // A Bearer token outside a labelled header (prose, JSON fragments, logs).
   // Horizontal whitespace only: `\s+` crossed line boundaries and masked the
   // first word of the NEXT line when a header was quoted with a trailing break.

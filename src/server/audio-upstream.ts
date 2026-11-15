@@ -17,7 +17,7 @@ import { NativeProfileError } from "../codex/native-profile-types";
 import { formatCodexProviderForLog } from "../codex/routing";
 import type { AdmissionLease } from "../lib/admission";
 import { captureExplicitOpenAiCallerAuth, resolveFirstUsableOpenAiSidecar, selectOpenAiImagesProvider } from "../providers/openai-sidecar";
-import type { OcxConfig } from "../types";
+import type { OcxConfig, OcxProviderConfig } from "../types";
 import { admissionScopeDenial } from "./admission-model-scope";
 import {
   isProxyAdmissionSecret,
@@ -53,6 +53,7 @@ export function resolveAudioAdmission(
 
 export interface AudioUpstream {
   providerName: string;
+  provider: OcxProviderConfig;
   providerBaseUrl: string;
   headers: Record<string, string>;
   keyed: boolean;
@@ -148,6 +149,7 @@ export async function resolveAudioUpstream(
       log.model = options.model;
       return {
         providerName: candidate.providerName,
+        provider: candidate.provider,
         providerBaseUrl: candidate.provider.baseUrl,
         headers: Object.fromEntries(selected),
         keyed: false,
@@ -169,7 +171,7 @@ export async function resolveAudioUpstream(
       log.provider = providerName;
       log.model = options.model;
       return {
-        providerName, providerBaseUrl: provider.baseUrl, headers: Object.fromEntries(selected),
+        providerName, provider, providerBaseUrl: provider.baseUrl, headers: Object.fromEntries(selected),
         keyed: true, release: () => {},
       };
     }

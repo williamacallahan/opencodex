@@ -197,11 +197,11 @@ by transports that can preserve that request-local decision:
 | Coding-agent subprocess providers in `src/adapters/coding-agent/turn.ts` | Not honoured | Their scoped child environment omits proxy variables, so a provider route is not projected into the subprocess. |
 | Compatibility Lab pinned sender in `src/lib/lab-live-pinned-sender.ts` | Not honoured | The sender uses the approved pinned address and does not resolve a provider route. |
 
-The following authenticated data-plane endpoints do not resolve a provider route because they do
-not route a model through the router: `/v1/images/generations`, `/v1/images/edits`,
-`/v1/audio/transcriptions` and `/v1/audio/transcriptions/stream`, `/v1/live`,
-`/v1/realtime/calls`, the standalone realtime WebSocket routes, and the non-account-qualified
-branch of `/v1/alpha/search`. Their dispatch remains with the endpoint owners in
+The Images relay, audio transcription, and live call creation resolve the selected provider route;
+the live sideband refuses an explicit route. The standalone xAI image relay also resolves its provider
+route. The hosted xAI image/video bridge does not yet bind its provider route to the client sends.
+Standalone realtime WebSocket routes and the non-account-qualified branch of `/v1/alpha/search`
+do not resolve a provider route. Their dispatch remains with the endpoint owners in
 `src/server/index/serve-options.ts`.
 
 ## Provider diagnostic outbound safety

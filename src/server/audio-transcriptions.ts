@@ -2,6 +2,8 @@ import { formatErrorResponse } from "../bridge";
 import { cancelBodyOnAbort, clearableDeadline, signalWithTimeout } from "../lib/abort";
 import type { AdmissionLease } from "../lib/admission";
 import { sidecarEnter } from "../lib/sidecar-tracker";
+import { InvalidProviderEgressError, providerEgressFetchInit, resolveProviderEgress } from "../lib/provider-egress";
+import { configuredOutboundFetch } from "../lib/proxy-env";
 import type { OcxConfig } from "../types";
 import type { DataPlaneAdmission } from "./auth-cors";
 import { resolveAudioUpstream, TRANSCRIPTION_MODEL } from "./audio-upstream";
@@ -116,7 +118,9 @@ async function transcribeAdmitted(
       form.append("model", input.model);
       form.append("response_format", "json");
     }
-    const upstream = await fetch(url, { method: "POST", headers, body: form, signal: signal.signal, redirect: "manual" });
+    const egress = resolveProviderEgress({ providerName: relay.providerName, provider: relay.provider, url });
+    const send = egress.kind === "inherit" ? fetch : configuredOutboundFetch;
+    const upstream = await send(url, { method: "POST", headers, body: form, signal: signal.signal, redirect: "manual", ...providerEgressFetchInit(egress) });
     outcome = upstream.status;
     const detach = cancelBodyOnAbort(upstream.body, signal.signal);
     let body: ArrayBuffer | Response;
@@ -140,7 +144,8 @@ async function transcribeAdmitted(
     return input.format === "text"
       ? new Response(payload.text, { headers: { "content-type": "text/plain; charset=utf-8" } })
       : Response.json({ text: payload.text });
-  } catch {
+  } catch (error) {
+    if (error instanceof InvalidProviderEgressError) throw error;
     if (operation.signal.aborted) {
       outcome = operation.didExpire() ? "timeout" : undefined;
       return formatErrorResponse(499, "client_closed_request", "Audio request canceled");

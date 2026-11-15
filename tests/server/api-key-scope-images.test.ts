@@ -26,13 +26,16 @@ const originalFetch = globalThis.fetch;
 const previousHome = process.env.OPENCODEX_HOME;
 let home = "";
 let upstreamCalls: string[] = [];
+let upstreamInit: Array<RequestInit & { proxy?: string | false }> = [];
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "ocx-images-scope-"));
   process.env.OPENCODEX_HOME = home;
   upstreamCalls = [];
-  globalThis.fetch = (async (input: unknown) => {
+  upstreamInit = [];
+  globalThis.fetch = (async (input: unknown, init?: RequestInit & { proxy?: string | false }) => {
     upstreamCalls.push(String(input));
+    if (init) upstreamInit.push(init);
     return Response.json({ created: 1, data: [{ b64_json: "aGk=" }] });
   }) as unknown as typeof fetch;
 });
@@ -116,6 +119,27 @@ test("the same key still reaches the destination its scope names", async () => {
   expect(upstreamCalls[0]).toContain("/v1/images/generations");
 });
 
+test.each(["generations", "edits"] as const)("image %s uses the provider's route and preserves inherited routing", async endpoint => {
+  for (const proxy of [undefined, "http://proxy.example:8080", "direct"] as const) {
+    const cfg = config({});
+    cfg.providers["openai-apikey"]!.proxy = proxy;
+    const response = await handleImages(imagesRequest({ prompt: "a cat" }), cfg, endpoint, logContext(), undefined, UNSCOPED);
+    expect(response.status).toBe(200);
+    expect(upstreamCalls.at(-1)).toBe(`https://api.openai.com/v1/images/${endpoint}`);
+    expect(upstreamInit.at(-1)?.proxy).toBe(proxy === "direct" ? false : proxy === undefined ? undefined : "http://proxy.example:8080/");
+  }
+});
+
+test("image provider bypasses its proxy for matching destinations and rejects an invalid route", async () => {
+  const cfg = config({});
+  Object.assign(cfg.providers["openai-apikey"]!, { proxy: "http://proxy.example:8080", noProxy: "api.openai.com" });
+  expect((await handleImages(imagesRequest({ prompt: "a cat" }), cfg, "generations", logContext(), undefined, UNSCOPED)).status).toBe(200);
+  expect(upstreamInit.at(-1)?.proxy).toBe(false);
+  cfg.providers["openai-apikey"]!.proxy = "invalid";
+  await expect(handleImages(imagesRequest({ prompt: "a cat" }), cfg, "generations", logContext(), undefined, UNSCOPED)).rejects.toThrow();
+  expect(upstreamCalls).toHaveLength(1);
+});
+
 test("a body that names no model cannot satisfy a model list", async () => {
   const response = await handleImages(
     imagesRequest({ prompt: "a cat" }),
@@ -144,6 +168,16 @@ test("naming the refusal marker in a scope grants nothing", async () => {
   );
   expect(response.status).toBe(403);
   expect(upstreamCalls).toEqual([]);
+});
+
+test("standalone xAI image relay uses the selected provider route", async () => {
+  const cfg = config({}, {
+    images: { bridgeEnabled: true },
+    providers: { xai: { adapter: "openai-chat", baseUrl: "https://api.x.ai/v1", apiKey: "fixture-xai-key", authMode: "key", proxy: "http://proxy.test:3128" } },
+  });
+  await handleImages(imagesRequest({ prompt: "a cat" }), cfg, "generations", logContext(), undefined, UNSCOPED);
+  expect(upstreamCalls).toEqual(["https://api.x.ai/v1/images/generations"]);
+  expect(upstreamInit[0]?.proxy).toBe("http://proxy.test:3128/");
 });
 
 test("the xAI image bridge is a destination the scope covers", async () => {

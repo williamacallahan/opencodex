@@ -24,7 +24,7 @@ afterEach(() => {
   home = "";
 });
 
-async function withRelay(run: (patch: (body: unknown) => Promise<Response>) => Promise<void>): Promise<void> {
+async function withRelay(run: (patch: (body: unknown) => Promise<Response>, list: () => Promise<Response>) => Promise<void>): Promise<void> {
   home = mkdtempSync(join(tmpdir(), "ocx-provider-patch-fields-"));
   process.env.OPENCODEX_HOME = home;
   const base = config("127.0.0.1");
@@ -37,7 +37,7 @@ async function withRelay(run: (patch: (body: unknown) => Promise<Response>) => P
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
-    }));
+    }), () => fetch(new URL("/api/providers", server.url)));
   } finally {
     resolved.mockRestore();
     await server.stop(true);
@@ -71,6 +71,46 @@ describe("provider PATCH field mask", () => {
       expect((await patch({ modelSamplingDefaults: { model: null } })).status).toBe(200);
       expect(loadConfig().providers.relay?.modelSamplingDefaults).toEqual({ other: { temperature: 0 } });
     });
+  });
+
+  test("sets, displays, validates, and clears the provider proxy", async () => {
+    const name = "OCX_TEST_PROVIDER_PATCH_PROXY";
+    const previous = process.env[name];
+    const reference = "${OCX_TEST_PROVIDER_PATCH_PROXY}";
+    process.env[name] = "http://user:pass@egress.test:3128";
+    try {
+      await withRelay(async (patch, list) => {
+        const literal = "http://user:pass@egress.test:3128";
+        const response = await patch({ proxy: literal });
+        expect(response.status).toBe(200);
+        expect(await response.text()).not.toContain("user:pass");
+        expect(loadConfig().providers.relay?.proxy).toBe(literal);
+        let rows = await (await list()).json();
+        expect(rows.find((row: { name: string }) => row.name === "relay").proxy).toBe("http://egress.test:3128");
+        expect(JSON.stringify(rows)).not.toContain("user:pass");
+        expect((await patch({ proxy: reference })).status).toBe(200);
+        expect(loadConfig().providers.relay?.proxy).toBe(reference);
+        rows = await (await list()).json();
+        expect(rows.find((row: { name: string }) => row.name === "relay").proxy).toBe(reference);
+        expect(JSON.stringify(rows)).not.toContain("user:pass");
+        for (const proxy of ["not a URL", "privatevalue:pass", 42, "${OCX_TEST_MISSING_PROVIDER_PROXY}"]) {
+          const rejected = await patch({ proxy });
+          expect(rejected.status).toBe(400);
+          expect(await rejected.text()).not.toContain("privatevalue");
+          expect(loadConfig().providers.relay?.proxy).toBe(reference);
+        }
+        expect((await patch({ proxy: "direct" })).status).toBe(200);
+        rows = await (await list()).json();
+        expect(rows.find((row: { name: string }) => row.name === "relay").proxy).toBe("direct");
+        expect((await patch({ proxy: null })).status).toBe(200);
+        expect(loadConfig().providers.relay).not.toHaveProperty("proxy");
+        rows = await (await list()).json();
+        expect(rows.find((row: { name: string }) => row.name === "relay")).not.toHaveProperty("proxy");
+      });
+    } finally {
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    }
   });
 
   test("stores promptCacheKey and clears it with null", async () => {

@@ -89,7 +89,7 @@ export async function planImageBridge(
     typeof keepRaw === "number" && Number.isFinite(keepRaw) ? Math.floor(keepRaw) : undefined;
   return {
     provider: found.provider,
-    auth: { baseUrl: pinnedBaseUrl, token },
+    auth: { baseUrl: pinnedBaseUrl, token, egress: { providerName: found.name, provider: found.provider } },
     model: config.images?.bridgeModel ?? DEFAULT_MODEL,
     toolNames,
     ...(hostedSize ? { defaultSize: hostedSize } : {}),
@@ -149,7 +149,7 @@ export async function planVideoBridge(
     typeof keepRaw === "number" && Number.isFinite(keepRaw) ? Math.floor(keepRaw) : undefined;
   return {
     provider: found.provider,
-    auth: { baseUrl: pinnedBaseUrl, token },
+    auth: { baseUrl: pinnedBaseUrl, token, egress: { providerName: found.name, provider: found.provider } },
     model: config.images?.videoBridgeModel ?? DEFAULT_VIDEO_MODEL,
     toolNames,
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),

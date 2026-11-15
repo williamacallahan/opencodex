@@ -26,6 +26,14 @@ function stubFetch(status: number, body: unknown): { url: string; init?: Request
 }
 
 describe("callXaiImages", () => {
+  test("applies the selected provider route to the image send", async () => {
+    const calls = stubFetch(200, { data: [{ b64_json: "dGVzdA==" }] });
+    await callXaiImages({ prompt: "x" }, {
+      ...AUTH, egress: { providerName: "xai", provider: { proxy: "http://proxy.test:3128" } },
+    });
+    expect((calls[0]!.init as RequestInit & { proxy?: string }).proxy).toBe("http://proxy.test:3128/");
+  });
+
   test("no imageUrl → POST /images/generations", async () => {
     const calls = stubFetch(200, { data: [{ b64_json: "dGVzdA==" }] });
     await callXaiImages({ prompt: "a cat" }, AUTH);

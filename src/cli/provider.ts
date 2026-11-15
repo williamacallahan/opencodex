@@ -32,6 +32,7 @@ import { projectLocalSyncResult, type LocalSyncResult } from "./local-sync-resul
 import { providerManagementConfigError } from "../server/auth-cors";
 import { readClientConnectionState, type ClientConnectionState } from "../client/state";
 import { SENSITIVE_KEY_PATTERN } from "../lib/redact";
+import { providerProxyForDisplay } from "../lib/provider-egress";
 
 export interface ProviderCommandDeps extends RuntimeApiDeps {
   syncModels?: typeof syncModelsToCodex;
@@ -559,6 +560,7 @@ function handleShow(args: string[]): void {
   const prov = config.providers[name];
   const display = {
     ...prov,
+    proxy: providerProxyForDisplay(prov.proxy),
     ...(prov.modelCosts !== undefined ? { modelCosts: sanitizeModelCostsForDisplay(prov.modelCosts) } : {}),
     ...(prov.apiKey ? { apiKey: maskSecret(prov.apiKey) } : {}),
     ...(prov.apiKeyPool ? { apiKeyPool: prov.apiKeyPool.map(e => ({ ...e, key: maskSecret(e.key) })) } : {}),

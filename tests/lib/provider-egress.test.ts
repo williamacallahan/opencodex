@@ -57,6 +57,30 @@ describe("provider egress resolution", () => {
     });
   });
 
+  test("environment references resolve at request time and reject unset or empty values", () => {
+    const name = "OCX_TEST_PROVIDER_EGRESS_ROUTE";
+    const previous = process.env[name];
+    const reference = "${OCX_TEST_PROVIDER_EGRESS_ROUTE}";
+    try {
+      process.env[name] = "http://user:pass@egress.test:3128";
+      expect(resolve({ proxy: reference })).toEqual({
+        kind: "proxy", proxyUrl: "http://user:pass@egress.test:3128/", transport: "http",
+      });
+      process.env[name] = "socks5://egress.test:1080";
+      expect(resolve({ proxy: reference })).toEqual({ kind: "proxy", proxyUrl: "socks5://egress.test:1080", transport: "socks5" });
+      for (const missing of [undefined, "", "  "]) {
+        if (missing === undefined) delete process.env[name];
+        else process.env[name] = missing;
+        expect(() => resolve({ proxy: reference })).toThrow(InvalidProviderEgressError);
+        expect(providerEgressConfigError({ proxy: reference })).toContain(name);
+        expect(providerEgressConfigError({ proxy: reference })).not.toContain("user:pass");
+      }
+    } finally {
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    }
+  });
+
   test("a socks5 URL is carried verbatim so the SOCKS transport can parse it", () => {
     // Not normalized through URL.toString(): the SOCKS transport validates the original value,
     // including credentials and the socks5h variant, and a reserialized URL is not guaranteed
@@ -64,6 +88,28 @@ describe("provider egress resolution", () => {
     for (const value of ["socks5://127.0.0.1:1080", "socks5h://127.0.0.1:1080"]) {
       expect(resolve({ proxy: value })).toEqual({ kind: "proxy", proxyUrl: value, transport: "socks5" });
     }
+  });
+
+  test("explicit proxies refuse plaintext destinations except loopback and bypasses", () => {
+    for (const proxy of ["http://egress.test:3128", "socks5://egress.test:1080"]) {
+      for (const url of ["http://api.provider.example/v1/models", "file:///secret"]) {
+        expect(() => resolve({ proxy }, url)).toThrow(InvalidProviderEgressError);
+      }
+      try {
+        resolve({ proxy }, "http://api.provider.example/v1/models");
+        throw new Error("expected refusal");
+      } catch (error) {
+        expect(error).toBeInstanceOf(InvalidProviderEgressError);
+        expect(error).toMatchObject({ field: "proxy" });
+      }
+      for (const url of ["http://localhost/", "http://127.2.3.4/", "http://[::1]/", "http://[::ffff:127.0.0.1]/"]) {
+        expect(resolve({ proxy }, url).kind).toBe("proxy");
+      }
+      expect(resolve({ proxy, noProxy: "api.provider.example" }, "http://api.provider.example/").kind).toBe("direct");
+      expect(providerEgressConfigError({ proxy })).toBeNull();
+    }
+    expect(resolve({}, "http://api.provider.example/").kind).toBe("inherit");
+    expect(resolve({ proxy: "direct" }, "http://api.provider.example/").kind).toBe("direct");
   });
 
   test("a provider noProxy match forces direct egress out of the provider's own proxy", () => {
@@ -119,6 +165,7 @@ describe("provider egress never reproduces a proxy credential", () => {
     const secret = "http://operator:hunter2@egress.test:3128/path?token=abc";
     const label = sanitizeProxyUrlForLog(secret);
     expect(label).toBe("http://egress.test:3128");
+    expect(sanitizeProxyUrlForLog("socks5://user:pass@egress.test")).toBe("socks5://egress.test");
     for (const fragment of ["operator", "hunter2", "token", "abc"]) {
       expect(label).not.toContain(fragment);
     }

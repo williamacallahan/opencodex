@@ -6,6 +6,7 @@ import {
 } from "../../config/load-degrade";
 import type { OcxProviderConfig } from "../../types";
 import { providerModelDiscoveryConfigError } from "../../providers/model-discovery-config";
+import { providerEgressConfigError } from "../../lib/provider-egress";
 
 /**
  * The retry policies. They are the one carried group the PATCH field mask did not know, and they
@@ -217,7 +218,7 @@ const PROVIDER_PATCH_FIELDS: ReadonlySet<string> = new Set([
   "modelContextWindows", "modelSamplingDefaults", "pinnedReasoningEffort", "modelPinnedReasoningEfforts", "autoReviewModel",
   "autoReviewModelOverrides", "modelAutoCompactTokenLimits", "modelSupportsServiceTier", "modelSuppressSyntheticMax",
   "noStructuredOutputModels", "noJsonSchemaModels", "unsupportedHostedTools", "retainModels",
-  "omitReasoningEffortWithToolsModels", "headers",
+  "omitReasoningEffortWithToolsModels", "headers", "proxy",
   ...REASONING_LIST_FIELDS,
   "promptCacheKey",
   "foldDeveloperRoleToSystem",
@@ -253,6 +254,17 @@ export function applyProviderCompatPatchFields(
   next: OcxProviderConfig,
 ): { touched: boolean } | { error: string } {
   let touched = false;
+  if (Object.hasOwn(rawBody, "proxy")) {
+    const proxy = rawBody.proxy;
+    if (proxy === null) delete next.proxy;
+    else if (typeof proxy !== "string") return { error: "proxy must be a string or null" };
+    else {
+      const error = providerEgressConfigError({ proxy });
+      if (error) return { error };
+      next.proxy = proxy;
+    }
+    touched = true;
+  }
   for (const field of REASONING_LIST_FIELDS) {
     if (!Object.hasOwn(rawBody, field)) continue;
     const value = rawBody[field];

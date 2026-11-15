@@ -48,6 +48,14 @@ describe("redactSecretString", () => {
     expect(redacted).not.toContain("arn:aws:codewhisperer");
   });
 
+  test("masks proxy URL userinfo while preserving scheme and host", () => {
+    for (const scheme of ["http", "https", "socks5", "socks5h"]) {
+      expect(redactSecretString(`${scheme}://user:pass@proxy.test:1080/path`))
+        .toBe(`${scheme}://${REDACTED_SECRET}@proxy.test:1080/path`);
+    }
+    expect(redactSecretString("https://proxy.test/path")).toBe("https://proxy.test/path");
+  });
+
   test("preserves non-secret diagnostic text", () => {
     expect(redactSecretString("status=429 model=gpt-5.5")).toBe("status=429 model=gpt-5.5");
   });

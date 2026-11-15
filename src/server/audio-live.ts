@@ -5,6 +5,8 @@ import { isolateCodexPoolClientMetadata } from "../codex/forward-transport-heade
 import { CodexInstallationIdUnavailableError } from "../codex/installation-id";
 import { cancelBodyOnAbort, clearableDeadline } from "../lib/abort";
 import type { AdmissionLease } from "../lib/admission";
+import { InvalidProviderEgressError, providerEgressFetchInit, providerEgressIsExplicit, resolveProviderEgress } from "../lib/provider-egress";
+import { configuredOutboundFetch } from "../lib/proxy-env";
 import { captureExplicitOpenAiCallerAuth } from "../providers/openai-sidecar";
 import type { OcxConfig } from "../types";
 import type { AudioClient } from "./audio-client";
@@ -104,7 +106,9 @@ export async function handleExternalLive(
     const url = relay.keyed
       ? frameless ? forwardLiveUrl(relay.providerBaseUrl, false) : keyedLiveUrl(relay.providerBaseUrl)
       : forwardLiveUrl(relay.providerBaseUrl, true);
-    const upstream = await fetch(url, { method: "POST", headers, body, signal: deadline.signal, redirect: "manual" });
+    const egress = resolveProviderEgress({ providerName: relay.providerName, provider: relay.provider, url });
+    const send = egress.kind === "inherit" ? fetch : configuredOutboundFetch;
+    const upstream = await send(url, { method: "POST", headers, body, signal: deadline.signal, redirect: "manual", ...providerEgressFetchInit(egress) });
     outcome = upstream.status;
     const detach = cancelBodyOnAbort(upstream.body, deadline.signal);
     let responseBody: ArrayBuffer | Response;
@@ -134,6 +138,7 @@ export async function handleExternalLive(
       location: `/v1/${frameless ? "live" : "realtime/calls"}/${alias}`,
     } });
   } catch (error) {
+    if (error instanceof InvalidProviderEgressError) throw error;
     if (error instanceof CodexInstallationIdUnavailableError) return formatErrorResponse(503, "server_busy", error.message);
     if (req.signal.aborted || controller.signal.aborted) {
       outcome = undefined;
@@ -182,15 +187,25 @@ export async function resolveExternalLiveSocket(
       relay.release();
       return formatErrorResponse(409, "authentication_error", "Live call account is no longer available");
     }
+    const upstreamWsUrl = buildLiveSidebandUpstreamWsUrl(upstreamTarget, binding ? binding.sidebandBaseUrl : config.experimentalRealtimeWsBaseUrl);
+    // This only decides whether to refuse the socket; it does not send through the proxy.
+    // HTTPS has the same default port and bypass matching as WSS.
+    const egressUrl = upstreamWsUrl.replace(/^wss:/, "https:");
+    const egress = resolveProviderEgress({ providerName: relay.providerName, provider: relay.provider, url: egressUrl });
+    if (providerEgressIsExplicit(egress)) {
+      relay.release();
+      return formatErrorResponse(502, "upstream_error", `Provider ${relay.providerName} cannot use its egress proxy for the live sideband`);
+    }
     return {
       authContext: relay.authContext,
       headers: Object.fromEntries(protocolHeaders(client, relay, frameless)),
-      upstreamWsUrl: buildLiveSidebandUpstreamWsUrl(upstreamTarget, binding ? binding.sidebandBaseUrl : config.experimentalRealtimeWsBaseUrl),
+      upstreamWsUrl,
       maxSessionMs: LIVE_CALL_TTL_MS,
       finish: finishAudioUpstream(relay),
     };
-  } catch {
+  } catch (error) {
     relay.release();
+    if (error instanceof InvalidProviderEgressError) throw error;
     return formatErrorResponse(400, "invalid_request_error", "Invalid live endpoint configuration");
   }
 }

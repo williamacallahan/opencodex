@@ -31,15 +31,19 @@ const originalFetch = globalThis.fetch;
 const previousHome = process.env.OPENCODEX_HOME;
 let home = "";
 let upstreamCalls: string[] = [];
+let upstreamInit: Array<RequestInit & { proxy?: string | false }> = [];
 let leases: AdmissionLease[] = [];
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "ocx-audio-scope-"));
   process.env.OPENCODEX_HOME = home;
   upstreamCalls = [];
+  upstreamInit = [];
   leases = [];
-  globalThis.fetch = (async (input: unknown) => {
+  globalThis.fetch = (async (input: unknown, init?: RequestInit & { proxy?: string | false }) => {
     upstreamCalls.push(String(input));
+    if (init) upstreamInit.push(init);
+    if (String(input).includes("/live")) return new Response("v=0", { status: 201, headers: { location: "/v1/live/rtc_test" } });
     return Response.json({ text: "hello" });
   }) as unknown as typeof fetch;
 });
@@ -140,6 +144,47 @@ test("file transcription still runs when the scope names its destination", async
     client(cfg).admission,
   );
   expect(response.status).toBe(200);
+  expect(upstreamCalls).toHaveLength(1);
+});
+
+test("transcription and live call creation use the provider route", async () => {
+  for (const proxy of [undefined, "http://proxy.example:8080", "direct"] as const) {
+    const cfg = config({});
+    cfg.providers["openai-apikey"]!.proxy = proxy;
+    const expected = proxy === "direct" ? false : proxy === undefined ? undefined : "http://proxy.example:8080/";
+    const transcription = await handleAudioTranscriptions(transcriptionRequest(), cfg, logContext(), client(cfg).admission);
+    expect(transcription.status).toBe(200);
+    expect(upstreamInit.at(-1)?.proxy).toBe(expected);
+    const call = await handleExternalLive(new Request("http://localhost/v1/live", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sdp: "v=0" }),
+    }), cfg, logContext(), { client: client(cfg), lease: lease(), bindings: new LiveCallBindings() });
+    expect(call.status).toBe(201);
+    expect(upstreamInit.at(-1)?.proxy).toBe(expected);
+  }
+});
+
+test("live sideband refuses an explicit provider route before opening a socket", async () => {
+  for (const route of [{ proxy: "http://proxy.example:8080" }, { proxy: "direct" }, { noProxy: "api.openai.com" }]) {
+    const cfg = config({});
+    Object.assign(cfg.providers["openai-apikey"]!, route);
+    const result = await resolveExternalLiveSocket(client(cfg), cfg, logContext(),
+      { style: "realtime-standalone", query: "model=" + LIVE_AUDIO_MODEL },
+      { lease: lease(), bindings: new LiveCallBindings() });
+    expect(result).toBeInstanceOf(Response);
+    if (!(result instanceof Response)) throw new Error("sideband was not refused");
+    expect(result.status).toBe(502);
+    expect(await result.text()).toContain("Provider openai-apikey cannot use its egress proxy for the live sideband");
+    expect(upstreamCalls).toEqual([]);
+  }
+});
+
+test("provider noProxy forces direct audio requests and malformed routes never send", async () => {
+  const cfg = config({});
+  Object.assign(cfg.providers["openai-apikey"]!, { proxy: "http://proxy.example:8080", noProxy: "api.openai.com" });
+  expect((await handleAudioTranscriptions(transcriptionRequest(), cfg, logContext(), client(cfg).admission)).status).toBe(200);
+  expect(upstreamInit.at(-1)?.proxy).toBe(false);
+  cfg.providers["openai-apikey"]!.proxy = "invalid";
+  await expect(handleAudioTranscriptions(transcriptionRequest(), cfg, logContext(), client(cfg).admission)).rejects.toThrow();
   expect(upstreamCalls).toHaveLength(1);
 });
 

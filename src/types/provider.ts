@@ -531,6 +531,8 @@ export interface OcxProviderConfig {
    * - `"direct"` or `null` — never use the global proxy for this provider.
    * - `"http://…"` / `"https://…"` — this provider's own HTTP(S) proxy.
    * - `"socks5://…"` / `"socks5h://…"` — this provider's own SOCKS5 proxy.
+   * - `"${ENV_VAR}"` — resolve the route from the environment for each request.
+   * PATCH `null` removes this field; use `"direct"` to force direct egress.
    *
    * An empty string is rejected rather than read as DIRECT: a cleared dashboard field must not
    * silently switch a provider from inheriting the global proxy to refusing it. A malformed

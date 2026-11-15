@@ -563,6 +563,18 @@ describe("ocx provider", () => {
     }
   });
 
+  test("provider show --json omits proxy credentials", () => {
+    const { dir } = freshConfig({ providers: {
+      relay: { adapter: "openai-chat", baseUrl: "https://relay.example.test/v1", proxy: "http://user:pass@egress.test:3128" },
+    }, defaultProvider: "relay" });
+    try {
+      const result = runCli(["provider", "show", "relay", "--json"], { OPENCODEX_HOME: dir });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout).proxy).toBe("http://egress.test:3128");
+      expect(result.stdout).not.toContain("user:pass");
+    } finally { removeTreeWithRetry(dir); }
+  });
+
   test("provider show --json returns valid JSON", () => {
     const { dir } = freshConfig();
     try {

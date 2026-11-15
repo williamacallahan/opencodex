@@ -29,6 +29,8 @@ import { formatCodexProviderForLog } from "../codex/routing";
 import { signalWithTimeout } from "../lib/abort";
 import { readBoundedResponseBytes, type BoundedBytesResult } from "../lib/bounded-body";
 import { sidecarEnter } from "../lib/sidecar-tracker";
+import { InvalidProviderEgressError, providerEgressFetchInit, resolveProviderEgress, type ProviderEgressBinding } from "../lib/provider-egress";
+import { configuredOutboundFetch } from "../lib/proxy-env";
 import { isNonReplayableResponse } from "../lib/upstream-retry";
 import type { OcxConfig } from "../types";
 import { resolveFirstUsableOpenAiSidecar, selectImagesProvider } from "../providers/openai-sidecar";
@@ -558,7 +560,7 @@ async function tryXaiImageRelay(
         aspectRatio,
         imageUrl,
       },
-      { baseUrl: "https://api.x.ai/v1", token },
+      { baseUrl: "https://api.x.ai/v1", token, egress: { providerName: found.name, provider: found.provider } },
       linkedSignal.signal,
       timeoutMs,
     );
@@ -767,6 +769,7 @@ export async function handleImages(
     catch { console.error("[images] Failed to release probe lease"); }
   };
   let url: string;
+  let egressBinding: ProviderEgressBinding;
   let recordKeyFailure = (_status: 401 | 429, _retryAfter: string | null) => {};
   // Each branch is re-checked as it is entered: the forward check is defence in
   // depth for the pre-filter above, and the keyed check runs before a key
@@ -781,6 +784,7 @@ export async function handleImages(
       return denial;
     }
     const { provider } = forward;
+    egressBinding = { providerName: forward.providerName, provider };
     try {
       headers = mergeCodexSelectedHeaders({ "content-type": "application/json", ...provider.headers }, forward.headers);
       assertImagesUpstreamAuthorization(headers, config);
@@ -851,6 +855,7 @@ export async function handleImages(
         `image generation selected an API key for "${providerName}" that cannot be resolved`,
       );
     }
+    egressBinding = { providerName, provider };
     recordKeyFailure = (status, retryAfter) => { recordDistributedKeyFailure(config, providerName, provider._apiKeyAttempt, status, Date.now(), retryAfter); };
     // No fall back to the earlier snapshot once a pick has happened. The picker COMMITS its
     // choice before returning, so if the chosen reference will not resolve -- revoked keychain
@@ -894,7 +899,10 @@ export async function handleImages(
   try {
     // Images POSTs create paid, non-idempotent work. One fetch only: no reset retry without a
     // source-proven idempotency contract.
-    upstreamResponse = await fetch(url, {
+    const egress = resolveProviderEgress({ ...egressBinding, url });
+    const send = egress.kind === "inherit" ? fetch : configuredOutboundFetch;
+    upstreamResponse = await send(url, {
+      ...providerEgressFetchInit(egress),
       method: "POST",
       headers,
       body: JSON.stringify(isolateCodexPoolClientMetadata(
@@ -936,6 +944,7 @@ export async function handleImages(
     forward?.recordOutcome?.(upstreamResponse.status);
     return relayResponse;
   } catch (err) {
+    if (err instanceof InvalidProviderEgressError) { releaseForwardProbe(); throw err; }
     // Client cancel first: it aborts the linked signal too, and must not be logged as an
     // upstream failure (499 maps to client_closed_request in the request log).
     if (req.signal.aborted) {

@@ -1,8 +1,9 @@
+import type { ProviderEgressBinding } from "../lib/provider-egress";
 import type { OcxProviderConfig } from "../types";
 
 export interface ImageBridgePlan {
   provider: OcxProviderConfig;
-  auth: { baseUrl: string; token: string };
+  auth: { baseUrl: string; token: string; egress?: ProviderEgressBinding };
   model: string;
   toolNames: Set<string>;
   /** Per-call xAI deadline (ms). Defaults inside callXaiImages when omitted. */
@@ -28,7 +29,7 @@ export interface ImageCallResult {
 /** Plan for the video bridge. Same auth/provider shape as image, without image-specific defaults. */
 export interface VideoBridgePlan {
   provider: OcxProviderConfig;
-  auth: { baseUrl: string; token: string };
+  auth: { baseUrl: string; token: string; egress?: ProviderEgressBinding };
   model: string;
   toolNames: Set<string>;
   /** Per-call xAI deadline (ms) for submit + poll. */

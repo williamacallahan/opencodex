@@ -8,6 +8,9 @@
  * from transient errors.
  */
 
+import { providerEgressFetchInit, resolveProviderEgress, type ProviderEgressBinding } from "../lib/provider-egress";
+import { configuredOutboundFetch } from "../lib/proxy-env";
+
 export interface XaiImageRequest {
   prompt: string;
   model?: string; // default "grok-imagine-image-quality"
@@ -84,7 +87,7 @@ function mapQualityToResolution(quality?: string): string | undefined {
 
 export async function callXaiImages(
   req: XaiImageRequest,
-  auth: { baseUrl: string; token: string },
+  auth: { baseUrl: string; token: string; egress?: ProviderEgressBinding },
   signal?: AbortSignal,
   timeoutMs: number = XAI_IMAGES_TIMEOUT_MS,
 ): Promise<XaiImageResult> {
@@ -111,7 +114,11 @@ export async function callXaiImages(
   const linkedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
 
   const baseUrl = auth.baseUrl.replace(/\/+$/, "");
-  const resp = await fetch(`${baseUrl}${endpoint}`, {
+  const url = `${baseUrl}${endpoint}`;
+  const egress = auth.egress && resolveProviderEgress({ ...auth.egress, url });
+  const send = !egress || egress.kind === "inherit" ? fetch : configuredOutboundFetch;
+  const resp = await send(url, {
+    ...(egress ? providerEgressFetchInit(egress) : {}),
     method: "POST",
     headers: {
       "Authorization": `Bearer ${auth.token}`,

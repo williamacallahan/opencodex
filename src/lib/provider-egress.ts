@@ -25,6 +25,8 @@
  * quiet reinterpretation this batch exists to remove. An empty or whitespace-only value is
  * therefore a configuration error naming both real alternatives.
  */
+import { isLoopbackHostname } from "../codex/loopback-target";
+import { resolveEnvValue } from "../config/proxy-env";
 import type { OcxProviderConfig } from "../types";
 import { isSocks5ProxyUrl, noProxyMatches } from "./proxy-env";
 
@@ -72,10 +74,19 @@ function egressFailure(providerName: string, field: "proxy" | "noProxy", reason:
 export function sanitizeProxyUrlForLog(proxyUrl: string): string {
   try {
     const parsed = new URL(proxyUrl);
-    return parsed.port ? `${parsed.protocol}//${parsed.hostname}:${parsed.port}` : parsed.origin;
+    return `${parsed.protocol}//${parsed.host}`;
   } catch {
     return "<unparseable-proxy-url>";
   }
+}
+
+const PROVIDER_PROXY_ENV_REFERENCE = /^\$\{\w+\}$/;
+
+export function providerProxyForDisplay(proxy: OcxProviderConfig["proxy"]): string | undefined {
+  if (proxy === undefined) return undefined;
+  if (proxy === null || proxy.trim().toLowerCase() === PROVIDER_EGRESS_DIRECT) return PROVIDER_EGRESS_DIRECT;
+  if (PROVIDER_PROXY_ENV_REFERENCE.test(proxy)) return proxy;
+  return sanitizeProxyUrlForLog(proxy);
 }
 
 export function describeProviderEgressForLog(egress: ProviderEgress): string {
@@ -135,7 +146,7 @@ function parseProviderProxyRoute(providerName: string, raw: string): ProviderEgr
     return egressFailure(
       providerName,
       "proxy",
-      `unsupported proxy scheme "${parsed.protocol}"; supported schemes are http, https, socks5 and socks5h`,
+      "unsupported proxy scheme; supported schemes are http, https, socks5 and socks5h",
     );
   }
   if (!parsed.hostname) {
@@ -167,6 +178,10 @@ export function resolveProviderEgress(context: ProviderEgressContext): ProviderE
     route = { kind: "direct", reason: "configured" };
   } else if (typeof raw !== "string") {
     return egressFailure(providerName, "proxy", "the value must be a proxy URL string, \"direct\", null, or absent");
+  } else if (PROVIDER_PROXY_ENV_REFERENCE.test(raw)) {
+    const resolved = resolveEnvValue(raw);
+    if (!resolved?.trim()) return egressFailure(providerName, "proxy", `environment variable ${raw.slice(2, -1)} is unset or empty`);
+    route = parseProviderProxyRoute(providerName, resolved);
   } else {
     route = parseProviderProxyRoute(providerName, raw);
   }
@@ -174,6 +189,14 @@ export function resolveProviderEgress(context: ProviderEgressContext): ProviderE
   if (noProxy !== null) {
     const target = parseTargetUrl(providerName, context.url);
     if (noProxyMatches(target, { NO_PROXY: noProxy })) return { kind: "direct", reason: "noProxy" };
+  }
+  if (route.kind === "proxy") {
+    const target = parseTargetUrl(providerName, context.url);
+    const host = target.hostname;
+    const loopback = host !== "" && (isLoopbackHostname(host) || /^127\./.test(host) || /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(host));
+    if (target.protocol !== "https:" && !loopback) {
+      return egressFailure(providerName, "proxy", "a provider proxy only carries HTTPS destinations; an HTTP destination would expose the provider credential to the proxy");
+    }
   }
   return route;
 }

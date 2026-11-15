@@ -41,6 +41,19 @@ for (const phase of ["submit", "poll"] as const) test.each([307, 308])(`video ${
   }
 });
 
+test("video submit and poll apply the selected provider route", async () => {
+  const calls: RequestInit[] = [];
+  globalThis.fetch = (async (_input, init) => {
+    calls.push(init!);
+    return mockFetchResponse({ request_id: "job", status: "done" });
+  }) as typeof fetch;
+  const routedAuth = { ...auth, egress: { providerName: "xai", provider: { proxy: "http://proxy.test:3128" } } };
+  await submitVideoJob({ prompt: "test" }, routedAuth);
+  await pollVideoJob("job", routedAuth);
+  expect(calls.map(init => (init as RequestInit & { proxy?: string }).proxy))
+    .toEqual(["http://proxy.test:3128/", "http://proxy.test:3128/"]);
+});
+
 describe("submitVideoJob", () => {
   test("returns request_id from response", async () => {
     const fetchMock = mock(() => Promise.resolve(mockFetchResponse({ request_id: "vid-123" })));
