@@ -10,6 +10,7 @@ import type { OcxConfig } from "../types";
 import { isNativeMainTrafficBlocked } from "./native-profile-startup";
 import { isMainAccountHardLocked } from "./main-account-hard-lock";
 import { configuredCodexMainDuplicate } from "./collision-identity";
+import { isPassiveRead } from "../lib/passive-read";
 
 export interface CodexAccountUsabilityOptions {
   /** Request-local capacity tier chosen by the automatic Luna fallback planner. */
@@ -150,8 +151,10 @@ export function isCodexMainDuplicateExcluded(
   options: CodexAccountUsabilityOptions = {},
 ): boolean {
   if (!configuredCodexMainDuplicate(config, accountId)) return false;
+  if (isMainAccountHardLocked(config)) return true;
   // These scopes must not read physical stored-main state, so they keep the exclusion.
-  if (options.nativeMainSelectionOnly || options.requestOwnedMainCredential) return true;
+  if (options.nativeMainSelectionOnly || options.requestOwnedMainCredential
+    || isNativeMainTrafficBlocked() || isPassiveRead()) return true;
   return mainCredentialUnusableReason(options) === undefined;
 }
 

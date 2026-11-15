@@ -8,6 +8,7 @@ import { resolveCodexAuthContext, isCodexAuthContextUsable, CodexPoolAuthenticat
 import { isAccountNeedsReauth } from "../../src/codex/account-runtime-state";
 import { poolAccountDto, listCodexAuthAccounts } from "../../src/codex/auth-api/account-list";
 import * as authCollision from "../../src/codex/auth-collision";
+import * as mainHardLock from "../../src/codex/main-account-hard-lock";
 import { reconcileMainCodexAccountRuntimeState, resetMainCodexAccountIdentityTrackingForTests, applyConfirmedMainCodexAccountTransition } from "../../src/codex/account-lifecycle";
 import { runPassiveRead } from "../../src/lib/passive-read";
 import { clearThreadAccountMap, clearCodexUpstreamHealth } from "../../src/codex/routing";
@@ -182,6 +183,16 @@ describe("stored Pool duplicate of native main", () => {
     native();
     expect(codexAccountUnusableReason(config, poolId)).toBe("duplicate_main");
     expect(isCodexAuthContextUsable(ctx, config)).toBe(false);
+  });
+  test("a main hard lock and passive reads keep the duplicate excluded while main cannot serve", async () => {
+    native();
+    unlinkSync(join(process.env.CODEX_HOME!, "auth.json"));
+    const locked = spyOn(mainHardLock, "isMainAccountHardLocked").mockReturnValue(true);
+    try {
+      expect(codexAccountUnusableReason(config, poolId)).toBe("duplicate_main");
+    } finally { locked.mockRestore(); }
+    expect(await runPassiveRead(async () => codexAccountUnusableReason(config, poolId))).toBe("duplicate_main");
+    expect(codexAccountUnusableReason(config, poolId)).toBeUndefined();
   });
   test("automatic selection cannot fall back to a duplicate when main is excluded", async () => {
     native();
