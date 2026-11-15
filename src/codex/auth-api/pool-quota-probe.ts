@@ -548,6 +548,30 @@ export async function fetchFreshPoolAccountQuota(
   finally { readState.owner?.settle(readState.usable, outcome); }
 }
 
+/**
+ * Why a dashboard validation of a pending account did not send its warm-up. Each of these used to
+ * end the request silently, so a seat could stay "validation pending" for days with no record of
+ * which check refused it.
+ */
+function pendingValidationSkipReason(
+  recordGeneration: number,
+  result: PoolQuotaResult,
+  configuredPlan: string | undefined,
+): string | undefined {
+  if (result.quotaProbeSkipped) return "usage_read_skipped";
+  if (result.freshCredentialGeneration === undefined) return "no_fresh_usage_read";
+  if (result.freshCredentialGeneration !== recordGeneration) return "credential_generation_moved";
+  if (!isCompleteCodexQuotaRecoverySnapshot(result.freshQuota ?? null, result.freshPlan ?? configuredPlan)) {
+    return result.freshQuota ? "usage_exhausted_or_incomplete" : "no_usage_window";
+  }
+  return undefined;
+}
+
+/** One line per dashboard validation outcome; names the account by its id suffix only. */
+function notePendingValidation(accountId: string, outcome: string): void {
+  console.warn(`[codex] pool validation account=\u2026${accountId.slice(-4)} ${outcome}`);
+}
+
 export async function fetchPoolAccountQuota(
   accountId: string,
   forceRefresh = false,
@@ -637,25 +661,31 @@ export async function fetchPoolAccountQuota(
     // polls and startup priming remain read-only with respect to inference spending.
     const generation = result.freshCredentialGeneration;
     const record = state.validatePending ? readCodexAccountRecord(accountId) : null;
-    if (record?.codexValidationPending && record.credential && record.deletedAt == null
-      && generation !== undefined && record.generation === generation
-      && isCompleteCodexQuotaRecoverySnapshot(result.freshQuota ?? null, result.freshPlan ?? configuredPlan)) {
+    const skipped = record?.codexValidationPending && record.credential && record.deletedAt == null
+      ? pendingValidationSkipReason(record.generation, result, configuredPlan) : undefined;
+    if (skipped) notePendingValidation(accountId, `skipped reason=${skipped}`);
+    if (record?.codexValidationPending && record.credential && record.deletedAt == null && !skipped && generation !== undefined) {
       try {
         // Quota I/O may outlive the source capture. Never validate a rotated or revoked link
         // using an older generation's observation. Explicit validation consent still applies.
         const sourceToken = record.credential.sourceAuthPath ? await getValidToken(accountId) : null;
         if (sourceToken && (sourceToken.generation !== generation
-          || !isCodexAccountGenerationLive(accountId, generation))) return result;
+          || !isCodexAccountGenerationLive(accountId, generation))) {
+          notePendingValidation(accountId, "skipped reason=source_generation_moved");
+          return result;
+        }
         await warmCodexAccount({
           accessToken: sourceToken?.accessToken ?? record.credential.accessToken,
           chatgptAccountId: sourceToken?.chatgptAccountId ?? record.credential.chatgptAccountId,
         });
         markCodexAccountValidated(accountId, Date.now(), generation);
         clearAccountNeedsReauth(accountId, generation);
+        notePendingValidation(accountId, "completed");
       } catch (error) {
         // Keep the durable restriction on any failed/partial inference response, even
         // when WHAM just reported headroom. No raw upstream text enters diagnostics.
         const reason = codexWarmupFailureReason(error);
+        notePendingValidation(accountId, `failed reason=${reason}`);
         if (reason === "http_status:401" || reason === "http_status:403") {
           markCodexAccountValidationFailed(accountId, reason, { expectedGeneration: generation });
           markAccountNeedsReauth(accountId, captureConfigGeneration(), generation);
