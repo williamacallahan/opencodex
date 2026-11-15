@@ -15,7 +15,7 @@ describe("usage client attribution", () => {
   test("report groups accepted usage by bounded app and preserves legacy absence", () => {
     const now = Date.now();
     const base = { timestamp: now, provider: "openai", model: "gpt-test", status: 200,
-      durationMs: 10, usageStatus: "reported" as const, usage: { inputTokens: 10, outputTokens: 5 } };
+      durationMs: 10, usageStatus: "reported" as const, usage: { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 6, cacheCreationInputTokens: 2 } };
     const accumulator = createUsageSummaryAccumulator({ filter: { sourceFilter: { client: "all", device: { kind: "all" } } } });
     accumulator.add({ ...base, requestId: "codex-cli", client: "codex_cli" });
     accumulator.add({ ...base, requestId: "codex-desktop", client: "codex_desktop" });
@@ -26,6 +26,8 @@ describe("usage client attribution", () => {
     expect(report.apps.map(row => [row.client, row.requests, row.totalTokens]).sort()).toEqual([
       ["claude_code", 1, 15], ["codex", 2, 30], ["unclassified", 1, 15], ["unknown", 1, 15],
     ]);
+    expect(report.apps.find(row => row.client === "codex")).toMatchObject({ inputTokens: 20, outputTokens: 10, cacheReadInputTokens: 12, cacheCreationInputTokens: 4 });
+    expect(report.days.find(row => row.requests === 5)).toMatchObject({ inputTokens: 50, outputTokens: 25, cacheReadInputTokens: 30, cacheCreationInputTokens: 10 });
     const clone = accumulator.clone();
     clone.add({ ...base, requestId: "grok", client: "grok" });
     expect(clone.summarize("30d", now).apps.find(row => row.client === "grok")?.requests).toBe(1);

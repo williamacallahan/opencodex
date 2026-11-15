@@ -8,6 +8,7 @@
 
 import type { WorkspaceSections } from "./catalog";
 import type { ProviderModelUsageRow } from "../components/provider-workspace/types";
+import type { TokenBreakdownSource } from "../../../src/usage/token-breakdown";
 
 /**
  * Per-provider model count as returned by /api/selected-models.
@@ -76,7 +77,7 @@ export function countAvailableModels(data: unknown): ProviderModelCounts {
  * Per-provider usage totals derived from /api/usage?range=30d.
  * The endpoint shape is { providers: Array<{ provider: string; requests: number; totalTokens: number }> }.
  */
-export interface ProviderUsageTotals {
+export interface ProviderUsageTotals extends TokenBreakdownSource {
   requests?: number;
   totalTokens?: number;
 }
@@ -86,7 +87,7 @@ export function buildProviderUsageTotals(
   providers: readonly (ProviderUsageTotals & { provider: string })[],
 ): Record<string, ProviderUsageTotals> {
   const totals: Record<string, ProviderUsageTotals> = Object.create(null);
-  for (const row of providers) totals[row.provider] = { requests: row.requests, totalTokens: row.totalTokens };
+  for (const row of providers) totals[row.provider] = { ...row };
   return totals;
 }
 

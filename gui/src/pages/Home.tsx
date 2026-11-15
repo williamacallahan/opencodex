@@ -1,4 +1,6 @@
 import { useKeyedClientResource } from "../client-resource";
+import { TokenBreakdown } from "../components/token-breakdown";
+import type { TokenBreakdownSource } from "../../../src/usage/token-breakdown";
 import { useT, getActiveLocale } from "../i18n/shared";
 import type { Page } from "../app-routing";
 import { IconRefresh } from "../icons";
@@ -25,7 +27,7 @@ interface HomeProps {
 }
 
 interface UsageDay { requests?: number; totalTokens?: number }
-interface UsageBody { summary?: { requests?: number; totalTokens?: number }; days?: UsageDay[] }
+interface UsageBody { summary?: TokenBreakdownSource & { requests?: number; totalTokens?: number }; days?: UsageDay[] }
 interface ConfigBody { providers?: Record<string, unknown> }
 interface LogRow extends HomeLogRow { model?: string; provider?: string; errorCode?: string; upstreamError?: string }
 
@@ -113,7 +115,7 @@ export default function Home({ apiBase, navigate, onReloadCodex, reloadingCodex 
         <Stat label={t("shellV2.tileVersion")} value={health.data?.version ? `v${health.data.version}` : "—"} />
         <Stat label={t("shellV2.tileUptime")} value={online && uptime !== null ? t("shellV2.uptimeValue", { h: String(Math.floor(uptime / 3600)), m: String(Math.floor((uptime % 3600) / 60)) }) : "—"} />
         <Stat label={t("shellV2.tileRequests")} value={number.format(requests7d)} />
-        <Stat label={t("shellV2.tileTokens")} value={compact.format(tokens7d)} />
+        <Stat label={t("shellV2.tileTokens")} value={compact.format(tokens7d)} breakdown={<TokenBreakdown source={usage.data?.summary ?? {}} locale={locale} variant="stack" />} />
       </section>
 
       <TelemetryProfileCard apiBase={apiBase} />
@@ -192,11 +194,12 @@ export default function Home({ apiBase, navigate, onReloadCodex, reloadingCodex 
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, breakdown }: { label: string; value: string; breakdown?: React.ReactNode }) {
   return (
     <div className="flex min-w-0 flex-col gap-1 rounded-card bg-surface px-4 py-3.5">
       <span className="text-xs font-medium text-fg-subtle">{label}</span>
       <span className="truncate text-stat font-semibold tracking-[-0.02em] tabular-nums">{value}</span>
+      {breakdown}
     </div>
   );
 }

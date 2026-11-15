@@ -168,6 +168,10 @@ describe("ocx usage compare", () => {
     expect(result.out).toContain("+100.0%");
     expect(result.out).toContain("~$0.2000");
     expect(result.out).toContain("~$0.1000");
+    expect(result.out).toMatch(/Cache read share\s+16\.7%\s+16\.7%/);
+    expect(result.out).toContain("Cache write share");
+    expect(result.out).toMatch(/Cache read share\s+16\.7%\s+16\.7%/);
+    expect(result.out).toContain("Cache write share");
   });
 
   test("JSON carries delta, percent change, and 1d as today", async () => {

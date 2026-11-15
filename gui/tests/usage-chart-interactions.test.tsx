@@ -82,11 +82,11 @@ function usagePayload(models: Array<{ provider: string; model: string; requests:
     summary: {
       requests: 7, measuredRequests: 7, reportedRequests: 7, unreportedRequests: 0,
       unsupportedRequests: 0, estimatedRequests: 0, inputTokens: 70, outputTokens: 30,
-      cachedInputTokens: 0, reasoningOutputTokens: 0, totalTokens: 100, coverageRatio: 1,
+      cachedInputTokens: 50, cacheCreationInputTokens: 10, reasoningOutputTokens: 0, totalTokens: 100, coverageRatio: 1,
     },
     days: [
       { date: yesterday, requests: 2, measuredRequests: 2, reportedRequests: 2, totalTokens: 25, models: [] },
-      { date: today, requests: 5, measuredRequests: 5, reportedRequests: 5, totalTokens: 75, models },
+      { date: today, requests: 5, measuredRequests: 5, reportedRequests: 5, totalTokens: 75, inputTokens: 70, outputTokens: 5, cacheReadInputTokens: 50, cacheCreationInputTokens: 10, models },
     ],
     models: [], providers: [], historyTruncated: false, truncatedPrefixBytes: 0,
     entriesTruncated: false, entriesDropped: 0,
@@ -149,6 +149,8 @@ test("seven-day bars expose the same detail on focus and touch", async () => {
   const focused = document.querySelector(".daybar-tip")?.textContent;
   expect(focused).toContain("5 requests");
   expect(focused).toContain("75 tokens");
+  expect(focused).toContain("71.4%");
+  expect(container.textContent).toContain("Cache write");
 
   await act(async () => { today.blur(); });
   await act(async () => {

@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { TokenBreakdown } from "./token-breakdown";
 import { useDataSurface } from "../data-surface";
 import { formatTokens } from "../format-tokens";
 import { useI18n } from "../i18n/shared";
@@ -162,6 +163,7 @@ export function JevStatsPanel({
                 <div className="stat">
                   <div className="muted">{t("cws.jev.stats.modelTokens")}</div>
                   <div className="stat-value">{formatTokens(data.summary.modelTotalTokens, locale)}</div>
+                  <TokenBreakdown variant="card" locale={locale} source={{ inputTokens: data.summary.modelInputTokens, outputTokens: data.summary.modelOutputTokens, cacheReadInputTokens: data.summary.modelCacheReadTokens, cacheCreationInputTokens: data.summary.modelCacheWriteTokens }} />
                   <div className="muted text-caption">
                     {t("cws.jev.stats.measuredAttempts", {
                       measured: data.summary.measuredModelAttempts,
@@ -172,6 +174,7 @@ export function JevStatsPanel({
                 <div className="stat">
                   <div className="muted">{t("cws.jev.stats.decisionTokens")}</div>
                   <div className="stat-value">{formatTokens(data.summary.decisionTotalTokens, locale)}</div>
+                  <TokenBreakdown variant="card" locale={locale} source={{ inputTokens: data.summary.decisionInputTokens, outputTokens: data.summary.decisionOutputTokens }} />
                   <div className="muted text-caption">
                     {t("cws.jev.stats.measuredDecisions", {
                       measured: data.summary.decisionUsageReported,
@@ -270,7 +273,7 @@ export function JevStatsPanel({
                         <td className="num mono">{formatTokens(model.outputTokens, locale)}</td>
                         <td className="num mono">{formatTokens(model.reasoningTokens, locale)}</td>
                         <td className="num mono">{formatTokens(model.cacheReadTokens, locale)} / {formatTokens(model.cacheWriteTokens, locale)}</td>
-                        <td className="num mono">{formatTokens(model.totalTokens, locale)}</td>
+                        <td className="num mono">{formatTokens(model.totalTokens, locale)}<TokenBreakdown variant="stack" locale={locale} source={{ inputTokens: model.inputTokens, outputTokens: model.outputTokens, cacheReadInputTokens: model.cacheReadTokens, cacheCreationInputTokens: model.cacheWriteTokens }} /></td>
                       </tr>
                     ))}
                   </tbody>

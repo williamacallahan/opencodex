@@ -4,6 +4,7 @@
  */
 import { Fragment, useMemo, useState } from "react";
 import { useT, useI18n } from "../../i18n/shared";
+import { TokenBreakdown } from "../token-breakdown";
 import type { WorkspaceItem } from "../../provider-workspace/catalog";
 import { formatRequestCount, formatTokenCount, formatCostUsd } from "../../provider-workspace/usage";
 import type { ProviderQuotaReportView } from "../../provider-workspace/report";
@@ -59,7 +60,7 @@ export default function ProviderUsage({ item, usageTotals, quotaReport, currentQ
                 <span className="muted pws-usage-metric-label">{t("pws.metricRequests")}</span>
               </div>
               <div className="pws-usage-metric">
-                <span className="pws-usage-metric-value">{formatTokenCount(usageTotals?.totalTokens, locale)}</span>
+                <span className="pws-usage-metric-value">{formatTokenCount(usageTotals?.totalTokens, locale)}<TokenBreakdown source={usageTotals ?? {}} locale={locale} variant="stack" /></span>
                 <span className="muted pws-usage-metric-label">{t("pws.metricTokens")}</span>
               </div>
             </div>
@@ -105,7 +106,7 @@ export default function ProviderUsage({ item, usageTotals, quotaReport, currentQ
                           )}
                         </td>
                         <td className="num mono">{formatCostUsd(row.estimatedCostUsd, locale)}</td>
-                        <td className="num mono">{formatTokenCount(row.totalTokens, locale)}</td>
+                        <td className="num mono">{formatTokenCount(row.totalTokens, locale)}<TokenBreakdown source={row} locale={locale} variant="stack" /></td>
                         <td className="num">{row.requests}</td>
                         <td>
                           <div className="pws-share-bar">

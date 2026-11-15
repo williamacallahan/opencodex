@@ -1,4 +1,5 @@
 import { IconAlert, IconChevron } from "../icons";
+import { TokenBreakdown } from "../components/token-breakdown";
 import { type TKey, useT } from "../i18n/shared";
 import { formatTokens } from "../format-tokens";
 import { formatUptime } from "../formatUptime";
@@ -51,6 +52,7 @@ export function DashboardOverviewHead({
           <HeadTile label={t("dash.tokens30d")} busy={usageLoading}
             sub={hasUsage ? t("dash.coverage").replace("{pct}", `${Math.round(usage30d.summary.coverageRatio * 100)}%`) : undefined}>
             {hasUsage ? formatTokens(usage30d.summary.totalTokens, locale) : "—"}
+            <TokenBreakdown source={usage30d?.summary ?? {}} locale={locale} variant="stack" />
           </HeadTile>
         </div>
 

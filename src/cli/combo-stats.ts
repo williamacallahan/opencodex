@@ -1,4 +1,5 @@
 import { JEV_DECISION_GATES } from "../usage/jev-stats";
+import { tokenBreakdownLine } from "./token-breakdown";
 import { runCatalogAction } from "./catalog-command-result";
 import { CliUsageError, printData, runtimeBaseUrl, runtimeRequest, takeFlag, takeOptionWithSyntax, type RuntimeApiDeps } from "./runtime-api";
 
@@ -116,7 +117,9 @@ export async function handleComboStatsCommand(argv: string[], deps: RuntimeApiDe
       ...(summary.pinnedRequests > 0 ? [`Session-pinned requests (no decision call): ${summary.pinnedRequests}`] : []),
       `Successful requests: ${summary.successfulRequests}; requests with model fallback: ${summary.requestsWithModelFallback}`,
       `Model tokens: ${summary.modelTotalTokens}; measured attempts: ${summary.measuredModelAttempts}/${summary.modelAttempts}`,
+      tokenBreakdownLine({ inputTokens: summary.modelInputTokens, outputTokens: summary.modelOutputTokens, cacheReadInputTokens: summary.modelCacheReadTokens, cacheCreationInputTokens: summary.modelCacheWriteTokens }, String),
       `Decision tokens: ${summary.decisionTotalTokens}; decisions reporting usage: ${summary.decisionUsageReported}/${summary.decisions}`,
+      tokenBreakdownLine({ inputTokens: summary.decisionInputTokens, outputTokens: summary.decisionOutputTokens }, String),
       `Average decision latency: ${summary.averageLatencyMs === null ? "unavailable" : `${summary.averageLatencyMs} ms`}`,
       `Average confidence: ${summary.averageConfidence ?? "unavailable"}; chosen probability: ${summary.averageChosenProbability ?? "unavailable"}`,
       ...(incomplete ? ["History is incomplete; totals cover only observed records."] : []),

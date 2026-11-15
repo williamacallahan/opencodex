@@ -13,8 +13,10 @@
  */
 
 import type { UsageModelView } from "./usage-model-search";
+import type { TokenBreakdownSource } from "../usage/token-breakdown";
+import { tokenBreakdownLine, tokenBreakdownCells, TOKEN_BREAKDOWN_HEADERS } from "./token-breakdown";
 
-interface CostRow {
+interface CostRow extends TokenBreakdownSource {
   provider: string;
   model?: string;
   requests: number;
@@ -38,6 +40,8 @@ interface UsageReportInput {
     inputTokens?: number;
     outputTokens?: number;
     cachedInputTokens?: number;
+    cacheReadInputTokens?: number;
+    cacheCreationInputTokens?: number;
     estimatedCostUsd?: number;
     unpricedRequests?: number;
     unmeteredRequests?: number;
@@ -56,6 +60,10 @@ interface UsageReportInput {
    */
   accounts?: {
     accountLogLabel: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadInputTokens?: number;
+    cacheCreationInputTokens?: number;
     ambiguous?: boolean;
     requests: number;
     totalTokens: number;
@@ -138,14 +146,10 @@ export function formatUsageReport(data: UsageReportInput, options?: { modelView?
     return lines.map(terminalText);
   }
 
-  const tokenSplit = [
-    summary.inputTokens !== undefined ? `in ${count(summary.inputTokens)}` : null,
-    summary.outputTokens !== undefined ? `out ${count(summary.outputTokens)}` : null,
-    summary.cachedInputTokens ? `cached ${count(summary.cachedInputTokens)}` : null,
-  ].filter(Boolean).join(" / ");
-
   lines.push(`Requests   ${count(summary.requests)}`);
-  lines.push(`Tokens     ${count(summary.totalTokens)}${tokenSplit ? `  (${tokenSplit})` : ""}`);
+  lines.push(`Tokens     ${count(summary.totalTokens)}`);
+  lines.push(tokenBreakdownLine(summary, count));
+  lines.push("Cache percentages are of sent tokens.");
   lines.push(`Est. cost  ${usd(summary.estimatedCostUsd)}    API list-price equivalent (this range)`);
 
   const unpriced = summary.unpricedRequests ?? 0;
@@ -160,8 +164,8 @@ export function formatUsageReport(data: UsageReportInput, options?: { modelView?
   if (providers.length > 0) {
     lines.push("");
     lines.push(...table(
-      ["PROVIDER", "REQUESTS", "TOKENS", "EST. COST"],
-      providers.map(row => [row.provider, count(row.requests), count(row.totalTokens), usd(row.estimatedCostUsd)]),
+      ["PROVIDER", "REQUESTS", "TOKENS", ...TOKEN_BREAKDOWN_HEADERS, "EST. COST"],
+      providers.map(row => [row.provider, count(row.requests), count(row.totalTokens), ...tokenBreakdownCells(row, count), usd(row.estimatedCostUsd)]),
     ));
   }
 
@@ -177,13 +181,14 @@ export function formatUsageReport(data: UsageReportInput, options?: { modelView?
   } else if (accounts.length > 0) {
     lines.push("");
     lines.push(...table(
-      ["ACCOUNT", "REQUESTS", "TOKENS", "EST. COST"],
+      ["ACCOUNT", "REQUESTS", "TOKENS", ...TOKEN_BREAKDOWN_HEADERS, "EST. COST"],
       accounts.map(row => [
         // An ambiguous row aggregates several accounts, so reading it as one account draws the
         // wrong conclusion. Mark it rather than presenting it as a single identity.
         row.ambiguous ? `${terminalText(row.accountLogLabel)} (ambiguous)` : terminalText(row.accountLogLabel),
         count(row.requests),
         count(row.totalTokens),
+        ...tokenBreakdownCells(row, count),
         usd(row.estimatedCostUsd),
       ]),
     ));
@@ -194,8 +199,8 @@ export function formatUsageReport(data: UsageReportInput, options?: { modelView?
     lines.push("");
     const shown = models.slice(0, view?.limit ?? options?.modelRowLimit ?? MAX_MODEL_ROWS);
     lines.push(...table(
-      ["MODEL", "PROVIDER", "REQUESTS", "TOKENS", "EST. COST"],
-      shown.map(row => [row.model ?? "-", row.provider, count(row.requests), count(row.totalTokens), usd(row.estimatedCostUsd)]),
+      ["MODEL", "PROVIDER", "REQUESTS", "TOKENS", ...TOKEN_BREAKDOWN_HEADERS, "EST. COST"],
+      shown.map(row => [row.model ?? "-", row.provider, count(row.requests), count(row.totalTokens), ...tokenBreakdownCells(row, count), usd(row.estimatedCostUsd)]),
     ));
     if (models.length > shown.length) {
       lines.push(`... ${models.length - shown.length} more (use --json)`);

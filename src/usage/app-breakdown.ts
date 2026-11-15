@@ -15,6 +15,10 @@ export interface UsageAppSummary {
   client: UsageApp;
   requests: number;
   measuredRequests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
   totalTokens: number;
   estimatedCostUsd?: number;
   pricedRequests: number;

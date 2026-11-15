@@ -17,6 +17,9 @@ import type { TKey } from "./en";
  * French i18n catalog. Must match the `TKey` set.
  */
 export const fr: Record<TKey, string> = {
+  "tokens.sent": "Envoyés", "tokens.received": "Reçus", "tokens.cacheRead": "Lecture du cache", "tokens.cacheWrite": "Écriture du cache",
+  "tokens.ofSent": "{percent} des jetons envoyés", "tokens.cacheWriteNotReported": "Écriture du cache : non signalée",
+  "tokens.cacheIncludedNote": "Les jetons du cache sont inclus dans les jetons envoyés.", "tokens.breakdownAria": "Envoyés {sent}, reçus {received}, lecture du cache {read} ({readShare}), écriture du cache {write} ({writeShare})",
     "pws.firstResponse.title": "Progression vers la première réponse",
   "pws.firstResponse.stepProvider": "Fournisseur",
   "pws.firstResponse.stepModels": "Modèles",

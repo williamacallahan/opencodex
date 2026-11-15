@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { TokenBreakdown } from "../token-breakdown";
 import type { Locale, TFn } from "../../i18n/shared";
 import { formatTokens } from "../../format-tokens";
 import { formatEstimatedUsdValue as formatUsdEstimate } from "../../intl-formatters";
@@ -63,7 +64,7 @@ function Stat({ label, term, hint, value, spark, foot, meter }: {
           <span className="block h-full rounded-full bg-fg" style={{ width: `${Math.max(0, Math.min(1, meter)) * 100}%` }} />
         </span>
       )}
-      {foot && <span className="truncate text-xs text-fg-subtle tabular-nums">{foot}</span>}
+      {foot && <span className="text-xs text-fg-subtle tabular-nums">{foot}</span>}
     </div>
   );
 }
@@ -85,12 +86,8 @@ export function UsageSummaryCards({
   const excluded = (summary.unpricedRequests ?? 0) + (summary.unmeteredRequests ?? 0);
   const hasCost = summary.estimatedCostUsd !== undefined;
   const costSpark = days.some(day => day.estimatedCostUsd !== undefined) ? days.map(day => day.estimatedCostUsd ?? 0) : undefined;
-  const cacheReads = summary.cacheReadInputTokens ?? summary.cachedInputTokens;
-  const cacheWrites = summary.cacheCreationInputTokens ?? 0;
   const facts: { label: string; value: string; title?: string }[] = [
     { label: t("usage.card.measured"), value: number.format(summary.measuredRequests) },
-    { label: t("usage.card.cachedTokens"), value: formatTokens(cacheReads, locale), title: t("usage.card.cachedTokensHint") },
-    ...(cacheWrites > 0 ? [{ label: t("usage.card.cacheWriteTokens"), value: formatTokens(cacheWrites, locale) }] : []),
     {
       label: t("usage.col.tokPerSec"),
       value: hasThroughput(summary.throughputTokensPerSec) ? summary.throughputTokensPerSec.toFixed(1) : t("usage.unavailable"),
@@ -113,7 +110,7 @@ export function UsageSummaryCards({
             label={t("usage.card.totalTokens")}
             value={formatTokens(summary.totalTokens, locale)}
             spark={days.map(day => day.totalTokens)}
-            foot={t("usageV2.tokensSplit", { input: formatTokens(summary.inputTokens, locale), output: formatTokens(summary.outputTokens, locale) })}
+            foot={<TokenBreakdown source={summary} locale={locale} variant="card" />}
           />
           <Stat
             label={t("usageV2.costLabel")}

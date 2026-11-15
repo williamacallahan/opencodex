@@ -1,9 +1,10 @@
 /** Saved companion display filters applied to two bounded management reads. */
 import { ObservationError, withObserveStream, type ObserveStreamDeps } from "./observe-stream";
+import { tokenBreakdownLine } from "./token-breakdown";
 import { printData, rejectArgs, runCliAction, takeFlag } from "./runtime-api";
 
 const USAGE = "Usage: ocx companion usage [--json]";
-const TOTAL_FIELDS = ["requests", "totalTokens", "inputTokens", "outputTokens", "cachedInputTokens", "cacheReadInputTokens", "estimatedCostUsd", "measuredRequests", "pricedRequests", "coverageRatio"] as const;
+const TOTAL_FIELDS = ["requests", "totalTokens", "inputTokens", "outputTokens", "cachedInputTokens", "cacheReadInputTokens", "cacheCreationInputTokens", "estimatedCostUsd", "measuredRequests", "pricedRequests", "coverageRatio"] as const;
 type Totals = Partial<Record<typeof TOTAL_FIELDS[number], number>>;
 type Model = Totals & { model: string; provider: string };
 interface Usage {
@@ -96,7 +97,7 @@ function filterUsage(usage: Usage, filters: Filters): Usage {
 function measuredTotals<T extends Totals>(data: T): T {
   const next = { ...data };
   if ((data.requests ?? 0) > 0 && (data.measuredRequests === 0 || data.coverageRatio === 0)) {
-    for (const key of ["totalTokens", "inputTokens", "outputTokens", "cachedInputTokens", "cacheReadInputTokens"] as const) delete next[key];
+    for (const key of ["totalTokens", "inputTokens", "outputTokens", "cachedInputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"] as const) delete next[key];
   }
   if ((data.requests ?? 0) > 0 && data.pricedRequests === 0) delete next.estimatedCostUsd;
   return next;
@@ -108,8 +109,10 @@ function formatRange(label: string, result: RangeResult): string[] {
   const cost = (value: number | undefined) => value === undefined ? "unknown" : `~$${value.toFixed(4)}`;
   const data = result.data;
   return [`${label}: ${count(data.summary.requests)} requests; ${count(data.summary.totalTokens)} tokens; cost ${cost(data.summary.estimatedCostUsd)}`,
+    ...(data.summary.totalTokens === undefined ? [] : [`  ${tokenBreakdownLine(data.summary, count)}`]),
     ...(data.usageIncomplete || data.historyTruncated || data.entriesTruncated ? ["  Incomplete observation; totals include only attributable measured data."] : []),
-    ...data.models.map(row => `  ${row.provider}/${row.model}: ${count(row.requests)} requests; ${count(row.totalTokens)} tokens; cost ${cost(row.estimatedCostUsd)}`)];
+    ...data.models.flatMap(row => [`  ${row.provider}/${row.model}: ${count(row.requests)} requests; ${count(row.totalTokens)} tokens; cost ${cost(row.estimatedCostUsd)}`,
+      ...(row.totalTokens === undefined ? [] : [`    ${tokenBreakdownLine(row, count)}`])])];
 }
 
 export async function handleCompanionUsageCommand(argv: string[], deps: ObserveStreamDeps = {}): Promise<number> {

@@ -14,6 +14,7 @@ import { redactSecretString } from "../lib/redact";
 import { findLiveProxy, probeHostname } from "../server/proxy-liveness";
 import { fetchBoundLocalManagementRead, type LocalManagementReadDeps } from "../server/local-management-read-client";
 import { rangeWindow, USAGE_SURFACES } from "../usage/summary";
+import { tokenBreakdown, formatTokenShare } from "../usage/token-breakdown";
 import type { UsageTimeWindow } from "../usage/time-range";
 import {
   CliUsageError,
@@ -37,7 +38,7 @@ export type UsageCompareDeps = RuntimeApiDeps & Pick<LocalManagementReadDeps, "d
   readRuntime?: typeof readRuntimePort;
 };
 
-const METRICS = ["requests", "totalTokens", "inputTokens", "outputTokens", "cachedInputTokens", "estimatedCostUsd"] as const;
+const METRICS = ["requests", "totalTokens", "inputTokens", "outputTokens", "cachedInputTokens", "cacheReadInputTokens", "cacheCreationInputTokens", "estimatedCostUsd"] as const;
 type Metric = typeof METRICS[number];
 type Totals = Partial<Record<Metric, number>>;
 type ScopedUsage = {
@@ -162,6 +163,8 @@ function formatCompare(input: {
     inputTokens: "Input",
     outputTokens: "Output",
     cachedInputTokens: "Cached",
+    cacheReadInputTokens: "Cache read",
+    cacheCreationInputTokens: "Cache write",
     estimatedCostUsd: "Est. cost",
   };
   const rows = METRICS.map(key => {
@@ -175,6 +178,10 @@ function formatCompare(input: {
       pct(changePct(input.current[key], input.previous[key])),
     ];
   });
+  const currentBreakdown = tokenBreakdown(input.current);
+  const previousBreakdown = tokenBreakdown(input.previous);
+  rows.push(["Cache read share", formatTokenShare(currentBreakdown.cacheReadShare), formatTokenShare(previousBreakdown.cacheReadShare), "—", "—"]);
+  rows.push(["Cache write share", formatTokenShare(currentBreakdown.cacheWriteShare), formatTokenShare(previousBreakdown.cacheWriteShare), "—", "—"]);
   const header = ["METRIC", "CURRENT", "PREVIOUS", "DELTA", "CHANGE"];
   const widths = header.map((h, i) => Math.max(h.length, ...rows.map(row => row[i]!.length)));
   const line = (cols: string[]) => cols.map((c, i) => c.padEnd(widths[i]!)).join("  ").trimEnd();

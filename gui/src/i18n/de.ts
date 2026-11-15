@@ -18,6 +18,9 @@ import type { TKey } from "./en";
  * German i18n catalog, generated from en.ts. Must match the `TKey` set (compile-checked).
  */
 export const de: Record<TKey, string> = {
+  "tokens.sent": "Gesendet", "tokens.received": "Empfangen", "tokens.cacheRead": "Cache gelesen", "tokens.cacheWrite": "Cache geschrieben",
+  "tokens.ofSent": "{percent} der gesendeten Token", "tokens.cacheWriteNotReported": "Cache-Schreibvorgänge: nicht gemeldet",
+  "tokens.cacheIncludedNote": "Cache-Token sind in den gesendeten Token enthalten.", "tokens.breakdownAria": "Gesendet {sent}, empfangen {received}, Cache gelesen {read} ({readShare}), Cache geschrieben {write} ({writeShare})",
     "pws.firstResponse.title": "Fortschritt bis zur ersten Antwort",
   "pws.firstResponse.stepProvider": "Anbieter",
   "pws.firstResponse.stepModels": "Modelle",

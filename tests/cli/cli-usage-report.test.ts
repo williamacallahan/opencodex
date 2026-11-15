@@ -26,7 +26,7 @@ function payload(overrides: Record<string, unknown> = {}): Record<string, unknow
       unpricedRequests: 0,
       unmeteredRequests: 0,
     },
-    providers: [{ provider: "xai", requests: 1_447, totalTokens: 178_521_375, estimatedCostUsd: 12.3456 }],
+    providers: [{ provider: "xai", requests: 1_447, totalTokens: 178_521_375, inputTokens: 57_400, outputTokens: 600, cacheReadInputTokens: 51_000, cacheCreationInputTokens: 2_000, estimatedCostUsd: 12.3456 }],
     models: [{ provider: "xai", model: "grok-4.6", requests: 1_447, totalTokens: 178_521_375, estimatedCostUsd: 12.3456 }],
     days: [{ date: "2026-08-22", requests: 1_447, totalTokens: 178_521_375, estimatedCostUsd: 12.3456 }],
     accounts: [],
@@ -63,7 +63,7 @@ describe("formatUsageReport", () => {
     const lines = formatUsageReport(body as never);
     expect(lines.every(line => !/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(line))).toBe(true);
     expect(lines.join("\n")).toContain("before\\x1b[2J\\x07\\u2028after\\u2029");
-    expect(lines.find(line => line.startsWith("Tokens"))).toBe("Tokens     —  (in — / out —)");
+    expect(lines.find(line => line.startsWith("Tokens"))).toBe("Tokens     —");
     expect(body.summary).toEqual({ requests: 1, totalTokens: control, inputTokens: Infinity, outputTokens: control });
   });
 
@@ -77,7 +77,7 @@ describe("formatUsageReport", () => {
 
   test("preserves ordinary per-account totals and keeps JSON unchanged", async () => {
     const body = payload({ accounts: [{ accountLogLabel: "account-1", requests: 12, totalTokens: 345, estimatedCostUsd: 0.125 }] });
-    expect(formatUsageReport(body as never).join("\n")).toMatch(/account-1\s+12\s+345\s+~\$0\.1250/);
+    expect(formatUsageReport(body as never).join("\n")).toMatch(/account-1\s+12\s+345\s+-\s+-\s+- \(—\)\s+not reported\s+~\$0\.1250/);
     const malformed = payload({ summary: { requests: 1, outputTokens: "\x1b[2J" } });
     const { code, out } = await run(["usage", "--json"], malformed);
     expect(code).toBe(0);
@@ -105,8 +105,11 @@ describe("formatUsageReport", () => {
   test("prints per-provider and per-model cost, not an item count", () => {
     const out = formatUsageReport(payload() as never).join("\n");
     expect(out).toContain("~$12.3456");
-    expect(out).toMatch(/PROVIDER\s+REQUESTS\s+TOKENS\s+EST\. COST/);
-    expect(out).toMatch(/MODEL\s+PROVIDER\s+REQUESTS\s+TOKENS\s+EST\. COST/);
+    expect(out).toMatch(/PROVIDER\s+REQUESTS\s+TOKENS\s+Sent\s+Received\s+Cache read\s+Cache write\s+EST\. COST/);
+    expect(out).toMatch(/MODEL\s+PROVIDER\s+REQUESTS\s+TOKENS\s+Sent\s+Received\s+Cache read\s+Cache write\s+EST\. COST/);
+    expect(out).toContain("Sent 4,489,102 | Received 1,283,441 | Cache read 172,748,832 (100%) | Cache write not reported");
+    expect(out).toContain("Cache percentages are of sent tokens.");
+    expect(out).toMatch(/xai\s+1,447\s+178,521,375\s+57,400\s+600\s+51,000 \(88\.9%\)\s+2,000 \(3\.5%\)/);
     expect(out).toContain("grok-4.6");
     // The old rendering produced exactly this shape and nothing else.
     expect(out).not.toContain("item(s)");

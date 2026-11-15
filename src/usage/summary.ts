@@ -94,6 +94,10 @@ export interface UsageDay {
   requests: number;
   measuredRequests: number;
   reportedRequests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
   totalTokens: number;
   /** Display-time estimated cost for this local day, summed from its model rows. */
   estimatedCostUsd: number;
@@ -157,8 +161,8 @@ export interface UsageProvider {
   reportedRequests: number;
   estimatedRequests: number;
   totalTokens: number;
-  inputTokens?: number;
-  outputTokens?: number;
+  inputTokens: number;
+  outputTokens: number;
   /**
    * Aggregate output throughput for this row (#6309): summed measured output tokens over summed
    * wall-clock duration. Undefined when no attempt in the row reported both.
@@ -1780,6 +1784,10 @@ class StreamingUsageSummaryAccumulator implements UsageSummaryAccumulator {
         requests: day.totals.requests,
         measuredRequests: day.totals.measuredRequests,
         reportedRequests: day.totals.reportedRequests,
+        inputTokens: day.totals.inputTokens,
+        outputTokens: day.totals.outputTokens,
+        cacheReadInputTokens: day.totals.cacheReadInputTokens,
+        cacheCreationInputTokens: day.totals.cacheCreationInputTokens,
         totalTokens: day.totals.totalTokens,
         estimatedCostUsd: day.totals.estimatedCostUsd,
         models: buildDayModels(day.models, day.modelOverlaps),
@@ -1796,7 +1804,8 @@ class StreamingUsageSummaryAccumulator implements UsageSummaryAccumulator {
       models: buildUsageModels(models, totals.totalTokens, modelOverlaps),
       providers: buildUsageProviders(this.mode === "row-unique" ? providers : models, totals.totalTokens),
       apps: [...apps].map(([client, app]) => ({ client, requests: app.requests, measuredRequests: app.measuredRequests,
-        totalTokens: app.totalTokens, ...(app.pricedRequests ? { estimatedCostUsd: app.estimatedCostUsd } : {}), pricedRequests: app.pricedRequests,
+        inputTokens: app.inputTokens, outputTokens: app.outputTokens, cacheReadInputTokens: app.cacheReadInputTokens,
+        cacheCreationInputTokens: app.cacheCreationInputTokens, totalTokens: app.totalTokens, ...(app.pricedRequests ? { estimatedCostUsd: app.estimatedCostUsd } : {}), pricedRequests: app.pricedRequests,
         unpricedRequests: app.unpricedRequests + app.unmeteredRequests, shareRatio: totals.totalTokens === 0 ? 0 : Math.min(1, app.totalTokens / totals.totalTokens) })),
       accounts: buildUsageAccounts(accounts),
       ...(this.filter?.sourceFilter ? { sourceFilter: { client: this.filter.sourceFilter.client,

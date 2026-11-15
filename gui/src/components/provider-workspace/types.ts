@@ -1,4 +1,5 @@
 import type { QuotaFailureCode, QuotaUnknownReason } from "../../../../src/providers/quota-types";
+import type { TokenBreakdownSource } from "../../../../src/usage/token-breakdown";
 /**
  * provider-workspace/types.ts — shared view-model types for the Providers
  * workspace shell/rail/detail (WP080a). Data shapes only; no React.
@@ -23,20 +24,20 @@ export type PricingFilter = { free: boolean; paid: boolean };
 export type TypeFilter = { cloud: boolean; local: boolean; selfHosted: boolean; login: boolean };
 
 /** Per-provider usage totals for the workspace overview (30d window). */
-export interface ProviderUsageTotals {
+export interface ProviderUsageTotals extends TokenBreakdownSource {
   requests?: number;
   totalTokens?: number;
 }
 
 /** Per-model usage row from /api/usage, filtered by provider. */
-export interface ProviderModelUsageRow {
+export interface ProviderModelUsageRow extends TokenBreakdownSource {
   model: string;
   resolvedModel?: string;
   hasUnresolvedRequestedModel?: true;
   requests: number;
   totalTokens: number;
-  inputTokens: number;
-  outputTokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
   shareRatio: number;
   estimatedCostUsd?: number;
 }

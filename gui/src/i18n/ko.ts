@@ -17,6 +17,9 @@ import type { TKey } from "./en";
  * Korean i18n catalog; must match the `TKey` set (compile-checked).
  */
 export const ko: Record<TKey, string> = {
+  "tokens.sent": "전송", "tokens.received": "수신", "tokens.cacheRead": "캐시 읽기", "tokens.cacheWrite": "캐시 쓰기",
+  "tokens.ofSent": "전송량의 {percent}", "tokens.cacheWriteNotReported": "캐시 쓰기: 보고되지 않음",
+  "tokens.cacheIncludedNote": "캐시 토큰은 전송 토큰에 포함됩니다.", "tokens.breakdownAria": "전송 {sent}, 수신 {received}, 캐시 읽기 {read} ({readShare}), 캐시 쓰기 {write} ({writeShare})",
     "pws.firstResponse.title": "첫 응답 진행 상태",
   "pws.firstResponse.stepProvider": "제공자",
   "pws.firstResponse.stepModels": "모델",

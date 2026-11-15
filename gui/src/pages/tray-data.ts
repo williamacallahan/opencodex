@@ -3,7 +3,7 @@ import type { CompanionSettings } from './usage-companion-utils';
 import type { AccountQuota } from '../codex-quota-utils';
 import { normalizeQuotaForPlan } from '../codex-quota-utils';
 
-export type TrayTotals = Partial<Record<'requests' | 'totalTokens' | 'inputTokens' | 'outputTokens' | 'cachedInputTokens' | 'cacheReadInputTokens' | 'estimatedCostUsd' | 'measuredRequests' | 'pricedRequests' | 'coverageRatio', number>>;
+export type TrayTotals = Partial<Record<'requests' | 'totalTokens' | 'inputTokens' | 'outputTokens' | 'cachedInputTokens' | 'cacheReadInputTokens' | 'cacheCreationInputTokens' | 'estimatedCostUsd' | 'measuredRequests' | 'pricedRequests' | 'coverageRatio', number>>;
 export type TrayModel = TrayTotals & { model: string; provider: string };
 export interface TrayUsage { summary: TrayTotals; models: TrayModel[]; customWindow?: boolean; since?: number; until?: number; usageIncomplete?: boolean; historyTruncated?: boolean; entriesTruncated?: boolean }
 /**
@@ -135,7 +135,7 @@ export function filterUsage(usage: TrayUsage, settings: CompanionSettings): Tray
     return { ...usage, models: models.filter(row => row.provider !== 'other' || row.model !== 'other'), summary: {}, usageIncomplete: true };
   }
   const summary: TrayTotals = {};
-  for (const key of ['requests', 'totalTokens', 'inputTokens', 'outputTokens', 'cachedInputTokens', 'cacheReadInputTokens', 'estimatedCostUsd', 'measuredRequests', 'pricedRequests'] as const) {
+  for (const key of ['requests', 'totalTokens', 'inputTokens', 'outputTokens', 'cachedInputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens', 'estimatedCostUsd', 'measuredRequests', 'pricedRequests'] as const) {
     if (models.length && models.every(row => finite(row[key]))) summary[key] = models.reduce((sum, row) => sum + row[key]!, 0);
   }
   return { ...usage, models, summary };
@@ -144,7 +144,7 @@ export function filterUsage(usage: TrayUsage, settings: CompanionSettings): Tray
 export function measuredTotals(data: TrayTotals): TrayTotals {
   const next = { ...data };
   if ((data.requests ?? 0) > 0 && (data.measuredRequests === 0 || data.coverageRatio === 0)) {
-    for (const key of ['totalTokens', 'inputTokens', 'outputTokens', 'cachedInputTokens', 'cacheReadInputTokens'] as const) delete next[key];
+    for (const key of ['totalTokens', 'inputTokens', 'outputTokens', 'cachedInputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens'] as const) delete next[key];
   }
   if ((data.requests ?? 0) > 0 && data.pricedRequests === 0) delete next.estimatedCostUsd;
   return next;

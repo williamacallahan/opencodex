@@ -88,7 +88,7 @@ function UsageWorkspaceBody({
         <>
           <UsageSummaryCards summary={data.summary} days={bars} activeDays={activeDays} locale={locale} t={t} />
           <UsageHeatmapPanel key={`${range}:${customWindow}`} defaultView={defaultView} heatmap={heatmap} bars={bars}
-            totalTokens={data.summary.totalTokens} locale={locale} t={t} />
+            totalTokens={data.summary.totalTokens} summary={data.summary} locale={locale} t={t} />
         </>
       ),
     },

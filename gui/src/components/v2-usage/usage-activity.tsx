@@ -1,4 +1,5 @@
 import { createPortal } from "react-dom";
+import { TokenBreakdown } from "../token-breakdown";
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Locale, TFn } from "../../i18n/shared";
 import { formatTokens } from "../../format-tokens";
@@ -115,10 +116,11 @@ function DayBars({ bars, locale, t }: { bars: UsageDay[]; locale: Locale; t: TFn
             <span>{t("usage.heatmap.tooltipRequests", { requests: activeDay.requests })}</span>
             <span className="daybar-tip-val">{t("usage.heatmap.tooltipTokens", { tokens: formatTokens(activeDay.totalTokens, locale) })}</span>
           </div>
+          <TokenBreakdown source={activeDay} locale={locale} variant="detail" />
           {activeDay.models.slice(0, 8).map(model => (
             <div key={`${model.provider}/${model.model}`} className="daybar-tip-row">
               <span className="daybar-tip-name">{modelLabel(model.model)}</span>
-              <span className="daybar-tip-val">{formatTokens(model.totalTokens, locale)}</span>
+              <span className="daybar-tip-val">{formatTokens(model.totalTokens, locale)}<TokenBreakdown source={model} locale={locale} variant="detail" /></span>
             </div>
           ))}
         </UsageChartOverlay>
@@ -231,6 +233,7 @@ function CalendarHeatmap({ heatmap, locale, t }: { heatmap: Heatmap; locale: Loc
             <div className="heatmap-tip-date">{formatCalendarDate(cell.date, locale)}</div>
             <div className="heatmap-tip-val">{t("usage.heatmap.tooltipTokens", { tokens: formatTokens(cell.totalTokens, locale) })}</div>
             <div className="heatmap-tip-req muted">{t("usage.heatmap.tooltipRequests", { requests: cell.requests })}</div>
+            <TokenBreakdown source={cell} locale={locale} variant="detail" />
           </UsageChartOverlay>
         );
       })()}
@@ -248,6 +251,7 @@ export function UsageHeatmapPanel({
   heatmap,
   bars,
   totalTokens,
+  summary,
   locale,
   t,
 }: {
@@ -255,6 +259,7 @@ export function UsageHeatmapPanel({
   heatmap: Heatmap;
   bars: UsageDay[];
   totalTokens: number;
+  summary: import("../../../../src/usage/token-breakdown").TokenBreakdownSource;
   locale: Locale;
   t: TFn;
 }) {
@@ -266,6 +271,7 @@ export function UsageHeatmapPanel({
           <h3 id="usage-heatmap-title" className="m-0 text-[15px] font-semibold text-fg">{t("usage.section.heatmap")}</h3>
           <span className="text-[13px] text-fg-muted tabular-nums">
             {t("usageV2.chartCaption", { tokens: formatTokens(totalTokens, locale) })}
+            <TokenBreakdown source={summary} locale={locale} variant="stack" />
           </span>
         </div>
         <SegmentedControl

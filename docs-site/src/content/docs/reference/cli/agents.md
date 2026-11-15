@@ -492,7 +492,10 @@ still apply. These commands query the running proxy; they do not provide offline
 rather than the provider serving the request.
 
 The default view prints request, token and estimated-cost totals plus
-per-provider and per-model breakdowns. Costs are API list-price equivalents,
+per-provider and per-model breakdowns. Token totals are accompanied by sent, received,
+cache-read and cache-write counts; cache percentages are shares of sent tokens. Sent
+already includes cache reads and writes. Unreported cache writes are labeled rather than
+assumed to be zero. Costs are API list-price equivalents,
 not a billing receipt: subscription plans and provider credits are billed
 separately, and requests with no matching price row are counted as
 `unpriced`/`unmetered` rather than folded in as zero.

@@ -64,7 +64,10 @@ function formatHistoryRow(row: LogRow, formatRow: (row: LogRow) => string): stri
   const tokens = typeof row.totalTokens === "number" && Number.isFinite(row.totalTokens)
     ? `${row.totalTokens}tok`
     : "";
-  return [formatRow(row), tokens, formatCost(row)].filter(Boolean).join("  ");
+  const usage = record(row.usage) ? row.usage : undefined;
+  const count = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? String(value) : "-";
+  const split = tokens && usage ? ` in${count(usage.inputTokens)} out${count(usage.outputTokens)} c${count(usage.cacheReadInputTokens ?? usage.cachedInputTokens)} w${count(usage.cacheCreationInputTokens)}` : "";
+  return [formatRow(row), tokens + split, formatCost(row)].filter(Boolean).join("  ");
 }
 
 function historyPage(raw: unknown): {

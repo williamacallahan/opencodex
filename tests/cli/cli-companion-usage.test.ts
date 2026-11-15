@@ -73,6 +73,13 @@ test("unknown folded attribution remains incomplete; explicit empty selection ha
   expect(output().ranges.today.data.models.map((row: { provider: string }) => row.provider)).toEqual(["a"]);
 });
 
+test("human output shows measured token splits", async () => {
+  const totals = { requests: 1, totalTokens: 110, inputTokens: 100, outputTokens: 10, cacheReadInputTokens: 80, cacheCreationInputTokens: 5 };
+  const report = { summary: totals, models: [{ ...totals, provider: "a", model: "alpha" }] };
+  expect((await run([settings, report, report], [])).code).toBe(0);
+  expect(out.mock.calls.flat().join("\n")).toContain("Sent 100 | Received 10 | Cache read 80 (80%) | Cache write 5 (5%)");
+});
+
 test("unmeasured/unpriced and missing fields stay unknown on both summary and rows", async () => {
   const totals = { requests: 3, totalTokens: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheReadInputTokens: 0, estimatedCostUsd: 0, measuredRequests: 0, pricedRequests: 0, coverageRatio: 0 };
   const data = { summary: totals, models: [{ ...totals, provider: "a", model: "alpha" }, { provider: "b", model: "beta", requests: 0 }] };
@@ -156,6 +163,8 @@ test("companion dispatch retains partial numeric result and human unknown metric
   const text = out.mock.calls.flat().join("\n");
   expect(text).toContain("Today: unknown requests; unknown tokens; cost unknown");
   expect(text).toContain("30 days: unavailable");
+  expect(text).not.toContain("Cache write");
+  expect(text).not.toContain("Cache write");
 });
 
 test("preabort and SIGTERM retain signal exits without late output", async () => {

@@ -19,6 +19,9 @@ import type { TKey } from "./en";
  * Technical terms and model identifiers intentionally remain English.
  */
 export const pt: Record<TKey, string> = {
+  "tokens.sent": "Enviados", "tokens.received": "Recebidos", "tokens.cacheRead": "Leitura de cache", "tokens.cacheWrite": "Gravação de cache",
+  "tokens.ofSent": "{percent} dos enviados", "tokens.cacheWriteNotReported": "Gravação de cache: não informada",
+  "tokens.cacheIncludedNote": "Os tokens de cache estão incluídos nos tokens enviados.", "tokens.breakdownAria": "Enviados {sent}, recebidos {received}, leitura de cache {read} ({readShare}), gravação de cache {write} ({writeShare})",
     "pws.firstResponse.title": "Progresso até a primeira resposta",
   "pws.firstResponse.stepProvider": "Provedor",
   "pws.firstResponse.stepModels": "Modelos",

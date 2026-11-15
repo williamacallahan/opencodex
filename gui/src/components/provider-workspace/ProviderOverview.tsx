@@ -6,6 +6,7 @@ import { anthropicInstanceRowShapeMatches, isAnthropicInstanceId } from "../../.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readJsonOrThrow } from "../../fetch-json";
 import { useT, useI18n } from "../../i18n/shared";
+import { TokenBreakdown } from "../token-breakdown";
 import { IconAlert, IconCheck } from "../../icons";
 import { binProviderStatus, usesUnverifiedVertexCredentials, type WorkspaceItem } from "../../provider-workspace/catalog";
 import { formatRequestCount, formatTokenCount } from "../../provider-workspace/usage";
@@ -482,7 +483,7 @@ export default function ProviderOverview({
           {typeof tokens === "number" && (
             <div className="pws-kv-row">
               <dt>{t("pws.stats.totalTokens")}</dt>
-              <dd className="pws-kv-mono">{formatTokenCount(tokens, locale)}</dd>
+              <dd className="pws-kv-mono">{formatTokenCount(tokens, locale)}<TokenBreakdown source={usageTotals ?? {}} locale={locale} variant="stack" /></dd>
             </div>
           )}
           {typeof requests !== "number" && typeof tokens !== "number" && (

@@ -145,7 +145,7 @@ export interface ShadowCallData {
   /** Runtime-owned source inventory; older runtimes omit it. */
   sourceModelOptions?: ShadowCallSourceOption[];
 }
-export type UsageSummary30d = import("../usage-summary-resource").UsageReadMetadata & { summary: { requests: number; totalTokens: number; coverageRatio: number } };
+export type UsageSummary30d = import("../usage-summary-resource").UsageReadMetadata & { summary: import("../../../src/usage/token-breakdown").TokenBreakdownSource & { requests: number; totalTokens: number; coverageRatio: number } };
 export type UpdateChannel = "latest" | "preview";
 export type Installer = "bun" | "mise" | "npm" | "pnpm" | "source";
 export type UpdateJobStatus = "running" | "restarting" | "succeeded" | "failed";

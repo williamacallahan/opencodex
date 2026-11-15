@@ -4,6 +4,7 @@
   "prompt-cache-reuse-paths.test.ts": "usage",
   "prompt-cache-claude-shape.test.ts": "usage",
   "usage-client-attribution.test.ts": "usage",
+  "token-breakdown.test.ts": "usage",
   "usage-filter-index.test.ts": "usage",
   "usage-filter-paging.test.ts": "usage",
   "request-log.test.ts": "usage",

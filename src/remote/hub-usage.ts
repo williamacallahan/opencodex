@@ -5,10 +5,11 @@ import { USAGE_APPS } from "../usage/app-breakdown";
 export const MAX_HUB_USAGE_BYTES = 1024 * 1024;
 const count = z.number().finite().nonnegative();
 const label = z.string().min(1).max(2048).refine(value => !/[\x00-\x1f\x7f]/.test(value));
-const costs = { requests: count, totalTokens: count, estimatedCostUsd: count.optional() };
+const split = { inputTokens: count.optional(), outputTokens: count.optional(), cachedInputTokens: count.optional(), cacheReadInputTokens: count.optional(), cacheCreationInputTokens: count.optional() };
+const costs = { requests: count, totalTokens: count, estimatedCostUsd: count.optional(), ...split };
 const appCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const apps = z.array(z.object({ client: z.enum(USAGE_APPS), requests: appCount, measuredRequests: appCount,
-  totalTokens: count, estimatedCostUsd: count.optional(), pricedRequests: appCount, unpricedRequests: appCount,
+  totalTokens: count, ...split, estimatedCostUsd: count.optional(), pricedRequests: appCount, unpricedRequests: appCount,
   shareRatio: count.max(1) })).max(USAGE_APPS.length)
   .refine(rows => new Set(rows.map(row => row.client)).size === rows.length);
 

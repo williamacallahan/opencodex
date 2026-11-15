@@ -145,6 +145,8 @@ Storage policy flags in `src/cli/storage.ts` preserve omitted enable/settings an
 
 ## Bounded display selections and per-key quota
 
+The CLI token-breakdown module formats sent, received, cache-read and cache-write counts through the shared usage token-breakdown calculation; cache shares use sent tokens. Missing cache writes are not reported rather than presented as zero.
+
 `src/cli/log-history.ts` pages `GET /api/request-history` and reads one canonical row by id. It is distinct from the recent `/api/logs` ring and from `ocx logs explain`. JSON is the management payload; JSONL emits entries and prints `nextCursor` on stderr when `hasMore` is true. Bounds reuse the usage timestamp parser. Invalid options fail before the request.
 
 `src/cli/log-view-filter.ts` owns the additive logs-filter snapshot, separate from existing follow/event transport. It fetches only the fixed log endpoint with a scan limit of at most 2000, applies GUI-equivalent local selectors, then returns the newest matches in source order without deduplicating. Model/provider matching covers resolved/served/attempt identities; protocol and conversation matching reuse their actual owners. Speed bounds accept observed value-kind metrics only. The versioned JSON view separates loaded, matched and returned counts from configured scan/output limits; JSONL is rows only. Neither a match count nor a cursor claims historical completeness or resumable search. Invalid options fail before discovery; malformed windows never become empty success.

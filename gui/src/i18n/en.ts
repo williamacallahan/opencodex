@@ -19,6 +19,10 @@ import { telemetryProfileCopy } from "./v2-pages/telemetry-profile-copy";
  * `{var}` are plain interpolations.
  */
 export const en = {
+  "tokens.sent": "Sent", "tokens.received": "Received", "tokens.cacheRead": "Cache read", "tokens.cacheWrite": "Cache write",
+  "tokens.ofSent": "{percent} of sent", "tokens.cacheWriteNotReported": "Cache write: not reported",
+  "tokens.cacheIncludedNote": "Cache counts are included in sent tokens.",
+  "tokens.breakdownAria": "Sent {sent}, Received {received}, Cache read {read} ({readShare}), Cache write {write} ({writeShare})",
     "pws.firstResponse.title": "First-response progress",
   "pws.firstResponse.stepProvider": "Provider",
   "pws.firstResponse.stepModels": "Models",

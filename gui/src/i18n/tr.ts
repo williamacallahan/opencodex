@@ -18,6 +18,9 @@ import type { TKey } from "./en";
  * Turkish i18n catalog. Must match the `TKey` set (compile-checked).
  */
 export const tr: Record<TKey, string> = {
+  "tokens.sent": "Gönderilen", "tokens.received": "Alınan", "tokens.cacheRead": "Önbellek okuma", "tokens.cacheWrite": "Önbellek yazma",
+  "tokens.ofSent": "gönderilenlerin {percent} kadarı", "tokens.cacheWriteNotReported": "Önbellek yazma: bildirilmedi",
+  "tokens.cacheIncludedNote": "Önbellek tokenları gönderilen tokenlara dahildir.", "tokens.breakdownAria": "Gönderilen {sent}, alınan {received}, önbellek okuma {read} ({readShare}), önbellek yazma {write} ({writeShare})",
     "pws.firstResponse.title": "İlk yanıt durumu",
   "pws.firstResponse.stepProvider": "Sağlayıcı",
   "pws.firstResponse.stepModels": "Modeller",

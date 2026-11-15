@@ -15,6 +15,7 @@ function page(overrides: Record<string, unknown> = {}): Record<string, unknown> 
         model: "grok-4.6",
         durationMs: 42,
         totalTokens: 120,
+        usage: { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 80 },
         displayMetrics: { cost: { kind: "value", estimate: { cost: { total: 0.0123 } } } },
       },
     ],
@@ -84,7 +85,7 @@ describe("ocx logs history", () => {
     expect(url.searchParams.get("to")).toBe("2000");
     expect(url.searchParams.get("limit")).toBe("50");
     expect(result.out).toContain("id=req/1");
-    expect(result.out).toContain("120tok");
+    expect(result.out).toContain("120tok in100 out20 c80 w-");
     expect(result.out).toContain("~$0.0123");
     expect(result.out).toContain("nextCursor=cursor-2");
     expect(result.out).toContain("indexedRows=9");

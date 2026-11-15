@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import type { TokenBreakdownSource } from "../../../../src/usage/token-breakdown";
 import type { SourceFilter } from "./usage-source";
 import type { UsageApp as UsageAppClient } from "../../../../src/usage/app-breakdown";
 import type { Locale, TFn } from "../../i18n/shared";
@@ -22,9 +23,9 @@ export interface UsageSummaryTotals {
   unreportedRequests: number;
   unsupportedRequests: number;
   estimatedRequests: number;
-  inputTokens: number;
-  outputTokens: number;
-  cachedInputTokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
   reasoningOutputTokens: number;
@@ -36,14 +37,14 @@ export interface UsageSummaryTotals {
   unmeteredRequests?: number;
 }
 
-export interface UsageDayModel {
+export interface UsageDayModel extends TokenBreakdownSource {
   model: string;
   provider: string;
   requests: number;
   totalTokens: number;
 }
 
-export interface UsageDay {
+export interface UsageDay extends TokenBreakdownSource {
   date: string;
   requests: number;
   measuredRequests: number;
@@ -63,8 +64,8 @@ export interface UsageModel {
   reportedRequests: number;
   estimatedRequests: number;
   totalTokens: number;
-  inputTokens: number;
-  outputTokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
   throughputTokensPerSec?: number;
   throughputSamples?: number;
   cachedInputTokens?: number;
@@ -82,7 +83,7 @@ export interface UsageModel {
   shareRatio: number;
 }
 
-export interface UsageProvider {
+export interface UsageProvider extends TokenBreakdownSource {
   provider: string;
   requests: number;
   measuredRequests: number;
@@ -100,7 +101,7 @@ export interface UsageProvider {
   shareRatio: number;
 }
 
-export interface UsageApp {
+export interface UsageApp extends TokenBreakdownSource {
   client: UsageAppClient;
   requests: number;
   measuredRequests: number;
@@ -164,7 +165,7 @@ export function cacheHitRateTitle(model: UsageModel, locale: Locale, t: TFn): st
     return t("usage.cacheHitRate.unmeasured");
   }
   const observed = model.cacheObservedInputTokens;
-  if (typeof observed !== "number" || !Number.isFinite(observed) || observed >= model.inputTokens) {
+  if (typeof observed !== "number" || !Number.isFinite(observed) || model.inputTokens === undefined || observed >= model.inputTokens) {
     return undefined;
   }
   return t("usage.cacheHitRate.partial", {
@@ -202,6 +203,7 @@ export function lastDays(days: UsageDay[], count: number): UsageDay[] {
     const iso = isoDate(cursor);
     const d = byDate.get(iso);
     out.push({
+      ...d,
       date: iso,
       requests: d?.requests ?? 0,
       measuredRequests: d?.measuredRequests ?? 0,
@@ -272,7 +274,7 @@ function bucketLevel(value: number, buckets: number[]): 0 | 1 | 2 | 3 | 4 {
   return 4;
 }
 
-export interface HeatmapCell {
+export interface HeatmapCell extends TokenBreakdownSource {
   date: string;
   requests: number;
   totalTokens: number;
@@ -318,7 +320,7 @@ export function buildHeatmap(days: UsageDay[], customWindow = false): Heatmap {
         lastMonthCol = weeks.length;
       }
       pad(weekday);
-      week.push({ date: day.date, requests: day.requests, totalTokens: day.totalTokens,
+      week.push({ ...day, date: day.date, requests: day.requests, totalTokens: day.totalTokens,
         level: bucketLevel(day.totalTokens, buckets), dayOfWeek: weekday });
     }
     if (week.length > 0) { pad(7); weeks.push(week); }
@@ -349,6 +351,7 @@ export function buildHeatmap(days: UsageDay[], customWindow = false): Heatmap {
     }
     const d = dayMap.get(iso);
     week.push({
+      ...d,
       date: iso,
       requests: d?.requests ?? 0,
       totalTokens: d?.totalTokens ?? 0,

@@ -254,7 +254,7 @@ export default function ProviderWorkspaceShell({
   useEffect(() => {
     let cancelled = false;
     const timeout = window.setTimeout(() => {
-      const data = usageResource.data as { providers?: Array<{ provider: string; requests: number; totalTokens?: number }>; models?: Array<ProviderModelUsageRow & { provider: string }> } | undefined;
+      const data = usageResource.data as { providers?: Array<ProviderUsageTotals & { provider: string }>; models?: Array<ProviderModelUsageRow & { provider: string }> } | undefined;
       if (cancelled) return;
       if (!data) {
         if (usageResource.loading) setUsageLoading(!readSessionListCache(usageCacheKey));

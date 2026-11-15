@@ -19,6 +19,9 @@ import type { TKey } from "./en";
  * Technical terms and model identifiers intentionally remain English.
  */
 export const vi: Record<TKey, string> = {
+  "tokens.sent": "Đã gửi", "tokens.received": "Đã nhận", "tokens.cacheRead": "Đọc bộ nhớ đệm", "tokens.cacheWrite": "Ghi bộ nhớ đệm",
+  "tokens.ofSent": "{percent} số đã gửi", "tokens.cacheWriteNotReported": "Ghi bộ nhớ đệm: không được báo cáo",
+  "tokens.cacheIncludedNote": "Số token bộ nhớ đệm đã được tính trong số token gửi đi.", "tokens.breakdownAria": "Đã gửi {sent}, đã nhận {received}, đọc bộ nhớ đệm {read} ({readShare}), ghi bộ nhớ đệm {write} ({writeShare})",
     "pws.firstResponse.title": "Tiến trình phản hồi đầu tiên",
   "pws.firstResponse.stepProvider": "Nhà cung cấp",
   "pws.firstResponse.stepModels": "Mô hình",

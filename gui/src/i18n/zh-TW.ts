@@ -15,6 +15,9 @@ import type { TKey } from "./en";
 
 /** Traditional Chinese (Taiwan) UI strings — keys must match `en.ts` 1:1. */
 export const zhTW: Record<TKey, string> = {
+  "tokens.sent": "已傳送", "tokens.received": "已接收", "tokens.cacheRead": "快取讀取", "tokens.cacheWrite": "快取寫入",
+  "tokens.ofSent": "占傳送量的 {percent}", "tokens.cacheWriteNotReported": "快取寫入：未回報",
+  "tokens.cacheIncludedNote": "快取權杖數已包含在傳送權杖數中。", "tokens.breakdownAria": "已傳送 {sent}，已接收 {received}，快取讀取 {read}（{readShare}），快取寫入 {write}（{writeShare}）",
     "pws.firstResponse.title": "首次回應進度",
   "pws.firstResponse.stepProvider": "供應商",
   "pws.firstResponse.stepModels": "模型",

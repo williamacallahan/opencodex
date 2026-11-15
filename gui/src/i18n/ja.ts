@@ -17,6 +17,9 @@ import type { TKey } from "./en";
  * Japanese i18n catalog; must match the `TKey` set (compile-checked).
  */
 export const ja: Record<TKey, string> = {
+  "tokens.sent": "送信", "tokens.received": "受信", "tokens.cacheRead": "キャッシュ読み取り", "tokens.cacheWrite": "キャッシュ書き込み",
+  "tokens.ofSent": "送信の{percent}", "tokens.cacheWriteNotReported": "キャッシュ書き込み：未報告",
+  "tokens.cacheIncludedNote": "キャッシュ数は送信トークンに含まれます。", "tokens.breakdownAria": "送信 {sent}、受信 {received}、キャッシュ読み取り {read}（{readShare}）、キャッシュ書き込み {write}（{writeShare}）",
     "pws.firstResponse.title": "初回応答の進行状況",
   "pws.firstResponse.stepProvider": "プロバイダー",
   "pws.firstResponse.stepModels": "モデル",

@@ -17,6 +17,9 @@ import type { TKey } from "./en";
  * Russian i18n catalog; must match the `TKey` set (compile-checked).
  */
 export const ru: Record<TKey, string> = {
+  "tokens.sent": "Отправлено", "tokens.received": "Получено", "tokens.cacheRead": "Чтение кэша", "tokens.cacheWrite": "Запись кэша",
+  "tokens.ofSent": "{percent} отправленных", "tokens.cacheWriteNotReported": "Запись кэша: нет данных",
+  "tokens.cacheIncludedNote": "Токены кэша включены в отправленные токены.", "tokens.breakdownAria": "Отправлено {sent}, получено {received}, чтение кэша {read} ({readShare}), запись кэша {write} ({writeShare})",
     "pws.firstResponse.title": "Готовность к первому ответу",
   "pws.firstResponse.stepProvider": "Провайдер",
   "pws.firstResponse.stepModels": "Модели",

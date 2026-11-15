@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { TokenBreakdown } from "../token-breakdown";
 import type { Locale, TFn } from "../../i18n/shared";
 import { formatTokens } from "../../format-tokens";
 import { formatEstimatedUsdValue as formatUsdEstimate } from "../../intl-formatters";
@@ -174,12 +175,12 @@ export function UsageModelsTable({
                   <td className="mono font-medium text-fg" title={model.model}>{modelLabel(model.model)}</td>
                   <td className="muted" title={providerName}>{providerName}</td>
                   <td><ShareBar ratio={model.shareRatio} /></td>
-                  <td className="num mono">{formatTokens(model.totalTokens, locale)}</td>
+                  <td className="num mono">{formatTokens(model.totalTokens, locale)}<TokenBreakdown source={model} locale={locale} variant="stack" /></td>
                   <td className="num"><UsageListPrice row={model} locale={locale} t={t} /></td>
                   <td className="num">{model.requests}</td>
                   <td className="num">{model.measuredRequests}</td>
-                  <td className="num mono">{formatTokens(model.inputTokens, locale)}</td>
-                  <td className="num mono">{formatTokens(model.outputTokens, locale)}</td>
+                  <td className="num mono">{formatOptionalTokens(model.inputTokens, locale, unavailable)}</td>
+                  <td className="num mono">{formatOptionalTokens(model.outputTokens, locale, unavailable)}</td>
                   <td className="num mono" title={throughputNote}>
                     <span className="usage-hit-rate">
                       {hasThroughput(model.throughputTokensPerSec) ? `${model.throughputTokensPerSec.toFixed(1)} tok/s` : unavailable}
@@ -234,7 +235,7 @@ export function UsageAppsTable({ apps, locale, t }: { apps?: UsageApp[]; locale:
               <tr key={app.client}>
                 <td className="font-medium text-fg">{names[app.client]}</td>
                 <td><ShareBar ratio={app.shareRatio} /></td>
-                <td className="num mono">{formatTokens(app.totalTokens, locale)}</td>
+                <td className="num mono">{formatTokens(app.totalTokens, locale)}<TokenBreakdown source={app} locale={locale} variant="stack" /></td>
                 <td className="num"><UsageListPrice row={app} locale={locale} t={t} /></td>
                 <td className="num">{app.requests}</td><td className="num">{app.measuredRequests}</td>
               </tr>
@@ -270,7 +271,7 @@ export function UsageProvidersTable({ providers, locale, t }: { providers: Usage
               <tr key={provider.provider}>
                 <td className="font-medium text-fg">{formatProviderDisplayName(provider.provider, t)}</td>
                 <td><ShareBar ratio={provider.shareRatio} /></td>
-                <td className="num mono">{formatTokens(provider.totalTokens, locale)}</td>
+                <td className="num mono">{formatTokens(provider.totalTokens, locale)}<TokenBreakdown source={provider} locale={locale} variant="stack" /></td>
                 <td className="num"><UsageListPrice row={provider} locale={locale} t={t} /></td>
                 <td className="num">{provider.requests}</td>
                 <td className="num">{provider.measuredRequests}</td>

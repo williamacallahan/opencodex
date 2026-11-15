@@ -17,6 +17,9 @@ import type { TKey } from "./en";
  * Chinese i18n catalog; must match the `TKey` set (compile-checked).
  */
 export const zh: Record<TKey, string> = {
+  "tokens.sent": "已发送", "tokens.received": "已接收", "tokens.cacheRead": "缓存读取", "tokens.cacheWrite": "缓存写入",
+  "tokens.ofSent": "占发送量的 {percent}", "tokens.cacheWriteNotReported": "缓存写入：未报告",
+  "tokens.cacheIncludedNote": "缓存令牌数已计入发送令牌数。", "tokens.breakdownAria": "已发送 {sent}，已接收 {received}，缓存读取 {read}（{readShare}），缓存写入 {write}（{writeShare}）",
     "pws.firstResponse.title": "首次响应进度",
   "pws.firstResponse.stepProvider": "提供商",
   "pws.firstResponse.stepModels": "模型",

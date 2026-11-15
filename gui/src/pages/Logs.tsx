@@ -3,6 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useI18n, LOCALES, type TFn } from "../i18n/shared";
 import { formatProviderDisplayName } from "../provider-icons";
 import { formatTokens } from "../format-tokens";
+import { TokenBreakdown } from "../components/token-breakdown";
 import { hashLogConversationQuery } from "../log-conversation-id";
 import { statusCodeInfo } from "../status-codes";
 import { IconChevron, IconX } from "../icons";
@@ -441,6 +442,10 @@ function formatLogDateTime(ts: number, localeTag?: string, timeZone?: string): s
 function summarizeFilteredLogs(entries: LogEntry[]): {
   requests: number;
   totalTokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
   estimatedCostUsd: number;
   priorityLowerBound: boolean;
   unpricedRequests: number;
@@ -454,6 +459,7 @@ function summarizeFilteredLogs(entries: LogEntry[]): {
   return {
     requests: entries.length,
     totalTokens,
+    ...Object.fromEntries((["inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"] satisfies Array<"inputTokens" | "outputTokens" | "cacheReadInputTokens" | "cacheCreationInputTokens">).map(key => [key, entries.every(entry => (key === "cacheReadInputTokens" ? entry.usage?.cacheReadInputTokens ?? entry.usage?.cachedInputTokens : entry.usage?.[key]) !== undefined) ? entries.reduce((sum, entry) => sum + ((key === "cacheReadInputTokens" ? entry.usage?.cacheReadInputTokens ?? entry.usage?.cachedInputTokens : entry.usage?.[key]) ?? 0), 0) : undefined])),
     ...summarizeEstimatedCosts(entries),
   };
 }
@@ -823,6 +829,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
                   ),
                 })}
                 {" "}
+                <TokenBreakdown source={conversationTotals} locale={locale} variant="stack" />
                 <span className="muted">
                   {t("logs.conversation.scope")}
                   {(conversationTotals.unpricedRequests + conversationTotals.unmeteredRequests) > 0
@@ -975,16 +982,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
                         ? (
                             <span className="logs-stack-end">
                               <span>{log.usageStatus === "estimated" ? "~" : ""}{formatTokens(tokenTotal, locale)}</span>
-                              {(read !== undefined && read > 0) && (
-                                <span className="text-[11.5px] leading-tight text-fg-subtle">
-                                  c {formatTokens(read, locale)}
-                                </span>
-                              )}
-                              {(write !== undefined && write > 0) && (
-                                <span className="text-[11.5px] leading-tight text-fg-subtle">
-                                  w {formatTokens(write, locale)}
-                                </span>
-                              )}
+                              <TokenBreakdown source={log.usage ?? {}} locale={locale} variant="stack" />
                               {(log.usageStatus === "estimated" && read === undefined && write === undefined) && (
                                 <span className="text-[11.5px] leading-tight text-fg-subtle">
                                   {t(isCursorUsageProvider(log.provider) ? "logs.tokens.noCacheCursor" : "logs.tokens.noCache")}
@@ -1380,7 +1378,7 @@ function LogDetailDialog({
             <span className="muted">{t("logs.tokens.cacheRead")}</span><span className="mono">{tokenSplit.read !== undefined ? formatTokens(tokenSplit.read, localeCode) : "\u2014"}</span>
             <span className="muted">{t("logs.tokens.cacheWrite")}</span><span className="mono">{tokenSplit.write !== undefined ? formatTokens(tokenSplit.write, localeCode) : "\u2014"}</span>
             <span className="muted">{t("logs.tokens.reasoning")}</span><span className="mono">{detail.usage?.reasoningOutputTokens !== undefined ? formatTokens(detail.usage.reasoningOutputTokens, localeCode) : "\u2014"}</span>
-            <span className="muted">{t("logs.detail.totalTokens")}</span><span className="mono">{displayContextTokenTotal(detail) !== undefined ? formatTokens(displayContextTokenTotal(detail)!, localeCode) : "\u2014"}</span>
+            <span className="muted">{t("logs.detail.totalTokens")}</span><span className="mono">{displayContextTokenTotal(detail) !== undefined ? formatTokens(displayContextTokenTotal(detail)!, localeCode) : "\u2014"}<TokenBreakdown source={detail.usage ?? {}} locale={localeCode} variant="detail" /></span>
             {detail.usage?.contextTotalTokens !== undefined && (
               <>
                 <span className="muted">{t("logs.tokens.contextTotal")}</span>
