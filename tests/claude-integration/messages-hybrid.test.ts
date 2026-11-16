@@ -434,6 +434,34 @@ describe("hybrid Messages public HTTP transport", () => {
     expect(bridgeCalls).toHaveLength(0);
   });
 
+  test("hybrid admits a combo whose first target's provider is disabled when the usable targets are bridge-allowed", async () => {
+    await launch(false, config => {
+      config.providers["disabled-pool"] = { ...config.providers["gpt-pool"]!, disabled: true };
+      config.combos = { hybrid: { strategy: "failover", targets: [
+        { provider: "disabled-pool", model: "gpt-fixture" }, { provider: "gpt-pool", model: "gpt-fixture" },
+      ] } };
+    });
+    const response = await post("/hybrid/v1/messages", encode(raw.replace(nativeModel, "ocx-claude-combo--hybrid")));
+    expect(response.status).toBe(200);
+    await response.arrayBuffer();
+    expect(bridgeCalls).toHaveLength(1);
+    expect(nativeCalls).toHaveLength(0);
+  });
+
+  test("hybrid still refuses a combo whose usable target is Anthropic even with a disabled provider listed", async () => {
+    await launch(false, config => {
+      config.providers["disabled-pool"] = { ...config.providers["gpt-pool"]!, disabled: true };
+      config.combos = { hybrid: { strategy: "failover", targets: [
+        { provider: "disabled-pool", model: "gpt-fixture" }, { provider: "anthropic", model: nativeModel },
+      ] } };
+    });
+    const response = await post("/hybrid/v1/messages", encode(raw.replace(nativeModel, "ocx-claude-combo--hybrid")));
+    expect(response.status).toBe(400);
+    await response.arrayBuffer();
+    expect(nativeCalls).toHaveLength(0);
+    expect(bridgeCalls).toHaveLength(0);
+  });
+
   test("hybrid rechecks a fast-row base combo before dispatch", async () => {
     await launch(false, config => {
       config.fastRows = true;

@@ -95,6 +95,12 @@ function targetProviderIsUsable(config: OcxConfig, target: OcxComboTarget, now: 
   return providerExclusionReason(config, target, now) === undefined;
 }
 
+/** True when the picker can never select this target because its provider is missing or disabled in config. */
+export function comboTargetProviderUnconfigured(config: OcxConfig, target: OcxComboTarget): boolean {
+  const reason = providerExclusionReason(config, target, Date.now());
+  return reason === "provider missing" || reason === "provider disabled";
+}
+
 /**
  * OCX-11: the coarse fallback trigger for a target the picker passed over for a reason other
  * than a cooldown (provider missing or disabled, cached quota spent, ineligible for the request).

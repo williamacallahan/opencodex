@@ -23,6 +23,7 @@ export {
   advanceComboAfterFailure,
   clearComboSelectionState,
   comboExclusionReasons,
+  comboTargetProviderUnconfigured,
   comboTargetSkipTrigger,
   NoAvailableComboTargetsError,
   noteComboFailure,

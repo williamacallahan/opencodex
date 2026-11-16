@@ -46,7 +46,7 @@ import { AnthropicRequestError, callerCacheRetention, claudeCodeAgentId, claudeS
 import { nativeReasoningTag, type NativeReasoningOwner } from "../responses/reasoning-replay-cache";
 import { isKnownDesktop3pModelId, resolveDesktop3pAlias } from "../claude/desktop-3p";
 import { resolveAlias, claudeCodeNativeAlias, legacyAliasForNative } from "../claude/alias";
-import { getCombo, NoAvailableComboTargetsError } from "../combos";
+import { comboTargetProviderUnconfigured, getCombo, NoAvailableComboTargetsError } from "../combos";
 import { recordDesktopRequest } from "../claude/desktop-health";
 import { stripOneMillionMarker } from "../claude/context-windows";
 import { captureAdmissionPolicy } from "./capture-admission-policy";
@@ -679,10 +679,17 @@ async function handleClaudeMessagesWithBudget(
   ).adapter !== "anthropic"
     && !configuredAnthropicInstance(config, candidate.providerName) && candidate.routeKind !== "policy"
     && (!candidate.combo || comboTargetsBridgeAllowed(candidate.combo.comboId));
-  const comboTargetsBridgeAllowed = (comboId: string): boolean => !!getCombo(config, comboId)?.targets.every(target => {
-    const route = previewRouteModel(config, `${target.provider}/${target.model}`);
-    return !route.combo && bridgeRouteAllowed(route);
-  });
+  const comboTargetsBridgeAllowed = (comboId: string): boolean => {
+    const targets = getCombo(config, comboId)?.targets;
+    if (!targets) return false;
+    // The picker never selects a missing or disabled provider, so only selectable targets decide compatibility;
+    // a combo with none keeps evaluating every target.
+    const selectable = targets.filter(target => !comboTargetProviderUnconfigured(config, target));
+    return (selectable.length > 0 ? selectable : targets).every(target => {
+      const route = previewRouteModel(config, `${target.provider}/${target.model}`);
+      return !route.combo && bridgeRouteAllowed(route);
+    });
+  };
   if (ingress.hybridMessages) {
     let wire: Uint8Array | undefined;
     let strict = false;
