@@ -11,11 +11,13 @@ import * as authCollision from "../../src/codex/auth-collision";
 import * as mainHardLock from "../../src/codex/main-account-hard-lock";
 import { reconcileMainCodexAccountRuntimeState, resetMainCodexAccountIdentityTrackingForTests, applyConfirmedMainCodexAccountTransition } from "../../src/codex/account-lifecycle";
 import { runPassiveRead } from "../../src/lib/passive-read";
-import { clearThreadAccountMap, clearCodexUpstreamHealth } from "../../src/codex/routing";
+import { clearThreadAccountMap, clearCodexUpstreamHealth, clearConversationStateIssuerMap, rememberConversationStateIssuer } from "../../src/codex/routing";
+import { CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER } from "../../src/codex/routing/thread-affinity";
+import { accountChangeFileReferenceRefusal } from "../../src/server/responses/account-change-state";
 import { clearAccountQuota } from "../../src/codex/quota";
 import { clearMainAccountInfoCache } from "../../src/codex/main-account-cache";
 import { setMainAccountPlan } from "../../src/codex/main-account";
-import { observeMainCodexCollisionIdentity } from "../../src/codex/collision-identity";
+import { observeMainCodexCollisionIdentity, sameCodexUploadedFileAccount } from "../../src/codex/collision-identity";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
@@ -66,6 +68,7 @@ beforeEach(() => {
   saveCodexAccountCredential(poolId, { accessToken: jwt("plus", email), refreshToken: "fake-refresh",
     chatgptAccountId: "shared-account", expiresAt: Date.now() + 3600_000 });
   clearThreadAccountMap();
+  clearConversationStateIssuerMap();
   clearCodexUpstreamHealth();
   clearAccountQuota();
   clearMainAccountInfoCache();
@@ -74,6 +77,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   clearThreadAccountMap();
+  clearConversationStateIssuerMap();
   clearCodexUpstreamHealth();
   clearAccountQuota();
   clearMainAccountInfoCache();
@@ -404,6 +408,65 @@ describe("stored Pool duplicate of native main", () => {
       expect(codexAccountUnusableReason(config, poolId)).toBeUndefined();
       expect(dto().selectionExcludedReason).toBeUndefined();
     } finally { process.env.CODEX_HOME = original; }
+  });
+});
+
+describe("uploaded-file account equivalence", () => {
+  const bindingKey = "thread-uploaded-file-equivalence";
+  function fileBody() {
+    return { input: [{ type: "message", role: "user", content: [{ type: "input_file", file_id: "opaque" }] }] };
+  }
+  function refusal(servingAccountId: string, priorAccountId?: string) {
+    return accountChangeFileReferenceRefusal({
+      body: fileBody(),
+      bindingKey,
+      servingAccountId,
+      priorAccountId,
+      sameUploadedFileAccount: (first, second) => sameCodexUploadedFileAccount(config, first, second),
+    });
+  }
+  test("the main login and its stored copy are one account in both directions", () => {
+    native();
+    rememberConversationStateIssuer(bindingKey, poolId);
+    expect(refusal("__main__")).toBeUndefined();
+    rememberConversationStateIssuer(bindingKey, "__main__");
+    expect(refusal(poolId)).toBeUndefined();
+  });
+  test("without the equivalence every distinct slot stays a different account", () => {
+    native();
+    rememberConversationStateIssuer(bindingKey, poolId);
+    expect(accountChangeFileReferenceRefusal({ body: fileBody(), bindingKey, servingAccountId: "__main__" })?.status).toBe(400);
+  });
+  test("a prior account that is the copy does not refuse service by main", () => {
+    native();
+    expect(refusal("__main__", poolId)).toBeUndefined();
+    expect(refusal("__main__", "someone-else")?.status).toBe(400);
+  });
+  test("the equivalence never masks a foreign issuer or a foreign prior account", () => {
+    native();
+    rememberConversationStateIssuer(bindingKey, "someone-else");
+    expect(refusal("__main__", poolId)?.status).toBe(400);
+    rememberConversationStateIssuer(bindingKey, "__main__");
+    expect(refusal(poolId, "someone-else")?.status).toBe(400);
+  });
+  test("two Pool entries that duplicate main stay distinct accounts", () => {
+    native();
+    expect(sameCodexUploadedFileAccount(config, poolId, "another-copy")).toBe(false);
+  });
+  test("an unobserved main identity keeps the refusal", () => {
+    expect(sameCodexUploadedFileAccount(config, "__main__", poolId)).toBe(false);
+    rememberConversationStateIssuer(bindingKey, poolId);
+    expect(refusal("__main__")?.status).toBe(400);
+  });
+  test("the unknown-issuer sentinel keeps its strict stored comparison", () => {
+    native();
+    rememberConversationStateIssuer(bindingKey, CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER);
+    expect(refusal("__main__")?.status).toBe(400);
+  });
+  test("a different ChatGPT account under the stored copy still refuses", () => {
+    native("other-account");
+    rememberConversationStateIssuer(bindingKey, poolId);
+    expect(refusal("__main__")?.status).toBe(400);
   });
 });
 

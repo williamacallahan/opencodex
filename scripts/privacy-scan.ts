@@ -96,7 +96,10 @@ function isAllowedEmail(file: string, email: string): boolean {
   if (file === DEVLOG_PUBLICATION_PROOF_FILE && email === DEVLOG_PUBLICATION_PROOF_EMAIL) return true;
   if (SPONSORSHIP_CONTACT_FILES.has(file) && email.toLowerCase() === SPONSORSHIP_CONTACT_EMAIL) return true;
   const domain = email.split("@").at(1)?.toLowerCase() ?? "";
-  if (domain === "example.test" || domain === "example.com" || domain === "test.com" || domain.endsWith(".test")) {
+  // RFC 2606 / RFC 6761 reserve `.test` and `.example` for documentation, so no mailbox exists
+  // behind either. `proxy.example` read as a person's address until this covered both.
+  if (domain === "example.test" || domain === "example.com" || domain === "example"
+    || domain === "test.com" || domain.endsWith(".test") || domain.endsWith(".example")) {
     return true;
   }
   // devlog records public commit authorship: PR absorption notes, cherry-pick
@@ -110,6 +113,9 @@ function isAllowedEmail(file: string, email: string): boolean {
   }
   // URL-userinfo fixtures (https://user:pw@host/...) read as "pw@host" — not emails.
   if (file.startsWith("tests/") && email === ["pw", "chatgpt.com"].join("@")) return true;
+  // A VCS remote is not a mailbox: the SSH form every clone uses puts the transport account
+  // GitHub assigns, not a person, in front of the host.
+  if (file.startsWith("tests/") && email === ["git", "github.com"].join("@")) return true;
   // Retina asset names read as addresses: "128x128@2x.png" is local part "128x128", domain "2x",
   // and the loose TLD rule accepts "png". The exemption is written against the asset-name grammar
   // rather than against that shape, because a person's name in front of the same scale suffix is

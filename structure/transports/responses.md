@@ -362,34 +362,33 @@ normally. `canPortConversationState` is local until `src/routing/identity-domain
 
 ### Uploaded files do not move between accounts
 
-An uploaded `file_id` has always been classified as account-bound, and the scrub has always
-removed only `previous_response_id` and `conversation`. A body whose only account-bound state was
-a file reference therefore reported nothing scrubbed and went to the new account unchanged.
-
-Deleting the reference is not the contract. A file reference is content the caller attached, not
-continuation state the turn can do without, and dropping it silently answers a different question
-than the one that was asked. `accountChangeFileReferenceRefusal` reads the carriers directly
-rather than through the portability verdict, because that verdict reports the first reason it
-finds: a body carrying both a previous response id and a file reference reports only the former,
-and the file would slip through the scrub.
+An uploaded `file_id` is account-bound, and the scrub removes only `previous_response_id` and
+`conversation`, so a body whose only account-bound state was a file reference reported nothing
+scrubbed and went to the new account unchanged. Deleting the reference is not the contract: it is
+content the caller attached, and dropping it silently answers a different question.
+`accountChangeFileReferenceRefusal` therefore reads the carriers directly rather than through the
+portability verdict, which reports only the first reason it finds.
 
 The initial `/v1/responses` selection and the native compact dispatch answer HTTP 400, not a
-retryable status, and the message names both the cause and the remedy. That message carries more
-than the immediate failure on purpose: the reference stays in conversation history, so every later
-turn is refused the same way until the files are re-uploaded under the serving account or the
-conversation is restarted, and a caller told only that the reference is invalid would resend
-unchanged and see a dead conversation.
+retryable status, and the message names both the cause and the remedy: the reference stays in
+conversation history, so every later turn is refused the same way until the files are re-uploaded
+under the serving account or the conversation is restarted.
+
+The refusal is about the account, not the slot. `sameCodexUploadedFileAccount` relates native main and a stored copy of the
+same ChatGPT account (see [uploaded-file account retention](../providers/openai-accounts.md#uploaded-file-account-retention)),
+so a turn crossing those slots keeps its `file_id`. A request-owned bearer that does not match the observed native credential,
+the unknown-issuer sentinel, and a foreign prior account stay strict, because each compares stored observations rather than
+the caller's live evidence. Continuation scrubbing is unchanged.
 
 The alternate-account paths refuse the move instead of raising a status, because an earlier
 response already exists to return. `conversationCarriesUploadedFiles` answers from the body alone,
 so both the Responses retry helper and the compact retry ask before resolving an alternate: no
 send is reserved, the first response is never cancelled, and the caller returns the original
 upstream rejection. A same-account replay such as the gated-model 400 ladder is unaffected, and a
-single-account install never reaches any of this because serving and issuing accounts cannot
-differ. Pinning a file-carrying conversation to its issuing account is routing-affinity work and is
-specified in [uploaded-file account retention](../providers/openai-accounts.md#uploaded-file-account-retention);
-it reduces how often this refusal fires and does not replace it, because the issuing account can
-always become unable to serve.
+single-account install never reaches any of this. Pinning a file-carrying conversation to its
+issuing account is routing-affinity work, specified in
+[uploaded-file account retention](../providers/openai-accounts.md#uploaded-file-account-retention);
+it reduces how often this refusal fires and cannot replace it.
 
 > Decision record: [ADR-0039](../decisions/ADR-0039-responses-http-sse.md)
 

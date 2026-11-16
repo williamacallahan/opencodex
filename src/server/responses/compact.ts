@@ -1,6 +1,9 @@
 import { clientFacingModelLabel, type ClientFacingModelLabel } from "../../lib/error-destination";
 import { formatClientRetryAfter } from "../../lib/client-retry-after";
 import { conversationStateAccountId, releaseRequestOwnedMainOnOutcome, isKeyedRequestOwnedMain } from "../../codex/request-owned-affinity";
+import { isRequestOwnedAffinityKey } from "../../codex/request-owned-affinity-key";
+import { callerMatchesObservedMain } from "../../codex/request-owned-main-pin";
+import { sameCodexUploadedFileAccount } from "../../codex/collision-identity";
 import { CodexInstallationIdUnavailableError } from "../../codex/installation-id";
 import { MAIN_CODEX_ACCOUNT_ID } from "../../codex/account-id";
 import { isolateCodexPoolClientMetadata } from "../../codex/forward-transport-headers";
@@ -1017,6 +1020,9 @@ export async function handleResponsesCompact(
           body: raw,
           bindingKey: binding.bindingKey,
           servingAccountId: binding.accountId,
+          sameUploadedFileAccount: (firstAccountId, secondAccountId) =>
+            (!isRequestOwnedAffinityKey(binding.bindingKey) || callerMatchesObservedMain(req.headers))
+            && sameCodexUploadedFileAccount(config, firstAccountId, secondAccountId),
         });
         if (refusal) return refusal;
         applyAccountChangeConversationStateScrub({
