@@ -179,6 +179,9 @@ import {
   codexLogAccountId,
 } from "./core-codex-account";
 import { acquireUpstreamHostAdmission } from "../../codex/upstream-host-health";
+import { isRequestOwnedAffinityKey } from "../../codex/request-owned-affinity-key";
+import { callerMatchesObservedMain } from "../../codex/request-owned-main-pin";
+import { sameCodexUploadedFileAccount } from "../../codex/collision-identity";
 import { applyCompactionRoutingOverride, compactionRoutingKeepsProviderIdentity } from "./compaction-routing";
 import { applyMainHardLockFallbackOverride } from "./main-hard-lock-routing";
 import { FallbackRefusedError, guardFallbackHop } from "../../routing/fallback-policy";
@@ -1698,6 +1701,9 @@ export async function prepareResponsesRequest(
         body: parsed._rawBody,
         bindingKey: binding.bindingKey,
         servingAccountId: binding.accountId,
+        sameUploadedFileAccount: (firstAccountId, secondAccountId) =>
+          (!isRequestOwnedAffinityKey(binding.bindingKey) || callerMatchesObservedMain(callerAuthHeaders))
+          && sameCodexUploadedFileAccount(config, firstAccountId, secondAccountId),
       });
       if (refusal) return refusal;
       applyAccountChangeConversationStateScrub({

@@ -1521,6 +1521,7 @@
     "response-log-inspection.test.ts": "server",
     "response-model-identity.test.ts": "server",
     "responses-4546-incident-regression.test.ts": "responses",
+    "responses-main-duplicate-file-scope.test.ts": "responses",
     "responses-account-change-scrub.test.ts": "responses",
     "responses-account-label.test.ts": "responses",
     "responses-anthropic-fast-downgrade.test.ts": "responses",

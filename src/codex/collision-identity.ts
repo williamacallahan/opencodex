@@ -1,4 +1,5 @@
 import { decodeJwtPayload, extractAccountIdClaims, extractEmail } from "../oauth/chatgpt";
+import { MAIN_CODEX_ACCOUNT_ID } from "./account-id";
 import type { CodexAccount, OcxConfig } from "../types";
 import { getCodexAccountCredential } from "./account-store";
 import type { CodexTokens } from "./auth-collision";
@@ -100,4 +101,27 @@ export const CODEX_MAIN_DUPLICATE_ACTION =
 export function configuredCodexMainDuplicate(config: Pick<OcxConfig, "codexAccounts">, accountId: string): boolean {
   const account = config.codexAccounts?.find(row => row.id === accountId);
   return !!account && isStoredCodexMainDuplicate(account);
+}
+
+/**
+ * Whether two account slots name one ChatGPT account for uploaded-file access.
+ *
+ * An uploaded file belongs to the ChatGPT account that received it, so a slot id is the wrong
+ * unit for this question: the native main login and a stored Pool copy of it are two slots for
+ * one account, and a file either can read is a file the other can read. Every other pair stays
+ * distinct — including two Pool entries that both duplicate main, because only the main login
+ * itself is known to be the account that issued the file.
+ *
+ * False while main's identity has not been observed: `sameCodexCollisionIdentity` needs that
+ * observation to establish the match, and a missing one must refuse rather than guess.
+ */
+export function sameCodexUploadedFileAccount(
+  config: Pick<OcxConfig, "codexAccounts">,
+  firstAccountId: string,
+  secondAccountId: string,
+): boolean {
+  if (firstAccountId === secondAccountId) return true;
+  if (firstAccountId === MAIN_CODEX_ACCOUNT_ID) return configuredCodexMainDuplicate(config, secondAccountId);
+  if (secondAccountId === MAIN_CODEX_ACCOUNT_ID) return configuredCodexMainDuplicate(config, firstAccountId);
+  return false;
 }

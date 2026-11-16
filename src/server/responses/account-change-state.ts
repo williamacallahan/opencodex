@@ -316,17 +316,31 @@ export function applyAccountChangeConversationStateScrub(
  * So the move is refused, before dispatch, and the caller is told exactly what to do about it.
  * A 400 rather than a 409: re-uploading is required, and a retryable status would invite the
  * same request back unchanged.
+ *
+ * A different slot id is not always a different account: the native main login and a stored Pool
+ * copy of it are two slots for one ChatGPT account, and the file either can read is readable by
+ * both. The caller answers that with `sameUploadedFileAccount`; without it every distinct slot id
+ * is treated as a distinct account, which is the conservative reading. The unknown-issuer branch
+ * stays strict because it compares a stored observation, not the caller's live evidence.
  */
 export function accountChangeFileReferenceRefusal(
-  args: Pick<ApplyAccountChangeConversationStateScrubArgs, "body" | "bindingKey" | "servingAccountId" | "priorAccountId">,
+  args: Pick<ApplyAccountChangeConversationStateScrubArgs, "body" | "bindingKey" | "servingAccountId" | "priorAccountId"> & {
+    /**
+     * Whether two slots name one ChatGPT account for uploaded-file access. Absent means every
+     * distinct slot id is a distinct account, which is the conservative reading.
+     */
+    sameUploadedFileAccount?: (firstAccountId: string, secondAccountId: string) => boolean;
+  },
 ): Response | undefined {
   const { body, bindingKey, servingAccountId, priorAccountId } = args;
   if (!servingAccountId || !bindingKey) return undefined;
   const issuer = peekConversationStateIssuer(bindingKey);
   const accountChanged = (issuer === CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER
     ? peekConversationStateStoredIssuerAccount(bindingKey) !== servingAccountId
-    : issuer != null && issuer !== servingAccountId)
-    || (priorAccountId != null && priorAccountId !== servingAccountId);
+    : issuer != null && issuer !== servingAccountId
+      && !args.sameUploadedFileAccount?.(issuer, servingAccountId))
+    || (priorAccountId != null && priorAccountId !== servingAccountId
+      && !args.sameUploadedFileAccount?.(priorAccountId, servingAccountId));
   if (!accountChanged) return undefined;
   // Checked against the carriers directly rather than through the portability verdict: that
   // verdict reports the FIRST reason it finds, so a body carrying both a previous response id

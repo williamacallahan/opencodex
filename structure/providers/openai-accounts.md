@@ -461,28 +461,27 @@ disagreed would hand fallback a different account than the request actually uses
 
 ## Uploaded-file account retention
 
-Uploaded files are scoped to the account that issued them, so a conversation carrying live
-`file_id` references is the one case where a voluntary move is not merely expensive. It orphans the
-reference, and because the reference stays in conversation history every later turn is refused with
-`409 account_change_file_scope` until the user re-uploads under the serving account or restarts the
-conversation. Pool rotation is automatic, so any conversation with an attachment is otherwise one
-rotation away from being permanently blocked (#4778).
+Uploaded files are scoped to the ChatGPT account that received them, so a conversation carrying live `file_id` references is
+the one case where a voluntary move is not merely expensive: moving it to an account that cannot read the file orphans the
+reference, and the reference stays in history, so every later turn is refused with HTTP 400 until the user re-uploads under
+the serving account or restarts. Pool rotation is automatic, so any conversation with an attachment is otherwise one rotation
+away from being permanently blocked (#4778). A different slot id is not always a different account: the native main login and
+a stored Pool copy of it are two slots for one ChatGPT account, so crossing between them is not a move.
+`sameCodexUploadedFileAccount` in `src/codex/collision-identity.ts` answers that with the duplicate check's own collision
+identity, and every other pair stays distinct; an unobserved main identity answers false, so a missing observation refuses
+rather than guesses.
 
-`conversationCarriesUploadedFiles` answers that question from the request body alone — the same
-predicate the refusal guard uses, so routing and refusal can never disagree about which
-conversations are in scope — and `resolveResponsesCodexAuth` carries the answer into
-`CodexAccountUsabilityOptions.retainAccountForUploadedFiles`. `src/codex/routing/cache-affinity.ts`
-owns the rule: `retainsBoundAccountForQuota` also keeps Luna included owners while another seat has Reserve,
-and `mayRebindAffinityForQuota` applies the default cache-affinity bar whenever one of them holds,
-even with `pool.cacheAffinity` false. That flag trades cache locality for capacity, not
-correctness for capacity.
-Legacy-lineage adoption preserves the original binding clocks when it changes the key, so migration does not make an old owner the newest serving owner.
-The retention is a preference over the VOLUNTARY move only, and it is not an eligibility boundary.
-Genuine exhaustion and an unusable account still release the binding, and every involuntary release
-that runs earlier in `resolveCodexAccountForThreadDetailed` — quota refusal, failover streak, pause,
-cooldown, lost generation, affinity expiry — is untouched. A pinned conversation therefore cannot be
-wedged on an account that cannot serve it, which is why the refusal remains required: it reduces how
-often that refusal fires and can never replace it.
+`conversationCarriesUploadedFiles` answers that question from the request body alone — the same predicate the refusal guard
+uses, so routing and refusal can never disagree about which conversations are in scope — and `resolveResponsesCodexAuth`
+carries the answer into `CodexAccountUsabilityOptions.retainAccountForUploadedFiles`. `src/codex/routing/cache-affinity.ts` owns
+the rule: `retainsBoundAccountForQuota` also keeps Luna included owners while another seat has Reserve, and
+`mayRebindAffinityForQuota` applies the default cache-affinity bar whenever one of them holds, even with `pool.cacheAffinity`
+false. That flag trades cache locality for capacity, not correctness for capacity. Legacy-lineage adoption preserves the
+original binding clocks when it changes the key, so migration does not make an old owner the newest serving owner. The
+retention is a preference over the VOLUNTARY move only and not an eligibility boundary: genuine exhaustion and an unusable
+account still release the binding, and every involuntary release that runs earlier in `resolveCodexAccountForThreadDetailed`
+— quota refusal, failover streak, pause, cooldown, lost generation, affinity expiry — is untouched. A pinned conversation
+therefore cannot be wedged on an account that cannot serve it, which is why the refusal remains required.
 
 Upstream API-key usage follows the [physical-attempt account attribution contract](../dashboard-and-usage.md#upstream-key-account-attribution), independently of subscription quota observations.
 `src/codex/auth-api/login-flow.ts` resolves completion credentials through the successful flow's account receipt (`loginFlowAccountId`), never the provider-active credential after a concurrent login or switch. ChatGPT retains its single-slot store policy: if a later login removed the completed flow's account, completion refuses immediately and asks for another login. It distinguishes HTTP 429 from an attempted warmup as `codex_warmup_rate_limited` and preserves that code in OAuth status. Failed attempted warmup does not persist replacement credentials; quota-confirmed deferred registration and HTTP 401/403 handling remain separate. `src/codex/warmup.ts` retains a known 429 when bounded error-body draining times out. Before warmup or persistence, `src/codex/auth-api/login-collision.ts` acquires native-main admission and a shared claim for a bounded pinned-path read, refusing with a retry-login message while fenced or unreadable; `src/codex/auth-collision.ts` compares supplied or observed identity without physical reads and rejects native-main and pool duplicates sharing ChatGPT account ID, personal/workspace plan bucket, and email (or missing email), excluding the reauthenticated row. Distinct members, workspace IDs, and plan buckets remain independent. Login uses the access-token plan when WHAM fails or omits its plan; usable WHAM plans take precedence. Display-name fallback happens only after identity checks. `tests/helpers/codex-main-collision.ts`, registered by `tests/codex-integration/codex-auth-api.test.ts`, covers these admission paths. `src/codex/collision-identity.ts` also excludes existing native-main clones from automatic, pinned and exact stored-account selection without deleting config rows or credentials, but only while the native main login can serve: `isCodexMainDuplicateExcluded` in `src/codex/account-usability.ts` lifts the exclusion when main's own credential is unusable or needs reauthentication, and keeps it under a main hard lock. Its comparison reads an identity snapshot published by owned lifecycle observations in `src/codex/account-lifecycle.ts`; passive DTO and caller-owned routing do not open native credentials. The snapshot follows same-ID member/plan changes and is scoped to the home and main identity generation. External relogins take effect at the next owned observation; confirmed API-key-only login clears prior ChatGPT collision evidence, while malformed reads retain it. Stored alias-as-email values fall back to token identity. The account DTO reports `selectionExcludedReason: "duplicate_main"` and `selectionExcludedAction`; `tests/codex-integration/codex-stored-main-duplicate.test.ts` covers existing rows, relogin, distinct members/buckets and read fences. A manual Pool pin remains a preference, not an exact binding. A validated caller-owned main credential may serve pool exhaustion or quota cooldown; an exact binding refuses instead, and observed-main pause remains effective. Successful fallback emits a constant reason-only diagnostic without credential or account identifiers. `tests/codex-integration/codex-pool-caller-fallback-policy.test.ts` covers this distinction.
