@@ -229,8 +229,13 @@ concatenates transferred chunks and hashes them. Admission reserves the source, 
 worker concatenation and bounded scratch within the ledger's pending budget; insufficient capacity
 reports `worker_backlog` without rejecting the request. Neither forwarding nor final logging waits for
 hashing: a fast buffered reply can report `hash_unavailable` while its confirmed prefill subsequently
-becomes evidence for a later request. Worker failure is terminal for that observer lifetime and lowers
-coverage rather than starting a retry loop.
+becomes evidence for a later request. A walk that throws inside the worker marks only its own turn
+`worker_failed`. A worker fault (its `error` event, a failed spawn or post, or a confirmed job older
+than the 10-second deadline) terminates the worker and marks every pending turn `worker_failed`. New
+sends stay `worker_failed` for a doubling backoff from 1 second up to 5 minutes, which resets on the
+next successful reply, and the next send after it rebuilds the worker. Each fault logs its path and
+detail without prompt bytes. A latch for the observer's lifetime blinded production cache alerts
+within 52 to 82 minutes of every hub start.
 
 `src/server/prompt-cache-prefix.ts` owns byte-preserving position identities and unsupported shapes.
 `src/server/prompt-cache-reuse.ts` owns dispatch-time history, bounded pending memory, expiry and

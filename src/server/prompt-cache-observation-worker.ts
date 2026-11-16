@@ -12,8 +12,9 @@ self.onmessage = (event: MessageEvent<PrefixWorkerRequest>) => {
     let offset = 0;
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
     reply = { id, prefix: walkPromptCachePrefix(bytes, encoding) };
-  } catch {
-    reply = { id, failed: true };
+  } catch (error) {
+    // Walk failures are typed results; an exception here is a defect, so name it without prompt bytes.
+    reply = { id, failed: true, error: (error instanceof Error ? `${error.name}: ${error.message}` : typeof error).slice(0, 200) };
   }
   self.postMessage(reply);
 };

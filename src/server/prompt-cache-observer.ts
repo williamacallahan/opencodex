@@ -20,7 +20,9 @@ import { PromptCacheReuseLedger, type ReuseClassification, type SendObservation 
 import type { RequestLogContext } from "./request-log";
 
 export interface PrefixWorkerRequest { id: number; chunks: Uint8Array[]; encoding: string | null }
-export type PrefixWorkerReply = { id: number; prefix: PrefixWalk } | { id: number; failed: true };
+export type PrefixWorkerReply = { id: number; prefix: PrefixWalk } | { id: number; failed: true; error: string };
+/** Which observation step faulted; logged so a recurring fault names its path. */
+type ObservationFault = "worker_error" | "reply_failed" | "handoff_failed" | "bytes_changed" | "deadline";
 type ObservationReason = "unsupported_transport" | "count_tokens" | "local_answer" | "combo_parent" | "combo_child"
   | "hidden_account" | "worker_failed" | "request_failed" | "model_mismatch" | "send_unavailable" | "credential_override" | "prefill_unavailable" | "usage_unavailable";
 export type NativeCacheReuse = Omit<ReuseClassification, "reuse_reason"> & {
@@ -55,6 +57,9 @@ interface ObservedSend {
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
 
 const handoffLimits = { binaryChunkBytes: 262144, stringChunkUnits: 32768, chunkOverheadBytes: 256 };
+// A faulted worker is rebuilt after a doubling backoff, so one fault never blinds the process.
+const workerRecovery = { deadlineMs: 10000, firstBackoffMs: 1000, maxBackoffMs: 300000 };
+const faultDetail = (error: unknown) => (error instanceof Error ? `${error.name}: ${error.message}` : typeof error).slice(0, 200);
 
 class NativeCacheObserver {
   readonly ledger = new PromptCacheReuseLedger();
@@ -63,7 +68,8 @@ class NativeCacheObserver {
   readonly detachShutdown = registerOptionalShutdownHook("prompt-cache-observations", () => stopNativePromptCacheObservations());
   worker?: Worker;
   deadline?: ReturnType<typeof setTimeout>;
-  workerFailed = false;
+  workerRetryAt = 0;
+  workerFaults = 0;
   nextId = 0;
 
   unknown(reason: ObservationReason | ReuseClassification["reuse_reason"]): NativeCacheReuse {
@@ -91,7 +97,7 @@ class NativeCacheObserver {
       return;
     }
     if (Object.keys(options.provider.headers ?? {}).some(isCredentialName)) { send.failure = "credential_override"; return; }
-    if (this.workerFailed) { send.failure = "worker_failed"; return; }
+    if (performance.now() < this.workerRetryAt) { send.failure = "worker_failed"; return; }
     const headers = new Headers(options.wire.headers);
     const credential = options.account
       ? `oauth:${options.account.provider}:${options.account.accountId}:${options.account.generation}`
@@ -126,7 +132,7 @@ class NativeCacheObserver {
     send.usage = anthropicUsageToOcx(message.usage);
     send.postedAt = performance.now();
     this.armDeadline();
-    this.handoff(send).catch(() => this.failWorker());
+    this.handoff(send).catch(error => this.failWorker("handoff_failed", faultDetail(error)));
   }
   async handoff(send: ObservedSend): Promise<void> {
     // Yield before allocation or worker startup; a resolved Promise would not yield to I/O.
@@ -153,13 +159,14 @@ class NativeCacheObserver {
       await Bun.sleep(0);
       if (!this.pending.has(send.id)) return;
     }
-    if (copied !== send.wireBytes) throw new Error("observation_bytes_changed");
+    if (copied !== send.wireBytes) { this.failSend(send, "bytes_changed", `copied=${copied} wire=${send.wireBytes}`); return; }
     send.body = undefined;
     if (!this.worker) {
       const worker = spawnWorker(new URL("./prompt-cache-observation-worker.ts", import.meta.url).href, "prompt-cache-observation-worker");
       this.worker = worker;
-      worker.onmessage = (event: MessageEvent<PrefixWorkerReply>) => this.accept(event.data);
-      worker.onerror = () => this.failWorker();
+      // A terminated worker's late events must not fault its replacement.
+      worker.onmessage = (event: MessageEvent<PrefixWorkerReply>) => { if (this.worker === worker) this.accept(event.data); };
+      worker.onerror = event => { if (this.worker === worker) this.failWorker("worker_error", String(event.message || event.type).slice(0, 200)); };
     }
     this.worker.postMessage({ id: send.id, chunks, encoding: send.encoding ?? null } satisfies PrefixWorkerRequest,
       chunks.map(chunk => chunk.buffer));
@@ -222,33 +229,47 @@ class NativeCacheObserver {
     const send = this.pending.get(reply.id);
     if (!send?.ticket) return;
     send.postedAt = undefined;
-    if ("failed" in reply) {
-      this.failWorker();
-      return;
-    }
+    // The worker survives a failed walk; only that turn's reuse becomes unknown.
+    if ("failed" in reply) { this.failSend(send, "reply_failed", reply.error); return; }
+    this.workerFaults = 0;
     this.ledger.resolvePrefix(send.ticket, reply.prefix);
     if (send.finished) this.release(send);
     this.armDeadline();
   }
+  // Re-reads the queue when it fires: a send released since arming leaves a timer with nothing overdue.
   armDeadline(): void {
     if (this.deadline) clearTimeout(this.deadline);
+    this.deadline = undefined;
     let oldest = Infinity;
-    for (const send of this.pending.values()) if (send.postedAt !== undefined) oldest = Math.min(oldest, send.postedAt);
-    this.deadline = Number.isFinite(oldest)
-      ? setTimeout(() => this.failWorker(), Math.max(0, oldest + 10000 - performance.now())) : undefined;
-    this.deadline?.unref();
+    let posted = 0;
+    for (const send of this.pending.values()) if (send.postedAt !== undefined) { oldest = Math.min(oldest, send.postedAt); posted++; }
+    if (!Number.isFinite(oldest)) return;
+    const wait = oldest + workerRecovery.deadlineMs - performance.now();
+    if (wait <= 0) { this.failWorker("deadline", `posted=${posted} oldest_ms=${Math.round(workerRecovery.deadlineMs - wait)}`); return; }
+    this.deadline = setTimeout(() => this.armDeadline(), wait);
+    this.deadline.unref();
   }
-  failWorker(): void {
-    if (this.workerFailed) return;
-    this.workerFailed = true;
+  failSend(send: ObservedSend, fault: ObservationFault, detail: string): void {
+    send.failure = "worker_failed";
+    this.release(send);
+    this.armDeadline();
+    console.warn(`[prompt-cache] observation fault=${fault} detail=${JSON.stringify(detail)}; this turn's cache reuse is unknown`);
+  }
+  failWorker(fault: ObservationFault, detail: string): void {
     if (this.deadline) clearTimeout(this.deadline);
+    this.deadline = undefined;
     this.worker?.terminate();
     this.worker = undefined;
+    let affected = 0;
     for (const send of this.pending.values()) {
       send.failure = "worker_failed";
       this.release(send);
+      affected++;
     }
-    console.warn("[prompt-cache] observation worker unavailable; cache reuse coverage is unknown");
+    const backoff = Math.min(workerRecovery.firstBackoffMs * 2 ** this.workerFaults++, workerRecovery.maxBackoffMs);
+    this.workerRetryAt = performance.now() + backoff;
+    console.warn(`[prompt-cache] observation worker fault=${fault} detail=${JSON.stringify(detail)} affected=${affected}`
+      + ` retry_ms=${backoff}; cache reuse is unknown until the worker is rebuilt`);
   }
   finish(logCtx: RequestLogContext | undefined, input: PromptCacheOutcomeInput): { reuse: NativeCacheReuse; physical?: Pick<PromptCacheOutcomeInput, "provider" | "servedModel" | "usage" | "usageStatus" | "wireParsed" | "nativeCacheWire"> } {
     const send = logCtx && this.bindings.get(logCtx);

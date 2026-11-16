@@ -198,6 +198,16 @@ describe("native prompt cache observation paths", () => {
     expect(warmMiss.line).toMatch(/reuse_epoch=[a-f0-9-]{36}/);
     expect(warmMiss.line).toContain("prompt_tokens=2050 cached_tokens=0 cache_write_tokens=2048");
   });
+  test("a worker fault names its path, blinds only its backoff, and observation recovers without a restart", async () => {
+    const post = spyOn(Worker.prototype, "postMessage").mockImplementationOnce(() => { throw new Error("synthetic post failure"); });
+    respond = () => streamingReply();
+    try { await send(JSON.stringify(requestBody(true))); } finally { post.mockRestore(); }
+    expect(warnings).toEqual([expect.stringContaining('fault=handoff_failed detail="Error: synthetic post failure" affected=1 retry_ms=1000')]);
+    warnings.length = 0;
+    expect((await send(JSON.stringify(requestBody(true)))).line).toContain("reuse_reason=worker_failed");
+    await Bun.sleep(1000);
+    expect((await warm()).line).toContain("reuse_expectation=reuse reuse_reason=same_account_anchor");
+  });
 
   test("streaming begins before completion and valid message_start warms later turns", async () => {
     const opening = frame("message_start", { type: "message_start", message: reply() });
