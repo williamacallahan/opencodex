@@ -104,16 +104,21 @@ export function configuredCodexMainDuplicate(config: Pick<OcxConfig, "codexAccou
 }
 
 /**
- * Whether two account slots name one ChatGPT account for uploaded-file access.
+ * Whether uploaded-file state may move from the issuing slot to the serving slot.
  *
  * An uploaded file belongs to the ChatGPT account that received it, so a slot id is the wrong
- * unit for this question: the native main login and a stored Pool copy of it are two slots for
- * one account, and a file either can read is a file the other can read. Every other pair stays
- * distinct — including two Pool entries that both duplicate main, because only the main login
- * itself is known to be the account that issued the file.
+ * unit for this question: a stored Pool copy of the native main login is a second slot for the
+ * same account. That crossing is allowed in ONE direction — a stored Pool issuer served by native
+ * main — because only that direction has positive evidence for the issuing side. A remembered
+ * `__main__` issuer does not carry the login that issued it, so after the native login changes it
+ * would be read against a stranger's identity; the reverse crossing therefore stays refused.
  *
- * False while main's identity has not been observed: `sameCodexCollisionIdentity` needs that
- * observation to establish the match, and a missing one must refuse rather than guess.
+ * The positive evidence is stricter than duplicate exclusion, which must answer for its own
+ * purpose: two credentials are one member only when their tokens positively say so. Account-ID
+ * claims must agree with the stored credential and with the observed main identity, both member
+ * claims must be present, nonconflicting, and equal, and available token emails must not disagree.
+ * A missing claim refuses; `sameCodexCollisionIdentity`'s missing-email rule is not proof of one
+ * member.
  */
 export function sameCodexUploadedFileAccount(
   config: Pick<OcxConfig, "codexAccounts">,
@@ -121,7 +126,21 @@ export function sameCodexUploadedFileAccount(
   secondAccountId: string,
 ): boolean {
   if (firstAccountId === secondAccountId) return true;
-  if (firstAccountId === MAIN_CODEX_ACCOUNT_ID) return configuredCodexMainDuplicate(config, secondAccountId);
-  if (secondAccountId === MAIN_CODEX_ACCOUNT_ID) return configuredCodexMainDuplicate(config, firstAccountId);
-  return false;
+  if (firstAccountId === MAIN_CODEX_ACCOUNT_ID || secondAccountId !== MAIN_CODEX_ACCOUNT_ID) return false;
+  if (!configuredCodexMainDuplicate(config, firstAccountId)) return false;
+
+  const main = getObservedMainCodexCollisionIdentity();
+  const credential = getCodexAccountCredential(firstAccountId);
+  if (!main?.userId || !credential?.chatgptAccountId) return false;
+
+  const account = extractAccountIdClaims(credential.accessToken);
+  const user = nativeUserIdClaims(credential.accessToken);
+  const email = normalizedEmail(extractEmail(undefined, credential.accessToken));
+  const mainEmail = normalizedEmail(main.email);
+  return !account.conflict
+    && account.accountId === credential.chatgptAccountId
+    && account.accountId === main.accountId
+    && !user.conflict
+    && user.userId === main.userId
+    && (!email || !mainEmail || email === mainEmail);
 }

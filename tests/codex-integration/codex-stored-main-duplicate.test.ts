@@ -425,46 +425,89 @@ describe("uploaded-file account equivalence", () => {
       sameUploadedFileAccount: (first, second) => sameCodexUploadedFileAccount(config, first, second),
     });
   }
-  test("the main login and its stored copy are one account in both directions", () => {
-    native();
+  /** Both credentials positively claim one member, which is what permits the copy-to-main crossing. */
+  function positivePair(mainUserId = "same-user", poolUserId = "same-user") {
+    saveCodexAccountCredential(poolId, { accessToken: jwt("plus", email, poolUserId), refreshToken: "fake-refresh",
+      chatgptAccountId: "shared-account", expiresAt: Date.now() + 3600_000 });
+    native("shared-account", "plus", email, true, mainUserId);
+  }
+  test("a positively identified stored copy may hand a file to native main", () => {
+    positivePair();
     rememberConversationStateIssuer(bindingKey, poolId);
     expect(refusal("__main__")).toBeUndefined();
+    expect(refusal("__main__", poolId)).toBeUndefined();
+  });
+  test("a remembered main alias cannot authorize the reverse crossing", () => {
+    positivePair();
     rememberConversationStateIssuer(bindingKey, "__main__");
-    expect(refusal(poolId)).toBeUndefined();
+    expect(refusal(poolId)?.status).toBe(400);
+    expect(refusal(poolId, "__main__")?.status).toBe(400);
   });
   test("without the equivalence every distinct slot stays a different account", () => {
-    native();
+    positivePair();
     rememberConversationStateIssuer(bindingKey, poolId);
     expect(accountChangeFileReferenceRefusal({ body: fileBody(), bindingKey, servingAccountId: "__main__" })?.status).toBe(400);
   });
-  test("a prior account that is the copy does not refuse service by main", () => {
-    native();
-    expect(refusal("__main__", poolId)).toBeUndefined();
-    expect(refusal("__main__", "someone-else")?.status).toBe(400);
+  test("matching emails alone never authorize the crossing", () => {
+    saveCodexAccountCredential(poolId, { accessToken: jwt("plus", email), refreshToken: "fake-refresh",
+      chatgptAccountId: "shared-account", expiresAt: Date.now() + 3600_000 });
+    native("shared-account", "plus", email, true);
+    expect(sameCodexUploadedFileAccount(config, poolId, "__main__")).toBe(false);
+  });
+  test("different members in one workspace are refused even when an email is missing", () => {
+    config.codexAccounts![0]!.plan = "team";
+    saveCodexAccountCredential(poolId, { accessToken: jwt("team", email, "member-two"), refreshToken: "fake-refresh",
+      chatgptAccountId: "shared-account", expiresAt: Date.now() + 3600_000 });
+    native("shared-account", "team", "", true, "member-one");
+    expect(sameCodexUploadedFileAccount(config, poolId, "__main__")).toBe(false);
+  });
+  test("a conflicting member claim is refused", () => {
+    positivePair("same-user", "other-user");
+    expect(sameCodexUploadedFileAccount(config, poolId, "__main__")).toBe(false);
+  });
+  test("an account claim that disagrees with the stored credential is refused", () => {
+    saveCodexAccountCredential(poolId, { accessToken: jwt("plus", email, "same-user", "other-account"),
+      refreshToken: "fake-refresh", chatgptAccountId: "shared-account", expiresAt: Date.now() + 3600_000 });
+    native("shared-account", "plus", email, true, "same-user");
+    expect(sameCodexUploadedFileAccount(config, poolId, "__main__")).toBe(false);
+  });
+  test("a disagreeing token email vetoes the crossing", () => {
+    positivePair();
+    saveCodexAccountCredential(poolId, { accessToken: jwt("plus", "other@example.test", "same-user"),
+      refreshToken: "fake-refresh", chatgptAccountId: "shared-account", expiresAt: Date.now() + 3600_000 });
+    expect(sameCodexUploadedFileAccount(config, poolId, "__main__")).toBe(false);
+  });
+  test("a missing email on both sides still needs matching member claims", () => {
+    config.codexAccounts![0]!.plan = "team";
+    saveCodexAccountCredential(poolId, { accessToken: jwt("team", "", "same-user"), refreshToken: "fake-refresh",
+      chatgptAccountId: "shared-account", expiresAt: Date.now() + 3600_000 });
+    native("shared-account", "team", "", true, "same-user");
+    expect(sameCodexUploadedFileAccount(config, poolId, "__main__")).toBe(true);
   });
   test("the equivalence never masks a foreign issuer or a foreign prior account", () => {
-    native();
+    positivePair();
     rememberConversationStateIssuer(bindingKey, "someone-else");
     expect(refusal("__main__", poolId)?.status).toBe(400);
-    rememberConversationStateIssuer(bindingKey, "__main__");
-    expect(refusal(poolId, "someone-else")?.status).toBe(400);
+    rememberConversationStateIssuer(bindingKey, poolId);
+    expect(refusal("__main__", "someone-else")?.status).toBe(400);
   });
   test("two Pool entries that duplicate main stay distinct accounts", () => {
-    native();
+    positivePair();
     expect(sameCodexUploadedFileAccount(config, poolId, "another-copy")).toBe(false);
   });
   test("an unobserved main identity keeps the refusal", () => {
-    expect(sameCodexUploadedFileAccount(config, "__main__", poolId)).toBe(false);
+    expect(sameCodexUploadedFileAccount(config, poolId, "__main__")).toBe(false);
     rememberConversationStateIssuer(bindingKey, poolId);
     expect(refusal("__main__")?.status).toBe(400);
   });
   test("the unknown-issuer sentinel keeps its strict stored comparison", () => {
-    native();
+    positivePair();
     rememberConversationStateIssuer(bindingKey, CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER);
     expect(refusal("__main__")?.status).toBe(400);
   });
   test("a different ChatGPT account under the stored copy still refuses", () => {
-    native("other-account");
+    positivePair();
+    native("other-account", "plus", email, true, "same-user");
     rememberConversationStateIssuer(bindingKey, poolId);
     expect(refusal("__main__")?.status).toBe(400);
   });

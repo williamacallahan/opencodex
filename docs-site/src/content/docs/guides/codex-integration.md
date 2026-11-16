@@ -1391,10 +1391,10 @@ With or without the option, a request that carries its own bearer records which 
 turn under a key scoped to that bearer. When a later turn is served by a different account, including
 after you switch accounts manually, OpenCodex removes `previous_response_id` before sending and
 rejects carried uploaded `file_id` references with HTTP 400, because the new account cannot read them.
-The native main login and a stored copy of it are the same ChatGPT account, so a turn that crosses
-between those two is not treated as a change: the uploaded file reference is sent unchanged. That
-exception applies only when the request's own bearer matches the observed native credential; any
-other bearer keeps the strict comparison.
+A turn served by native main can keep an uploaded file issued by its stored Pool copy only when token claims
+positively identify the same ChatGPT account and member; matching emails alone are not sufficient. A turn moving
+from native main to a Pool slot is refused because the remembered main alias does not identify its earlier login.
+For requests carrying their own bearer, this exception also requires that bearer to match the observed native credential.
 
 ### Optional idle-window steering
 

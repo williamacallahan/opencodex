@@ -317,11 +317,13 @@ export function applyAccountChangeConversationStateScrub(
  * A 400 rather than a 409: re-uploading is required, and a retryable status would invite the
  * same request back unchanged.
  *
- * A different slot id is not always a different account: the native main login and a stored Pool
- * copy of it are two slots for one ChatGPT account, and the file either can read is readable by
- * both. The caller answers that with `sameUploadedFileAccount`; without it every distinct slot id
- * is treated as a distinct account, which is the conservative reading. The unknown-issuer branch
- * stays strict because it compares a stored observation, not the caller's live evidence.
+ * A different slot id is not always a different account, but the permission is directional: the
+ * first argument is the recorded issuer or prior account and the second is the serving account.
+ * The caller may permit a positively identified stored Pool issuer to move to native main; a
+ * remembered `__main__` alias cannot authorize the reverse, because it does not retain the login
+ * that issued the state. Without the predicate every distinct slot id is a distinct account, which
+ * is the conservative reading. The unknown-issuer branch stays strict because it compares a stored
+ * observation, not the caller's live evidence.
  */
 export function accountChangeFileReferenceRefusal(
   args: Pick<ApplyAccountChangeConversationStateScrubArgs, "body" | "bindingKey" | "servingAccountId" | "priorAccountId"> & {

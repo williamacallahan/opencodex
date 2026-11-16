@@ -374,11 +374,11 @@ retryable status, and the message names both the cause and the remedy: the refer
 conversation history, so every later turn is refused the same way until the files are re-uploaded
 under the serving account or the conversation is restarted.
 
-The refusal is about the account, not the slot. `sameCodexUploadedFileAccount` relates native main and a stored copy of the
-same ChatGPT account (see [uploaded-file account retention](../providers/openai-accounts.md#uploaded-file-account-retention)),
-so a turn crossing those slots keeps its `file_id`. A request-owned bearer that does not match the observed native credential,
-the unknown-issuer sentinel, and a foreign prior account stay strict, because each compares stored observations rather than
-the caller's live evidence. Continuation scrubbing is unchanged.
+The refusal is about file access, not merely slot names. `sameCodexUploadedFileAccount` permits only stored-copy-to-main
+reuse with positive account/member claims (see [uploaded-file account retention](../providers/openai-accounts.md#uploaded-file-account-retention)),
+so a remembered `__main__` issuer never authorizes a move to Pool. Matching emails alone do not grant this exception.
+A request-owned bearer must match the observed native credential; unknown issuers and foreign prior accounts stay strict.
+File references are never removed, and continuation scrubbing is unchanged.
 
 The alternate-account paths refuse the move instead of raising a status, because an earlier
 response already exists to return. `conversationCarriesUploadedFiles` answers from the body alone,

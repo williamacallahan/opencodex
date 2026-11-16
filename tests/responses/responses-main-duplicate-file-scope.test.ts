@@ -28,10 +28,14 @@ let release: () => void;
 let config: OcxConfig;
 let sends: Array<{ authorization: string | null; body: string }>;
 
-function jwt(accountId = "shared-account", suffix = "fixture"): string {
+function jwt(accountId = "shared-account", suffix = "fixture",
+  claims: { userId?: string; plan?: string; member?: string } = {}): string {
+  const userId = claims.userId ?? "same-user";
+  const member = claims.member ?? email;
   return `header.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600,
-    chatgpt_account_id: accountId, "https://api.openai.com/auth": { chatgpt_plan_type: "plus" },
-    "https://api.openai.com/profile": { email } })).toString("base64url")}.${suffix}`;
+    chatgpt_account_id: accountId, "https://api.openai.com/auth": { chatgpt_plan_type: claims.plan ?? "plus",
+      ...(userId ? { chatgpt_user_id: userId } : {}) },
+    ...(member ? { "https://api.openai.com/profile": { email: member } } : {}) })).toString("base64url")}.${suffix}`;
 }
 const poolToken = jwt("shared-account", "pool");
 const mainToken = jwt("shared-account", "main");
@@ -105,12 +109,45 @@ for (const compact of [false, true]) {
       }
       else { native(scenario === "different account" ? "different-account" : "shared-account", scenario === "different account" ? jwt("different-account", "main") : mainToken); config.pausedCodexAccountIds = []; pin("__main__"); }
       const second = await send(compact, caller);
-      const refused = scenario === "unrelated caller" || scenario === "different account";
+      const refused = scenario !== "pool to main" && scenario !== "matching caller";
       expect(second.status).toBe(refused ? 400 : 200);
       expect(sends).toHaveLength(refused ? 1 : 2);
-      if (!refused) expectSend(1, scenario === "main to pool" ? poolToken : mainToken);
+      if (!refused) expectSend(1, mainToken);
     });
   }
+  test(`${compact ? "compact" : "responses"}: a replacement main login cannot authorize an earlier main issuer`, async () => {
+    // Native main is account A when the first file-carrying turn is served; A is the issuer recorded
+    // for the conversation. Native Codex then signs into account B, which the stored Pool copy also
+    // holds. The `__main__` alias carries no memory of A, so the move to B's copy must stay refused.
+    const issuerToken = jwt("issuer-account", "issuer", { userId: "issuer-user" });
+    native("issuer-account", issuerToken);
+    pin("__main__");
+    expect((await send(compact)).status).toBe(200);
+    expectSend(0, issuerToken);
+    native("shared-account", jwt("shared-account", "main"));
+    writeFileSync(join(process.env.CODEX_HOME!, "auth.json"), "{");
+    reconcileMainCodexAccountRuntimeState();
+    config.pausedCodexAccountIds = ["__main__"]; pin(pool);
+    const moved = await send(compact);
+    expect(moved.status).toBe(400);
+    expect(moved.body).toContain("re-upload the files");
+    expect(sends).toHaveLength(1);
+  });
+  test(`${compact ? "compact" : "responses"}: workspace membership without matching user claims cannot reuse a file`, async () => {
+    // Same workspace, same plan bucket, different members: the collision rule still excludes the
+    // copy as a duplicate, but a file the copy received is not proven readable by main's member.
+    config.codexAccounts![0]!.plan = "team";
+    saveCodexAccountCredential(pool, { accessToken: jwt("shared-account", "pool", { userId: "member-two", plan: "team" }),
+      refreshToken: "fixture-refresh", chatgptAccountId: "shared-account", expiresAt: Date.now() + 3600_000 });
+    config.pausedCodexAccountIds = ["__main__"]; pin(pool);
+    expect((await send(compact)).status).toBe(200);
+    native("shared-account", jwt("shared-account", "member-one", { userId: "member-one", plan: "team", member: "" }));
+    config.pausedCodexAccountIds = []; pin("__main__");
+    const moved = await send(compact);
+    expect(moved.status).toBe(400);
+    expect(moved.body).toContain("re-upload the files");
+    expect(sends).toHaveLength(1);
+  });
   test(`${compact ? "compact" : "responses"}: confirmed main credential removal refuses crossing to pool`, async () => {
     native(); pin("__main__");
     expect((await send(compact)).status).toBe(200);

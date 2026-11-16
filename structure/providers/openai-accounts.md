@@ -465,11 +465,11 @@ Uploaded files are scoped to the ChatGPT account that received them, so a conver
 the one case where a voluntary move is not merely expensive: moving it to an account that cannot read the file orphans the
 reference, and the reference stays in history, so every later turn is refused with HTTP 400 until the user re-uploads under
 the serving account or restarts. Pool rotation is automatic, so any conversation with an attachment is otherwise one rotation
-away from being permanently blocked (#4778). A different slot id is not always a different account: the native main login and
-a stored Pool copy of it are two slots for one ChatGPT account, so crossing between them is not a move.
-`sameCodexUploadedFileAccount` in `src/codex/collision-identity.ts` answers that with the duplicate check's own collision
-identity, and every other pair stays distinct; an unobserved main identity answers false, so a missing observation refuses
-rather than guesses.
+away from being permanently blocked (#4778). Cross-slot file reuse is limited to a stored Pool issuer served by native main.
+`sameCodexUploadedFileAccount` in `src/codex/collision-identity.ts` requires the existing duplicate match plus matching,
+nonempty token-derived user IDs and agreeing token account-ID claims; available token emails must not disagree.
+Missing member claims or unobserved main identity refuse. A remembered `__main__` issuer never crosses to a Pool slot,
+because the alias does not retain its issuing login's identity. Duplicate exclusion keeps its conservative missing-email rule.
 
 `conversationCarriesUploadedFiles` answers that question from the request body alone — the same predicate the refusal guard
 uses, so routing and refusal can never disagree about which conversations are in scope — and `resolveResponsesCodexAuth`
