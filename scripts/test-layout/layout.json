@@ -1397,6 +1397,7 @@
     "privacy-mask-account.test.ts": "lib",
     "privacy-scan-asset-names.test.ts": "ci-workflows",
     "privacy-scan-meta-key.test.ts": "ci-workflows",
+    "privacy-scan-reserved-emails.test.ts": "ci-workflows",
     "privacy-scan-ssh-endpoint.test.ts": "ci-workflows",
     "probe-lease-dispatch-wiring.test.ts": "routing",
     "probe-lease.test.ts": "routing",
