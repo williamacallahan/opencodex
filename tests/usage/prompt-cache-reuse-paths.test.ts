@@ -201,7 +201,8 @@ describe("native prompt cache observation paths", () => {
   test("a worker fault names its path, blinds only its backoff, and observation recovers without a restart", async () => {
     const post = spyOn(Worker.prototype, "postMessage").mockImplementationOnce(() => { throw new Error("synthetic post failure"); });
     respond = () => streamingReply();
-    try { await send(JSON.stringify(requestBody(true))); } finally { post.mockRestore(); }
+    // Response completion does not await the handoff, so hold the injector until the fault is logged.
+    try { await send(JSON.stringify(requestBody(true))); for (let wait = 0; wait < 100 && !warnings.length; wait++) await Bun.sleep(10); } finally { post.mockRestore(); }
     expect(warnings).toEqual([expect.stringContaining('fault=handoff_failed detail="Error: synthetic post failure" affected=1 retry_ms=1000')]);
     warnings.length = 0;
     expect((await send(JSON.stringify(requestBody(true)))).line).toContain("reuse_reason=worker_failed");
