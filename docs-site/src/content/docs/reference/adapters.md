@@ -205,7 +205,9 @@ names are refused. Canonical ChatGPT forward auth retains its separate fixed hea
 Only `originator`, `x-client-request-id`, `x-codex-app-version`, `user-agent`,
 `x-codex-window-id`, and `x-codex-installation-id` are supported by `forwardClientHeaders`, plus
 `x-lgw-cache-key` and `x-user-id` (the `openai-chat` adapter honours those two too, for a provider that
-fronts the LLM gateway); arbitrary names and wildcard prefixes are rejected on load/write and
+fronts the LLM gateway; when `x-user-id` is listed and the caller sent no launcher-form value, the hub sends
+`<client product>:via-opencodex` derived from the caller's `User-Agent`, so the gateway never labels the
+workload with the hub key's name); arbitrary names and wildcard prefixes are rejected on load/write and
 ignored at runtime.
 
 For a custom gateway that requires original Codex client metadata (for example, a sub2api

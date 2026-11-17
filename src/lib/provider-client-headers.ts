@@ -67,6 +67,13 @@ export function providerForwardClientHeadersConfigError(value: unknown): string 
   return null;
 }
 
+const USER_ID_HEADER = "x-user-id";
+const MAX_WORKLOAD_PRODUCT_LENGTH = 40;
+/** Operation half of every hub-derived workload label: the request reached the gateway through the hub. */
+export const HUB_WORKLOAD_OPERATION = "via-opencodex";
+// The hub's own derived label survives the hub's internal header rebuilds, which re-apply this gate; its fixed
+// operation always shows the label was assigned by the hub.
+const HUB_DERIVED_WORKLOAD_VALUE = new RegExp(`^[a-z0-9-]{1,40}:(?:${HUB_WORKLOAD_OPERATION}|hub-internal)$`);
 // The hub's own launchers send `<launcher>:<label>` (`claude-av:<session>`, `pi-av:<session>`,
 // `claude-code:codeAgent`). Anything else is a caller choosing its own gateway identity.
 const GATEWAY_IDENTITY_VALUE = /^(?:claude|pi)[a-z0-9-]*:[A-Za-z0-9._:-]{1,128}$/;
@@ -74,26 +81,54 @@ export const GATEWAY_IDENTITY_HEADERS: ReadonlySet<string> = new Set(["x-lgw-cac
 
 /** Whether a caller's value may be forwarded under this header name: gateway identities need a launcher's form. */
 export function forwardedClientHeaderValueAllowed(name: string, value: string): boolean {
-  return !GATEWAY_IDENTITY_HEADERS.has(name) || GATEWAY_IDENTITY_VALUE.test(value);
+  if (!GATEWAY_IDENTITY_HEADERS.has(name)) return true;
+  return GATEWAY_IDENTITY_VALUE.test(value) || (name === USER_ID_HEADER && HUB_DERIVED_WORKLOAD_VALUE.test(value));
 }
 
-/** The provider's opted-in caller metadata that passes the name allowlist and the value gate, in configured order. */
+/** Product half of a workload label from the caller's own User-Agent (else originator): `claude-cli/2.1 (...)` is `claude-code`. */
+function clientProductFromHeaders(incoming: Headers): string {
+  for (const raw of [incoming.get("user-agent"), incoming.get("originator")]) {
+    const token = (raw ?? "").trim().toLowerCase().split(/[\/\s(]/, 1)[0]!.replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!token) continue;
+    if (token.startsWith("claude")) return "claude-code";
+    if (token.startsWith("codex")) return "codex";
+    return token.slice(0, MAX_WORKLOAD_PRODUCT_LENGTH);
+  }
+  return "unknown-client";
+}
+
+/**
+ * The gateway workload label ('<product>:<operation>') for a caller that sent none in a launcher's form:
+ * its client product, derived by the hub, plus the fixed operation naming the hub path. No incoming
+ * request at all is a hub-originated call.
+ */
+export function deriveClientWorkloadLabel(incoming: Headers | undefined): string {
+  return incoming ? `${clientProductFromHeaders(incoming)}:${HUB_WORKLOAD_OPERATION}` : "opencodex:hub-internal";
+}
+
+/**
+ * The provider's opted-in caller metadata that passes the name allowlist and the value gate, in configured order.
+ * An opted-in `x-user-id` is never absent: a caller that sent none (or a foreign one) gets its derived label, so
+ * the gateway never falls back to the hub key's name for the workload.
+ */
 export function forwardableClientHeaders(
-  forwardClientHeaders: readonly string[] | undefined, incoming: Headers,
+  forwardClientHeaders: readonly string[] | undefined, incoming: Headers | undefined,
 ): Array<[name: string, value: string]> {
   if (!Array.isArray(forwardClientHeaders)) return [];
   const forwardable: Array<[string, string]> = [];
   for (const rawName of forwardClientHeaders.slice(0, MAX_FORWARDED_CLIENT_HEADERS)) {
     const name = normalizeForwardedClientHeaderName(rawName);
-    const value = name === null ? null : incoming.get(name);
-    if (name !== null && value && forwardedClientHeaderValueAllowed(name, value)) forwardable.push([name, value]);
+    if (name === null) continue;
+    const value = incoming?.get(name);
+    if (value && forwardedClientHeaderValueAllowed(name, value)) forwardable.push([name, value]);
+    else if (name === USER_ID_HEADER) forwardable.push([name, deriveClientWorkloadLabel(incoming)]);
   }
   return forwardable;
 }
 
 /** Copy the provider's opted-in caller metadata onto outbound headers it has not already set. */
 export function copyForwardedClientHeaders(
-  forwardClientHeaders: readonly string[] | undefined, headers: Record<string, string>, incoming: Headers,
+  forwardClientHeaders: readonly string[] | undefined, headers: Record<string, string>, incoming: Headers | undefined,
 ): void {
   for (const [name, value] of forwardableClientHeaders(forwardClientHeaders, incoming)) {
     if (!Object.keys(headers).some(existing => existing.toLowerCase() === name)) headers[name] = value;

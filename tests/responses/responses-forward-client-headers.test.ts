@@ -243,18 +243,27 @@ describe("openai-chat forwardClientHeaders carries the session identity to a gat
     expect(headers.authorization).toBe("Bearer gateway-key");
     expect(headers["x-other"]).toBeUndefined();
   });
-  test("drops a gateway identity that is not a hub launcher's", () => {
+  test("replaces a gateway identity that is not a hub launcher's with the derived label", () => {
     const headers = chatHeaders(gateway, { "x-lgw-cache-key": "someone-else:session", "x-user-id": "admin" });
     expect(headers["x-lgw-cache-key"]).toBeUndefined();
-    expect(headers["x-user-id"]).toBeUndefined();
+    expect(headers["x-user-id"]).toBe("unknown-client:via-opencodex");
     expect(chatHeaders(gateway, { "x-user-id": "claude-code:codeAgent", "x-lgw-cache-key": "pi-av:019e-abc" })["x-user-id"])
       .toBe("claude-code:codeAgent");
   });
   test("the compact handoff applies the same identity rule", () => {
     const target = new Headers();
     copyResponsesClientMetadata(target, new Headers({ "x-user-id": "admin", "x-lgw-cache-key": "claude-av:abc" }), gateway);
-    expect(target.get("x-user-id")).toBeNull();
+    expect(target.get("x-user-id")).toBe("unknown-client:via-opencodex");
     expect(target.get("x-lgw-cache-key")).toBe("claude-av:abc");
+  });
+  test("a caller that sends no X-User-ID is labeled with its own client product, never the hub key", () => {
+    const labelFor = (incoming: Record<string, string>) => chatHeaders(gateway, incoming)["x-user-id"];
+    expect(labelFor({ "user-agent": "claude-cli/2.1.321 (external, cli)" })).toBe("claude-code:via-opencodex");
+    expect(labelFor({ "user-agent": "codex_cli_rs/0.159.3 (Linux)", originator: "codex_cli_rs" })).toBe("codex:via-opencodex");
+    expect(labelFor({ originator: "Codex Desktop" })).toBe("codex:via-opencodex");
+    expect(labelFor({ "user-agent": "opencode/2.4.0" })).toBe("opencode:via-opencodex");
+    expect(labelFor({})).toBe("unknown-client:via-opencodex");
+    expect(chatHeaders(gateway, { "user-agent": "pi/0.9" })["x-user-id"]).toBe("pi:via-opencodex");
   });
   test("forwards nothing unless the provider opts in, and the provider's own header wins", () => {
     const { forwardClientHeaders: _optedIn, ...closed } = gateway;
@@ -316,12 +325,19 @@ describe("every route into an openai-chat gateway provider carries the session i
       config, { model: "", provider: "" }, undefined, config, { hybridMessages: true })],
   ];
   for (const [name, send] of routes) {
-    test(`${name} forwards the launcher identity and drops a foreign one`, async () => {
+    const messagesWire = name.startsWith("messages") || name.startsWith("hybrid");
+    test(`${name} forwards the launcher identity and labels a foreign or missing one with its client`, async () => {
       await (await send()).text();
       expectForwarded();
       seen = [];
       await (await send({ "x-user-id": "admin", "x-lgw-cache-key": "someone:else" })).text();
-      expect(seen[0]!.get("x-user-id")).toBeNull();
+      expect(seen[0]!.get("x-user-id")).toBe(messagesWire ? "claude-code:via-opencodex" : "unknown-client:via-opencodex");
+      seen = [];
+      await (await send({ "user-agent": "claude-cli/2.1.321 (external, cli)" })).text();
+      expect(seen[0]!.get("x-user-id")).toBe("claude-code:via-opencodex");
+      seen = [];
+      await (await send({ "user-agent": "codex_cli_rs/0.159.3" })).text();
+      expect(seen[0]!.get("x-user-id")).toBe(messagesWire ? "claude-code:via-opencodex" : "codex:via-opencodex");
     });
   }
 });

@@ -74,7 +74,7 @@ export function buildOpenAIChatPassthroughRequest(
   incomingHeaders?: Headers,
 ): AdapterRequest {
   const { url, headers, hasCredential } = openAIChatTransport(provider);
-  if (incomingHeaders) copyForwardedClientHeaders(provider.forwardClientHeaders, headers, incomingHeaders);
+  copyForwardedClientHeaders(provider.forwardClientHeaders, headers, incomingHeaders);
 
   const body: Record<string, unknown> = {
     model: provider.modelSuffixBracketStrip ? stripBracketedModelSuffix(modelId) : modelId,

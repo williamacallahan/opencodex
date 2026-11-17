@@ -105,7 +105,7 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
       lastRequestedModelId = parsed.modelId;
       const completedToolBlocks = incoming?.completedToolBlocks === true;
       const { url, headers, hasCredential } = openAIChatTransport(provider);
-      if (incoming) copyForwardedClientHeaders(provider.forwardClientHeaders, headers, incoming.headers);
+      copyForwardedClientHeaders(provider.forwardClientHeaders, headers, incoming?.headers);
       if (!completedToolBlocks) {
         for (const key of Object.keys(headers)) if (key.toLowerCase() === "x-opencodex-tool-completion") delete headers[key];
       }
