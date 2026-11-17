@@ -60,8 +60,9 @@ const digest = (text: string) => createHash("sha256").update(text).digest("hex")
 const handoffLimits = { binaryChunkBytes: 262144, stringChunkUnits: 32768, chunkOverheadBytes: 256 };
 // A worker faults only after deadlineMs without a completion while the main loop stays responsive:
 // a check more than maxTimerLagMs late restarts the window, because a stalled main thread (CPU quota,
-// GC) is not evidence against the worker. A faulted worker is rebuilt after a doubling backoff.
-export const workerRecovery = { deadlineMs: 10000, checkMs: 250, maxTimerLagMs: 250, firstBackoffMs: 1000, maxBackoffMs: 300000 };
+// GC) is not evidence against the worker. Lag never extends a window past maxNoProgressMs of wall time,
+// so a hung worker on a chronically lagging hub still faults. A faulted worker is rebuilt after a doubling backoff.
+export const workerRecovery = { deadlineMs: 10000, checkMs: 250, maxTimerLagMs: 250, maxNoProgressMs: 60000, firstBackoffMs: 1000, maxBackoffMs: 300000 };
 const faultDetail = (error: unknown) => (error instanceof Error ? `${error.name}: ${error.message}` : typeof error).slice(0, 200);
 
 class NativeCacheObserver {
@@ -253,6 +254,7 @@ class NativeCacheObserver {
     let seen = Atomics.load(progress.completed, 0);
     if (seen === progress.posted) return;
     let quietSince = performance.now();
+    let progressAt = quietSince;
     let dueAt = quietSince + workerRecovery.checkMs;
     const check = () => {
       if (this.workerProgress !== progress) return;
@@ -261,11 +263,13 @@ class NativeCacheObserver {
       const completed = Atomics.load(progress.completed, 0);
       if (completed === progress.posted) return;
       const lag = Math.max(0, now - dueAt);
+      if (completed !== seen) progressAt = now;
       if (completed !== seen || lag > workerRecovery.maxTimerLagMs) quietSince = now;
       seen = completed;
       const quietMs = now - quietSince;
-      if (quietMs >= workerRecovery.deadlineMs) {
-        this.failWorker("deadline", `posted=${(progress.posted - completed) >>> 0} no_progress_ms=${Math.round(quietMs)} timer_lag_ms=${Math.round(lag)}`);
+      if (quietMs >= workerRecovery.deadlineMs || now - progressAt >= workerRecovery.maxNoProgressMs) {
+        this.failWorker("deadline", `posted=${(progress.posted - completed) >>> 0} no_progress_ms=${Math.round(now - progressAt)}`
+          + ` responsive_ms=${Math.round(quietMs)} timer_lag_ms=${Math.round(lag)}`);
         return;
       }
       dueAt = now + workerRecovery.checkMs;

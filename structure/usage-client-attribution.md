@@ -236,7 +236,8 @@ completion while jobs are outstanding) terminates the worker and marks every pen
 reply still queued behind a stalled main loop counts. The window starts when a job is posted, not
 when copying starts, and a 250 ms check that fires more than 250 ms late restarts it: on a
 CPU-starved hub, main-thread stalls of up to 5.7 seconds had faulted a worker that answers in
-milliseconds. New
+milliseconds. Lag never extends a window past 60 seconds without a completion, so a hung worker on a
+chronically lagging hub still faults. New
 sends stay `worker_failed` for a doubling backoff from 1 second up to 5 minutes, which resets on the
 next successful reply, and the next send after it rebuilds the worker. Each fault logs its path and
 detail without prompt bytes. A latch for the observer's lifetime blinded production cache alerts

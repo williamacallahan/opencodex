@@ -213,20 +213,32 @@ describe("native prompt cache observation paths", () => {
   // Production faulted 13 times in 11 h with timers firing up to 5.7 s late on a CPU-starved hub
   // while the walk itself takes milliseconds: a stalled main thread is not a dead worker.
   // A stall before the post stands in for a slow cooperative copy; one after it, for a starved loop.
-  async function withShortWatchdog(stall: "before_post" | "after_post", stallMs: number, swallowJobs: boolean, run: () => Promise<void>) {
+  interface WatchdogCase { stall: "before_post" | "after_post"; stallMs: number; swallowJobs: boolean; everyMs?: number; maxNoProgressMs?: number }
+  async function withShortWatchdog(scenario: WatchdogCase, run: () => Promise<void>) {
     const saved = { ...workerRecovery };
-    Object.assign(workerRecovery, { deadlineMs: 400, checkMs: 50, maxTimerLagMs: 50 });
-    const hold = () => { const until = performance.now() + stallMs; while (performance.now() < until) { /* hold the main thread */ } };
+    Object.assign(workerRecovery, { deadlineMs: 600, checkMs: 50, maxTimerLagMs: 150, maxNoProgressMs: scenario.maxNoProgressMs ?? 20000 });
+    const hold = () => { const until = performance.now() + scenario.stallMs; while (performance.now() < until) { /* hold the main thread */ } };
     const original = Worker.prototype.postMessage;
+    let repeat: ReturnType<typeof setInterval> | undefined;
     const post = spyOn(Worker.prototype, "postMessage").mockImplementation(function (this: Worker, ...args: Parameters<Worker["postMessage"]>) {
-      if (stall === "before_post") hold();
-      if (!swallowJobs) original.apply(this, args);
-      if (stall === "after_post") setTimeout(hold, 10);
+      if (scenario.stall === "before_post") hold();
+      if (!scenario.swallowJobs) original.apply(this, args);
+      if (scenario.stall === "after_post") setTimeout(hold, 10);
+      if (scenario.everyMs) repeat = setInterval(hold, scenario.everyMs);
     });
-    try { await run(); } finally { post.mockRestore(); Object.assign(workerRecovery, saved); }
+    try { await run(); } finally { clearInterval(repeat); post.mockRestore(); Object.assign(workerRecovery, saved); }
+  }
+  async function deadlineFault() {
+    respond = () => streamingReply();
+    await send(JSON.stringify(requestBody(true)));
+    for (let wait = 0; wait < 800 && !warnings.length; wait++) await Bun.sleep(10);
+    expect(warnings).toEqual([expect.stringMatching(/fault=deadline detail="posted=1 no_progress_ms=\d+ responsive_ms=\d+ timer_lag_ms=\d+" affected=1 retry_ms=1000/)]);
+    const [, wall, responsive] = /no_progress_ms=(\d+) responsive_ms=(\d+)/.exec(warnings[0]!)!.map(Number);
+    warnings.length = 0;
+    return { wall: wall!, responsive: responsive! };
   }
   test("main-thread time spent before the job reaches the worker does not count against it", async () => {
-    await withShortWatchdog("before_post", 1500, false, async () => {
+    await withShortWatchdog({ stall: "before_post", stallMs: 1500, swallowJobs: false }, async () => {
       respond = () => streamingReply();
       await send(JSON.stringify(requestBody(true)));
       await Bun.sleep(1800);
@@ -235,16 +247,17 @@ describe("native prompt cache observation paths", () => {
     expect((await warm()).line).toContain("reuse_expectation=reuse reuse_reason=same_account_anchor");
   });
   test("a silent worker still faults on the deadline, and stalled main-thread time is not counted", async () => {
-    await withShortWatchdog("after_post", 1000, true, async () => {
-      respond = () => streamingReply();
-      await send(JSON.stringify(requestBody(true)));
-      for (let wait = 0; wait < 300 && !warnings.length; wait++) await Bun.sleep(10);
-    });
-    expect(warnings).toEqual([expect.stringMatching(/fault=deadline detail="posted=1 no_progress_ms=(\d+) timer_lag_ms=\d+" affected=1 retry_ms=1000/)]);
-    const quiet = Number(/no_progress_ms=(\d+)/.exec(warnings[0]!)![1]);
-    expect(quiet).toBeGreaterThanOrEqual(400);
-    expect(quiet).toBeLessThan(1000);
-    warnings.length = 0;
+    let fault = { wall: 0, responsive: 0 };
+    await withShortWatchdog({ stall: "after_post", stallMs: 2000, swallowJobs: true }, async () => { fault = await deadlineFault(); });
+    expect(fault.responsive).toBeGreaterThanOrEqual(600);
+    expect(fault.responsive).toBeLessThan(2000);
+    expect(fault.wall).toBeGreaterThanOrEqual(2000);
+  });
+  test("chronic main-thread lag cannot hide a silent worker past the wall-time ceiling", async () => {
+    let fault = { wall: 0, responsive: 0 };
+    await withShortWatchdog({ stall: "after_post", stallMs: 250, everyMs: 300, swallowJobs: true, maxNoProgressMs: 1500 }, async () => { fault = await deadlineFault(); });
+    expect(fault.wall).toBeGreaterThanOrEqual(1500);
+    expect(fault.responsive).toBeLessThan(600);
   });
 
   test("streaming begins before completion and valid message_start warms later turns", async () => {
