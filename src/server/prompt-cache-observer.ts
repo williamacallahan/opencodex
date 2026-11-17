@@ -19,7 +19,8 @@ import type { PrefixWalk } from "./prompt-cache-prefix";
 import { PromptCacheReuseLedger, type ReuseClassification, type SendObservation } from "./prompt-cache-reuse";
 import type { RequestLogContext } from "./request-log";
 
-export interface PrefixWorkerRequest { id: number; chunks: Uint8Array[]; encoding: string | null }
+/** `completed` is the worker generation's shared completion counter, incremented after each reply. */
+export interface PrefixWorkerRequest { id: number; chunks: Uint8Array[]; encoding: string | null; completed: SharedArrayBuffer }
 export type PrefixWorkerReply = { id: number; prefix: PrefixWalk } | { id: number; failed: true; error: string };
 /** Which observation step faulted; logged so a recurring fault names its path. */
 type ObservationFault = "worker_error" | "reply_failed" | "handoff_failed" | "bytes_changed" | "deadline";
@@ -50,15 +51,17 @@ interface ObservedSend {
   finalUsage?: OcxUsage | null;
   rawStreamObserved?: true;
   failure?: ObservationReason;
-  postedAt?: number;
+  hashPending?: true;
   finished?: true;
   outcome?: NativeCacheReuse;
 }
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
 
 const handoffLimits = { binaryChunkBytes: 262144, stringChunkUnits: 32768, chunkOverheadBytes: 256 };
-// A faulted worker is rebuilt after a doubling backoff, so one fault never blinds the process.
-const workerRecovery = { deadlineMs: 10000, firstBackoffMs: 1000, maxBackoffMs: 300000 };
+// A worker faults only after deadlineMs without a completion while the main loop stays responsive:
+// a check more than maxTimerLagMs late restarts the window, because a stalled main thread (CPU quota,
+// GC) is not evidence against the worker. A faulted worker is rebuilt after a doubling backoff.
+export const workerRecovery = { deadlineMs: 10000, checkMs: 250, maxTimerLagMs: 250, firstBackoffMs: 1000, maxBackoffMs: 300000 };
 const faultDetail = (error: unknown) => (error instanceof Error ? `${error.name}: ${error.message}` : typeof error).slice(0, 200);
 
 class NativeCacheObserver {
@@ -67,6 +70,7 @@ class NativeCacheObserver {
   readonly pending = new Map<number, ObservedSend>();
   readonly detachShutdown = registerOptionalShutdownHook("prompt-cache-observations", () => stopNativePromptCacheObservations());
   worker?: Worker;
+  workerProgress?: { completed: Uint32Array<SharedArrayBuffer>; posted: number };
   deadline?: ReturnType<typeof setTimeout>;
   workerRetryAt = 0;
   workerFaults = 0;
@@ -80,6 +84,7 @@ class NativeCacheObserver {
     if (send.ticket) this.ledger.releaseSend(send.ticket);
     this.pending.delete(send.id);
     send.body = undefined;
+    send.hashPending = undefined;
   }
   capture(logCtx: RequestLogContext, options: NativeSendOptions): void {
     const previous = this.bindings.get(logCtx);
@@ -130,8 +135,7 @@ class NativeCacheObserver {
     if (!this.ledger.confirmPrefill(send.ticket, { type: "message_start", message })) return;
     if (!isRec(message) || !isRec(message.usage)) return;
     send.usage = anthropicUsageToOcx(message.usage);
-    send.postedAt = performance.now();
-    this.armDeadline();
+    send.hashPending = true;
     this.handoff(send).catch(error => this.failWorker("handoff_failed", faultDetail(error)));
   }
   async handoff(send: ObservedSend): Promise<void> {
@@ -164,12 +168,17 @@ class NativeCacheObserver {
     if (!this.worker) {
       const worker = spawnWorker(new URL("./prompt-cache-observation-worker.ts", import.meta.url).href, "prompt-cache-observation-worker");
       this.worker = worker;
+      this.workerProgress = { completed: new Uint32Array(new SharedArrayBuffer(Uint32Array.BYTES_PER_ELEMENT)), posted: 0 };
       // A terminated worker's late events must not fault its replacement.
       worker.onmessage = (event: MessageEvent<PrefixWorkerReply>) => { if (this.worker === worker) this.accept(event.data); };
       worker.onerror = event => { if (this.worker === worker) this.failWorker("worker_error", String(event.message || event.type).slice(0, 200)); };
     }
-    this.worker.postMessage({ id: send.id, chunks, encoding: send.encoding ?? null } satisfies PrefixWorkerRequest,
+    const progress = this.workerProgress!;
+    // The shared counter is cloned by reference, never transferred.
+    this.worker.postMessage({ id: send.id, chunks, encoding: send.encoding ?? null, completed: progress.completed.buffer } satisfies PrefixWorkerRequest,
       chunks.map(chunk => chunk.buffer));
+    progress.posted = (progress.posted + 1) >>> 0;
+    this.armDeadline();
   }
   // The log tap sees client-facing rewrites. This bounded raw prefill observation cannot
   // use that transformed model identity, and its budget must not consume the relay's budget.
@@ -228,7 +237,7 @@ class NativeCacheObserver {
   accept(reply: PrefixWorkerReply): void {
     const send = this.pending.get(reply.id);
     if (!send?.ticket) return;
-    send.postedAt = undefined;
+    send.hashPending = undefined;
     // The worker survives a failed walk; only that turn's reuse becomes unknown.
     if ("failed" in reply) { this.failSend(send, "reply_failed", reply.error); return; }
     this.workerFaults = 0;
@@ -236,17 +245,34 @@ class NativeCacheObserver {
     if (send.finished) this.release(send);
     this.armDeadline();
   }
-  // Re-reads the queue when it fires: a send released since arming leaves a timer with nothing overdue.
+  // Reads the worker's shared completion counter, which advances even while its replies wait
+  // behind a stalled main thread. New posts never extend a running window.
   armDeadline(): void {
-    if (this.deadline) clearTimeout(this.deadline);
-    this.deadline = undefined;
-    let oldest = Infinity;
-    let posted = 0;
-    for (const send of this.pending.values()) if (send.postedAt !== undefined) { oldest = Math.min(oldest, send.postedAt); posted++; }
-    if (!Number.isFinite(oldest)) return;
-    const wait = oldest + workerRecovery.deadlineMs - performance.now();
-    if (wait <= 0) { this.failWorker("deadline", `posted=${posted} oldest_ms=${Math.round(workerRecovery.deadlineMs - wait)}`); return; }
-    this.deadline = setTimeout(() => this.armDeadline(), wait);
+    const progress = this.workerProgress;
+    if (!progress || this.deadline !== undefined) return;
+    let seen = Atomics.load(progress.completed, 0);
+    if (seen === progress.posted) return;
+    let quietSince = performance.now();
+    let dueAt = quietSince + workerRecovery.checkMs;
+    const check = () => {
+      if (this.workerProgress !== progress) return;
+      this.deadline = undefined;
+      const now = performance.now();
+      const completed = Atomics.load(progress.completed, 0);
+      if (completed === progress.posted) return;
+      const lag = Math.max(0, now - dueAt);
+      if (completed !== seen || lag > workerRecovery.maxTimerLagMs) quietSince = now;
+      seen = completed;
+      const quietMs = now - quietSince;
+      if (quietMs >= workerRecovery.deadlineMs) {
+        this.failWorker("deadline", `posted=${(progress.posted - completed) >>> 0} no_progress_ms=${Math.round(quietMs)} timer_lag_ms=${Math.round(lag)}`);
+        return;
+      }
+      dueAt = now + workerRecovery.checkMs;
+      this.deadline = setTimeout(check, workerRecovery.checkMs);
+      this.deadline.unref();
+    };
+    this.deadline = setTimeout(check, workerRecovery.checkMs);
     this.deadline.unref();
   }
   failSend(send: ObservedSend, fault: ObservationFault, detail: string): void {
@@ -258,6 +284,7 @@ class NativeCacheObserver {
   failWorker(fault: ObservationFault, detail: string): void {
     if (this.deadline) clearTimeout(this.deadline);
     this.deadline = undefined;
+    this.workerProgress = undefined;
     this.worker?.terminate();
     this.worker = undefined;
     let affected = 0;
@@ -292,11 +319,13 @@ class NativeCacheObserver {
     if (!send) return;
     send.finished = true;
     // Only an already-confirmed hashing job may outlive the native send's finish.
-    if (send.postedAt === undefined) this.release(send);
+    if (!send.hashPending) this.release(send);
   }
   close(): void {
     this.detachShutdown();
     if (this.deadline) clearTimeout(this.deadline);
+    this.deadline = undefined;
+    this.workerProgress = undefined;
     this.worker?.terminate();
     this.worker = undefined;
     for (const send of this.pending.values()) this.release(send);

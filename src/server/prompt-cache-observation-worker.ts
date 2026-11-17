@@ -5,7 +5,7 @@ declare const self: Worker;
 
 // One resident worker handles the already-admitted queue; no request thread scans prompt bytes.
 self.onmessage = (event: MessageEvent<PrefixWorkerRequest>) => {
-  const { id, chunks, encoding } = event.data;
+  const { id, chunks, encoding, completed } = event.data;
   let reply: PrefixWorkerReply;
   try {
     const bytes = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
@@ -17,4 +17,6 @@ self.onmessage = (event: MessageEvent<PrefixWorkerRequest>) => {
     reply = { id, failed: true, error: (error instanceof Error ? `${error.name}: ${error.message}` : typeof error).slice(0, 200) };
   }
   self.postMessage(reply);
+  // Typed walk failures count too: any published result proves the queue is moving.
+  Atomics.add(new Uint32Array(completed), 0, 1);
 };

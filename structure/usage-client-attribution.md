@@ -230,8 +230,13 @@ worker concatenation and bounded scratch within the ledger's pending budget; ins
 reports `worker_backlog` without rejecting the request. Neither forwarding nor final logging waits for
 hashing: a fast buffered reply can report `hash_unavailable` while its confirmed prefill subsequently
 becomes evidence for a later request. A walk that throws inside the worker marks only its own turn
-`worker_failed`. A worker fault (its `error` event, a failed spawn or post, or a confirmed job older
-than the 10-second deadline) terminates the worker and marks every pending turn `worker_failed`. New
+`worker_failed`. A worker fault (its `error` event, a failed spawn or post, or 10 seconds without a
+completion while jobs are outstanding) terminates the worker and marks every pending turn
+`worker_failed`. Completions are read from a counter the worker shares with the main thread, so a
+reply still queued behind a stalled main loop counts. The window starts when a job is posted, not
+when copying starts, and a 250 ms check that fires more than 250 ms late restarts it: on a
+CPU-starved hub, main-thread stalls of up to 5.7 seconds had faulted a worker that answers in
+milliseconds. New
 sends stay `worker_failed` for a doubling backoff from 1 second up to 5 minutes, which resets on the
 next successful reply, and the next send after it rebuilds the worker. Each fault logs its path and
 detail without prompt bytes. A latch for the observer's lifetime blinded production cache alerts

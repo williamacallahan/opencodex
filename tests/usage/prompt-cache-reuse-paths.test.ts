@@ -14,7 +14,7 @@ import { handleNativeMessages } from "../../src/server/messages-native";
 import { tapAnthropicSseForLog } from "../../src/server/messages-shared";
 import { handleClaudeMessages } from "../../src/server/claude-messages";
 import { beginInferenceAttempt } from "../../src/server/inference/attempt";
-import { stopNativePromptCacheObservations } from "../../src/server/prompt-cache-observer";
+import { stopNativePromptCacheObservations, workerRecovery } from "../../src/server/prompt-cache-observer";
 import { addFinalRequestLog, type RequestLogContext } from "../../src/server/request-log";
 import type { OcxConfig } from "../../src/types";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
@@ -208,6 +208,43 @@ describe("native prompt cache observation paths", () => {
     expect((await send(JSON.stringify(requestBody(true)))).line).toContain("reuse_reason=worker_failed");
     await Bun.sleep(1000);
     expect((await warm()).line).toContain("reuse_expectation=reuse reuse_reason=same_account_anchor");
+  });
+
+  // Production faulted 13 times in 11 h with timers firing up to 5.7 s late on a CPU-starved hub
+  // while the walk itself takes milliseconds: a stalled main thread is not a dead worker.
+  // A stall before the post stands in for a slow cooperative copy; one after it, for a starved loop.
+  async function withShortWatchdog(stall: "before_post" | "after_post", stallMs: number, swallowJobs: boolean, run: () => Promise<void>) {
+    const saved = { ...workerRecovery };
+    Object.assign(workerRecovery, { deadlineMs: 400, checkMs: 50, maxTimerLagMs: 50 });
+    const hold = () => { const until = performance.now() + stallMs; while (performance.now() < until) { /* hold the main thread */ } };
+    const original = Worker.prototype.postMessage;
+    const post = spyOn(Worker.prototype, "postMessage").mockImplementation(function (this: Worker, ...args: Parameters<Worker["postMessage"]>) {
+      if (stall === "before_post") hold();
+      if (!swallowJobs) original.apply(this, args);
+      if (stall === "after_post") setTimeout(hold, 10);
+    });
+    try { await run(); } finally { post.mockRestore(); Object.assign(workerRecovery, saved); }
+  }
+  test("main-thread time spent before the job reaches the worker does not count against it", async () => {
+    await withShortWatchdog("before_post", 1500, false, async () => {
+      respond = () => streamingReply();
+      await send(JSON.stringify(requestBody(true)));
+      await Bun.sleep(1800);
+    });
+    expect(warnings).toEqual([]);
+    expect((await warm()).line).toContain("reuse_expectation=reuse reuse_reason=same_account_anchor");
+  });
+  test("a silent worker still faults on the deadline, and stalled main-thread time is not counted", async () => {
+    await withShortWatchdog("after_post", 1000, true, async () => {
+      respond = () => streamingReply();
+      await send(JSON.stringify(requestBody(true)));
+      for (let wait = 0; wait < 300 && !warnings.length; wait++) await Bun.sleep(10);
+    });
+    expect(warnings).toEqual([expect.stringMatching(/fault=deadline detail="posted=1 no_progress_ms=(\d+) timer_lag_ms=\d+" affected=1 retry_ms=1000/)]);
+    const quiet = Number(/no_progress_ms=(\d+)/.exec(warnings[0]!)![1]);
+    expect(quiet).toBeGreaterThanOrEqual(400);
+    expect(quiet).toBeLessThan(1000);
+    warnings.length = 0;
   });
 
   test("streaming begins before completion and valid message_start warms later turns", async () => {
