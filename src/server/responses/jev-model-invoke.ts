@@ -143,7 +143,7 @@ export function createJevModelInvoker(context: JevModelInvokerContext): JevModel
     try {
       const request = new Request("http://localhost/v1/responses", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-user-id": "opencodex:hub-internal" },
         body,
         signal,
       });

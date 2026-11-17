@@ -2,13 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { copyResponsesClientMetadata } from "../../src/adapters/openai-responses/transport";
 import { createOpenAIChatAdapter } from "../../src/adapters/openai-chat";
 import { createResponsesPassthroughAdapter } from "../../src/adapters/openai-responses/passthrough";
-import { copyResponsesClientMetadata } from "../../src/adapters/openai-responses/transport";
 import { providerForwardClientHeadersConfigError } from "../../src/config/provider-validation";
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
 import { providerConfigSeed } from "../../src/providers/derive";
 import { getProviderRegistryEntry } from "../../src/providers/registry";
 import { providerManagementConfigError } from "../../src/server/auth-cors";
-import type { OcxProviderConfig } from "../../src/types";
+import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 
 function buildHeaders(provider: OcxProviderConfig, incoming: Record<string, string>): Record<string, string> {
   const budget = createTranslatorBudget();
@@ -288,7 +287,8 @@ describe("every route into an openai-chat gateway provider carries the session i
   let home: string; let previousHome: string | undefined; let release: (() => void) | undefined;
   const config = { defaultProvider: "gw", providers: { gw: {
     adapter: "openai-chat", authMode: "key", apiKey: "gateway-key", baseUrl: "https://gw.example.com/v1", models: ["m"],
-    forwardClientHeaders: ["x-lgw-cache-key", "x-user-id"] } } } as unknown as OcxConfig;
+    forwardClientHeaders: ["x-lgw-cache-key", "x-user-id"] } },
+    combos: { gateway: { strategy: "failover", targets: [{ provider: "gw", model: "m" }] } } } as unknown as OcxConfig;
   let seen: Headers[];
   const reply = () => Response.json({ id: "c1", object: "chat.completion", created: 1, model: "m",
     choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
@@ -296,7 +296,14 @@ describe("every route into an openai-chat gateway provider carries the session i
   beforeEach(() => {
     previousHome = process.env.OPENCODEX_HOME; home = mkdtempSync(join(tmpdir(), "ocx-chat-fwd-"));
     process.env.OPENCODEX_HOME = home; release = acquireOwnedSpendHome(); seen = [];
-    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => { seen.push(new Headers(init?.headers)); return reply(); }) as typeof fetch;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers));
+      if (typeof init?.body === "string" && JSON.parse(init.body).stream) return new Response(
+        `data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", model: "m", choices: [{ index: 0, delta: { content: "ok" }, finish_reason: null }] })}\n\ndata: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", model: "m", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      );
+      return reply();
+    }) as typeof fetch;
   });
   afterEach(() => {
     release?.(); globalThis.fetch = originalFetch;
@@ -316,6 +323,8 @@ describe("every route into an openai-chat gateway provider carries the session i
   const routes: Array<[string, (extra?: Record<string, string>) => Promise<Response>]> = [
     ["native chat passthrough", extra => handleChatCompletions(request("/v1/chat/completions",
       { model: "gw/m", messages: [{ role: "user", content: "hi" }], stream: false }, extra), config, { model: "", provider: "" })],
+    ["combo chat bridged to responses", extra => handleChatCompletions(request("/v1/chat/completions",
+      { model: "combo/gateway", messages: [{ role: "user", content: "hi" }], stream: false }, extra), config, { model: "", provider: "" })],
     ["responses translated to chat", extra => handleResponses(request("/v1/responses",
       { model: "gw/m", input: "hi", stream: false }, extra), config, { model: "", provider: "" })],
     ["messages bridged to chat", extra => handleClaudeMessages(request("/v1/messages",
@@ -325,19 +334,18 @@ describe("every route into an openai-chat gateway provider carries the session i
       config, { model: "", provider: "" }, undefined, config, { hybridMessages: true })],
   ];
   for (const [name, send] of routes) {
-    const messagesWire = name.startsWith("messages") || name.startsWith("hybrid");
     test(`${name} forwards the launcher identity and labels a foreign or missing one with its client`, async () => {
       await (await send()).text();
       expectForwarded();
       seen = [];
       await (await send({ "x-user-id": "admin", "x-lgw-cache-key": "someone:else" })).text();
-      expect(seen[0]!.get("x-user-id")).toBe(messagesWire ? "claude-code:via-opencodex" : "unknown-client:via-opencodex");
+      expect(seen[0]!.get("x-user-id")).toBe("unknown-client:via-opencodex");
       seen = [];
       await (await send({ "user-agent": "claude-cli/2.1.321 (external, cli)" })).text();
       expect(seen[0]!.get("x-user-id")).toBe("claude-code:via-opencodex");
       seen = [];
       await (await send({ "user-agent": "codex_cli_rs/0.159.3" })).text();
-      expect(seen[0]!.get("x-user-id")).toBe(messagesWire ? "claude-code:via-opencodex" : "codex:via-opencodex");
+      expect(seen[0]!.get("x-user-id")).toBe("codex:via-opencodex");
     });
   }
 });

@@ -5,7 +5,7 @@ import { ownedDisabledModelResponse, normalizeMessagesProxyRefusal, ownedAnthrop
 import { CLAUDE_CONTEXT_OVERFLOW_MESSAGE, isProxyError, markProxyError, carryProxyError, attachComboFailureEvidence, comboFailureEvidence } from "../lib/client-error-body";
 import type { MessagesFailureVerdictSink } from "../claude/failure-verdict";
 import { clientFacingModelLabel, clientFacingModelText } from "../lib/error-destination";
-import { GATEWAY_IDENTITY_HEADERS, HUB_WORKLOAD_OPERATION, forwardedClientHeaderValueAllowed } from "../lib/provider-client-headers";
+import { GATEWAY_IDENTITY_HEADERS, deriveClientWorkloadLabel, forwardedClientHeaderValueAllowed } from "../lib/provider-client-headers";
 import { classifyUpstreamCondition } from "../lib/upstream-condition";
 import { CodexInstallationIdUnavailableError } from "../codex/installation-id";
 import { recordLocalFailureDetail, type FailureDetail } from "./request-log-failure-detail";
@@ -1353,8 +1353,8 @@ async function handleClaudeMessagesWithBudget(
     const value = req.headers.get(name);
     if (value && forwardedClientHeaderValueAllowed(name, value)) headers.set(name, value);
   }
-  // The hop drops the caller's User-Agent, so the label is set here: the Messages wire is Claude Code's.
-  if (!headers.has("x-user-id")) headers.set("x-user-id", `claude-code:${HUB_WORKLOAD_OPERATION}`);
+  // The hop drops the caller's User-Agent, so derive the label before rebuilding the request.
+  if (!headers.has("x-user-id")) headers.set("x-user-id", deriveClientWorkloadLabel(req.headers));
   // Routed replays need main ChatGPT auth so OpenAI-backed sidecars remain reachable;
   // native replays have no caller ChatGPT credential. This enrichment is optional:
   // auth-context later rejects a real physical-main selection, while routed/pool

@@ -13,6 +13,7 @@ import type { FailureVerdictSink } from "../chat/failure-verdict";
  * that need Responses-only behavior keep the Chat -> Responses -> Chat bridge.
  */
 import { FORWARD_HEADERS } from "../adapters/openai-responses";
+import { deriveClientWorkloadLabel, forwardedClientHeaderValueAllowed, GATEWAY_IDENTITY_HEADERS } from "../lib/provider-client-headers";
 import {
   assertChatCompletionsRoutingBody,
   chatRawReasoningVisible,
@@ -524,6 +525,11 @@ async function handleChatCompletionsWithBudget(
     const value = req.headers.get(name);
     if (value) headers.set(name, value);
   }
+  for (const name of GATEWAY_IDENTITY_HEADERS) {
+    const value = req.headers.get(name);
+    if (value && forwardedClientHeaderValueAllowed(name, value)) headers.set(name, value);
+  }
+  if (!headers.has("x-user-id")) headers.set("x-user-id", deriveClientWorkloadLabel(req.headers));
   // Existing primary enrichment stays on non-caller-auth routes. Caller-auth routes defer
   // optional stored sidecar auth until the final helper plan actually needs it.
   if (!callerAuthorizationRoute) {
