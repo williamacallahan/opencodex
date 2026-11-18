@@ -761,12 +761,14 @@ A container gives the proxy the same small PID on every start. After an unclean 
 
 On Linux and macOS the owner holds a kernel lock on `ocx.owner.lock` in the state directory for as
 long as it runs, and its runtime record says so. The kernel releases the lock when the owner dies,
-however it dies, so a start that finds the record but can take the lock knows the owner is gone and
-recovers on its own: after a host reboot, a recreated Compose container, a replacement pod, or a
-restart on Docker's containerd image store. A live owner in another container on the same machine
-still holds the lock, so a second start next to it refuses. The lock reaches across machines only
-on a filesystem that shares locks between them (NFS with locking on; not `nolock` or
-`local_lock`).
+however it dies. On Linux, when the state directory is on a local filesystem (ext4, xfs, btrfs,
+tmpfs, overlayfs, zfs, f2fs, bcachefs; a Docker volume or bind mount on such a disk), a start that
+finds the record but can take the lock knows the owner is gone and recovers on its own: after a
+host reboot, a recreated Compose container, a replacement pod, or a restart on Docker's containerd
+image store. A live owner in another container on the same machine still holds the lock, so a
+second start next to it refuses. On a network or FUSE filesystem (NFS, SMB, Ceph, virtiofs, sshfs)
+a lock can be local to one machine while another machine still runs the owner, and macOS reports no
+reliable filesystem type, so there a free lock proves nothing and the checks below decide.
 
 Records written by a version without this lock fall back to the older check, which recovers only
 when the same container wrote them in an earlier run: a Kubernetes container restarted inside its
@@ -775,8 +777,8 @@ layer has a random id, as with Docker's `overlay2` storage driver and Podman.
 
 Every other case refuses with `Proxy ownership is unverified; startup refused`, because the old
 owner could still be serving the same volume: a record written by an older version (the first
-restart after an upgrade), a lock someone else still holds, or a platform without `flock`
-(Windows). Confirm that nothing else serves this state directory, then move `runtime-port.json` and
+restart after an upgrade), a lock someone else still holds, a state directory where a free lock proves nothing (macOS, or a
+network or FUSE filesystem), or a platform without `flock` (Windows). Confirm that nothing else serves this state directory, then move `runtime-port.json` and
 `ocx.pid` aside once and start again. Run a single writer per state volume: a Kubernetes
 `Deployment` that shares a volume should use `strategy: Recreate` (or `maxSurge: 0`) so the old pod
 stops before the new one starts. Do not share one state volume between processes in one network

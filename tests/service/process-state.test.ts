@@ -423,12 +423,15 @@ describe("proxy process-state ownership", () => {
   });
 
   // A restart replacement publishes while the retired parent still drains; it must get the lock.
-  test("removing this process's own runtime record releases the owner lock; another PID's removal does not", () => {
-    if (process.platform !== "linux" && process.platform !== "darwin") return;
+  // ownerLockReleased proves a free lock only on Linux (local test filesystems).
+  test.skipIf(process.platform !== "linux")("removing this process's own runtime record releases the owner lock; another PID's removal does not", () => {
     writeRuntimePort({ pid: process.pid, port: 58195 });
     expect(ownerLockReleased(getConfigDir())).toBe(false);
+    writeRuntimePort({ pid: 1234, port: 58195 });
     removeRuntimePortIfPidIs(1234);
+    expect(existsSync(getRuntimePortPath())).toBe(false);
     expect(ownerLockReleased(getConfigDir())).toBe(false);
+    writeRuntimePort({ pid: process.pid, port: 58195 });
     removeRuntimePort(process.pid);
     expect(ownerLockReleased(getConfigDir())).toBe(true);
     writeRuntimePort({ pid: process.pid, port: 58195 });

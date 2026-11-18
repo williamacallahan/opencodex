@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rootOverlayUpperdirFromMountinfo, runtimeOwnerScope, sameRuntimeOwnerScope } from "../../src/config/process-state";
-import { holdOwnerLock, ownerLockReleased, releaseOwnerLock } from "../../src/config/owner-lock";
+import { holdOwnerLock, lockProvesOwnerGone, ownerLockReleased, releaseOwnerLock } from "../../src/config/owner-lock";
 import { observeProxyLiveness, type LivenessIo } from "../../src/server/proxy-liveness";
 import { watchdogMs } from "../helpers/ci-watchdog";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -317,7 +317,21 @@ async function lockHolder(ocxHome: string): Promise<ReturnType<typeof Bun.spawn>
   return holder;
 }
 
-const lockable = process.platform === "linux" || process.platform === "darwin";
+// A free lock is proof only on Linux, where the test's temporary directories are local filesystems.
+const lockable = process.platform === "linux";
+
+// Sol review of bc4e8b893: an NFS mount with `nolock` or `local_lock` gives each client its own
+// lock table, so a lock this client can take says nothing about an owner on another machine.
+test("a free owner lock proves its owner gone only on a local Linux filesystem", () => {
+  expect(lockProvesOwnerGone("linux", 0xEF53)).toBe(true); // ext4
+  expect(lockProvesOwnerGone("linux", -0x6EDC97C2)).toBe(true); // btrfs, as Node reports it
+  expect(lockProvesOwnerGone("linux", 0x794C7630)).toBe(true); // overlayfs
+  for (const remote of [0x6969, 0xFE534D42, 0xFF534D42, 0x517B, 0x65735546, 0x6A656A63, 0x00C36400, 0x01021997]) {
+    expect(lockProvesOwnerGone("linux", remote)).toBe(false); // NFS, SMB2, CIFS, SMB, FUSE, virtiofs, Ceph, 9p
+  }
+  expect(lockProvesOwnerGone("darwin", 0xEF53)).toBe(false);
+  expect(lockProvesOwnerGone("win32", 0xEF53)).toBe(false);
+});
 
 test.skipIf(!lockable)("the owner lock is held until its holder is killed, and only then reads as released", async () => {
   const root = mkdtempSync(join(tmpdir(), "ocx-owner-lock-"));
