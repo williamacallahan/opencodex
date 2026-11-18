@@ -103,7 +103,7 @@ import type {
 } from "../convergence-types";
 import type { CatalogGatherProviderAuthOutcome, CatalogGatherProviderModelOutcome, GatherFlightCapture, ModelsAuthResolverFactory } from "./gather-capture";
 import { applyProviderConfigHints, configuredAutoCompactTokenLimit, configuredMaxInputTokens, configuredModelDisplayName, configuredReasoningSummarySupport, copyReasoningHintSource, modelInputModalities, routedMaxOutputTokens, withVisionSidecarInput } from "./model-hints";
-import { resolveComboCatalogMember } from "./combo-member";
+import { enabledCatalogCombo, resolveComboCatalogMember } from "./combo-member";
 import { captureGatherFlight, captureTrustedOpenAiApiPolicy, gatherFlightKey, keyedGatherBytesIdentity, withCanonicalOpenAiForwardAuthDefault } from "./gather-capture";
 import { fetchProviderModelsWithAuth, observedModelsAuthResolver, refreshingModelsAuthResolver } from "./provider-models";
 
@@ -488,7 +488,7 @@ async function gatherRoutedModelsUncached(
     });
   }
   for (const id of listComboIds(config)) {
-    const combo = getCombo(config, id);
+    const combo = enabledCatalogCombo(config, id);
     if (!combo) continue;
     const comboNativeLimits = nativeContextLimits(config);
     const nativeContextWindow = combo.nativeAlias && combo.alias

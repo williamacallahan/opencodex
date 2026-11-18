@@ -201,6 +201,11 @@ function vendorMetadataComboFallback(target: { provider: string; model: string }
   };
 }
 
+export function enabledCatalogCombo(config: OcxConfig, id: string): NormalizedComboConfig | undefined {
+  const combo = getCombo(config, id);
+  return combo && { ...combo, targets: combo.targets.filter(target => config.providers[target.provider]?.disabled !== true) };
+}
+
 /**
  * Resolve a combo target to a catalog member for derivation.
  * Prefer discovery metadata; when the target is missing from the gather map or

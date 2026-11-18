@@ -307,6 +307,7 @@
     "catalog-gated-native-suppression-reason.test.ts": "codex-integration",
     "catalog-go-exact-efforts.test.ts": "codex-integration",
     "catalog-hub-context-window.test.ts": "codex-integration",
+    "combo-disabled-provider-catalog.test.ts": "codex-integration",
     "catalog-input-modality-enum.test.ts": "codex-integration",
     "catalog-llamacpp-capabilities.test.ts": "codex-integration",
     "catalog-modelalias-unique-sync.test.ts": "codex-integration",
