@@ -1,4 +1,5 @@
 import { projectLocalModelRefusalLog } from "./request-log-failure-detail";
+import { AmbiguousModelIdError } from "../providers/slug-codec";
 import { MessagesSseFrameContext } from "../lib/messages-sse-error-presentation";
 import { createMessagesSseErrorFilter } from "./messages-sse-error-filter";
 import { ownedDisabledModelResponse, normalizeMessagesProxyRefusal, ownedAnthropicErrorPayload, ownedAnthropicErrorResponse, boundedMessagesDisplayCount, messagesOverflowPresentation, messagesRelayedOverflowPresentation } from "../lib/messages-error-body";
@@ -663,23 +664,28 @@ function hybridMessagesBridgeRouteAllowed(config: OcxConfig, candidate: RouteRes
 export function hybridMessagesModelLane(
   config: OcxConfig, model: string, cc: OcxConfig["claudeCode"] = config.claudeCode,
 ): "strict" | "bridge" | undefined {
-  const routedAlias = resolveAlias(model) !== null;
-  let route: RouteResult | undefined;
-  let coolingComboId: string | undefined;
-  try { route = previewRouteModel(config, routedAlias ? resolveInboundModel(model, cc) : model); } catch (error) {
-    // Cooling is availability, not incompatibility; dispatch retains its retryable refusal.
-    if (error instanceof NoEligiblePolicyCandidateError || error instanceof UnknownRoutingPolicyError) return undefined;
-    if (!(routedAlias && error instanceof NoAvailableComboTargetsError)) throw error;
-    coolingComboId = error.comboId;
+  try {
+    const routedAlias = resolveAlias(model) !== null;
+    let route: RouteResult | undefined;
+    let coolingComboId: string | undefined;
+    try { route = previewRouteModel(config, routedAlias ? resolveInboundModel(model, cc) : model); } catch (error) {
+      // Cooling is availability, not incompatibility; dispatch retains its retryable refusal.
+      if (error instanceof NoEligiblePolicyCandidateError || error instanceof UnknownRoutingPolicyError) return undefined;
+      if (!(routedAlias && error instanceof NoAvailableComboTargetsError)) throw error;
+      coolingComboId = error.comboId;
+    }
+    const modelMapped = [cc?.modelMap?.[model], cc?.modelMap?.[model.replace(/-\d{8}$/, "")]]
+      .some(mapped => typeof mapped === "string" && mapped.length > 0);
+    if (route && !routedAlias && !resolveDesktop3pAlias(model) && !modelMapped
+      && model.startsWith("claude-") && route.modelId === model
+      && nativeMessagesDeclineReason(route, { model }, config, { strict: true }) === undefined) return "strict";
+    const bridgeAllowed = route ? hybridMessagesBridgeRouteAllowed(config, route)
+      : !!coolingComboId && hybridMessagesComboAllowed(config, coolingComboId);
+    return routedAlias && bridgeAllowed ? "bridge" : undefined;
+  } catch (error) {
+    if (error instanceof AmbiguousModelIdError) return undefined;
+    throw error;
   }
-  const modelMapped = [cc?.modelMap?.[model], cc?.modelMap?.[model.replace(/-\d{8}$/, "")]]
-    .some(mapped => typeof mapped === "string" && mapped.length > 0);
-  if (route && !routedAlias && !resolveDesktop3pAlias(model) && !modelMapped
-    && model.startsWith("claude-") && route.modelId === model
-    && nativeMessagesDeclineReason(route, { model }, config, { strict: true }) === undefined) return "strict";
-  const bridgeAllowed = route ? hybridMessagesBridgeRouteAllowed(config, route)
-    : !!coolingComboId && hybridMessagesComboAllowed(config, coolingComboId);
-  return routedAlias && bridgeAllowed ? "bridge" : undefined;
 }
 
 /**
