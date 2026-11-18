@@ -719,6 +719,12 @@ Append `/hybrid` to the hosted gateway origin in `ANTHROPIC_BASE_URL` to use nat
 turns and routed subagents from one Claude Code process. Use the same gateway authentication
 as `/strict`; no additional configuration switch is needed.
 
+Gateway model discovery is available at `GET /hybrid/v1/models` with Anthropic headers
+or `?flavor=anthropic`. It reads the server's current catalog, publishes genuine native
+Claude ids and readable routed ids, and omits routes this prefix cannot serve. Capabilities
+come from the same catalog as ordinary discovery; no launcher model list is needed.
+Desktop config export (`?format=desktop-config`) remains on the root `/v1/models` endpoint.
+
 Native model ids beginning with `claude-` use the strict managed-account transport above.
 Desktop 3P aliases and ids claimed by a nonempty exact or date-stripped `modelMap` entry are refused.
 Routed ids such as `ocx-claude-gpt-pool--gpt-model` and escaped `ocx-claude2-` ids use the
