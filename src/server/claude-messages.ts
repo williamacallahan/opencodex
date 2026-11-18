@@ -642,6 +642,46 @@ function translationFailure(err: unknown, logCtx: RequestLogContext, logIds: { r
     localError: markProxyError({ message: clientMessage }), overflow: messagesRelayedOverflowPresentation("", legacy) }, legacy);
 }
 
+// A combo may select again or fail over; every selectable candidate must stay off Anthropic.
+function hybridMessagesComboAllowed(config: OcxConfig, comboId: string): boolean {
+  const targets = getCombo(config, comboId)?.targets;
+  if (!targets) return false;
+  const selectable = targets.filter(target => !comboTargetProviderUnconfigured(config, target));
+  return (selectable.length > 0 ? selectable : targets).every(target => {
+    const route = previewRouteModel(config, `${target.provider}/${target.model}`);
+    return !route.combo && hybridMessagesBridgeRouteAllowed(config, route);
+  });
+}
+
+function hybridMessagesBridgeRouteAllowed(config: OcxConfig, candidate: RouteResult): boolean {
+  return resolveWireProtocolOverride(candidate.providerName, candidate.modelId, candidate.provider, "anthropic").adapter !== "anthropic"
+    && !configuredAnthropicInstance(config, candidate.providerName) && candidate.routeKind !== "policy"
+    && (!candidate.combo || hybridMessagesComboAllowed(config, candidate.combo.comboId));
+}
+
+/** Shared read-only compatibility decision for hybrid ingress and model discovery. */
+export function hybridMessagesModelLane(
+  config: OcxConfig, model: string, cc: OcxConfig["claudeCode"] = config.claudeCode,
+): "strict" | "bridge" | undefined {
+  const routedAlias = resolveAlias(model) !== null;
+  let route: RouteResult | undefined;
+  let coolingComboId: string | undefined;
+  try { route = previewRouteModel(config, routedAlias ? resolveInboundModel(model, cc) : model); } catch (error) {
+    // Cooling is availability, not incompatibility; dispatch retains its retryable refusal.
+    if (error instanceof NoEligiblePolicyCandidateError || error instanceof UnknownRoutingPolicyError) return undefined;
+    if (!(routedAlias && error instanceof NoAvailableComboTargetsError)) throw error;
+    coolingComboId = error.comboId;
+  }
+  const modelMapped = [cc?.modelMap?.[model], cc?.modelMap?.[model.replace(/-\d{8}$/, "")]]
+    .some(mapped => typeof mapped === "string" && mapped.length > 0);
+  if (route && !routedAlias && !resolveDesktop3pAlias(model) && !modelMapped
+    && model.startsWith("claude-") && route.modelId === model
+    && nativeMessagesDeclineReason(route, { model }, config, { strict: true }) === undefined) return "strict";
+  const bridgeAllowed = route ? hybridMessagesBridgeRouteAllowed(config, route)
+    : !!coolingComboId && hybridMessagesComboAllowed(config, coolingComboId);
+  return routedAlias && bridgeAllowed ? "bridge" : undefined;
+}
+
 /**
  * Translate a Claude Messages request, route it through the Responses pipeline,
  * and translate the reply back. Runs under a translator budget owned by the
@@ -673,23 +713,6 @@ async function handleClaudeMessagesWithBudget(
 
   let hybridBody: Rec | undefined;
   let hybridRefusalMessage = "Hybrid Messages body is invalid; expected supported content encoding and a JSON object with a non-empty model";
-  // A combo may select again or fail over; every candidate must stay off Anthropic.
-  const bridgeRouteAllowed = (candidate: RouteResult): boolean => resolveWireProtocolOverride(
-    candidate.providerName, candidate.modelId, candidate.provider, "anthropic",
-  ).adapter !== "anthropic"
-    && !configuredAnthropicInstance(config, candidate.providerName) && candidate.routeKind !== "policy"
-    && (!candidate.combo || comboTargetsBridgeAllowed(candidate.combo.comboId));
-  const comboTargetsBridgeAllowed = (comboId: string): boolean => {
-    const targets = getCombo(config, comboId)?.targets;
-    if (!targets) return false;
-    // The picker never selects a missing or disabled provider, so only selectable targets decide compatibility;
-    // a combo with none keeps evaluating every target.
-    const selectable = targets.filter(target => !comboTargetProviderUnconfigured(config, target));
-    return (selectable.length > 0 ? selectable : targets).every(target => {
-      const route = previewRouteModel(config, `${target.provider}/${target.model}`);
-      return !route.combo && bridgeRouteAllowed(route);
-    });
-  };
   if (ingress.hybridMessages) {
     let wire: Uint8Array | undefined;
     let strict = false;
@@ -701,22 +724,9 @@ async function handleClaudeMessagesWithBudget(
       if (!isRec(body) || typeof body.model !== "string" || !body.model || !wire) throw markProxyError(new AnthropicRequestError("model is required"));
       const model = body.model;
       hybridRefusalMessage = `Hybrid Messages model ${redactSecretString(model).slice(0, 200)} is incompatible; accepted forms are native Claude ids and ocx-claude- or ocx-claude2- routed ids`;
-      const routedAlias = resolveAlias(model) !== null;
-      // A combo whose targets are all cooling throws here; that is availability, not compatibility. Check its
-      // targets directly and let dispatch answer with the retryable 429/503 instead of a terminal 400.
-      let route: RouteResult | undefined;
-      let coolingComboId: string | undefined;
-      try { route = previewRouteModel(config, routedAlias ? resolveInboundModel(model, cc) : model); } catch (error) {
-        if (!(routedAlias && error instanceof NoAvailableComboTargetsError)) throw error;
-        coolingComboId = error.comboId;
-      }
-      const modelMapped = [cc?.modelMap?.[model], cc?.modelMap?.[model.replace(/-\d{8}$/, "")]]
-        .some(mapped => typeof mapped === "string" && mapped.length > 0);
-      strict = route !== undefined && !routedAlias && !resolveDesktop3pAlias(model) && !modelMapped
-        && model.startsWith("claude-") && route.modelId === model
-        && nativeMessagesDeclineReason(route, body, config, { strict: true }) === undefined;
-      const bridgeAllowed = route ? bridgeRouteAllowed(route) : !!coolingComboId && comboTargetsBridgeAllowed(coolingComboId);
-      if (!strict && !(routedAlias && bridgeAllowed)) {
+      const lane = hybridMessagesModelLane(config, model, cc);
+      strict = lane === "strict";
+      if (!lane) {
         throw markProxyError(new AnthropicRequestError("incompatible model"));
       }
       hybridBody = body;
@@ -1086,7 +1096,7 @@ async function handleClaudeMessagesWithBudget(
       } }, route, config, "anthropic") },
     );
     route.provider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, "anthropic", route.staticPolicy);
-    if (ingress.hybridMessages && !bridgeRouteAllowed(route)) {
+    if (ingress.hybridMessages && !hybridMessagesBridgeRouteAllowed(config, route)) {
       if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 400, { closeReason: "non_stream" });
       return anthropicErrorResponse(400, hybridRefusalMessage, "invalid_request_error");
     }

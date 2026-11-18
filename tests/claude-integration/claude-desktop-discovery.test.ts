@@ -4,10 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OcxConfig } from "../../src/types";
 import { saveConfig } from "../../src/config";
+import { claudeCodeAlias } from "../../src/claude/alias";
 import { startServer } from "../../src/server";
 import { buildDesktopDiscoveryInputs } from "../../src/claude/desktop-discovery-inputs";
 import { buildDesktop3pRegistry, generateDesktop3pModels, resolveDesktop3pAlias, resolvableDesktop3pAlias, desktop3pAlias } from "../../src/claude/desktop-3p";
-import { buildAnthropicModelInfos } from "../../src/claude/model-info";
+import { buildAnthropicModelInfos, type AnthropicModelInfo } from "../../src/claude/model-info";
 import { getRequestLogEntries } from "../../src/server/request-log";
 import { parseDesktopProfile } from "../../src/claude/desktop-profile";
 import { desktopVisibleNativeSlugs, type CatalogModel } from "../../src/codex/catalog";
@@ -148,6 +149,13 @@ describe("Desktop snapshot through authenticated model discovery", () => {
     upstream = Bun.serve({
       hostname: "127.0.0.1", port: 0,
       fetch: async req => {
+        if (new URL(req.url).pathname.endsWith("/messages")) {
+          const body = await req.json();
+          upstreamRequests.push(body);
+          return Response.json({ id: "msg_fixture", type: "message", role: "assistant", model: body.model,
+            content: [{ type: "text", text: "native fixture" }], stop_reason: "end_turn",
+            usage: { input_tokens: 2, output_tokens: 1 } });
+        }
         if (new URL(req.url).pathname.endsWith("/chat/completions")) {
           const body = await req.json() as Record<string, unknown>;
           upstreamRequests.push(body);
@@ -202,9 +210,87 @@ describe("Desktop snapshot through authenticated model discovery", () => {
     server = startServer(0);
   }
 
-  function request(query: string, headers: Record<string, string> = { "x-opencodex-api-key": key }): Promise<Response> {
-    return fetch(`http://127.0.0.1:${server!.port}/v1/models${query}`, { headers });
+  function request(query: string, headers: Record<string, string> = { "x-opencodex-api-key": key }, prefix = ""): Promise<Response> {
+    return fetch(`http://127.0.0.1:${server!.port}${prefix}/v1/models${query}`, { headers });
   }
+
+  test("hybrid discovery publishes native Claude and callable routed selectors with shared capabilities", async () => {
+    launch(true, undefined, {
+      defaultProvider: "anthropic-fixture",
+      fastRows: false,
+      providers: {
+        test: { adapter: "openai-chat", baseUrl: `http://127.0.0.1:${upstream.port}/v1`, apiKey: "fixture",
+          allowPrivateNetwork: true, liveModels: false, models: ["model-123", "model-155"],
+          reasoningEfforts: ["low", "high"], modelContextWindows: { "model-123": 200_000 } },
+        "anthropic-fixture": { adapter: "anthropic", baseUrl: `http://127.0.0.1:${upstream.port}`, apiKey: "fixture",
+          authMode: "key", allowPrivateNetwork: true, liveModels: false, models: ["claude-fixture", "claude-mapped-fixture"] },
+      },
+      claudeCode: { enabled: true, desktopNativeModels: false, modelMap: { "claude-mapped-fixture": "test/model-155" } },
+      combos: {
+        routed: { strategy: "round-robin", targets: [{ provider: "test", model: "model-123" }] },
+        mixed: { strategy: "round-robin", targets: [{ provider: "test", model: "model-123" }, { provider: "anthropic-fixture", model: "claude-fixture" }] },
+      },
+    });
+    const headers = { "x-opencodex-api-key": key, "anthropic-version": "2023-06-01", "user-agent": "claude-code/2.1.207" };
+    const root = await request("?ids=cli&limit=1000", headers);
+    expect(root.status).toBe(200);
+    const rootBody = await root.json() as { data: AnthropicModelInfo[] };
+    expect(rootBody.data.map(model => model.id), "root discovery preserves the native catalog row")
+      .toContain(claudeCodeAlias("anthropic-fixture", "claude-fixture"));
+    const hybrid = await request("?ids=cli&limit=1000", headers, "/hybrid");
+    expect(hybrid.status).toBe(200);
+    expect(hybrid.headers.get("content-type")).toContain("application/json");
+    const body = await hybrid.json() as { data: AnthropicModelInfo[] };
+    const ids = body.data.map(model => model.id);
+    expect(ids).toContain("claude-fixture");
+    expect(ids).toContain("ocx-claude-test--model-123");
+    expect(ids).toContain("ocx-claude-combo--routed");
+    expect(ids).not.toContain(claudeCodeAlias("anthropic-fixture", "claude-fixture"));
+    expect(ids).not.toContain("claude-mapped-fixture");
+    expect(ids).not.toContain(claudeCodeAlias("anthropic-fixture", "claude-mapped-fixture"));
+    expect(ids).not.toContain("ocx-claude-combo--mixed");
+    for (const entry of body.data) {
+      const rootId = entry.id === "claude-fixture" ? claudeCodeAlias("anthropic-fixture", entry.id) : entry.id;
+      const original = rootBody.data.find(model => model.id === rootId)!;
+      expect(original).toBeDefined();
+      expect(entry.capabilities).toEqual(original.capabilities);
+      expect(entry.max_input_tokens).toBe(original.max_input_tokens);
+      expect(entry.type).toBe("model");
+      expect(entry.created_at).toBe(original.created_at);
+      const response = await fetch(`http://127.0.0.1:${server!.port}/hybrid/v1/messages`, {
+        method: "POST", headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ model: entry.id, max_tokens: 32, stream: false,
+          messages: [{ role: "user", content: "discovered fixture" }] }),
+      });
+      expect(response.status, await response.text()).toBe(200);
+    }
+    expect(upstreamRequests.some(request => request.model === "claude-fixture")).toBe(true);
+    expect(upstreamRequests.some(request => request.model === "model-123")).toBe(true);
+    // An explicit Desktop id query cannot make hybrid advertise hashes it refuses to serve.
+    const desktop = await request("?flavor=anthropic&ids=desktop", undefined, "/hybrid");
+    expect(await desktop.json()).toEqual(body);
+  });
+
+  test("hybrid model discovery keeps authentication, origin and query-format boundaries", async () => {
+    launch();
+    expect((await request("?flavor=anthropic", {}, "/hybrid")).status).toBe(401);
+    expect((await request("?flavor=anthropic", { "x-opencodex-api-key": key,
+      origin: "https://untrusted.example.test" }, "/hybrid")).status).toBe(403);
+    expect((await request("?format=desktop-config", undefined, "/hybrid")).status).toBe(400);
+    for (const query of ["", "?client_version=0.145.0"]) {
+      const root = await request(query);
+      const hybrid = await request(query, undefined, "/hybrid");
+      expect(hybrid.status).toBe(root.status);
+      expect(await hybrid.json()).toEqual(await root.json());
+    }
+  });
+
+  test("disabled Claude keeps hybrid discovery empty", async () => {
+    launch(false);
+    const response = await request("?flavor=anthropic&ids=cli", undefined, "/hybrid");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ data: [] });
+  });
 
   test("generated Desktop IDs preserve model switching and every effort through Messages to the adapter", async () => {
     launch();

@@ -30,7 +30,8 @@ import {
 import { remoteWorkspaceEnabled } from "../../remote-control/workspace-activation";
 import { isClaudeInterceptedPath } from "../../claude/intercept/listener";
 import { markActivity } from "../../lib/sidecar-tracker";
-import { knownModelIdsForProvider } from "../../router";
+import { knownModelIdsForProvider, previewRouteModel } from "../../router";
+import { claudeCodeAlias, claudeCodeNativeAlias } from "../../claude/alias";
 import {
   buildWarmupCompletionFrames,
   buildWsErrorFrame,
@@ -120,6 +121,7 @@ import {
 import {
   handleClaudeCountTokens,
   handleClaudeMessages,
+  hybridMessagesModelLane,
 } from "../claude-messages";
 import { handleChatCompletions } from "../chat-completions";
 import { anthropicErrorResponse } from "../../claude/outbound";
@@ -933,7 +935,8 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         );
       }
 
-      if (url.pathname === "/v1/models" && req.method === "GET") {
+      const hybridModelsPath = ingress === "public" && url.pathname === "/hybrid/v1/models";
+      if ((url.pathname === "/v1/models" || hybridModelsPath) && req.method === "GET") {
         // #809: the catalog read sits immediately before model discovery because it shares
         // that route's admission rationale exactly. Keep them adjacent so a future change to
         // one is made in sight of the other.
@@ -946,6 +949,9 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin data-plane request blocked"), req, policy);
         }
         const wantsDesktopConfig = url.searchParams.get("format") === "desktop-config";
+        if (wantsDesktopConfig && hybridModelsPath) {
+          return jsonResponse({ error: "Desktop config format requires the root model discovery endpoint" }, 400, req, policy);
+        }
         if (wantsDesktopConfig && (url.searchParams.get("ids") === "cli" || url.searchParams.has("client_version"))) {
           return jsonResponse({ error: "Desktop config format cannot use CLI or client-version selectors" }, 400, req, policy);
         }
@@ -1106,12 +1112,20 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             : idsParam === "desktop"
               ? "desktop3p" as const
               : (/^claude-code\//i.test(req.headers.get("user-agent") ?? "") ? "readable" as const : "desktop3p" as const);
+          // Hybrid cannot serve Desktop hashes or routed Anthropic aliases. Reuse ModelInfo's
+          // selector callback without changing its capability, ordering or variant projection.
+          const hybridAlias = (provider: string, modelId: string): string | undefined => {
+            if (modelId.startsWith("claude-") && hybridMessagesModelLane(config, modelId) === "strict"
+              && previewRouteModel(config, modelId).providerName === provider) return modelId;
+            const alias = provider === "native" ? claudeCodeNativeAlias(modelId) : claudeCodeAlias(provider, modelId);
+            return hybridMessagesModelLane(config, alias) !== undefined ? alias : undefined;
+          };
           const data = buildAnthropicModelInfos(
             desktopNativeSlugs,
             goOrdered,
             resolveAutoContext(config.claudeCode),
-            idStyle,
-            resolvableDesktop3pAlias,
+            hybridModelsPath ? "desktop3p" : idStyle,
+            hybridModelsPath ? hybridAlias : resolvableDesktop3pAlias,
             desktopInputs.nativeContextCap,
             config.fastMode,
             // Explicit opt-out omits the Fast predicate.
@@ -1123,7 +1137,8 @@ export function createServeOptions(ctx: ServeOptionsContext) {
               : undefined,
             { modelPickerOrder: config.modelPickerOrder, featured: config.subagentModels }, configuredRoutedDisplayName(config),
           );
-          return jsonResponse({ data }, 200, req, policy);
+          return jsonResponse({ data: hybridModelsPath
+            ? data.filter(model => hybridMessagesModelLane(config, model.id) !== undefined) : data }, 200, req, policy);
         }
         if (url.searchParams.has("client_version")) {
           const { buildCodexModelList } = await import("../codex-model-list");
