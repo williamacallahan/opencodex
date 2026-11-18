@@ -6,19 +6,21 @@ import { recordOwnedConfigPath } from "../lib/config-ownership";
  * A kernel `flock` the owner of a home's `ocx.pid` and `runtime-port.json` holds while it owns them.
  *
  * The kernel drops the lock when its holder dies, however it dies: SIGKILL, the OOM killer, a crash,
- * `docker kill`, a host reboot. So a runtime record whose writer declared it held the lock
- * (`ownerLock: true`), read while that lock is free, names an owner that is gone, whatever PID
- * number it had and whichever container or PID namespace it ran in. That is the proof the PID and
+ * `docker kill`, a host reboot. So a runtime record whose writer held the lock on a filesystem whose
+ * locks live in one kernel (`ownerLock: "kernel"`), read on such a filesystem while that lock is
+ * free, names an owner that is gone, whatever PID number it had and whichever container or PID
+ * namespace it ran in. That is the proof the PID and
  * owner-scope checks cannot give after a reboot or a recreated container, where the new process
  * often gets the very PID the stale record names. A live owner in another container on the same
  * machine still holds the lock, so its record keeps refusing a second writer.
  *
  * The lock is advisory and only as wide as the filesystem's lock domain. A free lock proves the
- * owner gone only where every possible owner shares this kernel's lock table: a local Linux
- * filesystem ({@link lockProvesOwnerGone}). A network or FUSE mount can confine locks to one client
- * (NFS `nolock` or `local_lock`), so taking the lock there proves nothing about an owner on another
- * machine, and macOS reports no stable filesystem type to tell the two apart. There the owner still
- * holds and stamps the lock, but a reader proves nothing from it and the existing checks decide.
+ * owner gone only when both the writer and the reader reached the directory through a local Linux
+ * filesystem ({@link lockDomainIsKernel}), because a network or FUSE mount can confine locks to one
+ * client (NFS `nolock` or `local_lock`): a hub writing over NFS from machine B holds a lock the
+ * reader on the exporting machine A cannot see. macOS reports no stable filesystem type to tell the
+ * two apart. Elsewhere the owner still holds the lock and stamps `ownerLock: true`, which proves a
+ * live owner while the lock is held and nothing once it is free ({@link ownerLockState}).
  *
  * The owner drops the lock when it removes its own runtime record ({@link releaseOwnerLock}), so a
  * restart replacement started while the old process drains can take it.
@@ -78,18 +80,26 @@ export function releaseOwnerLock(stateDir: string): void {
 }
 
 /**
- * Whether no process holds this state directory's owner lock, proved by taking and dropping it.
- * Never creates the file: a missing one cannot prove anything, because a live owner can still hold
- * the lock on a file someone unlinked. This process's own held lock reads as held.
+ * This state directory's owner lock as a reader sees it: `held` by a live process (this one
+ * included), `free` with proof that no owner holds it, or `unproved` (no `flock`, no lock file, or a
+ * filesystem whose locks can be local to one client). Never creates the file: a missing one proves
+ * nothing, because a live owner can still hold the lock on a file someone unlinked.
  */
-export function ownerLockReleased(stateDir: string): boolean {
+export function ownerLockState(stateDir: string): "held" | "free" | "unproved" {
   const flock = loadFlock();
-  if (!flock) return false;
-  try { if (!lockProvesOwnerGone(process.platform, statfsSync(stateDir).type)) return false; } catch { return false; }
+  if (!flock) return "unproved";
   let fd: number;
   // Read-write: NFS emulates flock with byte-range locks, and an exclusive one needs write access.
-  try { fd = openSync(join(stateDir, LOCK_FILE), "r+"); } catch { return false; }
-  try { return flock(fd, LOCK_EX | LOCK_NB) === 0; } finally { closeSync(fd); }
+  try { fd = openSync(join(stateDir, LOCK_FILE), "r+"); } catch { return "unproved"; }
+  try {
+    if (flock(fd, LOCK_EX | LOCK_NB) !== 0) return "held";
+  } finally { closeSync(fd); }
+  return lockDomainIsKernel(stateDir) ? "free" : "unproved";
+}
+
+/** Whether this directory's filesystem keeps its locks in the one kernel that mounts it. */
+export function lockDomainIsKernel(stateDir: string): boolean {
+  try { return isSingleKernelLockFilesystem(process.platform, statfsSync(stateDir).type); } catch { return false; }
 }
 
 /**
@@ -110,8 +120,8 @@ const SINGLE_KERNEL_LOCK_FILESYSTEMS: ReadonlySet<number> = new Set([
   0xCA451A4E, // bcachefs
 ]);
 
-/** Whether a free owner lock on a filesystem of this `statfs` type proves its owner gone. */
-export function lockProvesOwnerGone(platform: NodeJS.Platform, filesystemType: number): boolean {
+/** Whether a filesystem of this `statfs` type keeps its locks in one kernel. */
+export function isSingleKernelLockFilesystem(platform: NodeJS.Platform, filesystemType: number): boolean {
   // Node reports the magic as a signed 32-bit number (btrfs reads -0x6EDC97C2).
   return platform === "linux" && SINGLE_KERNEL_LOCK_FILESYSTEMS.has(filesystemType >>> 0);
 }

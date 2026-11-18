@@ -12,7 +12,7 @@ import {
 import { atomicWriteFile } from "./atomic-write";
 import { readWindowsProcessCommandLineNative } from "./windows-process-command-line";
 import { getConfigDir, hardenConfigDir } from "./paths";
-import { holdOwnerLock, releaseOwnerLock } from "./owner-lock";
+import { holdOwnerLock, lockDomainIsKernel, releaseOwnerLock } from "./owner-lock";
 import { registerOwnHome, unregisterOwnerRegistryHome } from "./owner-registry";
 
 export function getPidPath(): string {
@@ -180,11 +180,14 @@ export type RuntimePortState = {
    */
   ownerScope?: RuntimeOwnerScope;
   /**
-   * The owner held this home's owner lock ({@link holdOwnerLock}) when it wrote the record, so a
-   * free lock later proves the owner is gone. Stamped by {@link writeRuntimePort} like `ownerScope`;
-   * a record without it (an older version, or an owner that could not take the lock) proves nothing.
+   * The owner held this home's owner lock ({@link holdOwnerLock}) when it wrote the record:
+   * `"kernel"` on a filesystem whose locks live in one kernel, so a free lock later proves the owner
+   * gone; `true` anywhere else (macOS, a network or FUSE mount, or a version before that
+   * distinction), where only a held lock means something. Stamped by {@link writeRuntimePort} like
+   * `ownerScope`; a record without it (an older version, or an owner that could not take the lock)
+   * proves nothing.
    */
-  ownerLock?: true;
+  ownerLock?: true | "kernel";
 };
 
 export function isValidRuntimePortState(value: unknown): value is RuntimePortState {
@@ -214,8 +217,9 @@ export function writeRuntimePort(state: RuntimePortState): void {
   const own = state.pid === process.pid;
   const ownerScope = own ? runtimeOwnerScope() : state.ownerScope;
   const { ownerLock: carriedLock, ...fields } = state;
-  const ownerLock = own ? holdOwnerLock(getConfigDir()) : carriedLock === true;
-  const record = { ...fields, ...(ownerScope === undefined ? {} : { ownerScope }), ...(ownerLock ? { ownerLock: true as const } : {}) };
+  const ownerLock = !own ? carriedLock
+    : holdOwnerLock(getConfigDir()) ? (lockDomainIsKernel(getConfigDir()) ? "kernel" as const : true as const) : undefined;
+  const record = { ...fields, ...(ownerScope === undefined ? {} : { ownerScope }), ...(ownerLock === undefined ? {} : { ownerLock }) };
   atomicWriteFile(getRuntimePortPath(), JSON.stringify(record, null, 2) + "\n");
   // The record proves this home's owner only to a reader that knows where it lives.
   // One pointer in the shared registry makes the record findable from every home;

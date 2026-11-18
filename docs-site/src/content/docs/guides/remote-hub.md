@@ -768,7 +768,9 @@ host reboot, a recreated Compose container, a replacement pod, or a restart on D
 image store. A live owner in another container on the same machine still holds the lock, so a
 second start next to it refuses. On a network or FUSE filesystem (NFS, SMB, Ceph, virtiofs, sshfs)
 a lock can be local to one machine while another machine still runs the owner, and macOS reports no
-reliable filesystem type, so there a free lock proves nothing and the checks below decide.
+reliable filesystem type, so a free lock proves nothing when either the old owner or the new start
+reached the state directory that way, and the checks below decide. A lock still held there keeps
+refusing.
 
 Records written by a version without this lock fall back to the older check, which recovers only
 when the same container wrote them in an earlier run: a Kubernetes container restarted inside its

@@ -16,7 +16,7 @@ import {
   hasPublishedOwnershipRecords, isOcxCommandLine, readAlivePid, readProcessCommandLine, readRuntimePort,
   runtimeOwnerScope, sameRuntimeOwnerScope, verifyPidIdentity, type RuntimeOwnerScope,
 } from "../config/process-state";
-import { ownerLockReleased } from "../config/owner-lock";
+import { ownerLockState } from "../config/owner-lock";
 import { getConfigDir } from "../config/paths";
 import { createServer, isIP } from "node:net";
 import { loopbackFamilyAvailability } from "../lib/loopback-family";
@@ -101,8 +101,8 @@ export interface LivenessIo {
   readRuntimeFn?: (pid?: number) => { pid?: number; port: number; hostname?: string; ownerScope?: unknown; ownerLock?: unknown } | null;
   /** This process, as the self-record proof in {@link observeProxyLiveness} needs it (#8552). */
   ownProcessFn?: () => OwnProcess;
-  /** Test seam for {@link ownerLockReleased} on this home's state directory. */
-  ownerLockReleasedFn?: () => boolean;
+  /** Test seam for {@link ownerLockState} on this home's state directory. */
+  ownerLockStateFn?: () => ReturnType<typeof ownerLockState>;
   configFn?: () => { port?: number; hostname?: string };
   timeoutMs?: number;
   /**
@@ -554,13 +554,15 @@ export async function observeProxyLiveness(io: LivenessIo = {}): Promise<ProxyLi
   // The scope proof fails after a host reboot (new boot id and network namespace) and for a
   // recreated container (new host name), and on Docker's containerd image store it has no layer to
   // fall back on, while the new process often gets the very PID the record names. A record whose
-  // writer held the home's owner lock, read while that lock is free, names an owner that is gone
-  // whatever its PID or namespace, because the kernel drops the lock only when its holder dies
+  // writer held the home's owner lock on a filesystem whose locks live in one kernel ("kernel"),
+  // read on such a filesystem while that lock is free, names an owner that is gone whatever its PID
+  // or namespace, because the kernel drops the lock only when its holder dies
   // (src/config/owner-lock.ts). A live owner in another container still holds it and keeps refusing.
-  // A record that claims the lock, while the lock cannot be taken, vetoes the scope proof too.
-  const recordOwnerGone = runtimeLock === true && (io.ownerLockReleasedFn ?? (() => ownerLockReleased(getConfigDir())))();
+  // A held lock vetoes the scope proof too; an unproved one (macOS, a network mount) leaves it alone.
+  const lockState = runtimeLock === undefined ? "unproved" : (io.ownerLockStateFn ?? (() => ownerLockState(getConfigDir())))();
+  const recordOwnerGone = runtimeLock === "kernel" && lockState === "free";
   const ownEarlierLifetime = !own.publishedOwnership && runtimePid === own.pid && sameRuntimeOwnerScope(runtimeScope, own.scope)
-    && (runtimeLock !== true || recordOwnerGone);
+    && lockState !== "held";
   const candidates = new Set<number>();
   if (alivePid !== null) candidates.add(alivePid);
   if (runtimePid !== undefined && Number.isSafeInteger(runtimePid) && runtimePid > 0) candidates.add(runtimePid);

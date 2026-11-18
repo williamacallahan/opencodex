@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rootOverlayUpperdirFromMountinfo, runtimeOwnerScope, sameRuntimeOwnerScope } from "../../src/config/process-state";
-import { holdOwnerLock, lockProvesOwnerGone, ownerLockReleased, releaseOwnerLock } from "../../src/config/owner-lock";
+import { holdOwnerLock, isSingleKernelLockFilesystem, ownerLockState, releaseOwnerLock } from "../../src/config/owner-lock";
 import { observeProxyLiveness, type LivenessIo } from "../../src/server/proxy-liveness";
 import { watchdogMs } from "../helpers/ci-watchdog";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -122,37 +122,49 @@ describe("a record naming this process's own PID", () => {
 // the very PID the stale record names. The owner lock the record's writer held proves it is gone.
 describe("a record whose writer held the home's owner lock", () => {
   const elsewhere = { host: "fedcba9876543210fedcba9876543210", boot: "cccccccccccccccccccccccccccccccc", network: "22222222222222222222222222222222" };
-  const lockedRecord = (pid = process.pid, claim: { ownerLock?: unknown } = { ownerLock: true }) => ({ ...selfRecord(elsewhere), pid, ...claim });
+  const lockedRecord = (pid = process.pid, claim: { ownerLock?: unknown } = { ownerLock: "kernel" }) => ({ ...selfRecord(elsewhere), pid, ...claim });
 
   test("is absent once the lock is free, naming this process's own PID", async () => {
-    const io = ioFor({ readPidFn: () => process.pid, readRuntimeFn: () => lockedRecord(), ownProcessFn: unpublished, ownerLockReleasedFn: () => true });
+    const io = ioFor({ readPidFn: () => process.pid, readRuntimeFn: () => lockedRecord(), ownProcessFn: unpublished, ownerLockStateFn: () => "free" as const });
     expect(await observeProxyLiveness(io)).toEqual({ kind: "absent", live: null });
   });
 
   test("is absent once the lock is free, naming another alive ocx PID", async () => {
-    const io = ioFor({ readPidFn: () => process.ppid, readRuntimeFn: () => lockedRecord(process.ppid), ownProcessFn: unpublished, ownerLockReleasedFn: () => true });
+    const io = ioFor({ readPidFn: () => process.ppid, readRuntimeFn: () => lockedRecord(process.ppid), ownProcessFn: unpublished, ownerLockStateFn: () => "free" as const });
     expect(await observeProxyLiveness(io)).toEqual({ kind: "absent", live: null });
   });
 
   test("still refuses while the lock is held", async () => {
-    const io = ioFor({ readRuntimeFn: () => lockedRecord(), ownProcessFn: unpublished, ownerLockReleasedFn: () => false });
+    const io = ioFor({ readRuntimeFn: () => lockedRecord(), ownProcessFn: unpublished, ownerLockStateFn: () => "held" as const });
     expect(await observeProxyLiveness(io)).toEqual({ kind: "unknown", live: null });
   });
 
-  for (const [label, claim] of [["no lock claim (an older version, maybe still serving)", {}], ["a malformed lock claim", { ownerLock: "true" }]] as const) {
+  for (const [label, claim] of [
+    ["no lock claim (an older version, maybe still serving)", {}],
+    ["a malformed lock claim", { ownerLock: "true" }],
+    // The writer held the lock where it can be local to one client (macOS, NFS nolock or local_lock).
+    ["a lock claim not qualified as one kernel's", { ownerLock: true }],
+  ] as const) {
     test(`with ${label} still refuses when the lock is free`, async () => {
-      const io = ioFor({ readRuntimeFn: () => lockedRecord(process.pid, claim), ownProcessFn: unpublished, ownerLockReleasedFn: () => true });
+      const io = ioFor({ readRuntimeFn: () => lockedRecord(process.pid, claim), ownProcessFn: unpublished, ownerLockStateFn: () => "free" as const });
       expect(await observeProxyLiveness(io)).toEqual({ kind: "unknown", live: null });
     });
   }
 
   test("a held lock vetoes a matching owner scope", async () => {
-    const io = ioFor({ readRuntimeFn: () => ({ ...selfRecord(), ownerLock: true }), ownProcessFn: unpublished, ownerLockReleasedFn: () => false });
+    const io = ioFor({ readRuntimeFn: () => ({ ...selfRecord(), ownerLock: true }), ownProcessFn: unpublished, ownerLockStateFn: () => "held" as const });
     expect(await observeProxyLiveness(io)).toEqual({ kind: "unknown", live: null });
   });
 
+  // Sol review of 2605d08fe: proof that is unavailable is not a held lock, so it must not cancel the
+  // same-place recovery a matching owner scope already gives (a crash on macOS or an NFS volume).
+  test("an unproved lock leaves a matching owner scope's recovery alone", async () => {
+    const io = ioFor({ readRuntimeFn: () => ({ ...selfRecord(), ownerLock: true }), ownProcessFn: unpublished, ownerLockStateFn: () => "unproved" as const });
+    expect(await observeProxyLiveness(io)).toEqual({ kind: "absent", live: null });
+  });
+
   test("a free lock does not release a different alive ocx PID in the pid file", async () => {
-    const io = ioFor({ readPidFn: () => process.ppid, readRuntimeFn: pid => pid === undefined ? lockedRecord() : null, ownProcessFn: unpublished, ownerLockReleasedFn: () => true });
+    const io = ioFor({ readPidFn: () => process.ppid, readRuntimeFn: pid => pid === undefined ? lockedRecord() : null, ownProcessFn: unpublished, ownerLockStateFn: () => "free" as const });
     expect(await observeProxyLiveness(io)).toEqual({ kind: "unknown", live: null });
   });
 });
@@ -223,7 +235,7 @@ const START_WAIT_MS = watchdogMs(15_000);
 
 // `exec` keeps the shell's PID, so the shell plays the previous container and `ocx start` the next
 // one: same PID, new lifetime, records naming it already on disk. Windows has no exec handoff.
-async function startAfterOwnLifetime(ownerScope: unknown, opts: { ownerLock?: true; prepare?: (ocxHome: string) => Promise<void> } = {}): Promise<{ child: ReturnType<typeof Bun.spawn>; port: number; ocxHome: string; served: boolean; stderr: Promise<string> }> {
+async function startAfterOwnLifetime(ownerScope: unknown, opts: { ownerLock?: true | "kernel"; prepare?: (ocxHome: string) => Promise<void> } = {}): Promise<{ child: ReturnType<typeof Bun.spawn>; port: number; ocxHome: string; served: boolean; stderr: Promise<string> }> {
   const root = mkdtempSync(join(tmpdir(), "ocx-self-pid-"));
   roots.push(root);
   const ocxHome = join(root, "ocx"), codexHome = join(root, "codex"), home = join(root, "home"), runtime = join(root, "runtime");
@@ -259,7 +271,7 @@ async function startAfterOwnLifetime(ownerScope: unknown, opts: { ownerLock?: tr
       SELF_PID_CLI: repoPath("src/cli/index.ts"),
       SELF_PID_PORT: String(port),
       SELF_PID_SCOPE: JSON.stringify(ownerScope),
-      SELF_PID_EXTRA: opts.ownerLock ? ',"ownerLock":true' : "",
+      SELF_PID_EXTRA: opts.ownerLock === undefined ? "" : `,"ownerLock":${JSON.stringify(opts.ownerLock)}`,
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -322,31 +334,31 @@ const lockable = process.platform === "linux";
 
 // Sol review of bc4e8b893: an NFS mount with `nolock` or `local_lock` gives each client its own
 // lock table, so a lock this client can take says nothing about an owner on another machine.
-test("a free owner lock proves its owner gone only on a local Linux filesystem", () => {
-  expect(lockProvesOwnerGone("linux", 0xEF53)).toBe(true); // ext4
-  expect(lockProvesOwnerGone("linux", -0x6EDC97C2)).toBe(true); // btrfs, as Node reports it
-  expect(lockProvesOwnerGone("linux", 0x794C7630)).toBe(true); // overlayfs
+test("only local Linux filesystems classify as keeping their locks in one kernel", () => {
+  expect(isSingleKernelLockFilesystem("linux", 0xEF53)).toBe(true); // ext4
+  expect(isSingleKernelLockFilesystem("linux", -0x6EDC97C2)).toBe(true); // btrfs, as Node reports it
+  expect(isSingleKernelLockFilesystem("linux", 0x794C7630)).toBe(true); // overlayfs
   for (const remote of [0x6969, 0xFE534D42, 0xFF534D42, 0x517B, 0x65735546, 0x6A656A63, 0x00C36400, 0x01021997]) {
-    expect(lockProvesOwnerGone("linux", remote)).toBe(false); // NFS, SMB2, CIFS, SMB, FUSE, virtiofs, Ceph, 9p
+    expect(isSingleKernelLockFilesystem("linux", remote)).toBe(false); // NFS, SMB2, CIFS, SMB, FUSE, virtiofs, Ceph, 9p
   }
-  expect(lockProvesOwnerGone("darwin", 0xEF53)).toBe(false);
-  expect(lockProvesOwnerGone("win32", 0xEF53)).toBe(false);
+  expect(isSingleKernelLockFilesystem("darwin", 0xEF53)).toBe(false);
+  expect(isSingleKernelLockFilesystem("win32", 0xEF53)).toBe(false);
 });
 
 test.skipIf(!lockable)("the owner lock is held until its holder is killed, and only then reads as released", async () => {
   const root = mkdtempSync(join(tmpdir(), "ocx-owner-lock-"));
   roots.push(root);
-  expect(ownerLockReleased(root)).toBe(false); // no lock file: nothing proved
+  expect(ownerLockState(root)).toBe("unproved"); // no lock file: nothing proved
   const holder = await lockHolder(root);
-  expect(ownerLockReleased(root)).toBe(false);
+  expect(ownerLockState(root)).toBe("held");
   expect(holdOwnerLock(root)).toBe(false);
   holder.kill("SIGKILL");
   await holder.exited;
-  expect(ownerLockReleased(root)).toBe(true);
+  expect(ownerLockState(root)).toBe("free");
   expect(holdOwnerLock(root)).toBe(true);
-  expect(ownerLockReleased(root)).toBe(false); // this process's own lock reads as held
+  expect(ownerLockState(root)).toBe("held"); // this process's own lock reads as held
   releaseOwnerLock(root);
-  expect(ownerLockReleased(root)).toBe(true);
+  expect(ownerLockState(root)).toBe("free");
 });
 
 // The hub's failure: a hard-killed owner on another boot or in another container left records
@@ -354,7 +366,7 @@ test.skipIf(!lockable)("the owner lock is held until its holder is killed, and o
 test.skipIf(!lockable)("ocx start recovers a same-PID record from elsewhere once its writer's owner lock died with it", async () => {
   const elsewhere = { ...runtimeOwnerScope(), host: "fedcba9876543210fedcba9876543210" };
   const { child, served, stderr, ocxHome } = await startAfterOwnLifetime(elsewhere, {
-    ownerLock: true,
+    ownerLock: "kernel",
     prepare: async home => {
       const holder = await lockHolder(home);
       holder.kill("SIGKILL");
@@ -364,13 +376,31 @@ test.skipIf(!lockable)("ocx start recovers a same-PID record from elsewhere once
   if (!served) throw new Error(`start did not serve as PID ${child.pid}: ${(await stderr).trim().slice(0, 400)}`);
   const record = JSON.parse(readFileSync(join(ocxHome, "runtime-port.json"), "utf8")) as { pid: number; ownerLock?: unknown };
   expect(record.pid).toBe(child.pid);
-  expect(record.ownerLock).toBe(true);
-  expect(ownerLockReleased(ocxHome)).toBe(false);
+  expect(record.ownerLock).toBe("kernel");
+  expect(ownerLockState(ocxHome)).toBe("held");
+}, Math.max(30_000, START_WAIT_MS * 2));
+
+// The writer did not qualify its claim (macOS, a network mount, or the first lock version), so a
+// free lock proves nothing about it, and the same-PID record from elsewhere still refuses.
+test.skipIf(!lockable)("ocx start still refuses a same-PID record from elsewhere whose lock claim was not one kernel's", async () => {
+  const elsewhere = { ...runtimeOwnerScope(), host: "fedcba9876543210fedcba9876543210" };
+  const { child, served, stderr, ocxHome } = await startAfterOwnLifetime(elsewhere, {
+    ownerLock: true,
+    prepare: async home => {
+      const holder = await lockHolder(home);
+      holder.kill("SIGKILL");
+      await holder.exited;
+    },
+  });
+  expect(served).toBe(false);
+  expect(await child.exited).toBe(1);
+  expect(await stderr).toContain("Proxy ownership is unverified");
+  expect(existsSync(join(ocxHome, "ocx.pid"))).toBe(true);
 }, Math.max(30_000, START_WAIT_MS * 2));
 
 test.skipIf(!lockable)("ocx start still refuses that record while another live owner holds the lock", async () => {
   const elsewhere = { ...runtimeOwnerScope(), host: "fedcba9876543210fedcba9876543210" };
-  const { child, served, stderr, ocxHome } = await startAfterOwnLifetime(elsewhere, { ownerLock: true, prepare: async home => { await lockHolder(home); } });
+  const { child, served, stderr, ocxHome } = await startAfterOwnLifetime(elsewhere, { ownerLock: "kernel", prepare: async home => { await lockHolder(home); } });
   expect(served).toBe(false);
   expect(await child.exited).toBe(1);
   expect(await stderr).toContain("Proxy ownership is unverified");
