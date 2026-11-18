@@ -65,6 +65,13 @@ export function decodeRoutedModelId(requested: string, knownIds: Iterable<string
   return aliasMatch ?? requested;
 }
 
+export class AmbiguousModelIdError extends Error {
+  constructor(model: string) {
+    super(`ambiguous model id "${model}"`);
+    this.name = "AmbiguousModelIdError";
+  }
+}
+
 /**
  * Decode a Codex-facing id, but fail when a custom slash id and another known id
  * share the same encoded form. Write-time checks cannot cover a later live cache.
@@ -76,7 +83,7 @@ export function decodeRoutedModelIdOrThrow(requested: string, knownIds: Iterable
   for (const id of ids) {
     if (id === requested || encodeRoutedModelId(id) === encodedRequested) matches.add(id);
   }
-  if (matches.size > 1) throw new Error(`ambiguous model id "${requested}"`);
+  if (matches.size > 1) throw new AmbiguousModelIdError(requested);
   return decodeRoutedModelId(requested, ids);
 }
 

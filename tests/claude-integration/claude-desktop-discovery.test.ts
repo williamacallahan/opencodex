@@ -228,6 +228,7 @@ describe("Desktop snapshot through authenticated model discovery", () => {
       claudeCode: { enabled: true, desktopNativeModels: false, modelMap: { "claude-mapped-fixture": "test/model-155" } },
       combos: {
         routed: { strategy: "round-robin", targets: [{ provider: "test", model: "model-123" }] },
+        ambiguous: { strategy: "round-robin", targets: [{ provider: "test", model: "vendor-model" }] },
         mixed: { strategy: "round-robin", targets: [{ provider: "test", model: "model-123" }, { provider: "anthropic-fixture", model: "claude-fixture" }] },
       },
     });
@@ -247,6 +248,7 @@ describe("Desktop snapshot through authenticated model discovery", () => {
     expect(ids).toContain("ocx-claude-combo--routed");
     expect(ids).not.toContain(claudeCodeAlias("test", "vendor/model"));
     expect(ids).not.toContain(claudeCodeAlias("test", "vendor-model"));
+    expect(ids).not.toContain("ocx-claude-combo--ambiguous");
     expect(ids).not.toContain(claudeCodeAlias("anthropic-fixture", "claude-fixture"));
     expect(ids).not.toContain("claude-mapped-fixture");
     expect(ids).not.toContain(claudeCodeAlias("anthropic-fixture", "claude-mapped-fixture"));

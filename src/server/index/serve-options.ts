@@ -31,7 +31,6 @@ import { remoteWorkspaceEnabled } from "../../remote-control/workspace-activatio
 import { isClaudeInterceptedPath } from "../../claude/intercept/listener";
 import { markActivity } from "../../lib/sidecar-tracker";
 import { knownModelIdsForProvider, previewRouteModel } from "../../router";
-import { encodedModelIdCollides } from "../../providers/slug-codec";
 import { claudeCodeAlias, claudeCodeNativeAlias } from "../../claude/alias";
 import {
   buildWarmupCompletionFrames,
@@ -1116,9 +1115,6 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           // Hybrid cannot serve Desktop hashes or routed Anthropic aliases. Reuse ModelInfo's
           // selector callback without changing its capability, ordering or variant projection.
           const hybridAlias = (provider: string, modelId: string): string | undefined => {
-            const configuredProvider = config.providers[provider];
-            if (configuredProvider && encodedModelIdCollides(modelId,
-              knownModelIdsForProvider(provider, configuredProvider, config))) return undefined;
             if (modelId.startsWith("claude-") && hybridMessagesModelLane(config, modelId) === "strict"
               && previewRouteModel(config, modelId).providerName === provider) return modelId;
             const alias = provider === "native" ? claudeCodeNativeAlias(modelId) : claudeCodeAlias(provider, modelId);
