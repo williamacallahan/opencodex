@@ -18,8 +18,8 @@ The public listener also exposes `/hybrid/v1/messages` and `/hybrid/v1/messages/
 Anthropic discovery uses the shared ModelInfo capability serializer with genuine native Claude
 ids and readable routed selectors, filtered by `hybridMessagesModelLane` in the Messages owner.
 This read-only predicate also owns ingress lane selection, including selectable combo targets;
-discovery never advances round-robin state. Unsupported generated variants and Desktop hashes
-are omitted. OpenAI/Codex query shapes retain root behavior; Desktop config export requires the root endpoint.
+discovery never advances round-robin state. Unsupported generated variants, ambiguous encoded
+model selectors, and Desktop hashes are omitted. OpenAI/Codex query shapes retain root behavior; Desktop config export requires the root endpoint.
 `src/server/claude-messages.ts` reads each body once with the bounded reader and retains the wire
 bytes. An unchanged `claude-` model accepted by the strict route predicate enters the strict handler
 with those bytes, unless a Desktop 3P registry entry or a nonempty exact/date-stripped `modelMap`

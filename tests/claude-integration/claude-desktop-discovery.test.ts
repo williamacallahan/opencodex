@@ -220,7 +220,7 @@ describe("Desktop snapshot through authenticated model discovery", () => {
       fastRows: false,
       providers: {
         test: { adapter: "openai-chat", baseUrl: `http://127.0.0.1:${upstream.port}/v1`, apiKey: "fixture",
-          allowPrivateNetwork: true, liveModels: false, models: ["model-123", "model-155"],
+          allowPrivateNetwork: true, liveModels: false, models: ["model-123", "model-155", "vendor/model", "vendor-model"],
           reasoningEfforts: ["low", "high"], modelContextWindows: { "model-123": 200_000 } },
         "anthropic-fixture": { adapter: "anthropic", baseUrl: `http://127.0.0.1:${upstream.port}`, apiKey: "fixture",
           authMode: "key", allowPrivateNetwork: true, liveModels: false, models: ["claude-fixture", "claude-mapped-fixture"] },
@@ -245,6 +245,8 @@ describe("Desktop snapshot through authenticated model discovery", () => {
     expect(ids).toContain("claude-fixture");
     expect(ids).toContain("ocx-claude-test--model-123");
     expect(ids).toContain("ocx-claude-combo--routed");
+    expect(ids).not.toContain(claudeCodeAlias("test", "vendor/model"));
+    expect(ids).not.toContain(claudeCodeAlias("test", "vendor-model"));
     expect(ids).not.toContain(claudeCodeAlias("anthropic-fixture", "claude-fixture"));
     expect(ids).not.toContain("claude-mapped-fixture");
     expect(ids).not.toContain(claudeCodeAlias("anthropic-fixture", "claude-mapped-fixture"));
