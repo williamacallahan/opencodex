@@ -1228,6 +1228,15 @@ export async function executeComboResponses(
         if (childLog.terminalIncompleteReason !== undefined) logCtx.terminalIncompleteReason = childLog.terminalIncompleteReason;
         if (childLog.terminalErrorCode !== undefined) logCtx.terminalErrorCode = childLog.terminalErrorCode;
         if (childLog.upstreamError !== undefined) logCtx.upstreamError = childLog.upstreamError;
+        // The child's terminal parse also captured the frame's closed diagnostics, its provenance
+        // and any cause it proved; without them a committed quota refusal read as `upstream-fault`
+        // with `type=unknown` (infra#1230).
+        if (childLog.upstreamErrorType !== undefined) logCtx.upstreamErrorType = childLog.upstreamErrorType;
+        if (childLog.upstreamErrorCode !== undefined) logCtx.upstreamErrorCode = childLog.upstreamErrorCode;
+        if (childLog.upstreamRequestId !== undefined) logCtx.upstreamRequestId = childLog.upstreamRequestId;
+        if (childLog.transportPhase !== undefined) logCtx.transportPhase = childLog.transportPhase;
+        if (childLog.terminalSource !== undefined) logCtx.terminalSource = childLog.terminalSource;
+        if (childLog.causeHint !== undefined) logCtx.causeHint = childLog.causeHint;
         // A committed stream that ends failed is a target failure too; incomplete is an answer.
         if (status === "failed") jevPin?.forget();
         options.onNativePassthroughTerminal?.(status);

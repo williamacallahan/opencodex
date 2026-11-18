@@ -880,9 +880,18 @@ describe("server combo failover 030 activation matrix", () => {
     {
       name: "policy refusal", status: "failed", logStatus: 400,
       details: { error: { code: "cyber_policy", message: "blocked by cyber policy" } },
-      message: "blocked by cyber policy",
+      message: "blocked by cyber policy", errorCode: "cyber_policy",
     },
-  ]) {
+    {
+      // infra#1230: codex-lb streams its spent-pool refusal as a type with no code after the
+      // child committed; the parent row lost the type and read the 502 as an upstream fault.
+      name: "quota refusal", status: "failed", logStatus: 502,
+      details: { error: { type: "usage_limit_reached", message: "The usage limit has been reached" } },
+      message: "The usage limit has been reached",
+      upstreamErrorType: "usage_limit_reached", failureCause: "rate-limit",
+    },
+  ] as Array<{ name: string; status: string; logStatus: number; details: Record<string, unknown>; message: string;
+    errorCode?: string; upstreamErrorType?: string; failureCause?: string }>) {
     test(`late committed native ${scenario.name} reaches the HTTP combo log`, async () => {
       const held = heldNativeTerminal({
         type: `response.${scenario.status}`,
@@ -936,7 +945,9 @@ describe("server combo failover 030 activation matrix", () => {
         expect(JSON.stringify(logs[0])).not.toContain(scenario.message);
         expect(logs[0]!.attempts).toMatchObject([{ provider: "a", model: "m1", status: scenario.logStatus }]);
         expect(logs[0]!.attempts).toHaveLength(1);
-        if (scenario.status === "failed") expect(logs[0]!.errorCode).toBe("cyber_policy");
+        if (scenario.errorCode) expect(logs[0]!.errorCode).toBe(scenario.errorCode);
+        if (scenario.upstreamErrorType) expect(logs[0]!.upstreamErrorType).toBe(scenario.upstreamErrorType);
+        if (scenario.failureCause) expect(logs[0]!.failureCause).toBe(scenario.failureCause);
       } finally {
         held.release();
         await server.stop(true);
