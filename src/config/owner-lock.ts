@@ -1,6 +1,7 @@
 import { closeSync, openSync, statfsSync } from "node:fs";
 import { join } from "node:path";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
+import type { Pointer } from "bun:ffi";
 
 /**
  * A kernel `flock` the owner of a home's `ocx.pid` and `runtime-port.json` holds while it owns them.
@@ -32,18 +33,31 @@ const LOCK_FILE = "ocx.owner.lock";
 const LOCK_EX = 2;
 const LOCK_NB = 4;
 
-type Flock = (fd: number, operation: number) => number;
+/** `locked`, `contended` (another open file description holds it), or `failed` (any other error). */
+type Flock = (fd: number, operation: number) => "locked" | "contended" | "failed";
 let flockFn: Flock | null | undefined;
 
 function loadFlock(): Flock | null {
   if (flockFn !== undefined) return flockFn;
-  const library = process.platform === "linux" ? "libc.so.6" : process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : null;
+  const linux = process.platform === "linux";
+  const library = linux ? "libc.so.6" : process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : null;
   flockFn = null;
   if (library === null) return null;
+  // errno is thread-local, so it is read through the libc accessor right after the failed call.
+  const errnoSymbol = linux ? "__errno_location" : "__error";
+  const EWOULDBLOCK = linux ? 11 : 35;
   try {
-    const { dlopen, FFIType } = require("bun:ffi") as typeof import("bun:ffi");
-    const libc = dlopen(library, { flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
-    flockFn = (fd, operation) => libc.symbols.flock(fd, operation);
+    const { dlopen, FFIType, read } = require("bun:ffi") as typeof import("bun:ffi");
+    const libc = dlopen(library, {
+      flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+      [errnoSymbol]: { args: [], returns: FFIType.ptr },
+    });
+    const errnoAt = libc.symbols[errnoSymbol] as () => Pointer | null;
+    flockFn = (fd, operation) => {
+      if (libc.symbols.flock(fd, operation) === 0) return "locked";
+      const at = errnoAt();
+      return at !== null && read.i32(at, 0) === EWOULDBLOCK ? "contended" : "failed";
+    };
   } catch {
     // musl, a missing libc, or a runtime without bun:ffi: no lock evidence.
   }
@@ -62,7 +76,7 @@ export function holdOwnerLock(stateDir: string): boolean {
   recordOwnedConfigPath(stateDir, path);
   let fd: number;
   try { fd = openSync(path, "a", 0o600); } catch { return false; }
-  if (flock(fd, LOCK_EX | LOCK_NB) !== 0) {
+  if (flock(fd, LOCK_EX | LOCK_NB) !== "locked") {
     closeSync(fd);
     return false;
   }
@@ -81,8 +95,8 @@ export function releaseOwnerLock(stateDir: string): void {
 
 /**
  * This state directory's owner lock as a reader sees it: `held` by a live process (this one
- * included), `free` with proof that no owner holds it, or `unproved` (no `flock`, no lock file, or a
- * filesystem whose locks can be local to one client). Never creates the file: a missing one proves
+ * included), `free` with proof that no owner holds it, or `unproved` (no `flock`, no lock file, a
+ * `flock` error other than contention, or a filesystem whose locks can be local to one client). Never creates the file: a missing one proves
  * nothing, because a live owner can still hold the lock on a file someone unlinked.
  */
 export function ownerLockState(stateDir: string): "held" | "free" | "unproved" {
@@ -91,10 +105,11 @@ export function ownerLockState(stateDir: string): "held" | "free" | "unproved" {
   let fd: number;
   // Read-write: NFS emulates flock with byte-range locks, and an exclusive one needs write access.
   try { fd = openSync(join(stateDir, LOCK_FILE), "r+"); } catch { return "unproved"; }
-  try {
-    if (flock(fd, LOCK_EX | LOCK_NB) !== 0) return "held";
-  } finally { closeSync(fd); }
-  return lockDomainIsKernel(stateDir) ? "free" : "unproved";
+  let result: ReturnType<Flock>;
+  try { result = flock(fd, LOCK_EX | LOCK_NB); } finally { closeSync(fd); }
+  // Only contention is evidence of a live holder; any other failure proves nothing either way.
+  if (result === "contended") return "held";
+  return result === "locked" && lockDomainIsKernel(stateDir) ? "free" : "unproved";
 }
 
 /** Whether this directory's filesystem keeps its locks in the one kernel that mounts it. */
