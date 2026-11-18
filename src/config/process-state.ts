@@ -12,6 +12,7 @@ import {
 import { atomicWriteFile } from "./atomic-write";
 import { readWindowsProcessCommandLineNative } from "./windows-process-command-line";
 import { getConfigDir, hardenConfigDir } from "./paths";
+import { holdOwnerLock, releaseOwnerLock } from "./owner-lock";
 import { registerOwnHome, unregisterOwnerRegistryHome } from "./owner-registry";
 
 export function getPidPath(): string {
@@ -178,6 +179,12 @@ export type RuntimePortState = {
    * only an exact match ({@link sameRuntimeOwnerScope}).
    */
   ownerScope?: RuntimeOwnerScope;
+  /**
+   * The owner held this home's owner lock ({@link holdOwnerLock}) when it wrote the record, so a
+   * free lock later proves the owner is gone. Stamped by {@link writeRuntimePort} like `ownerScope`;
+   * a record without it (an older version, or an owner that could not take the lock) proves nothing.
+   */
+  ownerLock?: true;
 };
 
 export function isValidRuntimePortState(value: unknown): value is RuntimePortState {
@@ -204,8 +211,11 @@ export function writeRuntimePort(state: RuntimePortState): void {
   publishedOwnershipRecords = true;
   // Only the owner can say where it runs; a record written on another process's behalf keeps
   // whatever identity it already carried.
-  const ownerScope = state.pid === process.pid ? runtimeOwnerScope() : state.ownerScope;
-  const record = { ...state, ...(ownerScope === undefined ? {} : { ownerScope }) };
+  const own = state.pid === process.pid;
+  const ownerScope = own ? runtimeOwnerScope() : state.ownerScope;
+  const { ownerLock: carriedLock, ...fields } = state;
+  const ownerLock = own ? holdOwnerLock(getConfigDir()) : carriedLock === true;
+  const record = { ...fields, ...(ownerScope === undefined ? {} : { ownerScope }), ...(ownerLock ? { ownerLock: true as const } : {}) };
   atomicWriteFile(getRuntimePortPath(), JSON.stringify(record, null, 2) + "\n");
   // The record proves this home's owner only to a reader that knows where it lives.
   // One pointer in the shared registry makes the record findable from every home;
@@ -251,6 +261,7 @@ export function removeRuntimePort(expectedPid?: number, beforeMutation?: () => v
   const path = getRuntimePortPath();
   beforeMutation?.();
   try { unlinkSync(path); } catch { /* ignore */ }
+  releaseOwnLockOnceRecordGone(expectedPid);
   // The record is gone, so the registry pointer names a dead home. Retire it
   // beside the record or stale pointers accumulate toward the reader's cap.
   unregisterOwnerRegistryHome(getConfigDir(), beforeMutation);
@@ -271,6 +282,12 @@ export function removeRuntimePortIfPidIs(snapshotPid: number | null): void {
   const current = readRuntimePort();
   if ((current?.pid ?? null) !== snapshotPid) return;
   try { unlinkSync(getRuntimePortPath()); } catch { /* ignore */ }
+  releaseOwnLockOnceRecordGone(snapshotPid);
+}
+
+/** A lock-stamped record must never outlive its writer's lock, so release only once it is gone. */
+function releaseOwnLockOnceRecordGone(removedPid: number | null | undefined): void {
+  if (removedPid === process.pid && !existsSync(getRuntimePortPath())) releaseOwnerLock(getConfigDir());
 }
 
 /**

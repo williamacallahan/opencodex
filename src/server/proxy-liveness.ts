@@ -16,6 +16,8 @@ import {
   hasPublishedOwnershipRecords, isOcxCommandLine, readAlivePid, readProcessCommandLine, readRuntimePort,
   runtimeOwnerScope, sameRuntimeOwnerScope, verifyPidIdentity, type RuntimeOwnerScope,
 } from "../config/process-state";
+import { ownerLockReleased } from "../config/owner-lock";
+import { getConfigDir } from "../config/paths";
 import { createServer, isIP } from "node:net";
 import { loopbackFamilyAvailability } from "../lib/loopback-family";
 import {
@@ -96,9 +98,11 @@ export interface LivenessIo {
    * socket address (IPv6 unbracketed) and `timeoutMs` the remaining discovery budget.
    */
   bindProofFn?: (hostname: string, port: number, timeoutMs: number) => Promise<boolean>;
-  readRuntimeFn?: (pid?: number) => { pid?: number; port: number; hostname?: string; ownerScope?: unknown } | null;
+  readRuntimeFn?: (pid?: number) => { pid?: number; port: number; hostname?: string; ownerScope?: unknown; ownerLock?: unknown } | null;
   /** This process, as the self-record proof in {@link observeProxyLiveness} needs it (#8552). */
   ownProcessFn?: () => OwnProcess;
+  /** Test seam for {@link ownerLockReleased} on this home's state directory. */
+  ownerLockReleasedFn?: () => boolean;
   configFn?: () => { port?: number; hostname?: string };
   timeoutMs?: number;
   /**
@@ -531,10 +535,10 @@ function currentOwnProcess(): OwnProcess {
 
 /** Recovery additionally covers both available loopback families and fresh PID identity. */
 export async function observeProxyLiveness(io: LivenessIo = {}): Promise<ProxyLivenessObservation> {
-  let alivePid: number | null = null, runtimePid: number | undefined, runtimeScope: unknown, unknown = false;
+  let alivePid: number | null = null, runtimePid: number | undefined, runtimeScope: unknown, runtimeLock: unknown, unknown = false;
   const live = await discoverLiveProxy(io, {
     pid: pid => { alivePid = pid; },
-    runtimePid: (pid, ownerScope) => { runtimePid = pid; runtimeScope = ownerScope; },
+    runtimePid: (pid, ownerScope, ownerLock) => { runtimePid = pid; runtimeScope = ownerScope; runtimeLock = ownerLock; },
     endpoint: result => { if (result === "unknown") unknown = true; },
   });
   if (live) return { kind: "live", live };
@@ -547,14 +551,23 @@ export async function observeProxyLiveness(io: LivenessIo = {}): Promise<ProxyLi
   // namespace, which the endpoint probe cannot see. A record without a scope (an older version,
   // which may still be serving during an upgrade) keeps the refusal.
   const own = (io.ownProcessFn ?? currentOwnProcess)();
-  const ownEarlierLifetime = !own.publishedOwnership && runtimePid === own.pid && sameRuntimeOwnerScope(runtimeScope, own.scope);
+  // The scope proof fails after a host reboot (new boot id and network namespace) and for a
+  // recreated container (new host name), and on Docker's containerd image store it has no layer to
+  // fall back on, while the new process often gets the very PID the record names. A record whose
+  // writer held the home's owner lock, read while that lock is free, names an owner that is gone
+  // whatever its PID or namespace, because the kernel drops the lock only when its holder dies
+  // (src/config/owner-lock.ts). A live owner in another container still holds it and keeps refusing.
+  // A record that claims the lock, while the lock cannot be taken, vetoes the scope proof too.
+  const recordOwnerGone = runtimeLock === true && (io.ownerLockReleasedFn ?? (() => ownerLockReleased(getConfigDir())))();
+  const ownEarlierLifetime = !own.publishedOwnership && runtimePid === own.pid && sameRuntimeOwnerScope(runtimeScope, own.scope)
+    && (runtimeLock !== true || recordOwnerGone);
   const candidates = new Set<number>();
   if (alivePid !== null) candidates.add(alivePid);
   if (runtimePid !== undefined && Number.isSafeInteger(runtimePid) && runtimePid > 0) candidates.add(runtimePid);
   for (const pid of candidates) {
     if (unknown) break;
     if (io.deadlineAt !== undefined && (io.nowFn ?? Date.now)() >= io.deadlineAt) { unknown = true; break; }
-    if (ownEarlierLifetime && pid === own.pid) continue;
+    if ((ownEarlierLifetime && pid === own.pid) || (recordOwnerGone && pid === runtimePid)) continue;
     if (pid !== alivePid) {
       try { process.kill(pid, 0); } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ESRCH") continue;
@@ -584,7 +597,7 @@ export async function findLiveProxy(io: LivenessIo = {}): Promise<LiveProxy | nu
 
 async function discoverLiveProxy(io: LivenessIo, observer?: {
   pid: (pid: number | null) => void;
-  runtimePid: (pid: number | undefined, ownerScope: unknown) => void;
+  runtimePid: (pid: number | undefined, ownerScope: unknown, ownerLock: unknown) => void;
   endpoint: (result: EndpointLiveness) => void;
 }): Promise<LiveProxy | null> {
   // Prefer the cheap alive-pid check: the Windows cmdline probe (WMIC/PowerShell) is too
@@ -686,7 +699,7 @@ async function discoverLiveProxy(io: LivenessIo, observer?: {
   // sibling command, manual deletion). The runtime record still says where it listens —
   // identity-probe it so ensure/update/stop see the live proxy instead of shadowing it.
   const record = readRuntimeFn();
-  observer?.runtimePid(record?.pid, record?.ownerScope);
+  observer?.runtimePid(record?.pid, record?.ownerScope, record?.ownerLock);
   if (record?.port && record.port !== probedPort) {
     if (budgetExhausted()) return expired();
     const expectedPid = typeof record.pid === "number" ? record.pid : undefined;

@@ -755,24 +755,33 @@ the authenticated routed-response check above for your deployment.
 
 ### Restarts after an unclean exit
 
-A container runs the proxy as PID 1 on every start. After an unclean exit (an OOM kill, a crash, a
-node failure) the state volume can still hold `ocx.pid` and `runtime-port.json` naming PID 1, and
-the next start has to decide whether that owner is gone. It recovers on its own when the record was
-written by the same container in an earlier run, by an OpenCodex version that records where its
-owner runs: a Kubernetes container restarted inside its pod while the node stays up, or the same
-Docker or Podman container started again (`docker restart`, a restart policy, including after a
-host reboot) when its writable layer has a random id, as with Docker's `overlay2` storage driver
-and Podman. Docker's containerd image store numbers its layers instead, so a restart there refuses.
+A container gives the proxy the same small PID on every start. After an unclean exit (an OOM kill,
+`docker kill`, a crash, a host reboot) the state volume can still hold `ocx.pid` and
+`runtime-port.json` naming that PID, and the next start has to decide whether that owner is gone.
+
+On Linux and macOS the owner holds a kernel lock on `ocx.owner.lock` in the state directory for as
+long as it runs, and its runtime record says so. The kernel releases the lock when the owner dies,
+however it dies, so a start that finds the record but can take the lock knows the owner is gone and
+recovers on its own: after a host reboot, a recreated Compose container, a replacement pod, or a
+restart on Docker's containerd image store. A live owner in another container on the same machine
+still holds the lock, so a second start next to it refuses. The lock reaches across machines only
+on a filesystem that shares locks between them (NFS with locking on; not `nolock` or
+`local_lock`).
+
+Records written by a version without this lock fall back to the older check, which recovers only
+when the same container wrote them in an earlier run: a Kubernetes container restarted inside its
+pod while the node stays up, or the same Docker or Podman container started again when its writable
+layer has a random id, as with Docker's `overlay2` storage driver and Podman.
 
 Every other case refuses with `Proxy ownership is unverified; startup refused`, because the old
-owner could still be serving the same volume from another container: a replacement Kubernetes pod,
-a recreated Compose container, a pod that comes back after a node reboot, another node, or a record
-written by an older version (the first restart after an upgrade). Confirm that nothing else serves this state directory, then move
-`runtime-port.json` and `ocx.pid` aside once and start again. Run a single writer per state
-volume: a Kubernetes `Deployment` that shares a volume should use `strategy: Recreate` (or
-`maxSurge: 0`) so the old pod stops before the new one starts. Do not share one state volume between
-processes in one network namespace (host networking, sidecars, several WSL distros), between
-sandboxes restored from one VM snapshot, or between machines with the same host name.
+owner could still be serving the same volume: a record written by an older version (the first
+restart after an upgrade), a lock someone else still holds, or a platform without `flock`
+(Windows). Confirm that nothing else serves this state directory, then move `runtime-port.json` and
+`ocx.pid` aside once and start again. Run a single writer per state volume: a Kubernetes
+`Deployment` that shares a volume should use `strategy: Recreate` (or `maxSurge: 0`) so the old pod
+stops before the new one starts. Do not share one state volume between processes in one network
+namespace (host networking, sidecars, several WSL distros), between sandboxes restored from one VM
+snapshot, or between machines with the same host name.
 
 ## Rollback
 

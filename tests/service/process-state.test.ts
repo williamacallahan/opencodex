@@ -15,6 +15,7 @@ import {
   readRuntimePort,
   removePid,
   removeRuntimePort,
+  removeRuntimePortIfPidIs,
   runtimeOwnerScope,
   setOcxStartProcessCacheForTests,
   setProcessCommandLineExecForTests,
@@ -32,6 +33,8 @@ import {
   describeTrackedRuntimeTarget,
   inspectTrackedRuntimeRecord,
 } from "../../src/config/tracked-runtime-inspection";
+import { ownerLockReleased } from "../../src/config/owner-lock";
+import { getConfigDir } from "../../src/config/paths";
 import type { TrackedRecordProbeDeps } from "../../src/config/tracked-runtime-inspection";
 import { markSiblingStart, resetSiblingStartForTests, siblingRuntimeField } from "../../src/codex/sibling-start";
 import { setTrustedWindowsSystemDirectoryResolverForTests } from "../../src/lib/windows-elevation";
@@ -406,6 +409,32 @@ describe("proxy process-state ownership", () => {
     expect(readRuntimePort()?.ownerScope).toEqual({ host: "kept-as-written" });
     writeRuntimePort({ pid: 1234, port: 58195 });
     expect(readRuntimePort()?.ownerScope).toBeUndefined();
+  });
+
+  // infra#1204: the lock claim is the owner's too; a record for another PID keeps what it carried.
+  test("a runtime record this process writes for itself claims the owner lock it holds", () => {
+    const lockable = process.platform === "linux" || process.platform === "darwin";
+    writeRuntimePort({ pid: process.pid, port: 58195 });
+    expect(readRuntimePort()?.ownerLock).toBe(lockable ? true : undefined);
+    writeRuntimePort({ pid: 1234, port: 58195, ownerLock: true });
+    expect(readRuntimePort()?.ownerLock).toBe(true);
+    writeRuntimePort({ pid: 1234, port: 58195 });
+    expect(readRuntimePort()?.ownerLock).toBeUndefined();
+  });
+
+  // A restart replacement publishes while the retired parent still drains; it must get the lock.
+  test("removing this process's own runtime record releases the owner lock; another PID's removal does not", () => {
+    if (process.platform !== "linux" && process.platform !== "darwin") return;
+    writeRuntimePort({ pid: process.pid, port: 58195 });
+    expect(ownerLockReleased(getConfigDir())).toBe(false);
+    removeRuntimePortIfPidIs(1234);
+    expect(ownerLockReleased(getConfigDir())).toBe(false);
+    removeRuntimePort(process.pid);
+    expect(ownerLockReleased(getConfigDir())).toBe(true);
+    writeRuntimePort({ pid: process.pid, port: 58195 });
+    expect(readRuntimePort()?.ownerLock).toBe(true);
+    removeRuntimePortIfPidIs(process.pid);
+    expect(ownerLockReleased(getConfigDir())).toBe(true);
   });
 
   test("runtime port removal preserves newer pid state", () => {

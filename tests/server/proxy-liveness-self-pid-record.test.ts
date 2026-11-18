@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rootOverlayUpperdirFromMountinfo, runtimeOwnerScope, sameRuntimeOwnerScope } from "../../src/config/process-state";
+import { holdOwnerLock, ownerLockReleased, releaseOwnerLock } from "../../src/config/owner-lock";
 import { observeProxyLiveness, type LivenessIo } from "../../src/server/proxy-liveness";
 import { watchdogMs } from "../helpers/ci-watchdog";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -116,6 +117,46 @@ describe("a record naming this process's own PID", () => {
   });
 });
 
+// infra#1204: after a host reboot (new boot id and network namespace) or with a recreated container
+// (new host name), on Docker's containerd image store, no scope matches, and the new process gets
+// the very PID the stale record names. The owner lock the record's writer held proves it is gone.
+describe("a record whose writer held the home's owner lock", () => {
+  const elsewhere = { host: "fedcba9876543210fedcba9876543210", boot: "cccccccccccccccccccccccccccccccc", network: "22222222222222222222222222222222" };
+  const lockedRecord = (pid = process.pid, claim: { ownerLock?: unknown } = { ownerLock: true }) => ({ ...selfRecord(elsewhere), pid, ...claim });
+
+  test("is absent once the lock is free, naming this process's own PID", async () => {
+    const io = ioFor({ readPidFn: () => process.pid, readRuntimeFn: () => lockedRecord(), ownProcessFn: unpublished, ownerLockReleasedFn: () => true });
+    expect(await observeProxyLiveness(io)).toEqual({ kind: "absent", live: null });
+  });
+
+  test("is absent once the lock is free, naming another alive ocx PID", async () => {
+    const io = ioFor({ readPidFn: () => process.ppid, readRuntimeFn: () => lockedRecord(process.ppid), ownProcessFn: unpublished, ownerLockReleasedFn: () => true });
+    expect(await observeProxyLiveness(io)).toEqual({ kind: "absent", live: null });
+  });
+
+  test("still refuses while the lock is held", async () => {
+    const io = ioFor({ readRuntimeFn: () => lockedRecord(), ownProcessFn: unpublished, ownerLockReleasedFn: () => false });
+    expect(await observeProxyLiveness(io)).toEqual({ kind: "unknown", live: null });
+  });
+
+  for (const [label, claim] of [["no lock claim (an older version, maybe still serving)", {}], ["a malformed lock claim", { ownerLock: "true" }]] as const) {
+    test(`with ${label} still refuses when the lock is free`, async () => {
+      const io = ioFor({ readRuntimeFn: () => lockedRecord(process.pid, claim), ownProcessFn: unpublished, ownerLockReleasedFn: () => true });
+      expect(await observeProxyLiveness(io)).toEqual({ kind: "unknown", live: null });
+    });
+  }
+
+  test("a held lock vetoes a matching owner scope", async () => {
+    const io = ioFor({ readRuntimeFn: () => ({ ...selfRecord(), ownerLock: true }), ownProcessFn: unpublished, ownerLockReleasedFn: () => false });
+    expect(await observeProxyLiveness(io)).toEqual({ kind: "unknown", live: null });
+  });
+
+  test("a free lock does not release a different alive ocx PID in the pid file", async () => {
+    const io = ioFor({ readPidFn: () => process.ppid, readRuntimeFn: pid => pid === undefined ? lockedRecord() : null, ownProcessFn: unpublished, ownerLockReleasedFn: () => true });
+    expect(await observeProxyLiveness(io)).toEqual({ kind: "unknown", live: null });
+  });
+});
+
 describe("owner scope comparison", () => {
   test("Linux needs the host plus the network namespace within one boot, or the container", () => {
     const own = { host: "h", boot: "b", network: "n", container: "c" };
@@ -182,7 +223,7 @@ const START_WAIT_MS = watchdogMs(15_000);
 
 // `exec` keeps the shell's PID, so the shell plays the previous container and `ocx start` the next
 // one: same PID, new lifetime, records naming it already on disk. Windows has no exec handoff.
-async function startAfterOwnLifetime(ownerScope: unknown): Promise<{ child: ReturnType<typeof Bun.spawn>; port: number; ocxHome: string; served: boolean; stderr: Promise<string> }> {
+async function startAfterOwnLifetime(ownerScope: unknown, opts: { ownerLock?: true; prepare?: (ocxHome: string) => Promise<void> } = {}): Promise<{ child: ReturnType<typeof Bun.spawn>; port: number; ocxHome: string; served: boolean; stderr: Promise<string> }> {
   const root = mkdtempSync(join(tmpdir(), "ocx-self-pid-"));
   roots.push(root);
   const ocxHome = join(root, "ocx"), codexHome = join(root, "codex"), home = join(root, "home"), runtime = join(root, "runtime");
@@ -198,9 +239,10 @@ async function startAfterOwnLifetime(ownerScope: unknown): Promise<{ child: Retu
     providers: {},
     defaultProvider: "openai",
   }));
+  await opts.prepare?.(ocxHome);
   const script = [
     'printf %s "$$" > "$OPENCODEX_HOME/ocx.pid"',
-    'printf \'{"pid":%s,"port":%s,"hostname":"127.0.0.1","ownerScope":%s}\' "$$" "$SELF_PID_PORT" "$SELF_PID_SCOPE" > "$OPENCODEX_HOME/runtime-port.json"',
+    'printf \'{"pid":%s,"port":%s,"hostname":"127.0.0.1","ownerScope":%s%s}\' "$$" "$SELF_PID_PORT" "$SELF_PID_SCOPE" "$SELF_PID_EXTRA" > "$OPENCODEX_HOME/runtime-port.json"',
     'exec "$SELF_PID_BUN" "$SELF_PID_CLI" start --port "$SELF_PID_PORT"',
   ].join(" && ");
   const child = Bun.spawn(["/bin/sh", "-c", script], {
@@ -217,6 +259,7 @@ async function startAfterOwnLifetime(ownerScope: unknown): Promise<{ child: Retu
       SELF_PID_CLI: repoPath("src/cli/index.ts"),
       SELF_PID_PORT: String(port),
       SELF_PID_SCOPE: JSON.stringify(ownerScope),
+      SELF_PID_EXTRA: opts.ownerLock ? ',"ownerLock":true' : "",
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -257,6 +300,63 @@ test.skipIf(!posix)("ocx start recovers records an earlier run of its PID left i
 
 test.skipIf(!posix)("ocx start still refuses a same-PID record written somewhere else", async () => {
   const { child, served, stderr, ocxHome } = await startAfterOwnLifetime({ ...runtimeOwnerScope(), host: "fedcba9876543210fedcba9876543210" });
+  expect(served).toBe(false);
+  expect(await child.exited).toBe(1);
+  expect(await stderr).toContain("Proxy ownership is unverified");
+  expect(existsSync(join(ocxHome, "ocx.pid"))).toBe(true);
+}, Math.max(30_000, START_WAIT_MS * 2));
+
+// A process that takes the home's owner lock and keeps it, as a hub does, until it is killed.
+async function lockHolder(ocxHome: string): Promise<ReturnType<typeof Bun.spawn>> {
+  const holder = Bun.spawn([process.execPath, "-e", `const { holdOwnerLock } = await import(${JSON.stringify(repoPath("src/config/owner-lock.ts"))}); if (!holdOwnerLock(process.argv[1])) process.exit(3); console.log("held"); setInterval(() => {}, 1000);`, ocxHome], { stdout: "pipe", stderr: "inherit" });
+  children.push(holder);
+  const reader = holder.stdout.getReader();
+  const { value } = await reader.read();
+  reader.releaseLock();
+  expect(new TextDecoder().decode(value)).toContain("held");
+  return holder;
+}
+
+const lockable = process.platform === "linux" || process.platform === "darwin";
+
+test.skipIf(!lockable)("the owner lock is held until its holder is killed, and only then reads as released", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-owner-lock-"));
+  roots.push(root);
+  expect(ownerLockReleased(root)).toBe(false); // no lock file: nothing proved
+  const holder = await lockHolder(root);
+  expect(ownerLockReleased(root)).toBe(false);
+  expect(holdOwnerLock(root)).toBe(false);
+  holder.kill("SIGKILL");
+  await holder.exited;
+  expect(ownerLockReleased(root)).toBe(true);
+  expect(holdOwnerLock(root)).toBe(true);
+  expect(ownerLockReleased(root)).toBe(false); // this process's own lock reads as held
+  releaseOwnerLock(root);
+  expect(ownerLockReleased(root)).toBe(true);
+});
+
+// The hub's failure: a hard-killed owner on another boot or in another container left records
+// naming the PID the new start gets. Its lock died with it, so the first start serves.
+test.skipIf(!lockable)("ocx start recovers a same-PID record from elsewhere once its writer's owner lock died with it", async () => {
+  const elsewhere = { ...runtimeOwnerScope(), host: "fedcba9876543210fedcba9876543210" };
+  const { child, served, stderr, ocxHome } = await startAfterOwnLifetime(elsewhere, {
+    ownerLock: true,
+    prepare: async home => {
+      const holder = await lockHolder(home);
+      holder.kill("SIGKILL");
+      await holder.exited;
+    },
+  });
+  if (!served) throw new Error(`start did not serve as PID ${child.pid}: ${(await stderr).trim().slice(0, 400)}`);
+  const record = JSON.parse(readFileSync(join(ocxHome, "runtime-port.json"), "utf8")) as { pid: number; ownerLock?: unknown };
+  expect(record.pid).toBe(child.pid);
+  expect(record.ownerLock).toBe(true);
+  expect(ownerLockReleased(ocxHome)).toBe(false);
+}, Math.max(30_000, START_WAIT_MS * 2));
+
+test.skipIf(!lockable)("ocx start still refuses that record while another live owner holds the lock", async () => {
+  const elsewhere = { ...runtimeOwnerScope(), host: "fedcba9876543210fedcba9876543210" };
+  const { child, served, stderr, ocxHome } = await startAfterOwnLifetime(elsewhere, { ownerLock: true, prepare: async home => { await lockHolder(home); } });
   expect(served).toBe(false);
   expect(await child.exited).toBe(1);
   expect(await stderr).toContain("Proxy ownership is unverified");
