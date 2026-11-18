@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -41,6 +41,8 @@ import {
   resolveCodexModelEntitlements,
 } from "../../src/codex/model-entitlements";
 import type { OcxConfig } from "../../src/types";
+import * as mainAccount from "../../src/codex/main-account";
+import * as nativeMainAdmission from "../../src/codex/native-main-admission";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const FUTURE = "gpt-9-test";
@@ -278,6 +280,31 @@ describe("discovery-only roster", () => {
       }) as typeof fetch,
     });
     expect(entitlementFetches).toBe(1);
+  });
+
+  test("pool-only discovery never resolves the native-main login or claims its admission", async () => {
+    resetCodexNativeRosterDiscoveryForTests();
+    // The admitted lease keeps native main a candidate, so the default run below must reach it.
+    const admission = spyOn(nativeMainAdmission, "withNativeMainCredentialAdmission")
+      .mockImplementation(async operation => operation(new Set()));
+    const token = spyOn(mainAccount, "getValidMainAccountToken")
+      .mockResolvedValue({ accessToken: "main-token", chatgptAccountId: "main-workspace" });
+    try {
+      let fetches = 0;
+      const fetcher = (() => {
+        fetches += 1;
+        return Promise.resolve(Response.json({ models: [row()] }));
+      }) as typeof fetch;
+      expect(await discoverCodexNativeRoster({}, { fetcher, poolOnly: true })).toBe("unavailable");
+      expect(admission).not.toHaveBeenCalled();
+      expect(token).not.toHaveBeenCalled();
+      expect(fetches).toBe(0);
+      expect(await discoverCodexNativeRoster({}, { fetcher })).toBe("recorded");
+      expect(token).toHaveBeenCalledTimes(1);
+    } finally {
+      admission.mockRestore();
+      token.mockRestore();
+    }
   });
 
   test("a discovery whose scheduler generation ended does not publish", async () => {
