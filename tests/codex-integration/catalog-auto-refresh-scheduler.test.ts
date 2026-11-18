@@ -223,6 +223,7 @@ describe("catalog auto-refresh scheduler", () => {
     convergeImpl = async () => { steps.push("converge"); return COMMITTED_CATALOG_ONLY; };
     await runCatalogAutoRefreshTickForTests();
     expect(steps).toEqual(["bundled", "roster", "discovery", "converge"]);
+    expect(entitlements.discoverCodexNativeRoster).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ poolOnly: false }));
     expect(lastCatalogAutoRefreshOutcome()?.disposition.status).toBe("committed");
   });
 
@@ -855,6 +856,7 @@ describe("catalog auto-refresh without a managed Codex client", () => {
     expect(bundled.loadBundledCodexCatalogAsync).not.toHaveBeenCalled();
     expect(entitlements.ensureCodexEntitlementFreshness).not.toHaveBeenCalled();
     expect(entitlements.discoverCodexNativeRoster).toHaveBeenCalledTimes(1);
+    expect(entitlements.discoverCodexNativeRoster).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ poolOnly: true }));
     expect(catalogAutoRefreshTickCountForTests()).toBe(0);
   });
 

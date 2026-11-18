@@ -47,14 +47,18 @@ export async function refreshCatalogAutoRefreshSources(
   await refreshCatalogNativeDiscovery(config, current);
 }
 
-export async function refreshCatalogNativeDiscovery(config: OcxConfig, current: () => boolean): Promise<void> {
+export async function refreshCatalogNativeDiscovery(
+  config: OcxConfig,
+  current: () => boolean,
+  { poolOnly = false }: { poolOnly?: boolean } = {},
+): Promise<void> {
   // The entitlement roster above is asked under the installed client version, which upstream's
   // rollout gate can hide a new model from (GPT-6.1 Sol was invisible to 0.158 on release day).
   // Discovery asks as a newer client so an unpinned native reaches the converge below.
   await bestEffortSource(async (active, signal) => {
     const { discoverCodexNativeRoster } = await import("./model-entitlements");
     // A stopped scheduler generation aborts too, so a stale tick cannot record discoveries.
-    if (active() && current()) await discoverCodexNativeRoster(config, { signal, isCurrent: () => active() && current() });
+    if (active() && current()) await discoverCodexNativeRoster(config, { signal, poolOnly, isCurrent: () => active() && current() });
   });
 }
 

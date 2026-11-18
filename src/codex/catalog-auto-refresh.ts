@@ -228,11 +228,12 @@ async function tick(): Promise<void> {
     const { shouldSyncCodexOnStart } = await import("./desired-state");
     const codexManaged = shouldSyncCodexOnStart(config);
     if (!codexManaged) {
-      // Roster discovery reads the pool's own accounts and writes no local client state, so a hub
-      // still learns new upstream natives (gpt-6.2-* never reached a hub's catalog without this).
+      // Pool-only roster discovery reads the pool's own accounts and never the native-main login,
+      // so a hub still learns new upstream natives (gpt-6.2-* never reached a hub's catalog without
+      // this) while no local client state is read, refreshed, or written.
       const { refreshCatalogNativeDiscovery } = await import("./catalog-auto-refresh-sources");
       if (entryGeneration !== generation) return;
-      await refreshCatalogNativeDiscovery(config, () => entryGeneration === generation);
+      await refreshCatalogNativeDiscovery(config, () => entryGeneration === generation, { poolOnly: true });
       if (config.catalogAutoRefresh?.enabled !== true) return;
     }
     // A stop or restart landed while the config resolved: this tick no longer owns the timer,
