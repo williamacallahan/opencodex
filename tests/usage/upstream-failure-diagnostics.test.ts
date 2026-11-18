@@ -131,6 +131,19 @@ test("a usage-limit refusal from the pool logs its type and code instead of unkn
   expect(lines[0]).toContain("status=429 type=usage_limit_reached code=usage_limit_reached cause=rate-limit final=429");
 });
 
+// infra#1230: codex-lb answers 200 and then streams its spent-pool refusal as a type with no code.
+// The turn keeps the synthetic 502, which the status table alone reads as an upstream fault.
+test.each([
+  ["a failed terminal", { type: "response.failed", response: { error: { type: "usage_limit_reached", message: "The usage limit has been reached" } } }],
+  ["a bare error frame", { type: "error", error: { type: "usage_limit_reached", message: "The usage limit has been reached" } }],
+])("a streamed quota refusal in %s is a rate limit, not an upstream fault", (_label, frame) => {
+  const log = context();
+  inspectResponseLogJson(log, JSON.stringify(frame));
+  const lines = finalWarnings(log, 502, "failed");
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("status=502 type=usage_limit_reached code=unknown cause=rate-limit final=502");
+});
+
 test("each failed attempt prints one line and a successful attempt prints none", () => {
   const log: RequestLogContext = {
     ...context(),

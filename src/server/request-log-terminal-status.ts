@@ -23,6 +23,7 @@ export interface UpstreamErrorDiagnostics {
 interface TerminalStatusContext extends UpstreamErrorDiagnostics {
   terminalHttpStatus?: number;
   terminalErrorCode?: typeof CYBER_POLICY_ERROR_CODE;
+  causeHint?: RequestFailureCause;
 }
 
 export interface UpstreamErrorPayload {
@@ -161,12 +162,33 @@ export function warnUpstreamFailures(input: {
 
 export function captureUpstreamTerminalDiagnostics(logCtx: TerminalStatusContext, json: UpstreamErrorPayload): void {
   captureTerminalHttpStatus(logCtx, json);
+  noteStructuredQuotaTerminal(logCtx, json);
   noteBoundedDiagnostic(logCtx, "upstreamErrorCode",
     json.error?.code ?? json.last_error?.code ?? json.response?.error?.code
       // A bare top-level code (new in 2.83.0) has no envelope contract, so only a known class is kept.
       ?? (typeof json.code === "string" && KNOWN_BARE_ERROR_CODES.has(json.code) ? json.code : undefined));
   noteBoundedDiagnostic(logCtx, "upstreamErrorType",
     json.error?.type ?? json.last_error?.type ?? json.response?.error?.type);
+}
+
+const isStructuredQuotaClass = (value: unknown): boolean => typeof value === "string"
+  && STRUCTURED_QUOTA_CODES.has(value.trim().toLowerCase().replaceAll("-", "_"));
+
+/**
+ * A failing terminal frame whose structured type or code is a closed quota class (codex-lb's
+ * spent pool streams `error.type: "usage_limit_reached"` with no code after an HTTP 200) keeps
+ * its synthetic 502, and the status table reads a 502 as `upstream-fault`. The refusal is the
+ * one a 429 body with the same class already records as `rate-limit`, so the hint says that.
+ * The class set is closed, so this reads no open upstream text. The first terminal wins, as it
+ * does for the diagnostics above.
+ */
+function noteStructuredQuotaTerminal(logCtx: TerminalStatusContext, json: UpstreamErrorPayload): void {
+  if (logCtx.causeHint !== undefined) return;
+  if (json.type !== "response.failed" && json.type !== "response.incomplete" && json.type !== "error") return;
+  if ([json.error, json.last_error, json.response?.error]
+    .some(error => isStructuredQuotaClass(error?.code) || isStructuredQuotaClass(error?.type))) {
+    logCtx.causeHint = "rate-limit";
+  }
 }
 
 export function upstreamDiagnosticLogFields(logCtx: UpstreamErrorDiagnostics): UpstreamErrorDiagnostics {
