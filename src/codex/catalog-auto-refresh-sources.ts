@@ -44,6 +44,10 @@ export async function refreshCatalogAutoRefreshSources(
     if (active() && current()) await ensureCodexEntitlementFreshness(config, { waitMs: SOURCE_WAIT_MS });
   });
   if (!current()) return;
+  await refreshCatalogNativeDiscovery(config, current);
+}
+
+export async function refreshCatalogNativeDiscovery(config: OcxConfig, current: () => boolean): Promise<void> {
   // The entitlement roster above is asked under the installed client version, which upstream's
   // rollout gate can hide a new model from (GPT-6.1 Sol was invisible to 0.158 on release day).
   // Discovery asks as a newer client so an unpinned native reaches the converge below.

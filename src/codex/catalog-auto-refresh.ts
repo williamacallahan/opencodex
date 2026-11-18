@@ -227,7 +227,14 @@ async function tick(): Promise<void> {
     // `enabled: true` still refreshes, as it did before the default flipped.
     const { shouldSyncCodexOnStart } = await import("./desired-state");
     const codexManaged = shouldSyncCodexOnStart(config);
-    if (!codexManaged && config.catalogAutoRefresh?.enabled !== true) return;
+    if (!codexManaged) {
+      // Roster discovery reads the pool's own accounts and writes no local client state, so a hub
+      // still learns new upstream natives (gpt-6.2-* never reached a hub's catalog without this).
+      const { refreshCatalogNativeDiscovery } = await import("./catalog-auto-refresh-sources");
+      if (entryGeneration !== generation) return;
+      await refreshCatalogNativeDiscovery(config, () => entryGeneration === generation);
+      if (config.catalogAutoRefresh?.enabled !== true) return;
+    }
     // A stop or restart landed while the config resolved: this tick no longer owns the timer,
     // so it must neither count as a refresh nor adopt a cadence for a generation that is gone.
     if (entryGeneration !== generation) return;
