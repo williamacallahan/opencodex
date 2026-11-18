@@ -174,20 +174,29 @@ export function captureUpstreamTerminalDiagnostics(logCtx: TerminalStatusContext
 const isStructuredQuotaClass = (value: unknown): boolean => typeof value === "string"
   && STRUCTURED_QUOTA_CODES.has(value.trim().toLowerCase().replaceAll("-", "_"));
 
+// A hint read from a bare `error` frame is provisional, like that frame's status above.
+const provisionalQuotaHints = new WeakSet<TerminalStatusContext>();
+
 /**
  * A failing terminal frame whose structured type or code is a closed quota class (codex-lb's
  * spent pool streams `error.type: "usage_limit_reached"` with no code after an HTTP 200) keeps
  * its synthetic 502, and the status table reads a 502 as `upstream-fault`. The refusal is the
  * one a 429 body with the same class already records as `rate-limit`, so the hint says that.
- * The class set is closed, so this reads no open upstream text. The first terminal wins, as it
- * does for the diagnostics above.
+ * The class set is closed, so this reads no open upstream text. A genuine terminal replaces the
+ * hint a bare `error` frame set, exactly as captureTerminalHttpStatus replaces that frame's status.
  */
 function noteStructuredQuotaTerminal(logCtx: TerminalStatusContext, json: UpstreamErrorPayload): void {
-  if (logCtx.causeHint !== undefined) return;
-  if (json.type !== "response.failed" && json.type !== "response.incomplete" && json.type !== "error") return;
+  const type = json.type;
+  const genuine = type === "response.failed" || type === "response.completed" || type === "response.incomplete";
+  if (!genuine && type !== "error") return;
+  if (genuine && provisionalQuotaHints.delete(logCtx) && logCtx.causeHint === "rate-limit") delete logCtx.causeHint;
+  if (logCtx.causeHint !== undefined || type === "response.completed") return;
+  // captureTerminalHttpStatus ran first, so a genuine terminal is already recorded here.
+  if (type === "error" && genuineTerminals.has(logCtx)) return;
   if ([json.error, json.last_error, json.response?.error]
     .some(error => isStructuredQuotaClass(error?.code) || isStructuredQuotaClass(error?.type))) {
     logCtx.causeHint = "rate-limit";
+    if (type === "error") provisionalQuotaHints.add(logCtx);
   }
 }
 

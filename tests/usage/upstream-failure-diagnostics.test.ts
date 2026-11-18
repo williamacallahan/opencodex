@@ -144,6 +144,17 @@ test.each([
   expect(lines[0]).toContain("status=502 type=usage_limit_reached code=unknown cause=rate-limit final=502");
 });
 
+test("a genuine terminal replaces the quota hint a provisional bare error set", () => {
+  const log = context();
+  inspectResponseLogJson(log, JSON.stringify({ type: "error", error: { type: "usage_limit_reached" } }));
+  inspectResponseLogJson(log, JSON.stringify({ type: "response.failed", response: { status: "failed",
+    error: { type: "server_error", code: "server_is_overloaded", message: "genuine terminal" } } }));
+  const lines = finalWarnings(log, httpStatusForRequestLogTerminal("failed", log), "failed");
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("status=503");
+  expect(lines[0]).toContain("cause=upstream-declined");
+});
+
 test("each failed attempt prints one line and a successful attempt prints none", () => {
   const log: RequestLogContext = {
     ...context(),
