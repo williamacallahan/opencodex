@@ -1,4 +1,4 @@
-import { closeSync, openSync } from "node:fs";
+import { closeSync, openSync, statfsSync } from "node:fs";
 import { join } from "node:path";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
 
@@ -13,9 +13,12 @@ import { recordOwnedConfigPath } from "../lib/config-ownership";
  * often gets the very PID the stale record names. A live owner in another container on the same
  * machine still holds the lock, so its record keeps refusing a second writer.
  *
- * The lock is advisory and only as wide as the filesystem's lock domain: one kernel for a local
- * volume, every client of an NFS server that supports locks. An NFS mount with `nolock` or
- * `local_lock=flock` keeps locks on one machine, so it gives no proof across machines.
+ * The lock is advisory and only as wide as the filesystem's lock domain. A free lock proves the
+ * owner gone only where every possible owner shares this kernel's lock table: a local Linux
+ * filesystem ({@link lockProvesOwnerGone}). A network or FUSE mount can confine locks to one client
+ * (NFS `nolock` or `local_lock`), so taking the lock there proves nothing about an owner on another
+ * machine, and macOS reports no stable filesystem type to tell the two apart. There the owner still
+ * holds and stamps the lock, but a reader proves nothing from it and the existing checks decide.
  *
  * The owner drops the lock when it removes its own runtime record ({@link releaseOwnerLock}), so a
  * restart replacement started while the old process drains can take it.
@@ -82,8 +85,33 @@ export function releaseOwnerLock(stateDir: string): void {
 export function ownerLockReleased(stateDir: string): boolean {
   const flock = loadFlock();
   if (!flock) return false;
+  try { if (!lockProvesOwnerGone(process.platform, statfsSync(stateDir).type)) return false; } catch { return false; }
   let fd: number;
   // Read-write: NFS emulates flock with byte-range locks, and an exclusive one needs write access.
   try { fd = openSync(join(stateDir, LOCK_FILE), "r+"); } catch { return false; }
   try { return flock(fd, LOCK_EX | LOCK_NB) === 0; } finally { closeSync(fd); }
+}
+
+/**
+ * `statfs` magic numbers of Linux filesystems whose locks live in the kernel that mounts them, so a
+ * lock no process holds is free for every process that could own the directory. Network (NFS, SMB,
+ * Ceph, 9p), FUSE (virtiofs, sshfs) and unknown filesystems are left out: their locks can be local
+ * to one client while another client still runs the owner.
+ */
+const SINGLE_KERNEL_LOCK_FILESYSTEMS: ReadonlySet<number> = new Set([
+  0xEF53, // ext2, ext3, ext4
+  0x58465342, // xfs
+  0x9123683E, // btrfs
+  0x01021994, // tmpfs
+  0x858458F6, // ramfs
+  0x794C7630, // overlayfs
+  0x2FC12FC1, // zfs
+  0xF2F52010, // f2fs
+  0xCA451A4E, // bcachefs
+]);
+
+/** Whether a free owner lock on a filesystem of this `statfs` type proves its owner gone. */
+export function lockProvesOwnerGone(platform: NodeJS.Platform, filesystemType: number): boolean {
+  // Node reports the magic as a signed 32-bit number (btrfs reads -0x6EDC97C2).
+  return platform === "linux" && SINGLE_KERNEL_LOCK_FILESYSTEMS.has(filesystemType >>> 0);
 }
