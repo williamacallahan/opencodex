@@ -313,8 +313,9 @@ ruled out before any route is resolved. A portable turn dispatches native with `
 (sent ordinary `gpt-6-luna`, so its own pool prefers its Reserve), then native with `ordinary-only`, then the
 remaining targets; the extra leg is counted in the shared send budget. Portable means no account-bound carrier
 by `canPortConversationState` (continuation id, provider conversation, uploaded file, encrypted reasoning), no
-turn state in the `x-codex-turn-state` header or `client_metadata`, no unreadable encrypted agent task and no
-protocol source. The plan also requires both added hops (native to codex-lb, codex-lb to native) to pass
+turn state in the `x-codex-turn-state` header or `client_metadata`, and no unreadable encrypted agent task. A
+bridged Messages or Chat turn (`protocolSource`, every Claude Code turn) plans the same legs, and a leg carrying a
+capacity intent always takes the bridge child, which forwards that intent. The plan also requires both added hops (native to codex-lb, codex-lb to native) to pass
 `fallbackHopAllowed`, so provider fallback turned off keeps today's order. Any other turn, and any other combo,
 keeps its configured order.
 The `reserve-only` leg's own refusal (nothing sent, or a 429) never cools the native target and is not quota

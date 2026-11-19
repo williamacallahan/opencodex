@@ -22,6 +22,8 @@ import { createWebsocketHandler } from "../../src/server/index/websocket-handler
 import { tryReserveCodexWebSocket } from "../../src/codex/websocket-registry";
 import { buildResponsesWsData, type WsData } from "../../src/server/ws-bridge";
 import type { DataPlaneAdmission } from "../../src/server/auth-cors";
+import { createProtocolEnvelope } from "../../src/protocols/envelope";
+import { createTranslatorBudget } from "../../src/lib/translator-budget";
 
 const A = "luna-order-a";
 const B = "luna-order-b";
@@ -234,6 +236,21 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     const cfg = config({}, [{ provider: "openai", model: "gpt-6-sol" }, { provider: "relay", model: "gpt-6-sol" }]);
     await post(cfg);
     expect(calls.map(call => call.split(":")[0])).toEqual(["native", "relay"]);
+  });
+  test("a bridged Messages turn plans the same legs: native Reserve, relay, native ordinary", async () => {
+    seats(); native = body => body.model === "gpt-reserve" ? reserveRefused() : sse(body.model, "ok");
+    relay = refusedConnect;
+    const translatorBudget = createTranslatorBudget();
+    const envelope = createProtocolEnvelope({ inbound: "messages", translatorBudget,
+      body: { model: "combo/luna", max_tokens: 16, stream: true, messages: [{ role: "user", content: "ping" }] } });
+    const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "combo/luna", input: "ping", stream: true, prompt_cache_key: "luna-order" }) }),
+    config(), { model: "", provider: "" }, { admission: local, translatorBudget,
+      protocolSource: { inbound: "messages", envelope, dispatchNativeChild: () => { throw new Error("no Luna leg is a native child"); } } });
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(calls).toEqual(["native:gpt-reserve", "relay:gpt-6-luna", "native:gpt-6-luna"]);
   });
   test("WebSocket frames follow the same order", async () => {
     seats(); native = body => body.model === "gpt-reserve" ? reserveRefused() : sse(body.model, "ok");

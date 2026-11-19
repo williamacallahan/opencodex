@@ -635,8 +635,9 @@ export async function executeComboResponses(
     payloadEligible(target) && recoveryEligible(target);
   // Native Reserve -> codex-lb -> native ordinary Luna applies only to a turn any ChatGPT pool seat or relay can
   // take: any account-bound carrier (continuation id, provider conversation, uploaded file, encrypted reasoning,
-  // turn state in a header or the body) keeps today's order.
-  const lunaLegs = options.protocolSource ? undefined : planLunaReserveLegs(config, combo, () => {
+  // turn state in a header or the body) keeps today's order. A bridged Messages or Chat turn plans the same legs:
+  // a leg carrying a capacity intent always takes the bridge child below, which forwards that intent.
+  const lunaLegs = planLunaReserveLegs(config, combo, () => {
     const metadata = isPlainObject(rawBody) ? rawBody.client_metadata : undefined;
     return !unreadableEncryptedAgentTask && !req.headers.has(CODEX_TURN_STATE_HEADER)
       && !(isPlainObject(metadata) && CODEX_TURN_STATE_HEADER in metadata)
@@ -1284,7 +1285,7 @@ export async function executeComboResponses(
           && targetEligible(target)
           && !isComboTargetInCooldown(comboId, target),
         );
-      const nativeChild = protocolLanes?.nativeChild(pick.target, targetRoute, targetSendBudget, initialJevDecision, jevEffortApplies);
+      const nativeChild = legIntent ? undefined : protocolLanes?.nativeChild(pick.target, targetRoute, targetSendBudget, initialJevDecision, jevEffortApplies);
       response = nativeChild ? await dispatchNativeComboChild({
         source: options.protocolSource!,
         plan: nativeChild,
