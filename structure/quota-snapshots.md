@@ -17,9 +17,11 @@ without changing the ordinary weekly bar. The existing account DTO, persistence 
 Only automatic stored-account requests for `gpt-6-luna` may use it. Every such request goes first to
 Reserve on a seat whose included usage is spent; only when no such seat can serve Reserve does it use
 Luna on a seat with included usage, then previously consented fresh credits, then the existing refusal.
-A seat is offered Reserve when it has a fresh reported grant below 100% or no stored Reserve window at
-all: ChatGPT serves `gpt-reserve` to accounts whose usage response never lists a grant
-(openai/codex#40939), so an unreported seat is tried and upstream stays the entitlement authority.
+Among eligible seats, the router prefers a fresh reported grant below 100% or a completed Reserve
+turn observed within 15 minutes on the current credential. ChatGPT serves `gpt-reserve` without
+reporting a grant, so when neither kind of evidence is available, one real turn at a time can try
+an unreported seat. The scoped probe lease paces those trials at least five minutes apart per seat;
+there is no additional usage poll.
 The same holds for every Reserve judgment: a missing grant window, a `pro_rate_limit_reached` banner,
 an absent catalog row or one refused request never shows that Reserve is unavailable; only served
 `gpt-reserve` requests show that it works. The hub's request log records the requested `gpt-6-luna`
@@ -30,10 +32,9 @@ selected seat in that state for 60 seconds rather than sending. A thread bound t
 capacity does not keep Luna there: a soft binding never outranks Reserve, while a thread already
 served by Reserve keeps that seat. An operator pin keeps its seat and is offered its own Reserve only on a fresh reported grant, because a
 pinned request cannot move after a refusal.
-A Reserve refusal is recorded in the seat's `reserve` health scope only, whatever timing evidence the 429
-carries, and the request's single account move (`maxAlternateTargetSends: 1`) goes to included Luna
-(`skipPoolReserve`); the other depleted seats are asked on later requests while the refused seat's Reserve
-cools, and its shared scope is untouched.
+A Reserve refusal cools only the seat's `reserve` health scope and leaves its shared quota untouched.
+The request's single safe account move (`maxAlternateTargetSends: 1`) prefers another verified Reserve
+seat, then included Luna. It never tries an unknown Reserve seat on that retry.
 Before the selector changes scope, `src/codex/auth-context.ts` still adopts a live legacy parent binding onto the current cohort key in the existing quota scope; it decides the seat only when no seat is offerable for Reserve.
 The existing selector still enforces pause, plan, credential, failure-window and account-wide holds.
 Reserve uses its independent quota scope; shared Responses serialization changes only the wire model

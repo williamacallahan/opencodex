@@ -6,6 +6,8 @@ import { releaseRequestOwnedMainOnOutcome, isKeyedRequestOwnedMain } from "../..
 import { wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
 import { hasResponseMediaType } from "../../lib/http-response-semantics";
 import { routeKnownModels } from "../../usage/log";
+import { NATIVE_RESERVE_MODEL } from "../../codex/catalog/native-models";
+import { isPlainObject } from "../../lib/plain-data";
 import type { OcxProviderConfig } from "../../types";
 import { isNativeControlResponse } from "./native-response-control";
 import { guardBufferedComboRequiredTool } from "./combo-required-tool-contract";
@@ -532,7 +534,9 @@ export async function deliverPassthroughResponse(
         terminalOutcomeRecorded = true;
         // A restored pre-output refusal whose account outcome dispatch already wrote (#6969) keeps
         // every other terminal callback but must not write the same refusal a second time.
-        if (!nativeExchange.terminalOutcomeRecorded) recordTerminalOutcome(status, httpStatusOverride);
+        if (!nativeExchange.terminalOutcomeRecorded) recordTerminalOutcome(status, httpStatusOverride,
+          status === "completed" && logCtx.terminalSource !== "synthetic"
+            && nativeExchange.request.outboundModelId === NATIVE_RESERVE_MODEL);
       }
       : undefined;
     const terminalBodyWillRecord = !!terminalRecorder && upstreamResponse.ok && isEventStream;
@@ -566,9 +570,10 @@ export async function deliverPassthroughResponse(
           }
           options.onNativePassthroughTerminal?.(status);
         });
-      } else if (!shouldDeferCodexResetDerivedCooldown(
+      } else if (!(upstreamResponse.ok && nativeExchange.request.outboundModelId === NATIVE_RESERVE_MODEL
+        && hasResponseMediaType(headers, "application/json")) && !shouldDeferCodexResetDerivedCooldown(
         upstreamResponse,
-        options.deferCodexResetDerivedCooldown,
+        options.deferCodexResetDerivedCooldown && nativeExchange.request.outboundModelId !== NATIVE_RESERVE_MODEL,
       ) && !isReplayRefusalResponse(upstreamResponse) && !wasPermanentAccountRefusal(upstreamResponse)) {
         // A refusal this proxy made is not evidence about the account. Recording it would
         // classify the synthetic 429 as quota exhaustion and write a default cooldown against
@@ -1485,9 +1490,13 @@ export async function deliverPassthroughResponse(
       if (requiredFailure) return requiredFailure;
       commitReasoningReplayServingRoute(nativeExchange.request.headers);
       try {
-        rememberPassthroughResponseChecked(
-          JSON.parse(grokUpstreamEchoEnabled ? clientJson : text) as { id?: unknown; output?: unknown; status?: unknown; model?: unknown },
-        );
+        const observed: unknown = JSON.parse(grokUpstreamEchoEnabled ? clientJson : text);
+        if (isPlainObject(observed)) {
+          if (upstreamResponse.ok && observed.object === "response" && typeof observed.id === "string"
+            && observed.status === "completed" && Array.isArray(observed.output)
+            && nativeExchange.request.outboundModelId === NATIVE_RESERVE_MODEL) terminalRecorder?.("completed");
+          rememberPassthroughResponseChecked(observed);
+        }
       } catch { /* non-JSON despite content-type; recording is best-effort */ }
       if (isLocalCodexImageClient(req.headers, options.admission?.kind, options.inboundWire)) {
         const imageDisplay = createHostedImageDisplayRewrite();

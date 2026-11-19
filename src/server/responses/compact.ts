@@ -558,6 +558,7 @@ async function resolveAlternateCompactContext(args: {
   excludeAccountId: string | null;
   turnAdmissionLease?: AdmissionLease;
   admission?: DataPlaneAdmission;
+  verifiedPoolReserveOnly?: boolean;
 }): Promise<{ authCtx: CodexAuthContext; provider: OcxProviderConfig; headers: Headers } | { failure: Response } | null> {
   const { req, config, route, selectedModelId, excludeAccountId, turnAdmissionLease } = args;
   if (!route.codexAccountMode || !excludeAccountId) return null;
@@ -567,6 +568,7 @@ async function resolveAlternateCompactContext(args: {
       admission: args.admission,
       ...(selectedModelId ? { modelId: selectedModelId } : {}),
       excludeAccountId,
+      verifiedPoolReserveOnly: args.verifiedPoolReserveOnly,
       requestScopedMainCredential: hasForwardableCodexBearer(req.headers, config),
       beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
     });
@@ -1130,6 +1132,7 @@ export async function handleResponsesCompact(
         retryAfter?: string | null;
         resetAt?: unknown | unknown[];
         promoteAccountId?: string;
+        reserveServed?: boolean;
       } = {},
     ) => {
       // A gateway response is not evidence about any Codex account.
@@ -1580,6 +1583,7 @@ export async function handleResponsesCompact(
           selectedModelId,
           excludeAccountId: authCtx.accountId,
           turnAdmissionLease,
+          verifiedPoolReserveOnly: authCtx.kind === "pool" && authCtx.poolReserve === true,
         });
       if (alternate && "failure" in alternate) {
         await applyCompactPoolQuotaHeaders(authCtx, upstream);
@@ -1634,16 +1638,24 @@ export async function handleResponsesCompact(
           resetAt: firstResetAt,
           ...(alternate.authCtx.accountId ? { promoteAccountId: alternate.authCtx.accountId } : {}),
         });
-        await upstream.body?.cancel().catch(() => undefined);
-        outcomeCtx = alternate.authCtx;
+        const firstResponse = upstream;
+        const firstLabel = logCtx.accountLogLabel;
         logCtx.accountLogLabel = codexAuthContextLogLabel(alternate.authCtx, config);
         scrubCompactStateForAlternate(alternate.authCtx, alternate.headers);
+        let alternateDispatched = false;
         try {
-          sealFirstAttemptStatus(upstream.status);
+          sealFirstAttemptStatus(firstResponse.status);
           upstream = await sendCompactAttempt(alternate.provider, alternate.headers, "single", alternate.authCtx,
-            undefined, compactMoveRecovery(upstream.status));
+            () => { alternateDispatched = true; }, compactMoveRecovery(firstResponse.status));
+          outcomeCtx = alternate.authCtx;
+          void firstResponse.body?.cancel().catch(() => undefined);
         } catch (err) {
-          return failedAlternateCompactSend(err);
+          releaseCodexAuthContextProbeLease(alternate.authCtx);
+          if (alternateDispatched) {
+            void firstResponse.body?.cancel().catch(() => undefined);
+            return failedAlternateCompactSend(err);
+          }
+          logCtx.accountLogLabel = firstLabel;
         }
       }
     }
@@ -1678,6 +1690,7 @@ export async function handleResponsesCompact(
         selectedModelId,
         excludeAccountId: authCtx.accountId,
         turnAdmissionLease,
+        verifiedPoolReserveOnly: authCtx.kind === "pool" && authCtx.poolReserve === true,
       });
       if (alternate && "failure" in alternate) {
         await applyCompactPoolQuotaHeaders(authCtx, upstream);
@@ -1761,23 +1774,23 @@ export async function handleResponsesCompact(
     // A body-confirmed quota failure can arrive behind a generic 5xx. Record it as
     // quota evidence; otherwise preserve the real upstream status so a local buffering
     // failure after a 200 cannot soft-avoid a healthy account or rotate a thread.
+    const compactText = buffered.ok ? await buffered.clone().text() : undefined;
+    let validCompact = false;
+    const reserveAttempt = outcomeCtx.kind === "pool" && outcomeCtx.poolReserve === true;
+    if (compactText !== undefined && (gatewayReplayParsed || reserveAttempt)) {
+      try { validCompact = nativeCompactResponseSchema.safeParse(JSON.parse(compactText)).success; }
+      catch { /* Malformed JSON cannot establish serving evidence. */ }
+    }
     recordCompactPoolOutcome(
       outcomeCtx,
       bodyInferredQuota ? 429 : replayRefused ? 502 : upstream.status,
-      { retryAfter, resetAt },
+      { retryAfter, resetAt, reserveServed: reserveAttempt && validCompact },
     );
     // Lift usage and response metadata from the buffered upstream JSON into the
     // request log; the routed branch gets the same through handleResponses. The
     // synthetic buffer errors are not upstream bodies and stay uninspected.
-    if (buffered.ok) {
-      const compactText = await buffered.clone().text();
-      if (gatewayReplayParsed) {
-        try {
-          if (nativeCompactResponseSchema.safeParse(JSON.parse(compactText)).success) {
-            commitReasoningReplayServingIdentity(gatewayReplayParsed._reasoningReplayScope);
-          }
-        } catch { /* A malformed body cannot establish serving provenance. */ }
-      }
+    if (compactText !== undefined) {
+      if (gatewayReplayParsed && validCompact) commitReasoningReplayServingIdentity(gatewayReplayParsed._reasoningReplayScope);
       inspectResponseLogJson(logCtx, compactText);
       if (!options.compactionRoutingOverride) forgetCompactHandoffRoute(req, admission);
       rememberServingConversationStateIssuer(outcomeCtx, codexPoolAffinityKey(req.headers));

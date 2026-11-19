@@ -264,19 +264,111 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     expect(retry.ctx.accountId).toBe(A);
     expect(JSON.parse(retry.request.body).model).toBe("gpt-6-luna");
   });
-  test("the one account move after a refused Reserve attempt serves included Luna, not another seat's Reserve", async () => {
+  test("a Reserve retry uses included Luna instead of exploring an unverified seat", async () => {
     const cfg = config();
     const third = "pool-reserve-c";
     cfg.codexAccounts!.push({ id: third, email: "c@example.test", isMain: false, plan: "pro" });
     saveCodexAccountCredential(third, { accessToken: "access-c", refreshToken: "refresh-c",
       chatgptAccountId: `fixture-workspace-${third}`, expiresAt: now + 86_400_000 });
     ordinary(third, 40);
-    // B is still depleted and offerable, but the request already spent its account move budget on A's Reserve.
+    // B is depleted but has neither a fresh reported grant nor a completed Reserve turn.
     const retry = await resolveCodexAuthContext(new Headers(), cfg, "pool", {
-      modelId: "gpt-6-luna", excludeAccountId: A, skipPoolReserve: true,
+      modelId: "gpt-6-luna", excludeAccountId: A, verifiedPoolReserveOnly: true,
     });
     expect(retry.accountId).toBe(third);
     expect(retry.kind === "pool" && retry.poolReserve === true).toBe(false);
+  });
+  test("a pre-stream refusal uses one recently successful Reserve alternate and preserves the prompt key", async () => {
+    const cfg = config();
+    cfg.providers.openai = { ...base, codexAccountMode: "pool" };
+    const ordinarySeat = "pool-reserve-c";
+    cfg.codexAccounts!.push({ id: ordinarySeat, email: "c@example.test", isMain: false, plan: "pro" });
+    saveCodexAccountCredential(ordinarySeat, { accessToken: "fixture-access-c", refreshToken: "fixture-refresh-c",
+      chatgptAccountId: "fixture-workspace-c", expiresAt: now + 86_400_000 });
+    ordinary(ordinarySeat, 40);
+    noReserve(A);
+    const sends: { account: string | null; model: string; key?: string }[] = [];
+    let refuseA = false;
+    spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      expect(request.url).toBe(CODEX_RESPONSES_HTTP_URL);
+      const body = await request.json();
+      const account = request.headers.get("chatgpt-account-id");
+      sends.push({ account, model: body.model, key: body.prompt_cache_key });
+      if (refuseA && account === `fixture-workspace-${A}`) {
+        return Response.json({ error: { code: "usage_limit_reached", message: "Limit reached" } }, {
+          status: 429, headers: { "retry-after": "90" },
+        });
+      }
+      return Response.json({ id: `resp_pool_reserve_${sends.length}`, object: "response", status: "completed", created_at: 1,
+        model: body.model, output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } });
+    }, { preconnect() {} }));
+    const send = (key: string) => handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify({
+        model: "openai/gpt-6-luna", input: "ping", stream: false, prompt_cache_key: key,
+      }) }), cfg, { model: "", provider: "" });
+    const release = acquireOwnedSpendHome();
+    try {
+      expect((await send("other-thread")).status).toBe(200);
+      expect(sends.at(-1)).toEqual({ account: `fixture-workspace-${B}`, model: "gpt-reserve", key: "other-thread" });
+      const currentQuota = getAccountQuota(B)!;
+      noReserve(B); reserve(A);
+      expect((await send("warm-thread")).status).toBe(200);
+      expect(sends.at(-1)).toEqual({ account: `fixture-workspace-${A}`, model: "gpt-reserve", key: "warm-thread" });
+      setAccountQuotaFromParsed(B, { ...currentQuota, customWindows: [] });
+      refuseA = true;
+      expect((await send("warm-thread")).status).toBe(200);
+      expect(sends.slice(2)).toEqual([
+        { account: `fixture-workspace-${A}`, model: "gpt-reserve", key: "warm-thread" },
+        { account: `fixture-workspace-${B}`, model: "gpt-reserve", key: "warm-thread" },
+      ]);
+    } finally { release(); }
+  });
+  test("concurrent real turns do not repeat an unknown Reserve trial or retry before its hold", async () => {
+    const cfg = config();
+    cfg.providers.openai = { ...base, codexAccountMode: "pool" };
+    ordinary(A, 40);
+    const attempts: string[] = [];
+    const entered = Promise.withResolvers<void>();
+    const releaseRefusal = Promise.withResolvers<void>();
+    spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      expect(request.url).toBe(CODEX_RESPONSES_HTTP_URL);
+      const body = await request.json();
+      attempts.push(body.model);
+      if (body.model === "gpt-reserve") {
+        entered.resolve();
+        await releaseRefusal.promise;
+        return Response.json({ error: { code: "usage_limit_reached", message: "Limit reached" } }, {
+          status: 429, headers: { "retry-after": "900" },
+        });
+      }
+      return Response.json({ id: `resp_luna_${attempts.length}`, object: "response", status: "completed", created_at: 1,
+        model: body.model, output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } });
+    }, { preconnect() {} }));
+    const send = () => handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify({
+        model: "openai/gpt-6-luna", input: "ping", stream: false,
+      }) }), cfg, { model: "", provider: "" });
+    const release = acquireOwnedSpendHome();
+    const first = send();
+    try {
+      await Promise.race([entered.promise, first.then(() => { throw new Error("first turn did not try Reserve"); })]);
+      expect((await send()).status).toBe(200);
+      expect(attempts).toEqual(["gpt-reserve", "gpt-6-luna"]);
+      releaseRefusal.resolve();
+      expect((await first).status).toBe(200);
+      now += 899_000;
+      expect((await send()).status).toBe(200);
+      expect(attempts).toEqual(["gpt-reserve", "gpt-6-luna", "gpt-6-luna", "gpt-6-luna"]);
+      now += 1_000;
+      expect((await send()).status).toBe(200);
+      expect(attempts.slice(4)).toEqual(["gpt-reserve", "gpt-6-luna"]);
+    } finally {
+      releaseRefusal.resolve();
+      await first;
+      release();
+    }
   });
   test("a stale included-owner binding does not suppress Reserve", () => {
     reserve(); ordinary(A, 40);

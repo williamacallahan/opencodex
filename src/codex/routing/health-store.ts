@@ -10,6 +10,8 @@ export type CodexUpstreamHealth = {
   consecutiveFailures: number;
   /** Consecutive healthy terminals observed while recovering from escalation level 2+. */
   consecutiveSuccesses?: number;
+  /** A completed Reserve turn is routing evidence, not a quota reading. */
+  reserveSuccess?: { at: number; credentialGeneration: number };
   lastFailureStatus?: number;
   lastFailureAt?: number;
   /** Hard cooldown (quota 429). Survives a later 2xx; blocks auth + selection. */
@@ -352,6 +354,21 @@ export function deleteAccountHealth(accountId: string): void {
 
 export function carriesQuotaRefusal(health: CodexUpstreamHealth | undefined): boolean {
   return health?.lastFailureStatus === 429 || health?.lastFailureStatus === 402;
+}
+
+export function noteScopedCodexSuccess(
+  accountId: string, scope: CodexQuotaScope, now: number, reserveGeneration: number | undefined,
+): void {
+  const current = scopedHealthFor(accountId, scope);
+  if (scope === "reserve" && (current?.cooldownUntil ?? 0) > now) return;
+  const reserveSuccess = scope === "reserve" && reserveGeneration !== undefined
+    && isCodexAccountGenerationLive(accountId, reserveGeneration) ? { at: now, credentialGeneration: reserveGeneration } : undefined;
+  if (!reserveSuccess && (!current || !carriesQuotaRefusal(current))) return;
+  const { lastFailureStatus: _refusal, lastFailureAt: _refusedAt, quotaAvoidUntil: _avoid, ...retained } =
+    current ?? { consecutiveFailures: 0 };
+  if (reserveSuccess) setScopedHealth(accountId, scope, { ...retained, reserveSuccess });
+  else if (Object.keys(retained).length > 1) setScopedHealth(accountId, scope, retained);
+  else deleteScopedHealth(accountId, scope);
 }
 
 /**

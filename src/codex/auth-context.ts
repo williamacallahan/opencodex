@@ -59,6 +59,7 @@ import {
 // The half-open TRANSIENT-HOLD lease (#4701). Not the quota-cooldown probe lease imported from
 // ./routing above -- different module, different domain, and a request never holds both.
 import { releaseTransientProbe } from "../routing/probe-lease";
+import { scopedHealthFor } from "./routing/health-store";
 import { trackBackgroundWork } from "../lib/background-work";
 import {
   codexConversationIdentity,
@@ -771,6 +772,11 @@ export function createCodexAuthDispatchGuard(
   return headers => {
     if (config.pausedCodexAccountIds?.includes(ctx.accountId)) throw new CodexPoolAuthenticationError("Selected Codex account is paused; resume it in account settings");
     if (ctx.kind === "main-pool") { reserveGuard?.(headers); return; }
+    if (ctx.poolReserve && ctx.probeQuotaScope === "reserve" && ctx.probeLeaseId) {
+      const trial = scopedHealthFor(ctx.accountId, "reserve");
+      if (trial?.probeLeaseId !== ctx.probeLeaseId || trial.probeLeaseGeneration !== (trial.cooldownGeneration ?? 0)
+        || !isCodexAccountGenerationLive(ctx.accountId, ctx.generation)) throw new CodexReserveUnavailableError();
+    }
     assertPoolAccountCredits(ctx.accountId, poolContextCreditHoldResetAt(ctx, config), poolContextCreditRecoveryNeeded(ctx, config), ctx.quotaScope);
     reserveGuard?.(headers);
   };
@@ -1000,8 +1006,8 @@ export interface ResolveCodexAuthContextOptions {
   /** Live policy owner when the routing config is a caller-specific replay snapshot. */
   codexAuthPolicy?: CodexAuthPolicyConfig;
   excludeAccountId?: string;
-  /** The request's one account move follows a refused pool Reserve attempt: serve included Luna, not another Reserve. */
-  skipPoolReserve?: boolean;
+  /** The one account retry may use verified Reserve, but cannot discover an unknown seat. */
+  verifiedPoolReserveOnly?: boolean;
   /** Resolve exactly this account without consulting or mutating Pool selection. */
   accountId?: string;
   /** Final native model selected for this request, used to select its quota group. */
@@ -1317,6 +1323,7 @@ async function resolveCodexAuthContextUnannotated(
   // account. Declared out here because the release paths below and the returned context are on
   // opposite sides of several throws (#4701).
   let transientProbe: TransientProbeGrant | undefined;
+  let reserveDiscovery = false;
   const releaseTransientProbeGrant = (): void => {
     if (!transientProbe) return;
     releaseTransientProbe(transientProbe.lease);
@@ -1423,13 +1430,13 @@ async function resolveCodexAuthContextUnannotated(
       retainAccountForUploadedFiles: options.retainAccountForUploadedFiles === true,
     };
     // The native main login keeps its own per-request Reserve authorization, so only stored seats take part here.
-    const reserveModelId = !options.skipPoolReserve && !requestScopedMainCredential && fixedAccountId !== MAIN_CODEX_ACCOUNT_ID
-      ? options.modelId : undefined;
+    const reserveModelId = !requestScopedMainCredential && fixedAccountId !== MAIN_CODEX_ACCOUNT_ID ? options.modelId : undefined;
     const poolSelection = poolLunaReserveSelection(config, reserveModelId,
-      quotaScope, selectionOptions, options.excludeAccountId, affinityKey, Date.now(), fixedAccountId);
+      quotaScope, selectionOptions, options.excludeAccountId, affinityKey, Date.now(), fixedAccountId, options.verifiedPoolReserveOnly);
     selectionOptions = poolSelection.options;
     quotaScope = poolSelection.quotaScope;
     poolReserve = poolSelection.reserve;
+    reserveDiscovery = poolSelection.discovery === true;
     // A pre-drain selector reserves the native identity while reconciliation and
     // routing inspect it. Selectors arriving after the fence skip reconciliation
     // and may still route to non-main pool accounts without touching switch state.
@@ -1694,6 +1701,10 @@ async function resolveCodexAuthContextUnannotated(
       }
       throw new CodexAccountCooldownError(accountId, cooldownUntil, cooldown?.cooldownSource, cooldown?.quotaScope);
     }
+  } else if (reserveDiscovery) {
+    probeQuotaScope = "reserve";
+    probeLeaseId = tryAcquireCodexQuotaScopeProbeLease(accountId, probeQuotaScope, Date.now(), true) ?? undefined;
+    if (!probeLeaseId) throw new CodexPoolAuthenticationError("Luna Reserve trial is already in use");
   }
 
   if (accountId === MAIN_CODEX_ACCOUNT_ID) {

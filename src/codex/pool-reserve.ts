@@ -8,7 +8,9 @@ import { resetAtToMs, type StoredAccountQuota, type WhamUsageResponse } from "./
 import { grantsReserve, reserveLimits } from "./reserve-availability";
 import { getEligiblePoolAccounts, isCodexAccountSelectable } from "./routing/selection";
 import { getThreadAffinity, isThreadAffinityExpired, isThreadAffinityGenerationLive } from "./routing/thread-affinity";
-import type { CodexQuotaScope } from "./routing/health-store";
+import { isCodexAccountGenerationLive } from "./account-store";
+import { scopedHealthFor, type CodexQuotaScope } from "./routing/health-store";
+import { canTryUnknownCodexReserve } from "./routing/probe-lease";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers-destination";
 
 const LABEL = "Luna Reserve";
@@ -89,18 +91,32 @@ export function poolReserveHoldResetAt(accountId: string, now = Date.now()): num
 export function poolLunaReserveSelection(
   config: OcxConfig, modelId: string | undefined, quotaScope: CodexQuotaScope | undefined,
   options: CodexAccountUsabilityOptions, excludeId?: string, affinityKey?: string, now = Date.now(),
-  pinnedAccountId?: string,
-): { options: CodexAccountUsabilityOptions; quotaScope: CodexQuotaScope | undefined; reserve: boolean } {
+  pinnedAccountId?: string, verifiedOnly = false,
+): { options: CodexAccountUsabilityOptions; quotaScope: CodexQuotaScope | undefined; reserve: boolean; discovery?: boolean } {
   const unchanged = { options, quotaScope, reserve: false };
   if (modelId !== "gpt-6-luna") return unchanged;
   // A pin cannot move after a refusal, so it is offered Reserve only on a fresh reported grant.
-  const reserveIds = new Set((config.codexAccounts ?? []).filter(account => account.id !== excludeId
-    && (pinnedAccountId === undefined || account.id === pinnedAccountId)
-    && codexUsageLimitResetAt(getAccountQuota(account.id), account.plan, now) !== undefined
-    && (pinnedAccountId === undefined ? poolReserveOfferable(account.id, now) : hasFreshPoolReserve(account.id, now)))
-    .map(account => account.id));
-  if (reserveIds.size === 0) return unchanged;
-  const reserveOptions: CodexAccountUsabilityOptions = { ...options, modelEligibleAccountIds: reserveIds, poolCapacity: "reserve" };
+  const verified = new Set<string>();
+  const unknown = new Set<string>();
+  for (const account of config.codexAccounts ?? []) {
+    const { id } = account;
+    if (id === excludeId || (pinnedAccountId !== undefined && id !== pinnedAccountId)
+      || (options.modelEligibleAccountIds && !options.modelEligibleAccountIds.has(id))
+      || codexUsageLimitResetAt(getAccountQuota(id), account.plan, now) === undefined) continue;
+    const health = scopedHealthFor(id, "reserve");
+    if (health?.probeLeaseId !== undefined) continue;
+    if (hasFreshPoolReserve(id, now)) {
+      verified.add(id);
+    } else {
+      if (pinnedAccountId !== undefined || holdsPoolReserveWindow(id)) continue;
+      const success = health?.reserveSuccess;
+      if (success && success.at <= now && now - success.at <= POOL_RESERVE_FRESHNESS_MS
+        && isCodexAccountGenerationLive(id, success.credentialGeneration)) verified.add(id);
+      else if (!verifiedOnly && canTryUnknownCodexReserve(id, now)) unknown.add(id);
+    }
+  }
+  if (verified.size === 0 && unknown.size === 0 && !verifiedOnly) return unchanged;
+  const reserveOptions: CodexAccountUsabilityOptions = { ...options, modelEligibleAccountIds: verified, poolCapacity: "reserve" };
   // An operator pin keeps its seat; it only chooses between that seat's own Reserve and the unchanged request.
   if (pinnedAccountId !== undefined) {
     return isCodexAccountSelectable(config, pinnedAccountId, now, "reserve", reserveOptions)
@@ -112,8 +128,13 @@ export function poolLunaReserveSelection(
     && isCodexAccountSelectable(config, serving.accountId, now, "reserve", reserveOptions)) {
     return { options: reserveOptions, quotaScope: "reserve", reserve: true };
   }
-  if (getEligiblePoolAccounts(config, excludeId, now, "reserve", reserveOptions).length > 0) {
-    return { options: reserveOptions, quotaScope: "reserve", reserve: true };
+  const verifiedOptions = { ...reserveOptions, modelEligibleAccountIds: verified };
+  if (verified.size > 0 && getEligiblePoolAccounts(config, excludeId, now, "reserve", verifiedOptions).length > 0) {
+    return { options: verifiedOptions, quotaScope: "reserve", reserve: true };
+  }
+  const discoveryOptions = { ...reserveOptions, modelEligibleAccountIds: unknown };
+  if (unknown.size > 0 && getEligiblePoolAccounts(config, excludeId, now, "reserve", discoveryOptions).length > 0) {
+    return { options: discoveryOptions, quotaScope: "reserve", reserve: true, discovery: true };
   }
   const includedOnly: CodexAccountUsabilityOptions = { ...options, poolCapacity: "included" };
   return getEligiblePoolAccounts(config, excludeId, now, quotaScope, includedOnly).length > 0

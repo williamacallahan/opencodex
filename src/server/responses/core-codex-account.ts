@@ -793,9 +793,8 @@ export async function retryCodexPoolOnAlternateAccount(
         "pool",
         {
           excludeAccountId: firstAuthCtx.accountId,
-          // A request gets one account move, so a refused Reserve attempt moves to included Luna;
-          // the other spent seats are asked on later requests while this seat's Reserve cools.
-          skipPoolReserve: firstAuthCtx.kind === "pool" && firstAuthCtx.poolReserve === true,
+          // Spend the one move on verified Reserve or ordinary Luna, not another discovery attempt.
+          verifiedPoolReserveOnly: firstAuthCtx.kind === "pool" && firstAuthCtx.poolReserve === true,
           signal: options.abortSignal,
           admission: options.admission,
           codexAuthPolicy: options.codexAuthPolicy,
@@ -882,7 +881,7 @@ export async function retryCodexPoolOnAlternateAccount(
   }
   const deferFirstOutcome = shouldDeferCodexResetDerivedCooldown(
     firstResponse,
-    options.deferCodexResetDerivedCooldown,
+    options.deferCodexResetDerivedCooldown && !(firstAuthCtx.kind === "pool" && firstAuthCtx.poolReserve),
   );
   const recordFirstOutcome = (): void => {
     if (wasPermanentAccountRefusal(firstResponse)) {
@@ -1197,7 +1196,7 @@ export function codexForwardTerminalOutcomeRecorder(
   provider: OcxProviderConfig,
   modelId?: string,
   logCtx?: RequestLogContext,
-): ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined {
+): ((status: ResponsesTerminalStatus, httpStatusOverride?: number, reserveServed?: boolean) => void) | undefined {
   if (!usesCodexForwardPoolAuth(authCtx, provider)) {
     if (!isKeyedRequestOwnedMain(authCtx) || !isCanonicalOpenAiForwardProvider(provider)) return undefined;
     return (status, httpStatusOverride) => {
@@ -1207,7 +1206,7 @@ export function codexForwardTerminalOutcomeRecorder(
     };
   }
   const windowMeta = codexFailureWindowOutcomeMeta(authCtx);
-  return (status, httpStatusOverride) => {
+  return (status, httpStatusOverride, reserveServed) => {
     const quotaStatus = [httpStatusOverride, logCtx?.terminalHttpStatus]
       .find(value => value === 429 || value === 402);
     if (status === "incomplete" && quotaStatus === undefined) {
@@ -1240,6 +1239,7 @@ export function codexForwardTerminalOutcomeRecorder(
       : (quotaStatus ?? httpStatusOverride ?? logCtx?.terminalHttpStatus ?? 502);
     recordCodexUpstreamOutcome(config, authCtx.accountId, outcome, {
       ...windowMeta,
+      reserveServed,
       threadId: authCtx.affinityKey,
       fixedAccount: authCtx.fixedAccount,
       modelId,

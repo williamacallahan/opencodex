@@ -288,17 +288,29 @@ export function tryAcquireCodexQuotaScopeProbeLease(
   accountId: string,
   scope: CodexQuotaScope,
   now = Date.now(),
+  reserveDiscovery = false,
 ): string | null {
   const health = scopedHealthFor(accountId, scope);
-  if (!canAcquireQuotaProbeLease(health, now)) return null;
+  if (!(reserveDiscovery && scope === "reserve"
+    ? canTryUnknownCodexReserve(accountId, now)
+    : canAcquireQuotaProbeLease(health, now))) return null;
   const probeLeaseId = randomUUID();
   setScopedHealth(accountId, scope, {
-    ...health!,
+    consecutiveFailures: 0,
+    ...health,
     probeLeaseId,
-    probeLeaseGeneration: health!.cooldownGeneration ?? 0,
+    probeLeaseGeneration: health?.cooldownGeneration ?? 0,
     lastProbeAt: now,
   });
   return probeLeaseId;
+}
+
+/** Reserve discovery uses one real turn after the refusal or previous trial has aged out. */
+export function canTryUnknownCodexReserve(accountId: string, now: number): boolean {
+  const health = scopedHealthFor(accountId, "reserve");
+  return !health?.probeLeaseId && (health?.cooldownUntil ?? 0) <= now
+    && (health?.quotaAvoidUntil ?? 0) <= now
+    && (health?.lastProbeAt === undefined || now - health.lastProbeAt >= CODEX_QUOTA_PROBE_INTERVAL_MS);
 }
 
 /** Side-effect-free check for a confirmed model-specific quota probe. */

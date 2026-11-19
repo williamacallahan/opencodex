@@ -39,7 +39,6 @@ import {
   type CodexUpstreamOutcomeMeta,
 } from "./routing/cooldown-math";
 import {
-  carriesQuotaRefusal,
   codexPoolKeyForScope,
   codexQuotaScopeForModel,
   deleteAccountHealth,
@@ -56,6 +55,7 @@ import {
   isHealthAccountAdmissible,
   isHealthGenerationReconciled,
   isIndependentCodexQuotaScope,
+  noteScopedCodexSuccess,
   preservedCooldownFields,
   pruneHealthAccountsForContext,
   commitHealthReconcile,
@@ -1306,6 +1306,12 @@ export function recordCodexUpstreamOutcome(
    * starts from evidence that still describes a live credential.
    */
   dropSpentCredentialFailure(accountId);
+  if (meta.poolReserve && meta.failureWindowCredentialGeneration !== undefined
+    && !isCodexAccountGenerationLive(accountId, meta.failureWindowCredentialGeneration)) {
+    const scoped = scopedHealthFor(accountId, "reserve");
+    if (scoped && ownsProbeLease(scoped, meta)) setScopedHealth(accountId, "reserve", withProbeLeaseReleased(scoped, now));
+    return;
+  }
   if (outcomeClass === "success") {
     noteCodexFailureWindowOutcome(config, accountId, false, now, meta);
     // The operator's one-shot is spent by a dispatch that actually worked, and only by that.
@@ -1321,19 +1327,8 @@ export function recordCodexUpstreamOutcome(
         setScopedHealth(accountId, meta.probeQuotaScope, withProbeLeaseReleased(scopedProbe, now));
       }
     }
-    // A served request is what ends the refusal marker the quota branch left on this lane.
-    // The probe contract above owns the scoped COOLDOWN; this owns only the field
-    // {@link hasUnrecoveredCodexQuotaRefusal} reads, which would otherwise keep threads away
-    // from an account that is demonstrably serving them again. The account-wide marker needs
-    // no equivalent: every recovery write below runs it through preservedCooldownFields.
-    const refusedScope = quotaScope ? scopedHealthFor(accountId, quotaScope) : undefined;
-    if (quotaScope && refusedScope && carriesQuotaRefusal(refusedScope)) {
-      const {
-        lastFailureStatus: _refusal, lastFailureAt: _refusedAt, quotaAvoidUntil: _avoid, ...retained
-      } = refusedScope;
-      // A live cooldown and its probe bookkeeping survive; an entry that held nothing else goes.
-      if (Object.keys(retained).length > 1) setScopedHealth(accountId, quotaScope, retained);
-      else deleteScopedHealth(accountId, quotaScope);
+    if (quotaScope && (!meta.poolReserve || meta.reserveServed)) {
+      noteScopedCodexSuccess(accountId, quotaScope, now, meta.reserveServed ? meta.failureWindowCredentialGeneration : undefined);
     }
     const current = getAccountHealth(accountId);
     const cooldownUntil = getCodexAccountCooldownUntil(accountId, now);
