@@ -203,6 +203,24 @@ export type FallbackGuardResult =
 
 const NO_COMMIT = (): void => {};
 
+/** The policy verdict for one hop of `kind`, recording nothing. */
+function decideFallbackHop(config: OcxConfig, hop: FallbackHop, kind: OcxFallbackKind, now: number): { decision: FallbackDecision; deviceIds: string[] } {
+  let deviceIds = fallbackDeviceIds(config, hop.admission, now);
+  const routes = [hop.route, ...(hop.aliases ?? [])].filter((value, index, all) => value && all.indexOf(value) === index);
+  let decision = resolveFallbackPolicy(config, { kind, routes, provider: hop.from.provider, deviceIds });
+  for (const captured of hop.admission?.callerPolicy?.fallbackPolicies ?? []) {
+    const caller = resolveFallbackPolicy(captured.config, { kind, routes, provider: hop.from.provider, deviceIds: captured.deviceIds });
+    if (!caller.allowed) { decision = caller; deviceIds = [...captured.deviceIds]; break; }
+  }
+  return { decision, deviceIds };
+}
+
+/** Whether policy allows the hop, without recording an event: for a planner that must not order legs a hop would refuse. */
+export function fallbackHopAllowed(config: OcxConfig, hop: FallbackHop): boolean {
+  const kind = fallbackHopKind(hop.from, hop.to);
+  return kind === null || decideFallbackHop(config, hop, kind, hop.now ?? Date.now()).decision.allowed;
+}
+
 /**
  * Check one hop. A refusal is recorded at once; an allowed hop is recorded only through the
  * returned `commit`. A same-target retry is not a hop and always passes unrecorded.
@@ -211,13 +229,7 @@ export function guardFallbackHop(config: OcxConfig, hop: FallbackHop): FallbackG
   const kind = fallbackHopKind(hop.from, hop.to);
   if (kind === null) return { ok: true, kind: null, commit: NO_COMMIT };
   const now = hop.now ?? Date.now();
-  let deviceIds = fallbackDeviceIds(config, hop.admission, now);
-  const routes = [hop.route, ...(hop.aliases ?? [])].filter((value, index, all) => value && all.indexOf(value) === index);
-  let decision = resolveFallbackPolicy(config, { kind, routes, provider: hop.from.provider, deviceIds });
-  for (const captured of hop.admission?.callerPolicy?.fallbackPolicies ?? []) {
-    const caller = resolveFallbackPolicy(captured.config, { kind, routes, provider: hop.from.provider, deviceIds: captured.deviceIds });
-    if (!caller.allowed) { decision = caller; deviceIds = [...captured.deviceIds]; break; }
-  }
+  const { decision, deviceIds } = decideFallbackHop(config, hop, kind, now);
   const event: FallbackEvent = {
     at: new Date(now).toISOString(),
     site: hop.site,

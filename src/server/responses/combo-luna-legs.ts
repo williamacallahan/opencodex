@@ -31,6 +31,7 @@ export function planLunaReserveLegs(
   portable: () => boolean,
   resolve: (target: ComboTarget) => RouteResult | undefined,
   eligible: (target: ComboTarget) => boolean,
+  hopAllowed: (from: ComboTarget, to: ComboTarget) => boolean,
 ): LunaReserveLegPlan | undefined {
   // Configured model ids are enough to rule out every other combo before any route is resolved.
   if (combo.strategy !== "failover" || !combo.targets.some(target => modelHasPoolReserve(target.model)) || !portable()) return undefined;
@@ -43,7 +44,9 @@ export function planLunaReserveLegs(
   const relay = combo.targets[nativeIndex + 1];
   const relayProvider = relay && config.providers[relay.provider];
   if (!native || !relay || !relayProvider || relay.metered || !modelHasPoolReserve(relay.model) || !isCodexLbProvider(relayProvider)
-    || !eligible(native) || !eligible(relay)) return undefined;
+    || !eligible(native) || !eligible(relay)
+    // Both added hops must pass fallback policy, or a strict-Reserve refusal would end in fallback_refused where native ordinary Luna used to serve.
+    || !hopAllowed(native, relay) || !hopAllowed(relay, native)) return undefined;
   return { nativeKey: targetKey(native), relayKey: targetKey(relay), legCount: combo.targets.length + 1 };
 }
 

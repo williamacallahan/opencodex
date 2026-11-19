@@ -314,12 +314,15 @@ ruled out before any route is resolved. A portable turn dispatches native with `
 remaining targets; the extra leg is counted in the shared send budget. Portable means no account-bound carrier
 by `canPortConversationState` (continuation id, provider conversation, uploaded file, encrypted reasoning), no
 turn state in the `x-codex-turn-state` header or `client_metadata`, no unreadable encrypted agent task and no
-protocol source. Any other turn, and any other combo, keeps its configured order.
-The `reserve-only` leg never cools the native target and is not quota evidence for the ladder. In
+protocol source. The plan also requires both added hops (native to codex-lb, codex-lb to native) to pass
+`fallbackHopAllowed`, so provider fallback turned off keeps today's order. Any other turn, and any other combo,
+keeps its configured order.
+The `reserve-only` leg's own refusal (nothing sent, or a 429) never cools the native target and is not quota
+evidence for the ladder; any other failure after a send cools it as usual. In
 `resolveCodexAuthContext` it refuses with a zero-send `CodexReserveUnavailableError` unless a stored pool seat
 can serve Reserve; caller-owned or native main credentials and Direct mode never stand in for it.
 Native ordinary Luna follows a codex-lb failure only when the relay provably never received the turn: no
-physical send was counted, or the transport marked a pre-connect failure (`connect_neutral`,
-`markUpstreamNotStarted`). A timeout, 5xx, any started stream, an accepted non-stream body such as a 200 JSON
+physical send was counted, the transport marked a pre-connect failure (`connect_neutral`,
+`markUpstreamNotStarted`), or the relay answered a non-stream HTTP 401, 402, 403 or 429. A timeout, 5xx, any started stream, an accepted non-stream body such as a 200 JSON
 `response.failed`, or a caller abort never reaches native ordinary; later targets follow the existing rules.
 Coverage: `tests/server/server-combo-luna-reserve-order.test.ts`.

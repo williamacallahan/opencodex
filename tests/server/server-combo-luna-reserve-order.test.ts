@@ -132,6 +132,27 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     await post(config());
     expect(isComboTargetInCooldown("luna", { provider: "openai", model: "gpt-6-luna" })).toBe(false);
   });
+  test("provider fallback turned off plans no extra legs: native ordinary Luna serves and nothing is refused", async () => {
+    seats(false);
+    const cfg = { ...config(), fallback: { provider: false } };
+    const result = await post(cfg);
+    expect(result.status).toBe(200);
+    expect(result.text).not.toContain("fallback_refused");
+    expect(calls).toEqual(["native:gpt-6-luna"]);
+  });
+  test("a plain relay 429 with no stream proves the relay never started, so native ordinary Luna serves and metered is untouched", async () => {
+    seats(); native = body => body.model === "gpt-reserve" ? reserveRefused() : sse(body.model, "ok");
+    relay = reserveRefused;
+    const result = await post(config());
+    expect(result.status).toBe(200);
+    expect(calls).toEqual(["native:gpt-reserve", "relay:gpt-6-luna", "native:gpt-6-luna"]);
+  });
+  test("a Reserve-leg 502 after a send cools the native target, while the zero-send refusal does not", async () => {
+    seats(); native = body => body.model === "gpt-reserve" ? Response.json({ error: { message: "bad gateway" } }, { status: 502 }) : sse(body.model, "ok");
+    relay = refusedConnect;
+    await post(config());
+    expect(isComboTargetInCooldown("luna", { provider: "openai", model: "gpt-6-luna" })).toBe(true);
+  });
   test("with no eligible Reserve seat the native leg sends nothing and the relay serves the turn", async () => {
     seats(false);
     const result = await post(config());

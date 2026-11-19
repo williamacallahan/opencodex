@@ -13,7 +13,7 @@ import { resolveWireProtocolOverride } from "../adapter-resolve";
 import { parseSyntheticRowId } from "../fast-row";
 import { resolveOpenAiVirtualModel } from "../../providers/openai-virtual-models";
 import { comboCooldownRetryAfterSeconds, isDefiniteContextOverflow, type CodexAccountModelRefusal } from "../../combos/failover";
-import { fallbackTriggerForStatus, guardFallbackHop } from "../../routing/fallback-policy";
+import { fallbackHopAllowed, fallbackTriggerForStatus, guardFallbackHop } from "../../routing/fallback-policy";
 import {
   isCodexReasoningEffort,
   isDeclaredReasoningEffort,
@@ -643,7 +643,15 @@ export async function executeComboResponses(
       && canPortConversationState(collectConversationStateCarriers(rawBody)).portable;
   }, target => {
     try { return routeConcreteModel(config, `${target.provider}/${target.model}`); } catch { return undefined; }
-  }, targetEligible);
+  }, targetEligible, (from, to) => {
+    try {
+      const [source, destination] = [from, to].map(target => routeConcreteModel(config, `${target.provider}/${target.model}`));
+      return fallbackHopAllowed(config, {
+        site: "combo", route: `combo/${comboId}`, aliases: [requestedModel], trigger: "unavailable", admission: options.admission,
+        from: { provider: source!.providerName, model: source!.modelId }, to: { provider: destination!.providerName, model: destination!.modelId },
+      });
+    } catch { return false; }
+  });
   let lunaStage: "off" | "reserve" | "relay" | "done" = "off";
   const comboLegCount = lunaLegs?.legCount ?? combo.targets.length;
   const comboSendScope = isRequestExecutionBudget(options.sendBudget)
@@ -1225,6 +1233,7 @@ export async function executeComboResponses(
     const writerGeneration = pick.writerGeneration;
     let consumedChildFailure: ConsumedComboFailure | undefined;
     let preflightModelRefusal: CodexAccountModelRefusal | undefined;
+    let failedInPreflight = false;
     const callbackGate = createChildPassthroughCallbackGate({
       ...options,
       onResponseComplete: model => {
@@ -1377,6 +1386,7 @@ export async function executeComboResponses(
         terminalRecorder?.("failed", preflight.response.status);
         response = preflight.response;
         preflightModelRefusal = preflight.codexModelRefusal;
+        failedInPreflight = true;
       } else {
         response = preflight.response;
         if (nativePassthrough) markNativePassthroughSseResponse(response);
@@ -1588,8 +1598,8 @@ export async function executeComboResponses(
     );
     const failureNow = Date.now();
     const attemptedTargets: string[] = pick.attempted;
-    // The strict Reserve leg never cools the native target: ordinary Luna on it is still untried.
-    const failureCooldownScope = legIntent === "reserve-only" || isPolicyCandidateRefusal(failure.response) ? "none" : comboFailureCooldownScope(failure.response.status, failure.classificationText, {
+    // The strict Reserve leg's own refusal (nothing sent, or a Reserve 429) never cools the native target: ordinary Luna on it is still untried.
+    const failureCooldownScope = legIntent === "reserve-only" && (attempt.sendCount === 0 || failure.response.status === 429) || isPolicyCandidateRefusal(failure.response) ? "none" : comboFailureCooldownScope(failure.response.status, failure.classificationText, {
       code: failure.upstreamCode,
       malformedResponseFormat: failure.malformedResponseFormat,
       openRouterOpaque400: failure.openRouterOpaque400,
@@ -1680,7 +1690,7 @@ export async function executeComboResponses(
       // After the strict Reserve leg the relay is next; after the relay, native ordinary Luna is next only on proof the relay never got the turn.
       const afterReserve: boolean = lunaStage === "reserve";
       const ordinaryNext = afterReserve ? !pick || targetKey(pick.target) !== lunaLegs.relayKey
-        : relayProvedNotStarted(childLog, attempt.sendCount);
+        : relayProvedNotStarted(childLog, attempt.sendCount) || !failedInPreflight && [401, 402, 403, 429].includes(failure.response.status);
       lunaStage = afterReserve && pick && targetKey(pick.target) === lunaLegs.relayKey ? "relay" : "done";
       const ordinaryPick: ComboPick | null = ordinaryNext && !options.abortSignal?.aborted ? await pickWithWait({
         exclude: attemptedTargets.filter(key => key !== lunaLegs.nativeKey),
