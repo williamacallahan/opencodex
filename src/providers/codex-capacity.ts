@@ -8,6 +8,8 @@ export const CODEX_CONFIGURED_CAPACITY_WEIGHTS = {
   // Business Premium has 5x Standard included usage; this is display calibration only (#7440).
   self_serve_business_prolite: 5,
   pro: 20,
+  // Pro 500. OpenAI publishes no multiplier; codex-lb request spend per weekly 100% measured equal to `pro`.
+  promax: 20,
 } as const;
 
 /**

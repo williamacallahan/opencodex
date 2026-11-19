@@ -62,8 +62,15 @@ function boundedInteger(value: unknown, max: number): value is number {
 const NATIVE_LIMIT_IDS = new Map<string, string>([
   ["codex", "codex"], ...CODEX_QUOTA_FAMILIES.map(family => [`codex-${family}`, `codex_${family}`] as [string, string]),
 ]);
-// ChatGPT plan labels relayed in the native frame; anything else is omitted.
-const PLAN_TYPES = new Set(["free", "go", "plus", "pro", "team", "business", "enterprise", "edu"]);
+// ChatGPT plan labels relayed in the native frame: the Codex client's `RateLimitStatusPayload`
+// plan enum (codex-rs/codex-backend-openapi-models). Anything else is omitted, so a Pro 500
+// (`promax`) seat must be listed here or its client sees no plan at all.
+const PLAN_TYPES = new Set([
+  "guest", "free", "go", "plus", "pro", "prolite", "promax", "free_workspace", "team",
+  "self_serve_business_prolite", "self_serve_business_usage_based", "business", "ent26",
+  "enterprise_cbp_automation", "enterprise_cbp_usage_based", "education", "quorum", "k12",
+  "enterprise", "edu", "edu_plus", "edu_pro", "sci", "sci_plus",
+]);
 
 /** Canonical native limit id, undefined when absent, null when present but not a known id. */
 function nativeLimitId(raw: unknown): string | null | undefined {

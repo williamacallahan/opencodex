@@ -57,6 +57,16 @@ describe("configured-weight Codex pool capacity", () => {
     expect(result.aggregation?.fiveHour).toBeUndefined();
   });
 
+  test("Pro 500 (promax) seats weigh the same as Pro, not as an unknown Plus-sized seat", () => {
+    const result = aggregateCodexPoolCapacity([
+      account("pro", 100),
+      account("promax", 40),
+    ], NOW);
+    expect(result.aggregation).toMatchObject({ includedAccounts: 2, unknownPlanAccounts: 0 });
+    expect(result.aggregation?.weekly).toMatchObject({ totalWeight: 40, consumedWeight: 28 });
+    expect(result.quota?.weeklyPercent).toBe(70);
+  });
+
   test("legacy Team and Business plans share configured weight", () => {
     const result = aggregateCodexPoolCapacity([
       account("team", 20, { isMain: true, active: true }),

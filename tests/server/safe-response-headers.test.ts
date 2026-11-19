@@ -183,6 +183,13 @@ describe("response metadata headers are allowlisted by name and rebuilt by contr
     }
   });
 
+  test("the codex.rate_limits frame keeps a Pro 500 seat's promax plan", () => {
+    const owner = new CodexWsMetadata();
+    owner.commit();
+    const text = owner.consume({ type: "codex.rate_limits", plan_type: "promax", rate_limits: { allowed: true } }, 200)!;
+    expect(JSON.parse(text)).toEqual({ type: "codex.rate_limits", plan_type: "promax", rate_limits: { allowed: true } });
+  });
+
   test("every retained rate-limit field drops a prefixless key", () => {
     const owner = new CodexWsMetadata();
     owner.commit();
