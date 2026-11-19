@@ -870,7 +870,7 @@ export function resolveCodexAccountForThreadDetailed(
   // the operator's shared active/pin choice or the task's ordinary-model affinity.
   const modelScopedSelection = selectionOptions?.modelEligibleAccountIds !== undefined;
   let preserveExistingModelScopedAffinity = false;
-  const sharedSelectionOptions: CodexAccountUsabilityOptions | undefined = modelScopedSelection
+  const sharedSelectionOptions: CodexAccountUsabilityOptions | undefined = modelScopedSelection && selectionOptions?.poolCapacity !== "reserve"
     ? sharedStateSelectionOptions(selectionOptions) ?? {}
     : selectionOptions;
   // Retiring a spent manual pin is independent of affinity: an existing thread

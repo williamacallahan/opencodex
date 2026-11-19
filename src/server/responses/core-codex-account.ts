@@ -1196,6 +1196,7 @@ export function codexForwardTerminalOutcomeRecorder(
   provider: OcxProviderConfig,
   modelId?: string,
   logCtx?: RequestLogContext,
+  response?: Response,
 ): ((status: ResponsesTerminalStatus, httpStatusOverride?: number, reserveServed?: boolean) => void) | undefined {
   if (!usesCodexForwardPoolAuth(authCtx, provider)) {
     if (!isKeyedRequestOwnedMain(authCtx) || !isCanonicalOpenAiForwardProvider(provider)) return undefined;
@@ -1208,7 +1209,8 @@ export function codexForwardTerminalOutcomeRecorder(
   const windowMeta = codexFailureWindowOutcomeMeta(authCtx);
   return (status, httpStatusOverride, reserveServed) => {
     const quotaStatus = [httpStatusOverride, logCtx?.terminalHttpStatus]
-      .find(value => value === 429 || value === 402);
+      .find(value => value === 429 || value === 402)
+      ?? (status === "failed" && windowMeta.poolReserve && logCtx?.causeHint === "rate-limit" ? 429 : undefined);
     if (status === "incomplete" && quotaStatus === undefined) {
       // Normal limit/content-filter/stall terminal — the account served the
       // request. Don't penalize account health; record success to clear any
@@ -1239,6 +1241,7 @@ export function codexForwardTerminalOutcomeRecorder(
       : (quotaStatus ?? httpStatusOverride ?? logCtx?.terminalHttpStatus ?? 502);
     recordCodexUpstreamOutcome(config, authCtx.accountId, outcome, {
       ...windowMeta,
+      ...(quotaStatus !== undefined && response ? codexQuotaOutcomeMeta(response) : {}),
       reserveServed,
       threadId: authCtx.affinityKey,
       fixedAccount: authCtx.fixedAccount,

@@ -24,6 +24,7 @@ import { REQUIRED_TOOL_CONTRACT_CODE } from "../../lib/errors";
 import { attachComboFailureEvidence, isPausedTurn } from "../../lib/client-error-body";
 import { requiredToolReasoningPrelude } from "./combo-required-tool-stream";
 import { ProtocolPreOutputEof } from "../../lib/upstream-retry";
+import { NATIVE_RESERVE_MODEL } from "../../codex/catalog/native-models";
 
 const COMBO_STREAM_PREFLIGHT_MAX_BYTES = MAX_CLIENT_SSE_FRAME_BYTES;
 // Required-tool reasoning may delay delivery, but never for an unbounded/trickling prelude.
@@ -656,8 +657,15 @@ export async function preflightComboStreamResponse(
     onOpaquePayload: () => { outputCommitted = true; },
     onParsedPayload: payload => {
       if (terminalStatus !== undefined || outputCommitted || retryableTerminalPayload) return;
-      if (payload !== null && typeof payload === "object" && !Array.isArray(payload)
-        && (payload as { type?: unknown }).type === "response.created") responseCreated = true;
+      if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+        const type = (payload as { type?: unknown }).type;
+        if (type === "response.created") responseCreated = true;
+        // Reserve has already accepted this turn; a later quota terminal cannot authorize a replay.
+        if (logCtx.wireModel === NATIVE_RESERVE_MODEL && (responseCreated || type === "response.in_progress")) {
+          outputCommitted = true;
+          return;
+        }
+      }
       const retryable = retryableTerminalFor(payload);
       const matchedBareError = retryable && payload !== null && typeof payload === "object"
         && !Array.isArray(payload) && (payload as { type?: unknown }).type === "error";

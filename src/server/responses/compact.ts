@@ -240,7 +240,7 @@ import {
 } from "./core";
 import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel, sendWithConnectionPolicy } from "./fetch-helpers";
 import { requestPacingOverloadResponse } from "./pacing-overload";
-import { shouldRetryCodexPoolAccountQuota, shouldRetryCodexPoolAccountTransient } from "./core-codex-account";
+import { codexQuotaOutcomeMeta, shouldRetryCodexPoolAccountQuota, shouldRetryCodexPoolAccountTransient } from "./core-codex-account";
 import { mapCodexAuthContextErrorToResponse, nativeMainRefreshFailureResponse } from "./codex-auth-error";
 import { linkRequestSessionLane, sessionLaneIdFromRequest, reasoningReplayConversationIdFromResponsesRequest, sessionIdHeaderFromRequest } from "../request-log-conversation";
 import { recallComboForLane } from "./combo-session-recall";
@@ -1133,6 +1133,7 @@ export async function handleResponsesCompact(
         resetAt?: unknown | unknown[];
         promoteAccountId?: string;
         reserveServed?: boolean;
+        now?: number;
       } = {},
     ) => {
       // A gateway response is not evidence about any Codex account.
@@ -1560,12 +1561,7 @@ export async function handleResponsesCompact(
       && route.codexAccountMode
       && !req.signal.aborted
     ) {
-      const firstRetryAfter = upstream.headers.get("retry-after");
-      const firstResetAt = [
-        upstream.headers.get("x-codex-primary-reset-at"),
-        upstream.headers.get("x-codex-secondary-reset-at"),
-        upstream.headers.get("x-codex-tertiary-reset-at"),
-      ].filter(Boolean);
+      const firstOutcome = { ...codexQuotaOutcomeMeta(upstream), now: Date.now() };
       // Build the alternate COMPLETELY before cancelling the first body: if construction
       // throws, the first rejection is still intact and can be returned to the client.
       // The same reasoning refuses an uploaded-file move here: no alternate can read a file the
@@ -1587,7 +1583,7 @@ export async function handleResponsesCompact(
         });
       if (alternate && "failure" in alternate) {
         await applyCompactPoolQuotaHeaders(authCtx, upstream);
-        recordCompactPoolOutcome(authCtx, upstream.status, { retryAfter: firstRetryAfter, resetAt: firstResetAt });
+        recordCompactPoolOutcome(authCtx, upstream.status, firstOutcome);
         await upstream.body?.cancel().catch(() => undefined);
         return alternate.failure;
       }
@@ -1633,28 +1629,23 @@ export async function handleResponsesCompact(
         // rejection. Skipping this leaves quota-strategy routing and the dashboard
         // reading numbers from before the account ran out.
         await applyCompactPoolQuotaHeaders(authCtx, upstream);
-        recordCompactPoolOutcome(authCtx, upstream.status, {
-          retryAfter: firstRetryAfter,
-          resetAt: firstResetAt,
-          ...(alternate.authCtx.accountId ? { promoteAccountId: alternate.authCtx.accountId } : {}),
-        });
         const firstResponse = upstream;
         const firstLabel = logCtx.accountLogLabel;
         logCtx.accountLogLabel = codexAuthContextLogLabel(alternate.authCtx, config);
         scrubCompactStateForAlternate(alternate.authCtx, alternate.headers);
-        let alternateDispatched = false;
         try {
           sealFirstAttemptStatus(firstResponse.status);
-          upstream = await sendCompactAttempt(alternate.provider, alternate.headers, "single", alternate.authCtx,
-            () => { alternateDispatched = true; }, compactMoveRecovery(firstResponse.status));
-          outcomeCtx = alternate.authCtx;
-          void firstResponse.body?.cancel().catch(() => undefined);
+          upstream = await sendCompactAttempt(alternate.provider, alternate.headers, "single", alternate.authCtx, () => {
+            outcomeCtx = alternate.authCtx;
+            recordCompactPoolOutcome(authCtx, firstResponse.status, {
+              ...firstOutcome,
+              ...(alternate.authCtx.accountId ? { promoteAccountId: alternate.authCtx.accountId } : {}),
+            });
+            void firstResponse.body?.cancel().catch(() => undefined);
+          }, compactMoveRecovery(firstResponse.status));
         } catch (err) {
           releaseCodexAuthContextProbeLease(alternate.authCtx);
-          if (alternateDispatched) {
-            void firstResponse.body?.cancel().catch(() => undefined);
-            return failedAlternateCompactSend(err);
-          }
+          if (outcomeCtx === alternate.authCtx) return failedAlternateCompactSend(err);
           logCtx.accountLogLabel = firstLabel;
         }
       }
