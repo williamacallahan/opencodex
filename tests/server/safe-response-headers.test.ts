@@ -188,6 +188,9 @@ describe("response metadata headers are allowlisted by name and rebuilt by contr
     owner.commit();
     const text = owner.consume({ type: "codex.rate_limits", plan_type: "promax", rate_limits: { allowed: true } }, 200)!;
     expect(JSON.parse(text)).toEqual({ type: "codex.rate_limits", plan_type: "promax", rate_limits: { allowed: true } });
+    // A label the client's WebSocket enum lacks would overwrite its cached plan with Unknown.
+    const k12 = owner.consume({ type: "codex.rate_limits", plan_type: "k12", rate_limits: { allowed: true } }, 200)!;
+    expect(JSON.parse(k12)).toEqual({ type: "codex.rate_limits", rate_limits: { allowed: true } });
   });
 
   test("every retained rate-limit field drops a prefixless key", () => {
