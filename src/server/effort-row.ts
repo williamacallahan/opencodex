@@ -14,7 +14,7 @@ import { resolveModelAlias } from "../providers/default-aliases";
 import { knownModelIdsForProvider, previewRouteModel } from "../router";
 import { policyModelId, policyPublicModelId } from "../routing/profile";
 import type { OcxConfig } from "../types";
-import { routedSlug } from "../providers/slug-codec";
+import { encodeRoutedModelId, routedSlug } from "../providers/slug-codec";
 import { predictCursorEffort } from "./models-capabilities";
 
 const EFFORT_ROW_SEPARATOR = "--";
@@ -113,21 +113,23 @@ export function parseNoReasoningEffortRowId(id: string, config: OcxConfig): Pars
   const slash = baseId.indexOf("/");
   if (slash <= 0) return null;
   const providerName = baseId.slice(0, slash);
-  const modelId = baseId.slice(slash + 1);
   if (!hasOwnProvider(config.providers, providerName)) return null;
   const provider = config.providers[providerName];
   const ladders = provider.modelReasoningEfforts;
-  if (!ladders || !Object.hasOwn(ladders, modelId) || !ladders[modelId]?.includes("none")) return null;
+  if (!ladders) return null;
 
   const known = knownModelIdsForProvider(providerName, provider, config);
   const requestedModel = id.slice(slash + 1);
-  if (!known.includes(modelId) || isKnownId(knownEffortRowIds(config), id)
-    || provider.retainModels?.includes(requestedModel) || Object.hasOwn(provider.modelDisplayNames ?? {}, requestedModel)
+  const claimsSelector = (nativeId: string) => nativeId === requestedModel || encodeRoutedModelId(nativeId) === requestedModel;
+  if (isKnownId(knownEffortRowIds(config), id) || provider.retainModels?.some(claimsSelector)
+    || Object.keys(provider.modelDisplayNames ?? {}).some(claimsSelector)
     || resolveModelAlias(config, provider, known, requestedModel, providerName)) return null;
   try {
     const route = previewRouteModel(config, baseId);
-    if (route.routeKind === "explicit-provider" && route.providerName === providerName && route.modelId === modelId
-      && configuredReasoningEfforts(route.provider, modelId, { refreshMetadata: false })?.includes("none")) {
+    const modelId = route.modelId;
+    if (route.routeKind === "explicit-provider" && route.routeReason !== "blocked-model-redirect"
+      && route.providerName === providerName && known.includes(modelId) && Object.hasOwn(ladders, modelId)
+      && ladders[modelId]?.includes("none") && configuredReasoningEfforts(route.provider, modelId, { refreshMetadata: false })?.includes("none")) {
       return { baseId, effort: "none" };
     }
   } catch {

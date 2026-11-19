@@ -69,7 +69,7 @@ through to one another.
 
 ## Select no reasoning by model ID
 
-If your Chat Completions or Responses client cannot send an explicit `none`, add
+If your Responses client cannot send an explicit `none`, add
 `--none` to `provider/model`. Use this only for a routed model whose saved effort
 list includes `none`. OpenCodex sends the base model with `none` instead of the
 client's default effort. A real model ID or alias with the same name still wins.

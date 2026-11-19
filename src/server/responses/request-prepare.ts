@@ -308,7 +308,8 @@ export async function prepareResponsesRequest(
     && typeof (body as { model?: unknown }).model === "string"
     // One parse for both grammars, from the selector as the client sent it. Parsing them
     // separately made the outcome depend on which ran first.
-    ? (inboundWire === "responses" && !options.internalDecisionCall && !options.compactionRoutingOverride ? parseClientSyntheticRowId : parseSyntheticRowId)((body as { model: string }).model, config)
+    ? (inboundWire === "responses" && !options.internalDecisionCall && !options.compactionRoutingOverride && !options.compactionRecoveryKind
+      ? parseClientSyntheticRowId : parseSyntheticRowId)((body as { model: string }).model, config)
     : { fastRow: null, effortRow: null };
   const comboEffortRow = comboRows.effortRow;
   if (comboRows.fastRow) {

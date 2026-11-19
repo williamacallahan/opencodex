@@ -261,9 +261,7 @@ describe("Cursor effort variant rows", () => {
     }
   });
 
-  test.each([
-    ["chat/completions", handleChatCompletions], ["responses", handleResponses],
-  ] as const)("%s clients can select declared none by model ID without Cursor effort rows", async (path, handle) => {
+  test("Responses clients can select declared none without shadowing a real model", async () => {
     const upstream = mockChatUpstream();
     const releaseSpendHome = acquireOwnedSpendHome();
     try {
@@ -272,12 +270,10 @@ describe("Cursor effort variant rows", () => {
       const provider = config.providers.fixture!;
       provider.modelReasoningEfforts!["claude-effort-row-fixture"] = ["none", "low", "high", "max"];
       const model = "fixture/claude-effort-row-fixture--none";
-      const turn = () => handle(new Request(`http://localhost/v1/${path}`, {
+      const turn = (selector = model) => handleResponses(new Request("http://localhost/v1/responses", {
         method: "POST",
         headers: childHeaders,
-        body: JSON.stringify(path === "responses"
-          ? { model, reasoning: { effort: "high" }, input: "hello" }
-          : { model, reasoning_effort: "high", messages: [{ role: "user", content: "hello" }] }),
+        body: JSON.stringify({ model: selector, reasoning: { effort: "high" }, input: "hello" }),
       }), config, { model: "", provider: "" });
       for (const fastRows of [true, false]) {
         config.fastRows = fastRows;
@@ -291,6 +287,18 @@ describe("Cursor effort variant rows", () => {
       expect(realModel.status).toBe(200);
       await realModel.text();
       expect(upstream.captured.at(-1)).toMatchObject({ model: "claude-effort-row-fixture--none", reasoning_effort: "high" });
+
+      provider.models = ["claude-effort-row-fixture", "vendor/base"];
+      provider.modelReasoningEfforts!["vendor/base"] = ["none", "high"];
+      const encodedModel = await turn("fixture/vendor-base--none");
+      expect(encodedModel.status).toBe(200);
+      await encodedModel.text();
+      expect(upstream.captured.at(-1)).toMatchObject({ model: "vendor/base", reasoning_effort: "none" });
+      provider.modelDisplayNames = { "vendor/base--none": "A separate model" };
+      const coldCatalogModel = await turn("fixture/vendor-base--none");
+      expect(coldCatalogModel.status).toBe(200);
+      await coldCatalogModel.text();
+      expect(upstream.captured.at(-1)).toMatchObject({ model: "vendor/base--none", reasoning_effort: "high" });
     } finally {
       upstream.server.stop(true);
       releaseSpendHome();

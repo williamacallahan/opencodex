@@ -4,7 +4,7 @@ import { COMPACTION_TRIGGERS, validCompactionSourceModels } from "../../config/s
 import { routeConcreteModel, type RouteResult } from "../../router";
 import { resolveComboId } from "../../combos/identifiers";
 import { resolvePolicyProfileId } from "../../routing/profile";
-import { parseSyntheticRowId } from "../fast-row";
+import { parseClientSyntheticRowId } from "../fast-row";
 import { recallComboForLane } from "./combo-session-recall";
 import { sessionLaneIdFromRequest } from "../request-log-conversation";
 import { isLocalCompactionCheckpoint } from "../../responses/compaction-history-framing";
@@ -114,7 +114,7 @@ export function applyCompactionRoutingOverride(
  * virtual selector (`alias--fast`) slips past them.
  */
 function sourceSelectorOf(config: OcxConfig, sourceModel: string): string {
-  const { fastRow, effortRow } = parseSyntheticRowId(sourceModel, config);
+  const { fastRow, effortRow } = parseClientSyntheticRowId(sourceModel, config);
   return fastRow?.baseId ?? effortRow?.baseId ?? sourceModel;
 }
 
