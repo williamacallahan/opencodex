@@ -323,6 +323,7 @@ export async function resolveResponsesCodexAuth(
         signal: options.abortSignal,
         nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
         retainAccountForUploadedFiles,
+        poolCapacityIntent: options.poolCapacityIntent,
       });
       options.onCodexAuthContextResolved?.(authCtx);
     } else {

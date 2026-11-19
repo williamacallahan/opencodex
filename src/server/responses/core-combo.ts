@@ -127,6 +127,10 @@ import {
   markEagerRelaySseResponse,
 } from "../relay";
 import { preflightComboStreamResponse } from "./combo-stream-preflight";
+import { planLunaReserveLegs, relayProvedNotStarted } from "./combo-luna-legs";
+import { CODEX_TURN_STATE_HEADER } from "../../codex/forward-transport-headers";
+import { canPortConversationState, collectConversationStateCarriers } from "./account-change-state";
+import type { PoolCapacityIntent } from "../../codex/pool-reserve";
 import { requiredToolContractOf } from "./combo-required-tool-contract";
 import {
   streamingContextOverflowResponse,
@@ -450,9 +454,6 @@ export async function executeComboResponses(
   // counter, but nothing read it as a limit across targets -- while its transition and
   // alternate-target ledgers come from the target list rather than from the single-target
   // account-move profile (#4546).
-  const comboSendScope = isRequestExecutionBudget(options.sendBudget)
-    ? deriveSendBudgetScope(options.sendBudget, comboExecutionBudgetPolicy(combo.targets.length))
-    : undefined;
   // Expand previous_response_id before image policy and child dispatch so a
   // continuation that only references prior images still fails closed when
   // imageInput is disabled (and so targets see the full replayed input).
@@ -632,6 +633,22 @@ export async function executeComboResponses(
     && (protocolLanes?.pickable(target) ?? true);
   const targetEligible = (target: (typeof combo.targets)[number]): boolean =>
     payloadEligible(target) && recoveryEligible(target);
+  // Native Reserve -> codex-lb -> native ordinary Luna applies only to a turn any ChatGPT pool seat or relay can
+  // take: any account-bound carrier (continuation id, provider conversation, uploaded file, encrypted reasoning,
+  // turn state in a header or the body) keeps today's order.
+  const lunaLegs = options.protocolSource ? undefined : planLunaReserveLegs(config, combo, () => {
+    const metadata = isPlainObject(rawBody) ? rawBody.client_metadata : undefined;
+    return !unreadableEncryptedAgentTask && !req.headers.has(CODEX_TURN_STATE_HEADER)
+      && !(isPlainObject(metadata) && CODEX_TURN_STATE_HEADER in metadata)
+      && canPortConversationState(collectConversationStateCarriers(rawBody)).portable;
+  }, target => {
+    try { return routeConcreteModel(config, `${target.provider}/${target.model}`); } catch { return undefined; }
+  }, targetEligible);
+  let lunaStage: "off" | "reserve" | "relay" | "done" = "off";
+  const comboLegCount = lunaLegs?.legCount ?? combo.targets.length;
+  const comboSendScope = isRequestExecutionBudget(options.sendBudget)
+    ? deriveSendBudgetScope(options.sendBudget, comboExecutionBudgetPolicy(comboLegCount))
+    : undefined;
   const onlyReplayIncompatibleTargetsRemain = (excluded: Iterable<string> = []): boolean => {
     const excludedKeys = new Set(excluded);
     const remaining = combo.targets.filter(target => {
@@ -1021,6 +1038,10 @@ export async function executeComboResponses(
   while (pick) {
     if (options.abortSignal?.aborted) return clientCancelledResponse();
     const firstComboTarget = comboTargetsDispatched === 0;
+    const legTargetKey = targetKey(pick.target);
+    if (lunaLegs && firstComboTarget && legTargetKey === lunaLegs.nativeKey) lunaStage = "reserve";
+    const legIntent: PoolCapacityIntent | undefined = legTargetKey !== lunaLegs?.nativeKey ? undefined
+      : lunaStage === "reserve" ? "reserve-only" : lunaStage === "done" ? "ordinary-only" : undefined;
     // The physical destination after provider aliases and blockedModelRedirects: hops are
     // classified by where the request really goes, not by the selector the combo names.
     const targetRoute = routeConcreteModel(config, `${pick.target.provider}/${pick.target.model}`);
@@ -1076,7 +1097,7 @@ export async function executeComboResponses(
     }
     // Derive the target's allowance before booking its initial send; the booking occupies it.
     const targetSendBudget = comboSendScope
-      ? comboTargetSendBudget(comboSendScope, combo.targets.length - 1 - comboTargetsDispatched)
+      ? comboTargetSendBudget(comboSendScope, comboLegCount - 1 - comboTargetsDispatched)
       : options.sendBudget;
     // Every target prepays one send. Only its child may consume that booking; later targets
     // remain bounded by the shared total, transition ledger and per-target holdback.
@@ -1289,6 +1310,7 @@ export async function executeComboResponses(
         comboDispatchPermit: hopDecision?.allowed ? hopDecision.permit : undefined,
         comboReplaySnapshot,
         deferCodexResetDerivedCooldown,
+        poolCapacityIntent: legIntent,
         onBridgeUsageBound: () => {
           childUsageBound = true;
           forwardChildUsage();
@@ -1459,7 +1481,8 @@ export async function executeComboResponses(
     toolChoiceRefusalsOnly = (toolChoiceRefusalsOnly ?? true) && isMandatoryToolChoiceRefusal(failure.response);
     // A real target failure ends the session pin; the next turn is decided afresh (#7525).
     jevPin?.forget();
-    if (!quotaFailure && (lastFailure.status === 429 || lastFailure.status === 402)) {
+    // A strict Reserve refusal is this leg's own typed answer, not the ladder's quota evidence.
+    if (!quotaFailure && legIntent !== "reserve-only" && (lastFailure.status === 429 || lastFailure.status === 402)) {
       quotaFailure = lastFailure;
       quotaFailedChildLog = childLog;
     }
@@ -1564,8 +1587,9 @@ export async function executeComboResponses(
         + ` after ${Date.now() - started}ms${failureReason ? `: ${failureReason}` : ""}`,
     );
     const failureNow = Date.now();
-    const attemptedTargets = pick.attempted;
-    const failureCooldownScope = isPolicyCandidateRefusal(failure.response) ? "none" : comboFailureCooldownScope(failure.response.status, failure.classificationText, {
+    const attemptedTargets: string[] = pick.attempted;
+    // The strict Reserve leg never cools the native target: ordinary Luna on it is still untried.
+    const failureCooldownScope = legIntent === "reserve-only" || isPolicyCandidateRefusal(failure.response) ? "none" : comboFailureCooldownScope(failure.response.status, failure.classificationText, {
       code: failure.upstreamCode,
       malformedResponseFormat: failure.malformedResponseFormat,
       openRouterOpaque400: failure.openRouterOpaque400,
@@ -1650,6 +1674,20 @@ export async function executeComboResponses(
       ) {
         pick = await retryAfterCooldown();
       }
+    }
+    if (lunaLegs && failureDecision === "hop"
+      && (lunaStage === "reserve" && failedTargetKey === lunaLegs.nativeKey || lunaStage === "relay" && failedTargetKey === lunaLegs.relayKey)) {
+      // After the strict Reserve leg the relay is next; after the relay, native ordinary Luna is next only on proof the relay never got the turn.
+      const afterReserve: boolean = lunaStage === "reserve";
+      const ordinaryNext = afterReserve ? !pick || targetKey(pick.target) !== lunaLegs.relayKey
+        : relayProvedNotStarted(childLog, attempt.sendCount);
+      lunaStage = afterReserve && pick && targetKey(pick.target) === lunaLegs.relayKey ? "relay" : "done";
+      const ordinaryPick: ComboPick | null = ordinaryNext && !options.abortSignal?.aborted ? await pickWithWait({
+        exclude: attemptedTargets.filter(key => key !== lunaLegs.nativeKey),
+        eligible: target => targetKey(target) === lunaLegs.nativeKey && targetEligible(target),
+        now: failureNow,
+      }) : null;
+      if (ordinaryPick) pick = ordinaryPick;
     }
     if (!pick) {
       if (options.abortSignal?.aborted) return clientCancelledResponse();

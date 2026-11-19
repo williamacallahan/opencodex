@@ -5,6 +5,7 @@ import type { AdapterEvent, OcxUsage, OcxProviderContinuationState, OcxConfig } 
 import type { RouteResult } from "../../router";
 import type { SingleUseDispatchPermit } from "../../lib/request-execution-budget";
 import type { CodexAuthPolicyConfig, CodexAuthContext } from "../../codex/auth-context";
+import type { PoolCapacityIntent } from "../../codex/pool-reserve";
 import type { AdmissionLease } from "../../lib/admission";
 import type { DataPlaneAdmission } from "../auth-cors";
 import type { AdmissionModelScope } from "../admission-model-scope";
@@ -172,6 +173,8 @@ export interface HandleResponsesOptions {
   /** One-shot TTFT callback: first non-empty model output observed (WP4). */
   onFirstOutput?: () => void;
   onCodexAuthContextResolved?: (context: CodexAuthContext | undefined) => void;
+  /** Request-local native Luna capacity; a combo sets it per leg, never config or env. */
+  poolCapacityIntent?: PoolCapacityIntent;
   /** Internal deterministic seam for account-gated native fallback tests. */
   resolveCodexModelEntitlements?: typeof resolveCodexModelEntitlements;
   /** Internal: validated final client-visible model, after completed terminal success only. */

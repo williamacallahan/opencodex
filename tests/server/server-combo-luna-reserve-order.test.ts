@@ -1,0 +1,234 @@
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { OcxConfig } from "../../src/types";
+import { handleResponses } from "../../src/server/responses";
+import { CODEX_RESPONSES_HTTP_URL } from "../../src/server/responses/codex-ws-request";
+import { saveCodexAccountCredential } from "../../src/codex/account-store";
+import { clearAccountQuota, setAccountQuotaFromParsed, updateAccountQuota } from "../../src/codex/quota";
+import { clearCodexUpstreamHealth, clearThreadAccountMap } from "../../src/codex/routing";
+import { clearPoolRotationState } from "../../src/codex/pool-rotation";
+import { clearAccountNeedsReauth } from "../../src/codex/account-runtime-state";
+import { resetQuotaQueryBackoffForTests } from "../../src/codex/quota-query-backoff";
+import { planLunaReserveLegs } from "../../src/server/responses/combo-luna-legs";
+import { clearComboSelectionState, clearComboTargetCooldowns, isComboTargetInCooldown } from "../../src/combos";
+import { clearComboRecallForTests } from "../../src/server/responses/combo-session-recall";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
+import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
+import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { createWebsocketHandler } from "../../src/server/index/websocket-handler";
+import { tryReserveCodexWebSocket } from "../../src/codex/websocket-registry";
+import { buildResponsesWsData, type WsData } from "../../src/server/ws-bridge";
+import type { DataPlaneAdmission } from "../../src/server/auth-cors";
+
+const A = "luna-order-a";
+const B = "luna-order-b";
+const local: DataPlaneAdmission = { kind: "loopback", source: "loopback" };
+let home = "";
+let previousHome: string | undefined;
+let previousCodexHome: string | undefined;
+let release: (() => void) | undefined;
+let now = 0;
+type Call = string;
+let calls: Call[] = [];
+let relay: (request: Request, body: { model: string }) => Response | Promise<Response>;
+let native: (body: { model: string }) => Response | Promise<Response>;
+let metered: () => Response;
+
+function sse(model: string, frames: "ok" | "created-then-fail"): Response {
+  const created = { type: "response.created", response: { id: "resp_1", object: "response", status: "in_progress", model, output: [] } };
+  const body = frames === "ok" ? [created,
+    { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: "hi" },
+    { type: "response.completed", response: { ...created.response, status: "completed", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      output: [{ id: "msg_1", type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "hi", annotations: [] }] }] } }]
+    : [created, { type: "response.failed", response: { ...created.response, status: "failed", error: { code: "server_error", message: "boom" } } }];
+  return new Response(body.map(frame => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+}
+const reserveRefused = () => Response.json({ error: { code: "usage_limit_reached", message: "Limit reached" } }, { status: 429, headers: { "retry-after": "3600" } });
+const refusedConnect = () => { throw Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) }); };
+
+function config(extraProviders: OcxConfig["providers"] = {}, targets?: NonNullable<OcxConfig["combos"]>[string]["targets"]): OcxConfig {
+  return {
+    port: 0, defaultProvider: "openai", codexMainAccountHardLock: false, accountPoolStrategy: "quota", autoSwitchThreshold: 0,
+    activeCodexAccountId: A, creditCodexAccountIds: [],
+    codexAccounts: [A, B].map(id => ({ id, email: `${id}@example.test`, isMain: false, plan: "pro" as const })),
+    providers: {
+      openai: { adapter: "openai-responses", authMode: "forward", baseUrl: "https://chatgpt.com/backend-api/codex", codexAccountMode: "pool" },
+      relay: { adapter: "openai-responses", authMode: "key", apiKey: "relay-key", baseUrl: "https://relay.example.test/backend-api/codex" },
+      metered: { adapter: "openai-responses", authMode: "key", apiKey: "metered-key", baseUrl: "https://metered.example.test/v1" },
+      ...extraProviders,
+    },
+    combos: { luna: { strategy: "failover", allowMeteredTargets: true, targets: targets ?? [
+      { provider: "openai", model: "gpt-6-luna" }, { provider: "relay", model: "gpt-6-luna" },
+      { provider: "metered", model: "gpt-6-luna", metered: true },
+    ] } },
+  };
+}
+/** B is depleted but holds a fresh Reserve grant, A still has included Luna usage. */
+function seats(reserveOnB = true) {
+  updateAccountQuota(A, 40, now + 86_400_000); updateAccountQuota(B, 100, now + 86_400_000);
+  setAccountQuotaFromParsed(B, { customWindows: [{ label: "Luna Reserve", percent: reserveOnB ? 25 : 100, resetAt: now + 604_800_000, observedAt: now }] });
+}
+async function post(cfg: OcxConfig, extra: Record<string, unknown> = {}, headers: Record<string, string> = {}, signal?: AbortSignal) {
+  const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST", signal,
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify({ model: "combo/luna", input: "ping", stream: true, prompt_cache_key: "luna-order", ...extra }) }),
+    cfg, { model: "", provider: "" }, { admission: local, ...(signal ? { abortSignal: signal } : {}) });
+  return { status: response.status, text: await response.text() };
+}
+
+beforeEach(() => {
+  previousHome = process.env.OPENCODEX_HOME; previousCodexHome = process.env.CODEX_HOME;
+  home = mkdtempSync(join(tmpdir(), "ocx-luna-order-"));
+  process.env.OPENCODEX_HOME = home; process.env.CODEX_HOME = home;
+  now = Date.now(); spyOn(Date, "now").mockImplementation(() => now);
+  const acl = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+  setIcaclsRunnerForTests(() => acl); setAsyncIcaclsRunnerForTests(async () => acl);
+  release = acquireOwnedSpendHome();
+  clearAccountQuota(); clearCodexUpstreamHealth(); clearThreadAccountMap(); clearPoolRotationState(); resetQuotaQueryBackoffForTests();
+  clearComboSelectionState(); clearComboRecallForTests(); clearComboTargetCooldowns();
+  for (const id of [A, B]) {
+    clearAccountNeedsReauth(id);
+    saveCodexAccountCredential(id, { accessToken: `fixture-access-${id}`, refreshToken: `fixture-refresh-${id}`,
+      chatgptAccountId: `fixture-workspace-${id}`, expiresAt: now + 86_400_000 });
+  }
+  clearAccountNeedsReauth("__main__");
+  calls = [];
+  native = body => sse(body.model, "ok");
+  relay = () => sse("gpt-6-luna", "ok");
+  metered = () => sse("gpt-6-luna", "ok");
+  spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const body = await request.clone().json() as { model: string };
+    if (request.url === CODEX_RESPONSES_HTTP_URL) { calls.push(`native:${body.model}`); return native(body); }
+    if (request.url.startsWith("https://relay.example.test")) { calls.push(`relay:${body.model}`); return relay(request, body); }
+    if (request.url.startsWith("https://metered.example.test")) { calls.push(`metered:${body.model}`); return metered(); }
+    throw new Error(`unexpected upstream ${request.url}`);
+  }, { preconnect() {} }));
+});
+afterEach(async () => {
+  mock.restore(); release?.(); release = undefined;
+  clearAccountQuota(); clearCodexUpstreamHealth(); clearThreadAccountMap(); clearPoolRotationState(); resetQuotaQueryBackoffForTests();
+  clearComboSelectionState(); clearComboRecallForTests(); clearComboTargetCooldowns();
+  await flushConfigDirHardeningForTests(); setIcaclsRunnerForTests(null); setAsyncIcaclsRunnerForTests(null);
+  if (previousHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = previousHome;
+  if (previousCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousCodexHome;
+  removeTreeWithRetry(home);
+});
+
+describe("combo Luna leg order: native Reserve, relay, native ordinary, metered", () => {
+  test("a Reserve refusal moves to the relay, and a relay pre-connect failure moves to native ordinary Luna", async () => {
+    seats(); native = body => body.model === "gpt-reserve" ? reserveRefused() : sse(body.model, "ok");
+    relay = refusedConnect;
+    const result = await post(config());
+    expect(result.status).toBe(200);
+    expect(calls).toEqual(["native:gpt-reserve", "relay:gpt-6-luna", "native:gpt-6-luna"]);
+  });
+  test("a Reserve refusal does not cool the native target, so ordinary Luna on it stays available", async () => {
+    seats(); native = body => body.model === "gpt-reserve" ? reserveRefused() : sse(body.model, "ok");
+    relay = refusedConnect;
+    await post(config());
+    expect(isComboTargetInCooldown("luna", { provider: "openai", model: "gpt-6-luna" })).toBe(false);
+  });
+  test("with no eligible Reserve seat the native leg sends nothing and the relay serves the turn", async () => {
+    seats(false);
+    const result = await post(config());
+    expect(result.status).toBe(200);
+    expect(calls).toEqual(["relay:gpt-6-luna"]);
+  });
+  test("a relay success stops the ladder", async () => {
+    seats(); native = body => body.model === "gpt-reserve" ? reserveRefused() : sse(body.model, "ok");
+    expect((await post(config())).status).toBe(200);
+    expect(calls).toEqual(["native:gpt-reserve", "relay:gpt-6-luna"]);
+  });
+  test("an ambiguous relay 503 skips native ordinary Luna and falls through to the metered target as before", async () => {
+    seats(false); relay = () => Response.json({ error: { message: "bad gateway" } }, { status: 503 });
+    await post(config());
+    expect(calls).not.toContain("native:gpt-6-luna");
+    expect(calls.at(-1)).toBe("metered:gpt-6-luna");
+  });
+  test("a relay turn that already started never replays on native ordinary Luna", async () => {
+    seats(false); relay = () => sse("gpt-6-luna", "created-then-fail");
+    await post(config());
+    expect(calls).not.toContain("native:gpt-6-luna");
+  });
+  test("a relay 200 JSON failure is the client's answer, never silently replayed", async () => {
+    seats(false);
+    relay = () => Response.json({ id: "resp_1", object: "response", status: "failed", error: { code: "server_error", message: "boom" }, output: [] });
+    await post(config());
+    expect(calls).toEqual(["relay:gpt-6-luna"]);
+  });
+  test("a caller abort during the relay never dispatches native ordinary Luna", async () => {
+    seats(false);
+    const controller = new AbortController();
+    relay = request => new Promise<Response>((_resolve, reject) => {
+      controller.abort();
+      request.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+      reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+    });
+    await post(config(), {}, {}, controller.signal).catch(() => undefined);
+    expect(calls).toEqual(["relay:gpt-6-luna"]);
+  });
+  test("a turn-state handle keeps today's routing: native serves ordinary Luna and the relay is untouched", async () => {
+    seats(false);
+    const result = await post(config(), {}, { "x-codex-turn-state": "opaque" });
+    expect(result.status).toBe(200);
+    expect(calls).toEqual(["native:gpt-6-luna"]);
+  });
+  test("a continuation of a stored response keeps today's routing and stays with native", async () => {
+    seats(false);
+    expect((await post(config())).status).toBe(200);
+    expect(calls).toEqual(["relay:gpt-6-luna"]);
+    calls.length = 0;
+    expect((await post(config(), { previous_response_id: "resp_1" })).status).toBe(200);
+    expect(calls).toEqual(["native:gpt-6-luna"]);
+  });
+  test.each([
+    ["encrypted reasoning in the input", { input: [{ type: "reasoning", id: "rs_1", summary: [], encrypted_content: "opaque-cipher" }, { role: "user", content: "ping" }] }],
+    ["a turn-state handle in client_metadata", { client_metadata: { "x-codex-turn-state": "opaque" } }],
+    ["an uploaded file reference", { input: [{ role: "user", content: [{ type: "input_file", file_id: "file_1" }] }] }],
+  ])("%s keeps today's order: native serves ordinary Luna and the relay is untouched", async (_name, extra) => {
+    seats(false);
+    expect((await post(config(), extra)).status).toBe(200);
+    expect(calls).toEqual(["native:gpt-6-luna"]);
+  });
+  test("a non-codex-lb Luna endpoint is not treated as the relay", async () => {
+    seats(false);
+    const cfg = config({ relay: { adapter: "openai-responses", authMode: "key", apiKey: "k", baseUrl: "https://relay.example.test/v1" } });
+    expect((await post(cfg)).status).toBe(200);
+    expect(calls).toEqual(["native:gpt-6-luna"]);
+  });
+  test("a non-Luna failover combo costs no extra route resolution", () => {
+    const targets = Array.from({ length: 30 }, (_, index) => ({ provider: "openai", model: `gpt-6-sol-${index}` }));
+    const cfg = config({}, targets);
+    const resolve = mock(() => undefined);
+    const plan = planLunaReserveLegs(cfg, { ...cfg.combos!.luna!, targets } as never, () => true, resolve, () => true);
+    expect(plan).toBeUndefined();
+    expect(resolve).not.toHaveBeenCalled();
+  });
+  test("a combo whose native target is not Luna keeps its configured order", async () => {
+    seats(); native = () => reserveRefused();
+    const cfg = config({}, [{ provider: "openai", model: "gpt-6-sol" }, { provider: "relay", model: "gpt-6-sol" }]);
+    await post(cfg);
+    expect(calls.map(call => call.split(":")[0])).toEqual(["native", "relay"]);
+  });
+  test("WebSocket frames follow the same order", async () => {
+    seats(); native = body => body.model === "gpt-reserve" ? reserveRefused() : sse(body.model, "ok");
+    relay = refusedConnect;
+    const handler = createWebsocketHandler({ config: config(), deps: {} } as Parameters<typeof createWebsocketHandler>[0]);
+    const server = Bun.serve<WsData>({ hostname: "127.0.0.1", port: 0, websocket: handler,
+      fetch(req, srv) { return srv.upgrade(req, { data: buildResponsesWsData(new Headers(), local, tryReserveCodexWebSocket() ?? undefined) }) ? undefined : new Response("upgrade failed", { status: 400 }); } });
+    const ws = new WebSocket(String(server.url).replace("http:", "ws:"));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("websocket deadline")), 8000);
+        ws.onopen = () => ws.send(JSON.stringify({ type: "response.create", model: "combo/luna", input: "ping" }));
+        ws.onerror = () => { clearTimeout(timer); reject(new Error("websocket failed")); };
+        ws.onmessage = event => { if (String(event.data).includes("response.completed")) { clearTimeout(timer); resolve(); } };
+      });
+    } finally { ws.close(); await server.stop(true); }
+    expect(calls).toEqual(["native:gpt-reserve", "relay:gpt-6-luna", "native:gpt-6-luna"]);
+  });
+});

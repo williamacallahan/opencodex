@@ -19,7 +19,7 @@ import { codexFailureWindowOutcomeMeta } from "../../src/codex/routing/failure-w
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import {
   resolveCodexAuthContext, applyCodexAuthContextToProvider, materializeCodexUpstreamAuth,
-  createCodexAuthDispatchGuard, CodexAccountCooldownError, CodexPoolExhaustedError, CodexPoolAccountCreditsOffError, cooldownErrorResponse,
+  createCodexAuthDispatchGuard, CodexAccountCooldownError, CodexReserveUnavailableError, CodexPoolExhaustedError, CodexPoolAccountCreditsOffError, cooldownErrorResponse,
 } from "../../src/codex/auth-context";
 import { createResponsesPassthroughAdapter } from "../../src/adapters/openai-responses";
 import { prepareCodexWsRequest, CODEX_RESPONSES_HTTP_URL } from "../../src/server/responses/codex-ws-request";
@@ -709,6 +709,80 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
         expect(sentModel).toBe(state === "ordinary" ? "gpt-6-luna" : "gpt-reserve");
         expect(sentAccount).toBe(`fixture-workspace-${state === "ordinary" ? A : B}`);
       }
+    } finally { release(); }
+  });
+});
+
+describe("request-local native Luna capacity intent", () => {
+  const strict = { modelId: "gpt-6-luna", poolCapacityIntent: "reserve-only" } as const;
+  const resolve = (cfg: OcxConfig, extra: Partial<Parameters<typeof resolveCodexAuthContext>[3]> = {}) =>
+    resolveCodexAuthContext(new Headers(), cfg, "pool", { ...strict, ...extra });
+  test("reserve-only refuses with a typed error when no seat can serve Reserve, where no intent still serves ordinary Luna", async () => {
+    ordinary(A, 40); noReserve(B);
+    await expect(resolve(config())).rejects.toBeInstanceOf(CodexReserveUnavailableError);
+    await expect(resolve(config())).rejects.toThrow("nothing was sent");
+    const unchanged = await build();
+    expect(unchanged.ctx.accountId).toBe(A);
+    expect(JSON.parse(unchanged.request.body).model).toBe("gpt-6-luna");
+  });
+  test("a refused trial leaves reserve-only refusing while ordinary Luna keeps serving", async () => {
+    ordinary(A, 40);
+    const cfg = config();
+    const trial = await resolve(cfg);
+    expect(trial.kind === "pool" && trial.accountId === B && trial.poolReserve === true).toBe(true);
+    recordCodexUpstreamOutcome(cfg, B, 429, { ...codexFailureWindowOutcomeMeta(trial), modelId: "gpt-6-luna", now, retryAfter: "3600" });
+    await expect(resolve(cfg)).rejects.toBeInstanceOf(CodexReserveUnavailableError);
+    expect((await build(cfg)).ctx.accountId).toBe(A);
+  });
+  test("the bounded alternate selects only a verified Reserve seat, never ordinary Luna or a discovery trial", async () => {
+    const cfg = config();
+    const third = "pool-reserve-c";
+    cfg.codexAccounts!.push({ id: third, email: "c@example.test", isMain: false, plan: "pro" });
+    saveCodexAccountCredential(third, { accessToken: "access-c", refreshToken: "refresh-c",
+      chatgptAccountId: `fixture-workspace-${third}`, expiresAt: now + 86_400_000 });
+    ordinary(third, 40);
+    // B is depleted with no reported grant: unverified, and the alternate may not explore it.
+    await expect(resolve(cfg, { excludeAccountId: A, verifiedPoolReserveOnly: true })).rejects.toBeInstanceOf(CodexReserveUnavailableError);
+    reserve(B);
+    const moved = await resolve(cfg, { excludeAccountId: A, verifiedPoolReserveOnly: true });
+    expect(moved.kind === "pool" && moved.accountId === B && moved.poolReserve === true).toBe(true);
+  });
+  test("a grant lost between selection and send fails closed instead of spending ordinary Luna", async () => {
+    reserve(); noReserve(A);
+    const cfg = config();
+    const ctx = await resolve(cfg);
+    const guard = createCodexAuthDispatchGuard(ctx, cfg, "gpt-6-luna")!;
+    setAccountQuotaFromParsed(B, { customWindows: [] });
+    expect(() => guard(new Headers())).toThrow(CodexAccountCooldownError);
+  });
+  test("ordinary-only never takes Reserve even when a verified grant exists", async () => {
+    reserve(); ordinary(A, 40);
+    const ctx = await resolve(config(), { poolCapacityIntent: "ordinary-only" });
+    expect(ctx.kind === "pool" && ctx.accountId === A && ctx.poolReserve !== true).toBe(true);
+  });
+  test("a caller-owned main credential cannot stand in for the strict Reserve leg", async () => {
+    ordinary(A, 40); noReserve(B);
+    const cfg = config(); cfg.pausedCodexAccountIds = [A, B];
+    const headers = new Headers({ authorization: "Bearer caller-owned-main", "chatgpt-account-id": "caller-workspace" });
+    const callerOwned = { modelId: "gpt-6-luna", requestScopedMainCredential: true } as const;
+    const resolved = await resolveCodexAuthContext(headers, cfg, "pool", callerOwned);
+    expect(resolved.kind).toBe("main");
+    await expect(resolveCodexAuthContext(headers, cfg, "pool", { ...callerOwned, poolCapacityIntent: "reserve-only" }))
+      .rejects.toBeInstanceOf(CodexReserveUnavailableError);
+  });
+  test("over HTTP a reserve-only leg with no eligible Reserve seat reaches no upstream", async () => {
+    ordinary(A, 40); noReserve(B);
+    const cfg = config(); cfg.providers.openai = { ...base, codexAccountMode: "pool" };
+    const fetched = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => Response.json({}), { preconnect() {} }));
+    const release = acquireOwnedSpendHome();
+    try {
+      const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "openai/gpt-6-luna", input: "ping", stream: false }) }), cfg,
+      { model: "", provider: "" }, { poolCapacityIntent: "reserve-only" });
+      expect(response.status).toBe(429);
+      expect((await response.json()).error.message).toContain("nothing was sent");
+      expect(fetched).not.toHaveBeenCalled();
     } finally { release(); }
   });
 });

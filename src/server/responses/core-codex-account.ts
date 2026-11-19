@@ -3,6 +3,7 @@ import { CodexInstallationIdUnavailableError } from "../../codex/installation-id
 import { captureAccountAutoPauseAttempt, wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
 import type { OcxConfig, OcxProviderConfig, OcxParsedRequest } from "../../types";
 import type { CodexAuthContext, CodexAuthPolicyConfig } from "../../codex/auth-context";
+import type { PoolCapacityIntent } from "../../codex/pool-reserve";
 import type { CodexUpstreamOutcome } from "../../codex/routing";
 import {
   recordCodexUpstreamOutcome,
@@ -504,6 +505,7 @@ export interface CodexPoolAccountRetryArgs {
     visionDescribeTerminal?: boolean;
     abortSignal?: AbortSignal;
     onCodexAuthContextResolved?: (ctx: CodexAuthContext) => void;
+    poolCapacityIntent?: PoolCapacityIntent;
     deferCodexResetDerivedCooldown?: boolean;
     /** Private Claude bridge pool identity; alternate selection completes it like the first pick. */
     claudeBridgePoolSession?: string;
@@ -796,6 +798,7 @@ export async function retryCodexPoolOnAlternateAccount(
           excludeAccountId: firstAuthCtx.accountId,
           // Spend the one move on verified Reserve or ordinary Luna, not another discovery attempt.
           verifiedPoolReserveOnly: firstAuthCtx.kind === "pool" && firstAuthCtx.poolReserve === true,
+          poolCapacityIntent: options.poolCapacityIntent,
           signal: options.abortSignal,
           admission: options.admission,
           codexAuthPolicy: options.codexAuthPolicy,

@@ -36,6 +36,7 @@ and at dispatch, because a pinned request cannot move after a refusal.
 A Reserve refusal cools only the seat's `reserve` health scope and leaves its shared quota untouched.
 The request's single safe account move (`maxAlternateTargetSends: 1`) prefers another verified Reserve
 seat, then included Luna. It never tries an unknown Reserve seat on that retry.
+A combo leg can set a request-local `PoolCapacityIntent` (`HandleResponsesOptions.poolCapacityIntent`; never config or env). `reserve-only` makes `resolveCodexAuthContext` throw `CodexReserveUnavailableError` (a 429 that sent nothing) unless a seat can serve Reserve, and its bounded alternate takes only a verified Reserve seat; `ordinary-only` never consults Reserve. Without an intent nothing above changes. Coverage: `tests/codex-integration/codex-pool-reserve.test.ts`.
 Before the selector changes scope, `src/codex/auth-context.ts` still adopts a live legacy parent binding onto the current cohort key in the existing quota scope; it decides the seat only when no seat is offerable for Reserve.
 The existing selector still enforces pause, plan, credential, failure-window and account-wide holds.
 Reserve uses its independent quota scope; shared Responses serialization changes only the wire model

@@ -14,6 +14,11 @@ import { canTryUnknownCodexReserve } from "./routing/probe-lease";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers-destination";
 
 const LABEL = "Luna Reserve";
+export const POOL_RESERVE_UNAVAILABLE_MESSAGE = "No Codex pool account can serve Luna Reserve right now; nothing was sent.";
+/** The one model whose ChatGPT pool seats can hold a separate Reserve window. */
+export const modelHasPoolReserve = (modelId: unknown): boolean => modelId === "gpt-6-luna";
+/** Request-local capacity for a native Luna leg: Reserve or nothing, or ordinary Luna without ever consulting Reserve. */
+export type PoolCapacityIntent = "reserve-only" | "ordinary-only";
 // Longer than the 5-minute recovery probe cadence (CODEX_QUOTA_PROBE_INTERVAL_MS), so a grant
 // does not lapse between two scheduled re-reads; a revoked grant still fails closed upstream.
 export const POOL_RESERVE_FRESHNESS_MS = 15 * 60_000;
@@ -99,10 +104,10 @@ export function poolReserveHoldResetAt(accountId: string, now = Date.now()): num
 export function poolLunaReserveSelection(
   config: OcxConfig, modelId: string | undefined, quotaScope: CodexQuotaScope | undefined,
   options: CodexAccountUsabilityOptions, excludeId?: string, affinityKey?: string, now = Date.now(),
-  pinnedAccountId?: string, verifiedOnly = false,
+  pinnedAccountId?: string, verifiedOnly = false, intent?: PoolCapacityIntent,
 ): { options: CodexAccountUsabilityOptions; quotaScope: CodexQuotaScope | undefined; reserve: boolean; discovery?: boolean } {
   const unchanged = { options, quotaScope, reserve: false };
-  if (modelId !== "gpt-6-luna") return unchanged;
+  if (!modelHasPoolReserve(modelId) || intent === "ordinary-only") return unchanged;
   // A pin cannot move after a refusal, so it is offered Reserve only on a fresh reported grant.
   const verified = new Set<string>();
   const unknown = new Set<string>();
@@ -147,6 +152,6 @@ export function poolLunaReserveSelection(
 export function poolReserveWireBody<T>(body: T, provider: OcxRuntimeProviderConfig): T {
   const override = provider._codexAccountOverride;
   if (!override?.poolReserve || !isCanonicalOpenAiForwardProvider(provider)
-    || !body || typeof body !== "object" || !("model" in body) || body.model !== "gpt-6-luna") return body;
+    || !body || typeof body !== "object" || !("model" in body) || !modelHasPoolReserve(body.model)) return body;
   return { ...body, model: NATIVE_RESERVE_MODEL };
 }

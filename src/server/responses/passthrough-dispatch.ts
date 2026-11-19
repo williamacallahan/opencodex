@@ -137,6 +137,7 @@ import { classifyTransportFailureKind, transportErrorCode } from "../../lib/upst
 import { captureAccountAutoPauseAttempt, wasAccountAutoPaused, wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
 import { codexFailureWindowOutcomeMeta, recordCodexUpstreamOutcome } from "../../codex/routing";
 import { describeUpstreamConnectFailure } from "./upstream-error";
+import { markUpstreamNotStarted } from "./combo-luna-legs";
 import type { OpaqueBlobRecoveryGuard } from "./core-opaque-recovery";
 import {
   rateLimitRetryPolicyFor,
@@ -712,6 +713,7 @@ export async function preparePassthroughExchange(
       }
       nativeHostState.lease = admission.lease;
     }
+    const releaseHostLease = (): void => { releaseUpstreamHostAdmission(nativeHostState.lease); nativeHostState.lease = null; };
     const settleObservedHostResponse = (): void => {
       if (hostCircuitEnabled) {
         resetUpstreamHostHealth(actualHostKey, nativeHostState.lease);
@@ -881,8 +883,7 @@ export async function preparePassthroughExchange(
       // it here or one refused body holds translator budget for the process lifetime.
       builtRequest.releaseBodyObservation?.();
       upstream.abort();
-      releaseUpstreamHostAdmission(nativeHostState.lease);
-      nativeHostState.lease = null;
+      releaseHostLease();
       releaseCodexAuthContextProbeLease(refusalAuthCtx);
       logCtx.errorCode = "outbound_body_too_large";
       console.warn(
@@ -909,8 +910,7 @@ export async function preparePassthroughExchange(
       cleanupUpstreamAbort();
       upstream.abort();
       if (options.abortSignal?.aborted || req.signal.aborted) {
-        releaseUpstreamHostAdmission(nativeHostState.lease);
-        nativeHostState.lease = null;
+        releaseHostLease();
         releaseCodexAuthContextProbeLease(admissionState.authCtx);
         return clientCancelledResponse();
       }
@@ -919,8 +919,7 @@ export async function preparePassthroughExchange(
       // 502 upstream_error would blame the provider for a limit this process applied, and
       // would record a fake reachability failure against the account's health.
       if (err instanceof SendBudgetExhaustedError) {
-        releaseUpstreamHostAdmission(nativeHostState.lease);
-        nativeHostState.lease = null;
+        releaseHostLease();
         releaseCodexAuthContextProbeLease(admissionState.authCtx);
         return unboundPoolSpendRefusalResponse(logCtx)
           ?? markProxyError(formatErrorResponse(429, "request_send_budget_exhausted", err.message));
@@ -932,16 +931,14 @@ export async function preparePassthroughExchange(
       }
       const dispatchRefusal = requestPacingOverloadResponse(refusal) ?? copilotRefusalResponse(refusal);
       if (dispatchRefusal) {
-        releaseUpstreamHostAdmission(nativeHostState.lease);
-        nativeHostState.lease = null;
+        releaseHostLease();
         releaseCodexAuthContextProbeLease(admissionState.authCtx);
         return dispatchRefusal;
       }
       // Pacing may outlive the selected account's admission. No fetch occurred, so do
       // not turn an operator pause into a 502 or charge it to host/account health.
       if (refusal instanceof OAuthAccountPausedError || refusal instanceof OAuthLoginRequiredError || refusal instanceof AnthropicAccountCooldownError) {
-        releaseUpstreamHostAdmission(nativeHostState.lease);
-        nativeHostState.lease = null;
+        releaseHostLease();
         releaseCodexAuthContextProbeLease(admissionState.authCtx);
         if (refusal instanceof OAuthLoginRequiredError) {
           return markProxyError(formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(refusal)), publicOAuthErrorPresentation(refusal));
@@ -955,8 +952,7 @@ export async function preparePassthroughExchange(
         now: Date.now(), accountSelector: route.codexAccountNamespace,
       });
       if (localRefusal) {
-        releaseUpstreamHostAdmission(nativeHostState.lease);
-        nativeHostState.lease = null;
+        releaseHostLease();
         releaseCodexAuthContextProbeLease(admissionState.authCtx);
         return localRefusal;
       }
@@ -965,6 +961,7 @@ export async function preparePassthroughExchange(
       // forward send has no pool accounting, but the reachability failure is
       // still host-wide, not account evidence (#914 review).
       if (outcome === "connect_neutral") {
+        markUpstreamNotStarted(logCtx);
         if (hostCircuitEnabled) {
           recordUpstreamHostFailure(actualHostKey, {
             code: transportErrorCode(err),
@@ -976,8 +973,7 @@ export async function preparePassthroughExchange(
         }
         nativeHostState.lease = null;
       } else {
-        releaseUpstreamHostAdmission(nativeHostState.lease);
-        nativeHostState.lease = null;
+        releaseHostLease();
       }
       if (usesCodexForwardPoolAuth(admissionState.authCtx, route.provider)) {
         recordCodexUpstreamOutcome(config, admissionState.authCtx.accountId, outcome, {

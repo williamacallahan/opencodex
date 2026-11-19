@@ -303,3 +303,23 @@ ordinary failover by supplying the same header. The wire body remains `rate_limi
 The message says no additional provider request was sent when the current request already has
 physical sends; an admission refusal before its first send retains the no-provider wording.
 Coverage: `tests/responses/chat-native-spend.test.ts` and `tests/responses/responses-spend-contract-c.test.ts`.
+
+## Luna Reserve leg order
+
+`src/server/responses/combo-luna-legs.ts` plans one extra native leg for a `failover` combo whose native
+ChatGPT pool target (`codexAccountMode: "pool"`, a model with `modelHasPoolReserve`) is directly followed by a
+non-metered codex-lb target (`isCodexLbProvider`) on a Reserve-capable model. Combos with no such model id are
+ruled out before any route is resolved. A portable turn dispatches native with `reserve-only`, then codex-lb
+(sent ordinary `gpt-6-luna`, so its own pool prefers its Reserve), then native with `ordinary-only`, then the
+remaining targets; the extra leg is counted in the shared send budget. Portable means no account-bound carrier
+by `canPortConversationState` (continuation id, provider conversation, uploaded file, encrypted reasoning), no
+turn state in the `x-codex-turn-state` header or `client_metadata`, no unreadable encrypted agent task and no
+protocol source. Any other turn, and any other combo, keeps its configured order.
+The `reserve-only` leg never cools the native target and is not quota evidence for the ladder. In
+`resolveCodexAuthContext` it refuses with a zero-send `CodexReserveUnavailableError` unless a stored pool seat
+can serve Reserve; caller-owned or native main credentials and Direct mode never stand in for it.
+Native ordinary Luna follows a codex-lb failure only when the relay provably never received the turn: no
+physical send was counted, or the transport marked a pre-connect failure (`connect_neutral`,
+`markUpstreamNotStarted`). A timeout, 5xx, any started stream, an accepted non-stream body such as a 200 JSON
+`response.failed`, or a caller abort never reaches native ordinary; later targets follow the existing rules.
+Coverage: `tests/server/server-combo-luna-reserve-order.test.ts`.

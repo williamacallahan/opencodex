@@ -6,7 +6,7 @@ import type { OcxRuntimeProviderConfig } from "./auth-context-provider";
 export type { OcxRuntimeProviderConfig } from "./auth-context-provider";
 export { stripCodexRuntimeProviderFields } from "./auth-context-provider";
 import { bindPoolCreditPolicy, poolCreditHoldResetAt, poolContextCreditHoldResetAt, poolCreditRecoveryNeeded, poolContextCreditRecoveryNeeded, poolCreditRecoveryRetryAt, poolUnavailableUntilKnownHorizon } from "./pool-credit-policy";
-import { hasFreshPoolReserve, hasVerifiedPoolReserve, poolLunaReserveSelection } from "./pool-reserve";
+import { hasFreshPoolReserve, hasVerifiedPoolReserve, poolLunaReserveSelection, modelHasPoolReserve, POOL_RESERVE_UNAVAILABLE_MESSAGE, type PoolCapacityIntent } from "./pool-reserve";
 import { adoptLegacyLineageAffinity } from "./routing/thread-affinity";
 import { nextQuotaQueryDelay } from "./quota-query-backoff";
 import { noteMainAccountActivity } from "./main-account-external-usage";
@@ -572,10 +572,10 @@ export class CodexMainAccountCreditsOffError extends CodexAccountCooldownError {
 }
 
 export class CodexReserveUnavailableError extends CodexAccountCooldownError {
-  constructor() {
+  constructor(message?: string) {
     super(MAIN_CODEX_ACCOUNT_ID, 0);
     this.name = "CodexReserveUnavailableError";
-    this.message = "Codex Reserve is unavailable for this main credential."
+    this.message = message ?? "Codex Reserve is unavailable for this main credential."
       + " Use the stored main login or its matching caller credential, and retry when OpenAI grants Reserve access."
       + " Reserve compatibility requires the effective local Desktop authless opt-in; it cannot switch accounts automatically.";
   }
@@ -1016,6 +1016,8 @@ export interface ResolveCodexAuthContextOptions {
   excludeAccountId?: string;
   /** The one account retry may use verified Reserve, but cannot discover an unknown seat. */
   verifiedPoolReserveOnly?: boolean;
+  /** Set per combo leg: `reserve-only` refuses before any send when no seat can serve Reserve. */
+  poolCapacityIntent?: PoolCapacityIntent;
   /** Resolve exactly this account without consulting or mutating Pool selection. */
   accountId?: string;
   /** Final native model selected for this request, used to select its quota group. */
@@ -1161,6 +1163,8 @@ async function resolveCodexAuthContextUnannotated(
     throw new CodexReserveUnavailableError();
   }
   const fixedAccountId = reserve ? MAIN_CODEX_ACCOUNT_ID : options.accountId;
+  // A strict Reserve leg is served by a stored pool seat or refused: no caller-owned or native main credential stands in.
+  if (options.poolCapacityIntent === "reserve-only" && (mode !== "pool" || requestScopedMainCredential || fixedAccountId === MAIN_CODEX_ACCOUNT_ID || !modelHasPoolReserve(options.modelId))) throw new CodexReserveUnavailableError(POOL_RESERVE_UNAVAILABLE_MESSAGE);
   // #7410: automatic Pool resolution under `codexPool.poolOnly` never serves native main. Explicit
   // selectors (fixed account, Reserve) and Direct mode are operator choices outside the policy.
   // Read from the routing config, the same object the shared usability decision reads.
@@ -1440,11 +1444,12 @@ async function resolveCodexAuthContextUnannotated(
     // The native main login keeps its own per-request Reserve authorization, so only stored seats take part here.
     const reserveModelId = !requestScopedMainCredential && fixedAccountId !== MAIN_CODEX_ACCOUNT_ID ? options.modelId : undefined;
     const poolSelection = poolLunaReserveSelection(config, reserveModelId,
-      quotaScope, selectionOptions, options.excludeAccountId, affinityKey, Date.now(), fixedAccountId, options.verifiedPoolReserveOnly);
+      quotaScope, selectionOptions, options.excludeAccountId, affinityKey, Date.now(), fixedAccountId, options.verifiedPoolReserveOnly, options.poolCapacityIntent);
     selectionOptions = poolSelection.options;
     quotaScope = poolSelection.quotaScope;
     poolReserve = poolSelection.reserve;
     reserveDiscovery = poolSelection.discovery === true;
+    if (options.poolCapacityIntent === "reserve-only" && !poolReserve) throw new CodexReserveUnavailableError(POOL_RESERVE_UNAVAILABLE_MESSAGE);
     // A pre-drain selector reserves the native identity while reconciliation and
     // routing inspect it. Selectors arriving after the fence skip reconciliation
     // and may still route to non-main pool accounts without touching switch state.
@@ -1715,6 +1720,22 @@ async function resolveCodexAuthContextUnannotated(
     if (!probeLeaseId) throw new CodexPoolAuthenticationError("Luna Reserve trial is already in use");
   }
 
+  const releaseSelectionGrants = (): void => {
+    releaseTransientProbeGrant();
+    if (probeLeaseId && probeQuotaScope) releaseCodexQuotaScopeProbeLease(accountId, probeQuotaScope, probeLeaseId);
+    else if (probeLeaseId) releaseCodexQuotaProbeLease(accountId, probeLeaseId);
+  };
+  const selectedBindings = () => ({
+    ...(fixedAccountId !== undefined ? { fixedAccount: true } : {}),
+    ...(affinityKey ? { affinityKey } : {}),
+    ...(conversationStateKey ? { conversationStateKey } : {}),
+    ...(quotaScope ? { quotaScope } : {}),
+    ...(probeLeaseId ? { probeLeaseId } : {}),
+    ...(probeQuotaScope ? { probeQuotaScope } : {}),
+    ...(affinityDecision ? { affinityDecision } : {}),
+    ...(transientProbe ? { transientProbe } : {}),
+  });
+
   if (accountId === MAIN_CODEX_ACCOUNT_ID) {
     // Main account in rotation: refresh auth.json before upstream I/O and fail closed if it vanished.
     let token: { accessToken: string; chatgptAccountId: string } | null;
@@ -1727,9 +1748,7 @@ async function resolveCodexAuthContextUnannotated(
       if (token) mainQuotaWriter = observeSelectedMainCredential(token, mainQuotaWriter);
       assertMainAccountPolicy(policy);
     } catch (cause) {
-      releaseTransientProbeGrant();
-      if (probeLeaseId && probeQuotaScope) releaseCodexQuotaScopeProbeLease(accountId, probeQuotaScope, probeLeaseId);
-      else if (probeLeaseId) releaseCodexQuotaProbeLease(accountId, probeLeaseId);
+      releaseSelectionGrants();
       // Policy refusals, including one that lands while the token refresh was in flight, are not
       // authentication failures: they must stay reset-bound 429s and never mark a valid login.
       if (cause instanceof CodexMainAccountHardLockError || cause instanceof CodexMainAccountCreditsOffError) throw cause;
@@ -1740,9 +1759,7 @@ async function resolveCodexAuthContextUnannotated(
     }
     if (!token) {
       // Nothing will reach upstream, so give the probe back instead of burning it.
-      releaseTransientProbeGrant();
-      if (probeLeaseId && probeQuotaScope) releaseCodexQuotaScopeProbeLease(accountId, probeQuotaScope, probeLeaseId);
-      else if (probeLeaseId) releaseCodexQuotaProbeLease(accountId, probeLeaseId);
+      releaseSelectionGrants();
       throw new CodexPoolAuthenticationError(
         fixedAccountId !== undefined ? "Selected Codex account is unavailable" : undefined,
       );
@@ -1765,14 +1782,7 @@ async function resolveCodexAuthContextUnannotated(
       ...(reserveAuthorization ? { reserveAuthorization } : {}),
       accessToken: token.accessToken,
       chatgptAccountId: token.chatgptAccountId,
-      ...(fixedAccountId !== undefined ? { fixedAccount: true } : {}),
-      ...(affinityKey ? { affinityKey } : {}),
-      ...(conversationStateKey ? { conversationStateKey } : {}),
-      ...(quotaScope ? { quotaScope } : {}),
-      ...(probeLeaseId ? { probeLeaseId } : {}),
-      ...(probeQuotaScope ? { probeQuotaScope } : {}),
-      ...(affinityDecision ? { affinityDecision } : {}),
-      ...(transientProbe ? { transientProbe } : {}),
+      ...selectedBindings(),
     };
   }
 
@@ -1790,19 +1800,10 @@ async function resolveCodexAuthContextUnannotated(
       ...(poolReserve ? { poolReserve: true as const } : {}),
       accessToken: token.accessToken,
       chatgptAccountId: token.chatgptAccountId,
-      ...(fixedAccountId !== undefined ? { fixedAccount: true } : {}),
-      ...(affinityKey ? { affinityKey } : {}),
-      ...(conversationStateKey ? { conversationStateKey } : {}),
-      ...(quotaScope ? { quotaScope } : {}),
-      ...(probeLeaseId ? { probeLeaseId } : {}),
-      ...(probeQuotaScope ? { probeQuotaScope } : {}),
-      ...(affinityDecision ? { affinityDecision } : {}),
-      ...(transientProbe ? { transientProbe } : {}),
+      ...selectedBindings(),
     }, config, policy);
   } catch (cause) {
-    releaseTransientProbeGrant();
-    if (probeLeaseId && probeQuotaScope) releaseCodexQuotaScopeProbeLease(accountId, probeQuotaScope, probeLeaseId);
-    else if (probeLeaseId) releaseCodexQuotaProbeLease(accountId, probeLeaseId);
+    releaseSelectionGrants();
     // Post-refresh eligibility refusals do not invalidate a healthy credential.
     if (cause instanceof CodexPoolAccountCreditsOffError || cause instanceof CodexPoolAuthenticationError) throw cause;
     if (!options.signal?.aborted && shouldMarkAccountNeedsReauthForCodexAuthFailure(cause)) {
@@ -1856,6 +1857,21 @@ function selectedMainQuotaDispatch(selected: Headers): MainQuotaDispatch | undef
   if (!bearer) return undefined;
   const accountId = selected.get("chatgpt-account-id") ?? extractAccountId(undefined, bearer);
   return captureMainQuotaDispatch(bearer, accountId, captureConfigGeneration());
+}
+
+function substitutedMainHeaders(
+  selected: Headers, stored: NonNullable<ReturnType<typeof getMainAccountToken>>,
+  writer: ReturnType<typeof captureObservedMainWriter>, ctx: Extract<CodexAuthContext, { kind: "main" }>, options: CodexAuthMaterializationOptions,
+): Headers {
+  selected.delete("chatgpt-account-id");
+  selected.set("authorization", `Bearer ${stored.accessToken}`);
+  if (stored.chatgptAccountId) selected.set("chatgpt-account-id", stored.chatgptAccountId);
+  selected.delete("x-oai-attestation");
+  observeSelectedMainCredential(stored, writer);
+  assertMainAccountPolicy(options.config);
+  assertMaterializedReserve(selected, ctx, options);
+  ctx.mainQuotaDispatch = selectedMainQuotaDispatch(selected);
+  return selected;
 }
 
 /**
@@ -1919,15 +1935,7 @@ export function materializeCodexUpstreamAuth(
     if (!stored?.accessToken || !isMainAccountTokenLive()) {
       throw new CodexMainSubstitutionUnavailableError();
     }
-    selected.delete("chatgpt-account-id");
-    selected.set("authorization", `Bearer ${stored.accessToken}`);
-    if (stored.chatgptAccountId) selected.set("chatgpt-account-id", stored.chatgptAccountId);
-    selected.delete("x-oai-attestation");
-    observeSelectedMainCredential(stored, writer);
-    assertMainAccountPolicy(options.config);
-    assertMaterializedReserve(selected, ctx, options);
-    ctx.mainQuotaDispatch = selectedMainQuotaDispatch(selected);
-    return selected;
+    return substitutedMainHeaders(selected, stored, writer, ctx, options);
   }
   if (callerMatchesObservedMain(selected)) assertMainAccountPolicy(options.config);
   assertMaterializedReserve(selected, ctx, options);
@@ -2004,16 +2012,8 @@ export async function materializeCodexUpstreamAuthAsync(
     ...(options.nativeMainRefreshDependencies ?? {}),
   });
   if (!stored?.accessToken) throw new CodexMainSubstitutionUnavailableError();
-  selected.delete("chatgpt-account-id");
-  selected.set("authorization", `Bearer ${stored.accessToken}`);
-  if (stored.chatgptAccountId) selected.set("chatgpt-account-id", stored.chatgptAccountId);
-  selected.delete("x-oai-attestation");
-  observeSelectedMainCredential(stored, writer);
-  assertMainAccountPolicy(options.config);
   // An opt-in enabled during token refresh must not turn a proof-less context into Reserve.
-  assertMaterializedReserve(selected, ctx, options);
-  ctx.mainQuotaDispatch = selectedMainQuotaDispatch(selected);
-  return selected;
+  return substitutedMainHeaders(selected, stored, writer, ctx, options);
 }
 
 /** @deprecated Prefer materializeCodexUpstreamAuth; kept for call sites without admission context. */
