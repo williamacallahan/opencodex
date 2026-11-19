@@ -142,8 +142,6 @@ export type CodexUpstreamOutcomeMeta = {
   mainFailureWindowDispatch?: MainQuotaDispatch | null;
   /** Pool sample provenance retained by a terminal callback even if its context is reused. */
   failureWindowCredentialGeneration?: number;
-  /** The upstream finished this turn (a completed or limit-incomplete terminal), not merely accepted it. */
-  servedTurn?: boolean;
 };
 
 export function computeCodexUsageScore(quota: {

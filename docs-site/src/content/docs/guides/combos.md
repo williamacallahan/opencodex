@@ -865,9 +865,10 @@ combo re-decides each user turn by design and keeps only a tool loop on its targ
 session pin is described above.
 
 In a failover combo the pin never outlives your policy: a remembered target that the current
-fallback policy no longer allows from the primary is not kept. For `combo/gpt-6-luna`-style combos this also means a
-conversation keeps its Luna capacity: Reserve-first placement applies to a conversation's first
-turn, not to its later ones.
+fallback policy no longer allows from the primary is not kept. In `combo/gpt-6-luna`-style combos a
+pinned turn skips the combo's Reserve leg plan and keeps its target. On the hub's own ChatGPT pool,
+each Luna turn still asks a seat whose included usage is spent for Luna Reserve first, because
+Reserve is Luna-only capacity while included usage is shared with other models.
 
 Tracking uses the client's thread or session id; a translated Claude Code turn, which sends
 neither, uses its own transcript identity, so each Claude Code conversation and subagent keeps its

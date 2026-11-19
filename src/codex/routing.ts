@@ -4,7 +4,7 @@ import { getEffectiveCodexAutoSwitchThreshold } from "./account-auto-switch";
 import { codexQuotaHasFreshUsage } from "./quota-observation-freshness";
 import { saveConfigPreservingClaudeCode } from "../config";
 import { isCodexAccountGenerationLive, registerCodexRefreshGenerationHandoff } from "./account-store";
-import { handOffThreadAffinityGeneration, noteThreadServed } from "./routing/thread-affinity";
+import { handOffThreadAffinityGeneration } from "./routing/thread-affinity";
 import { codexAccountLogLabel } from "./account-label";
 import { isCodexAccountPaused } from "./account-pause";
 import { clearCodexAccountPin, pinnedCodexAccountId, codexAccountPriorityFailbackEnabled, CODEX_PRIORITY_FAILBACK_REFRESH_MS } from "./account-priority";
@@ -1334,7 +1334,6 @@ export function recordCodexUpstreamOutcome(
         bindThreadAffinity(meta.threadId, accountId, now, quotaScope);
       }
     }
-    if (meta.servedTurn && meta.threadId && meta.modelId && meta.failureWindowCredentialGeneration !== undefined && !meta.fixedAccount && (!meta.poolReserve || meta.reserveServed)) noteThreadServed(meta.threadId, meta.modelId, { accountId, generation: meta.failureWindowCredentialGeneration, capacity: meta.poolReserve ? "reserve" : "included" }, now);
     const current = getAccountHealth(accountId);
     const cooldownUntil = getCodexAccountCooldownUntil(accountId, now);
     // A leased probe that is still on its own cooldown generation proves the

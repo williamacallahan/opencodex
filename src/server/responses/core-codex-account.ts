@@ -1223,7 +1223,6 @@ export function codexForwardTerminalOutcomeRecorder(
       // prior soft-avoid so a healthy account isn't stuck avoided.
       recordCodexUpstreamOutcome(config, authCtx.accountId, 200, {
         ...windowMeta,
-        servedTurn: true,
         threadId: authCtx.affinityKey,
         fixedAccount: authCtx.fixedAccount,
         modelId,
@@ -1250,7 +1249,6 @@ export function codexForwardTerminalOutcomeRecorder(
       ...windowMeta,
       ...(quotaStatus !== undefined && response ? codexQuotaOutcomeMeta(response, terminalQuota?.headers) : {}),
       reserveServed,
-      servedTurn: status === "completed",
       threadId: authCtx.affinityKey,
       fixedAccount: authCtx.fixedAccount,
       modelId,

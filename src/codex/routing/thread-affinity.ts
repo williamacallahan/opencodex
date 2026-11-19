@@ -231,7 +231,6 @@ export function clearThreadAccountMap(options: { preserveConversationStateIssuer
   else recordAllCleared();
   threadAccountMap.clear();
   threadAffinityEntryTotal = 0;
-  threadServes.clear();
   // A refresh cooldown is per-account runtime state learned alongside these bindings. Leaving it
   // behind here keeps an account out of selection after the roster it belonged to is gone.
   clearAllCodexPoolRefreshFailures();
@@ -264,39 +263,6 @@ export function clearThreadAccountMapForAccount(
     }
     if (affinities.size === 0) threadAccountMap.delete(threadId);
   }
-  for (const [key, served] of threadServes) if (served.accountId === accountId) threadServes.delete(key);
-}
-
-/**
- * The pool seat and capacity that completed this thread's last turn of one model. Selection bindings are
- * written before a send and the conversation-state issuer is model-agnostic, so neither proves which seat
- * served a model; only a successful outcome writes this, including one on an alternate seat. The credential
- * generation fences it: a replaced credential under the same seat id is a different account.
- */
-export type ThreadServe = { accountId: string; generation: number; capacity: "included" | "reserve"; servedAt: number };
-const threadServes = new Map<string, ThreadServe>();
-const threadServeKey = (threadId: string, modelId: string): string => `${threadId}\u0000${modelId}`;
-
-export function noteThreadServed(threadId: string, modelId: string, served: Omit<ThreadServe, "servedAt">, now: number): void {
-  const key = threadServeKey(threadId, modelId);
-  const current = threadServes.get(key);
-  if (!isCodexAccountGenerationLive(served.accountId, served.generation)) {
-    // The turn's credential changed while it ran. A refresh already advanced this seat's record, which stays; a
-    // replacement never advances one, so the stale completion writes nothing and erases nothing.
-    if (current?.accountId === served.accountId && current.capacity === served.capacity
-      && isCodexAccountGenerationLive(current.accountId, current.generation)) current.servedAt = now;
-    return;
-  }
-  threadServes.delete(key);
-  const oldest = threadServes.keys().next();
-  if (threadServes.size >= CODEX_THREAD_AFFINITY_MAX_ENTRIES && !oldest.done) threadServes.delete(oldest.value);
-  threadServes.set(key, { ...served, servedAt: now });
-}
-
-export function lastThreadServe(threadId: string, modelId: string, now: number): ThreadServe | undefined {
-  const served = threadServes.get(threadServeKey(threadId, modelId));
-  return served && now - served.servedAt <= CODEX_THREAD_AFFINITY_IDLE_TTL_MS
-    && isCodexAccountGenerationLive(served.accountId, served.generation) ? served : undefined;
 }
 
 function pruneConversationStateIssuers(now: number): void {
@@ -557,8 +523,6 @@ export function handOffThreadAffinityGeneration(
       handedOff = true;
     }
   }
-  // A refresh of the same credential keeps the seat that served; a replacement never reaches this handoff.
-  for (const served of threadServes.values()) if (served.accountId === accountId && served.generation === fromGeneration) served.generation = toGeneration;
   return handedOff;
 }
 

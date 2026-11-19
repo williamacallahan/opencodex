@@ -7,7 +7,6 @@ import { wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
 import { hasResponseMediaType } from "../../lib/http-response-semantics";
 import { routeKnownModels } from "../../usage/log";
 import { NATIVE_RESERVE_MODEL } from "../../codex/catalog/native-models";
-import { noteThreadServed } from "../../codex/routing/thread-affinity";
 import { isPlainObject } from "../../lib/plain-data";
 import type { OcxProviderConfig } from "../../types";
 import { isNativeControlResponse } from "./native-response-control";
@@ -1498,13 +1497,6 @@ export async function deliverPassthroughResponse(
           if (upstreamResponse.ok && observed.object === "response" && typeof observed.id === "string"
             && observed.status === "completed" && Array.isArray(observed.output)
             && nativeExchange.request.outboundModelId === NATIVE_RESERVE_MODEL) terminalRecorder?.("completed");
-          // An ordinary JSON turn's outcome was recorded from its status line; only a completed body proves the seat served it.
-          const servingCtx = admissionState.authCtx;
-          if (upstreamResponse.ok && observed.object === "response" && typeof observed.id === "string"
-            && observed.status === "completed" && Array.isArray(observed.output) && servingCtx.kind === "pool" && servingCtx.affinityKey
-            && servingCtx.poolReserve !== true && !servingCtx.fixedAccount && nativeExchange.request.outboundModelId !== NATIVE_RESERVE_MODEL) {
-            noteThreadServed(servingCtx.affinityKey, route.modelId, { accountId: servingCtx.accountId, generation: servingCtx.generation, capacity: "included" }, Date.now());
-          }
           rememberPassthroughResponseChecked(observed);
         }
       } catch { /* non-JSON despite content-type; recording is best-effort */ }
