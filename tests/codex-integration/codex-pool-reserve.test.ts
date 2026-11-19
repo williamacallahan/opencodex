@@ -304,7 +304,7 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
         model: body.model, output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } });
     }, { preconnect() {} }));
     const send = (key: string) => handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
-      headers: { "content-type": "application/json" }, body: JSON.stringify({
+      headers: { "content-type": "application/json", "session-id": key, "thread-id": key }, body: JSON.stringify({
         model: "openai/gpt-6-luna", input: "ping", stream: false, prompt_cache_key: key,
       }) }), cfg, { model: "", provider: "" });
     const release = acquireOwnedSpendHome();
@@ -319,6 +319,7 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
       expect((await send("warm-thread")).status).toBe(200);
       refuseA = true;
       expect((await send("warm-thread")).status).toBe(200);
+      now += 90_001;
       expect((await send("warm-thread")).status).toBe(200);
       expect(sends.slice(2).map(({ account }) => account)).toEqual([
         `fixture-workspace-${A}`, `fixture-workspace-${A}`, `fixture-workspace-${B}`, `fixture-workspace-${B}`,
@@ -374,7 +375,7 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
       release();
     }
   });
-  test.each(["cancel", "quota", "incomplete JSON"])("a Reserve trial settles on %s without proving success", async ending => {
+  test.each(["cancel", "abort", "quota", "incomplete JSON"])("a Reserve trial settles on %s without proving success", async ending => {
     const cfg = config(); cfg.providers.openai = { ...base, codexAccountMode: "pool" };
     ordinary(A, 40);
     const models: string[] = [];
@@ -395,13 +396,15 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
       return Response.json({ id: "resp_next", object: "response", status: "completed", created_at: 1,
         model, output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } });
     }, { preconnect() {} }));
-    const send = (stream = false) => handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
+    const abort = new AbortController();
+    const send = (stream = false, signal?: AbortSignal) => handleResponses(new Request("http://localhost/v1/responses", { method: "POST", signal,
       headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "openai/gpt-6-luna", input: "ping", stream }),
     }), cfg, { model: "", provider: "" });
     const release = acquireOwnedSpendHome();
     try {
-      const response = await send(ending !== "incomplete JSON");
-      if (ending === "cancel") await response.body?.cancel();
+      const response = await send(ending !== "incomplete JSON", abort.signal);
+      if (ending === "abort") abort.abort();
+      else if (ending === "cancel") await response.body?.cancel();
       else await response.text();
       expect(models).toEqual(["gpt-reserve"]);
       const interval = ending === "quota" ? 900_000 : 300_000;
@@ -410,6 +413,33 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
       now += 1;
       expect((await send()).status).toBe(200);
       expect(models).toEqual(["gpt-reserve", "gpt-6-luna", "gpt-reserve"]);
+    } finally { release(); }
+  });
+  test("an unsent uploaded-file refusal releases its Reserve trial without host admission", async () => {
+    const cfg = config(); cfg.providers.openai = { ...base, codexAccountMode: "pool" };
+    ordinary(A, 40); noReserve(B);
+    const models: string[] = [];
+    spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const { model } = await request.json();
+      models.push(model);
+      return Response.json({ id: "resp_file_issuer", object: "response", status: "completed", created_at: 1,
+        model, output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } });
+    }, { preconnect() {} }));
+    const send = (input: unknown = "ping") => handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
+      headers: { "content-type": "application/json", "session-id": "files", "thread-id": "files" },
+      body: JSON.stringify({ model: "openai/gpt-6-luna", input, stream: false }),
+    }), cfg, { model: "", provider: "" });
+    const release = acquireOwnedSpendHome();
+    try {
+      expect((await send()).status).toBe(200);
+      setAccountQuotaFromParsed(B, { customWindows: [] });
+      const refusal = await send([{ role: "user", content: [{ type: "input_file", file_id: "file_a" }] }]);
+      expect(refusal.status).toBe(400);
+      expect(models).toEqual(["gpt-6-luna"]);
+      now += 300_000;
+      expect((await send()).status).toBe(200);
+      expect(models).toEqual(["gpt-6-luna", "gpt-reserve"]);
     } finally { release(); }
   });
   test("a stale included-owner binding does not suppress Reserve", () => {

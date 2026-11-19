@@ -1324,6 +1324,7 @@ export async function executeComboResponses(
 
     if (options.abortSignal?.aborted) {
       callbackGate.discard();
+      void response.body?.cancel(options.abortSignal.reason).catch(() => undefined);
       retainCancelledAttempt();
       return clientCancelledResponse();
     }

@@ -75,6 +75,17 @@ describe("mandatory-tool reasoning hold deadline", () => {
 });
 
 describe("mandatory native tool preflight commitment", () => {
+  test("an accepted Reserve turn can still move when the guard proves a required call was absent", async () => {
+    const guard = createComboRequiredToolStreamGuard({ tools: [{ type: "function", name: "marker" }], tool_choice: "required" }, new Set());
+    const [failed] = guard!.blockRewrite('data: {"type":"response.completed","response":{"status":"completed","output":[]}}');
+    const response = new Response(`data: {"type":"response.created","response":{"status":"in_progress","output":[]}}\n\n${failed}\n\n`, {
+      headers: { "content-type": "text/event-stream" },
+    });
+    const result = await preflightComboStreamResponse(response, { provider: "fixture", model: "gpt-6-luna", wireModel: "gpt-reserve" },
+      undefined, { requiredToolPrelude: true });
+    expect(result.kind).toBe("failed");
+    expect(await result.response.text()).toContain("required_tool_contract_unsatisfied");
+  });
   test("the reserved functions selector keeps a bare call identity", () => {
     const guard = createComboRequiredToolStreamGuard({ tools: [{ type: "function", name: "marker" }],
       tool_choice: { type: "function", namespace: "functions", name: "marker" } }, new Set());

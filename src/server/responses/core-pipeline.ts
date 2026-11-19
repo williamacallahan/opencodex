@@ -43,6 +43,7 @@ export async function handleResponsesInner(
   };
   let retention: ReturnType<typeof prepareCompactionRetention>;
   let releasePendingSend = () => {};
+  let passthroughOwnsTrial = false;
   try {
     const requestState = await prepareResponsesRequest(requestContext, admissionState, requestDispatchers);
     if (requestState instanceof Response) return requestState;
@@ -94,7 +95,10 @@ export async function handleResponsesInner(
           responseEffects,
           sendBudgetState,
         );
-        if (passthroughResult instanceof Response) return passthroughResult;
+        if (passthroughResult instanceof Response) {
+          passthroughOwnsTrial = true;
+          return passthroughResult;
+        }
         const unclaimedHop = sendBudgetState.pendingHopPermit;
         releasePendingSend = () => { if (sendBudgetState.pendingHopPermit === unclaimedHop) { unclaimedHop?.release(); sendBudgetState.pendingHopPermit = undefined; } };
       }
@@ -156,6 +160,9 @@ export async function handleResponsesInner(
     releasePendingSend();
     if (admissionState.pendingHostAdmissionLease) {
       releaseUpstreamHostAdmission(admissionState.pendingHostAdmissionLease);
+    }
+    if (!passthroughOwnsTrial && (admissionState.pendingHostAdmissionLease
+      || (admissionState.authCtx.kind === "pool" && admissionState.authCtx.poolReserve))) {
       releaseCodexAuthContextProbeLease(admissionState.authCtx);
     }
   }

@@ -56,7 +56,16 @@ export const CODEX_WS_CREATE_FRAME_LIMIT_BYTES =
 /** Close code the backend uses for an oversized message (RFC 6455 "message too big"). */
 const WS_CLOSE_MESSAGE_TOO_BIG = 1009;
 
-const codexWsUpstreamResponses = new WeakMap<Response, true>();
+export interface CodexWsTerminalQuota {
+  status: 402 | 429;
+  headers: Headers;
+}
+
+interface CodexWsResponseEvidence {
+  terminalQuota?: CodexWsTerminalQuota;
+}
+
+const codexWsUpstreamResponses = new WeakMap<Response, CodexWsResponseEvidence>();
 const quotaObservedResponses = new WeakMap<Response, true>();
 const codexWsPreludeProjections = new WeakMap<Response, true>();
 registerProviderResponseProvenance(codexWsUpstreamResponses);
@@ -82,9 +91,17 @@ export function isCodexWsPreludeProjection(response: Response): boolean {
   return codexWsPreludeProjections.has(response);
 }
 
-export function markCodexWsResponse(response: Response, observed: boolean): void {
-  codexWsUpstreamResponses.set(response, true);
+export function markCodexWsResponse(response: Response, observed: boolean): CodexWsResponseEvidence {
+  // Pacing can rewrap the body before its terminal arrives. Both responses share this object.
+  const evidence: CodexWsResponseEvidence = {};
+  codexWsUpstreamResponses.set(response, evidence);
   if (observed) quotaObservedResponses.set(response, true);
+  return evidence;
+}
+
+/** Validated quota metadata from the accepted turn's terminal, not its SSE head. */
+export function readCodexWsTerminalQuota(response: Response): CodexWsTerminalQuota | undefined {
+  return codexWsUpstreamResponses.get(response)?.terminalQuota;
 }
 
 /**

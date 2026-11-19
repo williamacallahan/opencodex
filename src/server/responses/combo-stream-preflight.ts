@@ -642,6 +642,7 @@ export async function preflightComboStreamResponse(
   let bufferedBytes = 0;
   let outputCommitted = false;
   let responseCreated = false;
+  let reserveAccepted = false;
   let terminalStatus: ResponsesTerminalStatus | undefined;
   let retryableTerminalPayload: Record<string, unknown> | undefined;
   let holdTimer: ReturnType<typeof setTimeout> | undefined;
@@ -660,13 +661,14 @@ export async function preflightComboStreamResponse(
       if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
         const type = (payload as { type?: unknown }).type;
         if (type === "response.created") responseCreated = true;
-        // Reserve has already accepted this turn; a later quota terminal cannot authorize a replay.
-        if (logCtx.wireModel === NATIVE_RESERVE_MODEL && (responseCreated || type === "response.in_progress")) {
-          outputCommitted = true;
-          return;
-        }
+        if (logCtx.wireModel === NATIVE_RESERVE_MODEL && (responseCreated || type === "response.in_progress")) reserveAccepted = true;
       }
-      const retryable = retryableTerminalFor(payload);
+      const toolContractFailure = options?.requiredToolPrelude && payload !== null && typeof payload === "object"
+        && (payload as { type?: unknown }).type === "response.failed"
+        && (payload as { response?: { error?: { code?: unknown } } }).response?.error?.code === REQUIRED_TOOL_CONTRACT_CODE;
+      // A started Reserve turn cannot be replayed. The held required-tool guard alone can prove
+      // that a missing call had no visible output or tool effects and is safe to try elsewhere.
+      const retryable = (!reserveAccepted || toolContractFailure) && retryableTerminalFor(payload);
       const matchedBareError = retryable && payload !== null && typeof payload === "object"
         && !Array.isArray(payload) && (payload as { type?: unknown }).type === "error";
       // A zero-output bare error is terminal evidence. Explicit client errors stay

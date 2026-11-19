@@ -14,7 +14,7 @@ import { UPGRADE_DEADLINE_MS, CODEX_WS_LIVENESS_PING_INTERVAL_MS, CODEX_WS_RESPO
   MAX_CODEX_WS_QUEUE_BYTES, markCodexWsResponse, markCodexWsPreludeProjection, normalizeResponsesWsRelayEvent, closedBeforeTerminalMessage,
   codexWsCreateFrameExceedsLimit, codexWsFailureDetail, codexWsPreResponseFailure, markCodexWsStage, codexWsOcxVersion,
   markCodexWsSocketDeath, codexWsWrapperStatus, isCodexWsTerminalEvent, type CodexWsFailureStage, type CodexWsStageRecord,
-  type CodexWsTerminalEvent, codexWsPreOutputRefusalStatus, isEmptyCodexWsLifecycleEvent, codexWsFrameResponseIds,
+  type CodexWsTerminalEvent, type CodexWsTerminalQuota, codexWsPreOutputRefusalStatus, isEmptyCodexWsLifecycleEvent, codexWsFrameResponseIds,
   markCodexWsPreOutputRefusal, type CodexWsPreOutputRefusalHold } from "./codex-ws-wire";
 
 interface ExchangeOptions {
@@ -84,28 +84,14 @@ function rejectionHeaders(source: Record<string, unknown>, prelude: Headers, con
   }
 }
 
-/**
- * Carry #3740's refused-create status back to the HTTP recovery path. Codex's
- * responses_websocket.rs accepts status/status_code and scalar header values;
- * unlike its native client, this relay converts only precommit 4xx. Returning a
- * post-send 5xx or fetch rejection could cause the outer retry wrapper to resend.
- * The one 5xx exception is the opt-in pre-output refusal below (#6969): a structured upstream
- * refusal with nothing relayed but empty lifecycle frames, which the caller may replay.
- */
-function wrappedRejectionResponse(payload: Record<string, unknown>, prelude: Headers, context: ResponseMetadataContext): Response | null {
-  if (payload.type !== "error" || payload.stream_id !== undefined) return null;
-  // The native typed wrapper has one aliased field, not two competing statuses.
-  if (Object.hasOwn(payload, "status_code") && Object.hasOwn(payload, "status")) return null;
-  const status = Object.hasOwn(payload, "status_code") ? payload.status_code : payload.status;
-  if (typeof status !== "number" || !Number.isInteger(status) || status < 400 || status > 499) return null;
+/** Validate the native 4xx wrapper independently of whether its turn can be replayed. */
+function wrappedRejection(payload: Record<string, unknown>, status: number | undefined, prelude: Headers, context: ResponseMetadataContext) {
+  if (status === undefined || status < 400 || status > 499 || payload.stream_id !== undefined) return;
   const error = payload.error;
   if (error != null && (!record(error)
-    || [error.code, error.message].some(value => value != null && typeof value !== "string"))) return null;
-  if (payload.headers != null && !record(payload.headers)) return null;
-  const headers = rejectionHeaders(record(payload.headers) ? payload.headers : {}, prelude, context);
-  return new Response(JSON.stringify({
-    error: error ?? { type: "upstream_error", message: "Upstream rejected the request" },
-  }), { status, headers });
+    || [error.code, error.message].some(value => value != null && typeof value !== "string"))) return;
+  if (payload.headers != null && !record(payload.headers)) return;
+  return { status, error, headers: rejectionHeaders(record(payload.headers) ? payload.headers : {}, prelude, context) };
 }
 
 /** The client-facing error of a pre-output refusal projection, from the refusal's own error object. */
@@ -169,6 +155,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
     // The resolved 200, retained so a later body failure can replace its
     // success-shaped stage record with the failure-shaped one (#4191).
     let committedResponse: Response | null = null;
+    let responseEvidence: ReturnType<typeof markCodexWsResponse> | undefined;
     // #6969: the pre-output refusal hold. While it is open, empty lifecycle frames are queued on the
     // not-yet-exposed stream without resolving it. Every settle other than an eligible refusal
     // commits first (deferredCommit), so the outcome is exactly what the exchange produced before.
@@ -264,7 +251,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       responseHeaders.set("content-type", "text/event-stream; charset=utf-8");
       const response = new Response(stream, { status: 200, headers: responseHeaders });
       metadata?.commit();
-      markCodexWsResponse(response, Boolean(metadata && onQuota));
+      responseEvidence = markCodexWsResponse(response, Boolean(metadata && onQuota));
       if (nativeControl) markNativeControlResponse(response);
       markCodexWsStage(response, stageRecord(null));
       committedResponse = response;
@@ -653,6 +640,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       let refusalStatus: number | undefined;
       let refusalHeaders: Headers | undefined;
       let refusalPrelude: Headers | undefined;
+      let terminalQuota: CodexWsTerminalQuota | undefined;
       if (!controlFrame) {
         firstResponseAt ??= Date.now();
         try {
@@ -664,20 +652,31 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         // Correlation must run first: a reused socket's foreign-stream error settles as a
         // non-replayable 502 above, never as the refused-create 4xx projection below, which
         // is the one status family that could authorize an account replay.
-        // Only before anything was held: after an empty preamble a 4xx frame keeps today's
-        // in-body delivery, so a held 429 can never become a quota rotation it was not before.
-        if (metadata && sent && !responseCommitted && !deferredCommit && type === "error") {
-          let rejection: Response | null;
-          try { rejection = wrappedRejectionResponse(normalized.payload, metadata.snapshot(), metadataContext); }
-          catch (error) { failStream(error); return; }
-          if (rejection) {
+        const wrapperStatus = codexWsWrapperStatus(normalized.payload);
+        const beforeAcceptance = !responseCommitted && !deferredCommit;
+        if (metadata && sent && type === "error" && (beforeAcceptance
+          || (!nativeControl && (wrapperStatus === 402 || wrapperStatus === 429)))) {
+          let rejection: ReturnType<typeof wrappedRejection>;
+          try { rejection = wrappedRejection(normalized.payload, wrapperStatus, metadata.snapshot(), metadataContext); }
+          catch (error) {
+            if (beforeAcceptance) { failStream(error); return; }
+            // Rejected metadata cannot change how an accepted turn is delivered.
+          }
+          if (rejection && beforeAcceptance) {
+            const projection = new Response(JSON.stringify({
+              error: rejection.error ?? { type: "upstream_error", message: "Upstream rejected the request" },
+            }), { status: rejection.status, headers: rejection.headers });
             terminal = true;
             cleanup();
             try { controller.close(); } catch { /* unused stream already closed */ }
             session.dispose();
-            markCodexWsPreludeProjection(rejection);
-            resolve(rejection);
+            markCodexWsPreludeProjection(projection);
+            resolve(projection);
             return;
+          }
+          if (rejection && (rejection.status === 402 || rejection.status === 429)) {
+            // A held or committed preamble keeps the quota failure in the body, not the retry ladder.
+            terminalQuota = { status: rejection.status, headers: rejection.headers };
           }
         }
         let holdFrame = false;
@@ -702,7 +701,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         // queue checks below: a body failure that follows is still an exchange that received it.
         if (!nativeControl && isCodexWsTerminalEvent(type)) {
           terminalEvent = type;
-          terminalErrorStatus = type === "error" ? (codexWsWrapperStatus(normalized.payload) ?? null) : null;
+          terminalErrorStatus = wrapperStatus ?? null;
         }
       }
       const prefix = encoder.encode(`event: ${type}\ndata: `);
@@ -728,6 +727,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         return;
       }
       if (!controlFrame) relayedEvents += 1;
+      if (terminalQuota && responseEvidence) responseEvidence.terminalQuota = terminalQuota;
       if (nativeControl ? steeringEnded : (type === "response.completed" || type === "response.failed" || type === "response.incomplete" || type === "error")) {
         const completedId = correlation?.completed(normalized.payload) ?? null;
         terminal = true;

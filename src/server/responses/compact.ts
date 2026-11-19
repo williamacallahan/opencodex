@@ -1493,6 +1493,16 @@ export async function handleResponsesCompact(
       }
     }
 
+    // Reserve quota evidence belongs to the account that received it, even if alternate
+    // selection or dispatch never reaches the wire.
+    const reserveQuotaRecorded = outcomeCtx.kind === "pool" && outcomeCtx.poolReserve === true
+      && !gatewayTransport && !isNonReplayableResponse(upstream)
+      && (upstream.status === 429 || upstream.status === 402);
+    if (reserveQuotaRecorded) {
+      recordCompactPoolOutcome(outcomeCtx, upstream.status, codexQuotaOutcomeMeta(upstream));
+      await applyCompactPoolQuotaHeaders(outcomeCtx, upstream);
+    }
+
     // The settle for an alternate send that threw, shared by the quota and transient moves. By the
     // time it runs the request already names the alternate (outcomeCtx), so health goes to it.
     const failedAlternateCompactSend = (err: unknown): Response => {
@@ -1582,8 +1592,10 @@ export async function handleResponsesCompact(
           verifiedPoolReserveOnly: authCtx.kind === "pool" && authCtx.poolReserve === true,
         });
       if (alternate && "failure" in alternate) {
-        await applyCompactPoolQuotaHeaders(authCtx, upstream);
-        recordCompactPoolOutcome(authCtx, upstream.status, firstOutcome);
+        if (!reserveQuotaRecorded) {
+          await applyCompactPoolQuotaHeaders(authCtx, upstream);
+          recordCompactPoolOutcome(authCtx, upstream.status, firstOutcome);
+        }
         await upstream.body?.cancel().catch(() => undefined);
         return alternate.failure;
       }
@@ -1593,7 +1605,7 @@ export async function handleResponsesCompact(
       // quota is not ours to spend on a request nobody is waiting for.
       if (alternate && req.signal.aborted) {
         releaseCodexAuthContextProbeLease(alternate.authCtx);
-        recordCompactPoolOutcome(outcomeCtx, 499);
+        if (!reserveQuotaRecorded) recordCompactPoolOutcome(outcomeCtx, 499);
         void upstream.body?.cancel(req.signal.reason).catch(() => undefined);
         return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");
       }
@@ -1616,7 +1628,7 @@ export async function handleResponsesCompact(
       // body, and sends B for a caller that is gone.
       if (alternate && req.signal.aborted) {
         releaseCodexAuthContextProbeLease(alternate.authCtx);
-        recordCompactPoolOutcome(outcomeCtx, 499);
+        if (!reserveQuotaRecorded) recordCompactPoolOutcome(outcomeCtx, 499);
         void upstream.body?.cancel(req.signal.reason).catch(() => undefined);
         return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");
       }
@@ -1628,7 +1640,7 @@ export async function handleResponsesCompact(
         // quota snapshot that produced it, so refresh A's cache before recording its
         // rejection. Skipping this leaves quota-strategy routing and the dashboard
         // reading numbers from before the account ran out.
-        await applyCompactPoolQuotaHeaders(authCtx, upstream);
+        if (!reserveQuotaRecorded) await applyCompactPoolQuotaHeaders(authCtx, upstream);
         const firstResponse = upstream;
         const firstLabel = logCtx.accountLogLabel;
         logCtx.accountLogLabel = codexAuthContextLogLabel(alternate.authCtx, config);
@@ -1637,7 +1649,7 @@ export async function handleResponsesCompact(
           sealFirstAttemptStatus(firstResponse.status);
           upstream = await sendCompactAttempt(alternate.provider, alternate.headers, "single", alternate.authCtx, () => {
             outcomeCtx = alternate.authCtx;
-            recordCompactPoolOutcome(authCtx, firstResponse.status, {
+            if (!reserveQuotaRecorded) recordCompactPoolOutcome(authCtx, firstResponse.status, {
               ...firstOutcome,
               ...(alternate.authCtx.accountId ? { promoteAccountId: alternate.authCtx.accountId } : {}),
             });
@@ -1759,7 +1771,7 @@ export async function handleResponsesCompact(
     // Record pool health only after the body is fully delivered (or definitively failed).
     // A premature 200 would clear soft-avoid while the client still sees a buffer 502.
     if (buffered.status === 499) {
-      recordCompactPoolOutcome(outcomeCtx, 499);
+      if (!reserveQuotaRecorded || outcomeCtx !== authCtx) recordCompactPoolOutcome(outcomeCtx, 499);
       return buffered;
     }
     // A body-confirmed quota failure can arrive behind a generic 5xx. Record it as
@@ -1772,9 +1784,9 @@ export async function handleResponsesCompact(
       try { validCompact = nativeCompactResponseSchema.safeParse(JSON.parse(compactText)).success; }
       catch { /* Malformed JSON cannot establish serving evidence. */ }
     }
-    recordCompactPoolOutcome(
+    if (!reserveQuotaRecorded || outcomeCtx !== authCtx) recordCompactPoolOutcome(
       outcomeCtx,
-      bodyInferredQuota ? 429 : replayRefused ? 502 : upstream.status,
+      bodyInferredQuota ? 429 : replayRefused ? 502 : reserveAttempt && upstream.ok && !buffered.ok ? "connect_neutral" : upstream.status,
       { retryAfter, resetAt, reserveServed: reserveAttempt && validCompact },
     );
     // Lift usage and response metadata from the buffered upstream JSON into the

@@ -30,8 +30,9 @@ log can, and its `/v1/usage` `luna_reserve.served_*` fields report them for the 
 stored window that is full, elapsed or stale keeps the seat out, and `poolReserveHoldResetAt` holds a
 selected seat in that state for 60 seconds rather than sending. A thread bound to a seat with included
 capacity does not keep Luna there: a soft binding never outranks Reserve, while a thread already
-served by Reserve keeps that seat. An operator pin keeps its seat and is offered its own Reserve only on a fresh reported grant, because a
-pinned request cannot move after a refusal.
+served by Reserve keeps that seat. A genuine completion on an alternate establishes Reserve affinity
+without changing shared affinity. An operator pin requires a fresh reported grant both at selection
+and at dispatch, because a pinned request cannot move after a refusal.
 A Reserve refusal cools only the seat's `reserve` health scope and leaves its shared quota untouched.
 The request's single safe account move (`maxAlternateTargetSends: 1`) prefers another verified Reserve
 seat, then included Luna. It never tries an unknown Reserve seat on that retry.

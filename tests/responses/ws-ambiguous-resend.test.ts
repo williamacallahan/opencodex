@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { clearAccountNeedsReauth } from "../../src/codex/auth-api";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import { clearAccountQuota, setAccountQuotaFromParsed } from "../../src/codex/quota";
-import { clearCodexUpstreamHealth, clearThreadAccountMap } from "../../src/codex/routing";
+import { clearCodexUpstreamHealth, clearThreadAccountMap, getCodexQuotaHealthSnapshot } from "../../src/codex/routing";
 import { handleResponses } from "../../src/server/responses";
 import { codexWsExchange } from "../../src/server/responses/codex-ws-exchange";
 import { CodexWsSession } from "../../src/server/responses/codex-ws-session";
@@ -332,6 +332,47 @@ describe("handleResponses replaces a dead socket's send once under retryOnReset 
         else process.env[key] = previousHomes[index];
       }
       removeTreeWithRetry(home);
+    });
+
+    test("an accepted Reserve WebSocket quota refusal honors Retry-After without resending", async () => {
+      const startedAt = Date.now();
+      const resetAt = Math.floor(startedAt / 1000) + 3600;
+      setAccountQuotaFromParsed(ACCOUNT_ID, { weeklyPercent: 100, weeklyResetAt: resetAt,
+        customWindows: [{ label: "Luna Reserve", percent: 10, observedAt: startedAt, resetAt }] });
+      const config: OcxConfig = {
+        ...forwardConfig({ codexAccountMode: "pool", retryOnReset: {} }),
+        activeCodexAccountId: ACCOUNT_ID,
+        autoSwitchThreshold: 0,
+        codexAccounts: [
+          { id: ACCOUNT_ID, email: "work@example.test", isMain: false, plan: "pro" },
+          { id: OTHER_ACCOUNT_ID, email: "other@example.test", isMain: false },
+        ],
+      };
+      installFake(ws => {
+        ws.emit("open", {});
+        ws.emit("message", { data: JSON.stringify({ type: "response.created",
+          response: { id: "r-reserve", status: "in_progress", output: [] } }) });
+        ws.emit("message", { data: JSON.stringify({ type: "error", status_code: 429,
+          headers: { "retry-after": "900" }, error: { code: "rate_limit_exceeded", message: "slow down" } }) });
+      });
+      const http = stubHttp(completed);
+      const response = await send(new Request("http://localhost/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "openai/gpt-6-luna", input: "hello", stream: true, store: false }),
+      }), config);
+      expect(response.status).toBe(200);
+      expect(response.headers.has("retry-after")).toBe(false);
+      const body = await response.text();
+      expect(body).toContain("r-reserve");
+      expect(body).toContain("rate_limit_exceeded");
+      expect(FakeWebSocket.instances.flatMap(ws => ws.sent.map(frame => JSON.parse(frame).model))).toEqual(["gpt-reserve"]);
+      expect(http).toHaveLength(0);
+      const cooldown = getCodexQuotaHealthSnapshot(ACCOUNT_ID, "reserve");
+      expect(cooldown).toMatchObject({ quotaScope: "reserve", cooldownSource: "retry-after" });
+      expect(cooldown!.cooldownUntil).toBeGreaterThanOrEqual(startedAt + 900_000);
+      expect(cooldown!.cooldownUntil).toBeLessThanOrEqual(Date.now() + 900_000);
+      expect(getCodexQuotaHealthSnapshot(ACCOUNT_ID, "shared")).toBeNull();
     });
 
     for (const [status, body] of [

@@ -1329,6 +1329,10 @@ export function recordCodexUpstreamOutcome(
     }
     if (quotaScope && (!meta.poolReserve || meta.reserveServed)) {
       noteScopedCodexSuccess(accountId, quotaScope, now, meta.reserveServed ? meta.failureWindowCredentialGeneration : undefined);
+      if (meta.poolReserve && meta.reserveServed && meta.threadId && !meta.fixedAccount
+        && getThreadAffinity(meta.threadId, quotaScope)?.accountId !== accountId) {
+        bindThreadAffinity(meta.threadId, accountId, now, quotaScope);
+      }
     }
     const current = getAccountHealth(accountId);
     const cooldownUntil = getCodexAccountCooldownUntil(accountId, now);

@@ -34,6 +34,7 @@ import {
   codexWsPreOutputRefusalOutcomeRecorded,
   isCodexWsPreOutputRefusal,
   noteCodexWsPreOutputRefusalOutcome,
+  readCodexWsTerminalQuota,
   restoreCodexWsPreOutputRefusal,
   type CodexWsPreOutputRefusalHold,
 } from "./codex-ws-wire";
@@ -646,16 +647,16 @@ export async function codexDenialOutcomeMeta(response: Response): Promise<{ deni
 }
 
 
-export function codexQuotaOutcomeMeta(response: Response): {
+export function codexQuotaOutcomeMeta(response: Response, headers = response.headers): {
   retryAfter: string | null;
   resetAt: string[];
 } {
   return {
-    retryAfter: response.headers.get("retry-after"),
+    retryAfter: headers.get("retry-after"),
     resetAt: [
-      response.headers.get("x-codex-primary-reset-at"),
-      response.headers.get("x-codex-secondary-reset-at"),
-      response.headers.get("x-codex-tertiary-reset-at"),
+      headers.get("x-codex-primary-reset-at"),
+      headers.get("x-codex-secondary-reset-at"),
+      headers.get("x-codex-tertiary-reset-at"),
     ].filter((value): value is string => !!value),
   };
 }
@@ -1208,8 +1209,10 @@ export function codexForwardTerminalOutcomeRecorder(
   }
   const windowMeta = codexFailureWindowOutcomeMeta(authCtx);
   return (status, httpStatusOverride, reserveServed) => {
+    const terminalQuota = status === "failed" && response ? readCodexWsTerminalQuota(response) : undefined;
     const quotaStatus = [httpStatusOverride, logCtx?.terminalHttpStatus]
       .find(value => value === 429 || value === 402)
+      ?? terminalQuota?.status
       ?? (status === "failed" && windowMeta.poolReserve && logCtx?.causeHint === "rate-limit" ? 429 : undefined);
     if (status === "incomplete" && quotaStatus === undefined) {
       // Normal limit/content-filter/stall terminal — the account served the
@@ -1241,7 +1244,7 @@ export function codexForwardTerminalOutcomeRecorder(
       : (quotaStatus ?? httpStatusOverride ?? logCtx?.terminalHttpStatus ?? 502);
     recordCodexUpstreamOutcome(config, authCtx.accountId, outcome, {
       ...windowMeta,
-      ...(quotaStatus !== undefined && response ? codexQuotaOutcomeMeta(response) : {}),
+      ...(quotaStatus !== undefined && response ? codexQuotaOutcomeMeta(response, terminalQuota?.headers) : {}),
       reserveServed,
       threadId: authCtx.affinityKey,
       fixedAccount: authCtx.fixedAccount,
