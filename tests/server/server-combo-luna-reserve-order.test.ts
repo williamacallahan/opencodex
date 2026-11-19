@@ -223,11 +223,21 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect((await post(cfg)).status).toBe(200);
     expect(calls).toEqual(["native:gpt-6-luna"]);
   });
+  test("a key that may not reach the relay keeps today's order instead of ending in the relay's 403", async () => {
+    seats(); native = body => body.model === "gpt-reserve" ? reserveRefused() : sse(body.model, "ok");
+    const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "combo/luna", input: "ping", stream: true, prompt_cache_key: "luna-order" }) }),
+    config(), { model: "", provider: "" }, { admission: local, admissionScope: { providers: ["openai"], models: [] } });
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(calls).toEqual(["native:gpt-reserve", "native:gpt-6-luna"]);
+  });
   test("a non-Luna failover combo costs no extra route resolution", () => {
     const targets = Array.from({ length: 30 }, (_, index) => ({ provider: "openai", model: `gpt-6-sol-${index}` }));
     const cfg = config({}, targets);
     const resolve = mock(() => undefined);
-    const plan = planLunaReserveLegs(cfg, { ...cfg.combos!.luna!, targets } as never, () => true, resolve, () => true);
+    const plan = planLunaReserveLegs({ ...cfg.combos!.luna!, targets } as never, () => true, resolve, () => true, () => true);
     expect(plan).toBeUndefined();
     expect(resolve).not.toHaveBeenCalled();
   });

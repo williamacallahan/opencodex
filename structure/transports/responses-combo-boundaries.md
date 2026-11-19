@@ -309,7 +309,10 @@ Coverage: `tests/responses/chat-native-spend.test.ts` and `tests/responses/respo
 `src/server/responses/combo-luna-legs.ts` plans one extra native leg for a `failover` combo whose native
 ChatGPT pool target (`codexAccountMode: "pool"`, a model with `modelHasPoolReserve`) is directly followed by a
 non-metered codex-lb target (`isCodexLbProvider`) on a Reserve-capable model. Combos with no such model id are
-ruled out before any route is resolved. A portable turn dispatches native with `reserve-only`, then codex-lb
+ruled out before any route is resolved; otherwise each leg is judged by its resolved destination: the model after
+redirects must still be Reserve-capable, the relay's effective wire must be Responses (the only transport that
+reports relay no-start evidence), and the caller's key scope (`routeAllowedByScope`) must admit both legs, so a key
+that may not reach codex-lb keeps today's order instead of ending on the relay's 403. A portable turn dispatches native with `reserve-only`, then codex-lb
 (sent ordinary `gpt-6-luna`, so its own pool prefers its Reserve), then native with `ordinary-only`, then the
 remaining targets; the extra leg is counted in the shared send budget. Portable means no account-bound carrier
 by `canPortConversationState` (continuation id, provider conversation, uploaded file, encrypted reasoning), no

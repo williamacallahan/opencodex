@@ -637,13 +637,16 @@ export async function executeComboResponses(
   // take: any account-bound carrier (continuation id, provider conversation, uploaded file, encrypted reasoning,
   // turn state in a header or the body) keeps today's order. A bridged Messages or Chat turn plans the same legs:
   // a leg carrying a capacity intent always takes the bridge child below, which forwards that intent.
-  const lunaLegs = planLunaReserveLegs(config, combo, () => {
+  const lunaLegs = planLunaReserveLegs(combo, () => {
     const metadata = isPlainObject(rawBody) ? rawBody.client_metadata : undefined;
     return !unreadableEncryptedAgentTask && !req.headers.has(CODEX_TURN_STATE_HEADER)
       && !(isPlainObject(metadata) && CODEX_TURN_STATE_HEADER in metadata)
       && canPortConversationState(collectConversationStateCarriers(rawBody)).portable;
   }, target => {
-    try { return routeConcreteModel(config, `${target.provider}/${target.model}`); } catch { return undefined; }
+    try {
+      const route = routeConcreteModel(config, `${target.provider}/${target.model}`);
+      return routeAllowedByScope(admissionScope, route) ? route : undefined;
+    } catch { return undefined; }
   }, targetEligible, (from, to) => {
     try {
       const [source, destination] = [from, to].map(target => routeConcreteModel(config, `${target.provider}/${target.model}`));

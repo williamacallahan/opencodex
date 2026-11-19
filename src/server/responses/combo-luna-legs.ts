@@ -3,7 +3,6 @@ import { modelHasPoolReserve } from "../../codex/pool-reserve";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { isCodexLbProvider } from "../../providers/quota/codex-lb-url";
 import type { RouteResult } from "../../router";
-import type { OcxConfig } from "../../types";
 
 type Combo = NonNullable<ReturnType<typeof getCombo>>;
 type ComboTarget = Combo["targets"][number];
@@ -26,24 +25,27 @@ export interface LunaReserveLegPlan {
 }
 
 export function planLunaReserveLegs(
-  config: OcxConfig,
   combo: Combo,
   portable: () => boolean,
+  /** The leg's real destination, or undefined when it cannot route or the caller's key may not reach it. */
   resolve: (target: ComboTarget) => RouteResult | undefined,
   eligible: (target: ComboTarget) => boolean,
   hopAllowed: (from: ComboTarget, to: ComboTarget) => boolean,
 ): LunaReserveLegPlan | undefined {
   // Configured model ids are enough to rule out every other combo before any route is resolved.
   if (combo.strategy !== "failover" || !combo.targets.some(target => modelHasPoolReserve(target.model)) || !portable()) return undefined;
+  // Each leg is judged by its resolved destination: a model redirect can leave Luna, and a per-model wire
+  // override can make the relay a Chat route whose failures carry no Responses no-start evidence.
   const nativeIndex = combo.targets.findIndex(target => {
     if (!modelHasPoolReserve(target.model)) return false;
     const route = resolve(target);
-    return route?.codexAccountMode === "pool" && isCanonicalOpenAiForwardProvider(route.provider);
+    return route?.codexAccountMode === "pool" && isCanonicalOpenAiForwardProvider(route.provider) && modelHasPoolReserve(route.modelId);
   });
   const native = combo.targets[nativeIndex];
   const relay = combo.targets[nativeIndex + 1];
-  const relayProvider = relay && config.providers[relay.provider];
-  if (!native || !relay || !relayProvider || relay.metered || !modelHasPoolReserve(relay.model) || !isCodexLbProvider(relayProvider)
+  const relayRoute = native && relay ? resolve(relay) : undefined;
+  if (!native || !relay || !relayRoute || relay.metered || !modelHasPoolReserve(relayRoute.modelId)
+    || !isCodexLbProvider(relayRoute.provider) || relayRoute.staticPolicy.model.adapter !== "openai-responses"
     || !eligible(native) || !eligible(relay)
     // Both added hops must pass fallback policy, or a strict-Reserve refusal would end in fallback_refused where native ordinary Luna used to serve.
     || !hopAllowed(native, relay) || !hopAllowed(relay, native)) return undefined;
