@@ -15,6 +15,7 @@ import { executeComboResponses } from "./core-combo";
 import { registerTurn, unregisterTurn } from "../lifecycle";
 import { runWithCompactionRecovery } from "./compaction-recovery";
 import { captureAdmissionPolicy } from "../capture-admission-policy";
+import { resolveClaudeBridgePoolSession } from "../claude-bridge-pool-session";
 /**
  * Route one `/v1/responses` request through the adapter pipeline: recovery loop, passthrough
  * wire, image/web-search bridges, and the terminal-guard continuation.
@@ -36,6 +37,12 @@ export async function handleResponses(
   try {
     const response = await runWithCompactionRecovery(req, config, logCtx, {
       ...options, abortSignal,
+      // A session-only caller (opencode or Pi: `session_id` and no `thread-id`) gets the same principal-scoped
+      // pool identity a translated Claude Code turn gets, so its seat and combo target hold across turns.
+      claudeBridgePoolSession: options.claudeBridgePoolSession
+        ?? (req.headers.has("session_id") || req.headers.has("session-id")
+          ? resolveClaudeBridgePoolSession({ ingress: req.headers, replay: req.headers, admission: options.admission })
+          : undefined),
       advisorAdmissionPolicy: options.advisorAdmissionPolicy ?? captureAdmissionPolicy(config, options.admission, options.admissionScope),
       openAiSidecarAuth: options.openAiSidecarAuth === undefined
         ? captureExplicitOpenAiCallerAuth(req.headers, config) : options.openAiSidecarAuth,

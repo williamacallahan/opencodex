@@ -116,7 +116,7 @@ import type { CodexAuthContext } from "../../codex/auth-context";
 import type { ResponsesTerminalStatus } from "../../bridge";
 import { beginRequestAttempt, sealRequestAttemptIdentity, finishRequestAttempt } from "../request-log";
 import { rememberComboForLane } from "./combo-session-recall";
-import { COMBO_TOOL_LOOP_PIN_REASON, toolLoopPinnedPick } from "./combo-tool-loop-pin";
+import { COMBO_CONVERSATION_PIN_REASON, conversationPinnedPick } from "./combo-conversation-pin";
 import { JEV_SESSION_PIN_ROUTE_REASON, jevSessionPinScope } from "./jev-session-pin";
 import { runTurnAdapterSseResponses } from "./core-lifetime";
 import { normalizePersistedJevDecision } from "../../usage/jev-stats";
@@ -633,11 +633,30 @@ export async function executeComboResponses(
     && (protocolLanes?.pickable(target) ?? true);
   const targetEligible = (target: (typeof combo.targets)[number]): boolean =>
     payloadEligible(target) && recoveryEligible(target);
-  // Native Reserve -> codex-lb -> native ordinary Luna applies only to a turn any ChatGPT pool seat or relay can
-  // take: any account-bound carrier (continuation id, provider conversation, uploaded file, encrypted reasoning,
-  // turn state in a header or the body) keeps today's order. A bridged Messages or Chat turn plans the same legs:
-  // a leg carrying a capacity intent always takes the bridge child below, which forwards that intent.
-  const lunaLegs = planLunaReserveLegs(combo, () => {
+  const initialNow = Date.now();
+  // A translated Claude Code turn carries no session or thread header; its bridge identity is the same
+  // transcript-scoped key its pool seat binding uses, so every turn of one transcript shares one lane.
+  const comboLane = sessionLaneIdFromRequest(req.headers) ?? options.claudeBridgePoolSession;
+  // A later turn of a known conversation stays on the target that served the previous one while that target
+  // is still selectable (#7298). Override routes never record a lane target, so they never pin either.
+  const conversationPin = options.compactionRoutingOverride || options.mainHardLockFallbackOverride
+    ? undefined
+    : conversationPinnedPick({
+      config,
+      comboId,
+      lane: comboLane,
+      body,
+      toolLoopOnly: combo.strategy === "jev",
+      eligible: target => (meteredAllowed || !target.metered) && targetEligible(target),
+      now: initialNow,
+    });
+  // Native Reserve -> codex-lb -> native ordinary Luna places a conversation's first turn, or one whose previous
+  // target is unavailable; a pinned conversation keeps its target and that target's capacity. Only a turn any
+  // ChatGPT pool seat or relay can take is planned: any account-bound carrier (continuation id, provider
+  // conversation, uploaded file, encrypted reasoning, turn state in a header or the body) keeps today's order.
+  // A bridged Messages or Chat turn plans the same legs: a leg carrying a capacity intent always takes the
+  // bridge child below, which forwards that intent.
+  const lunaLegs = conversationPin ? undefined : planLunaReserveLegs(combo, () => {
     const metadata = isPlainObject(rawBody) ? rawBody.client_metadata : undefined;
     return !unreadableEncryptedAgentTask && !req.headers.has(CODEX_TURN_STATE_HEADER)
       && !(isPlainObject(metadata) && CODEX_TURN_STATE_HEADER in metadata)
@@ -721,7 +740,6 @@ export async function executeComboResponses(
     comboReplaySnapshot.recoveredPlaintext = true;
     return true;
   };
-  const initialNow = Date.now();
   const pickWithWait = (pickOptions: {
     exclude?: Iterable<string>;
     eligible?: (target: NonNullable<typeof combo>["targets"][number]) => boolean;
@@ -737,26 +755,14 @@ export async function executeComboResponses(
     waitForCooldownMs: combo.waitForCooldownMs,
     abortSignal: options.abortSignal,
   });
-  // An in-flight tool loop stays on the target that issued its calls while that target is still
-  // selectable (#7298). Override routes never record a lane target, so they never pin either.
-  const toolLoopPin = options.compactionRoutingOverride || options.mainHardLockFallbackOverride
-    ? undefined
-    : toolLoopPinnedPick({
-      config,
-      comboId,
-      lane: sessionLaneIdFromRequest(req.headers),
-      body,
-      eligible: target => (meteredAllowed || !target.metered) && targetEligible(target),
-      now: initialNow,
-    });
-  let pick = toolLoopPin ?? await pickWithWait({
+  let pick = conversationPin ?? await pickWithWait({
     eligible: targetEligible,
     now: initialNow,
   });
   // Opt-in JEV session pin (#7525); override routes neither read nor write it, like the lane recall.
   const jevPin = options.compactionRoutingOverride || options.mainHardLockFallbackOverride
     ? undefined
-    : jevSessionPinScope({ combo, comboId, admission: options.admission, lane: sessionLaneIdFromRequest(req.headers) });
+    : jevSessionPinScope({ combo, comboId, admission: options.admission, lane: comboLane });
 
   if (unreadableEncryptedAgentTask && !pick) {
     pick = await pickWithWait({
@@ -805,7 +811,7 @@ export async function executeComboResponses(
   const primaryTarget = combo.targets[0];
   // An allowed hop is recorded only once its dispatch is admitted below.
   let pendingHopCommit: (() => void) | undefined;
-  if (!toolLoopPin && (combo.strategy ?? "failover") === "failover" && primaryTarget
+  if (!conversationPin && (combo.strategy ?? "failover") === "failover" && primaryTarget
     && targetKey(primaryTarget) !== targetKey(pick.target)) {
     const primaryCooling = isComboTargetInCooldown(comboId, primaryTarget, initialNow);
     const proactive = guardFallbackHop(config, {
@@ -823,7 +829,7 @@ export async function executeComboResponses(
     pendingHopCommit = proactive.commit;
   }
   let jevDecision: JevDecision | undefined;
-  if (combo.strategy === "jev" && !toolLoopPin) {
+  if (combo.strategy === "jev" && !conversationPin) {
     const choices = eligibleJevComboChoices(config, comboId, targetEligible, Date.now(), pick.cooldownReprobeTargets);
     const first = choices[0];
     if (!first) {
@@ -950,7 +956,7 @@ export async function executeComboResponses(
   const decision = comboRouteDecisionTrace(config, comboId, pick, responseModel);
   const selectedReason = options.memoryModelPhase
     ? memoryModelRouteReason(options.memoryModelPhase)
-    : toolLoopPin ? COMBO_TOOL_LOOP_PIN_REASON : jevDecision?.pinned ? JEV_SESSION_PIN_ROUTE_REASON : undefined;
+    : conversationPin ? COMBO_CONVERSATION_PIN_REASON : jevDecision?.pinned ? JEV_SESSION_PIN_ROUTE_REASON : undefined;
   logCtx.routeDecision = selectedReason
     ? { ...decision, selected: { ...decision.selected, reason: selectedReason } }
     : decision;
@@ -1248,7 +1254,7 @@ export async function executeComboResponses(
           && Object.hasOwn(config.providers, completedTarget.provider)
           && provider && provider.disabled !== true
           && currentCombo?.targets.some(target => targetKey(target) === targetKey(completedTarget))) {
-          rememberComboForLane(sessionLaneIdFromRequest(req.headers), comboId, completedTarget, model, writerGeneration);
+          rememberComboForLane(comboLane, comboId, completedTarget, model, writerGeneration);
           jevPin?.complete(targetKey(completedTarget), initialJevDecision, writerGeneration);
         }
         options.onResponseComplete?.(model);

@@ -21,7 +21,7 @@ import {
 } from "../../src/responses/state";
 import { handleResponses } from "../../src/server/responses";
 import { clearComboRecallForTests } from "../../src/server/responses/combo-session-recall";
-import { COMBO_TOOL_LOOP_PIN_REASON, isToolLoopContinuation } from "../../src/server/responses/combo-tool-loop-pin";
+import { COMBO_CONVERSATION_PIN_REASON, isConversationContinuation, isToolLoopContinuation } from "../../src/server/responses/combo-conversation-pin";
 import type { RequestLogContext } from "../../src/server/request-log";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
@@ -165,6 +165,16 @@ describe("isToolLoopContinuation", () => {
     expect(isToolLoopContinuation({ input: "hello" })).toBe(false);
     expect(isToolLoopContinuation({ messages: [{ role: "user", content: "x" }, { role: "tool", content: "y" }] })).toBe(true);
   });
+
+  test("any request carrying an earlier turn's output continues its conversation; a first turn does not", () => {
+    expect(isConversationContinuation({ input: [userMessage("hi")] })).toBe(false);
+    expect(isConversationContinuation({ input: "hello" })).toBe(false);
+    expect(isConversationContinuation({ input: [userMessage("hi"), answer("hello"), userMessage("more")] })).toBe(true);
+    expect(isConversationContinuation({ input: [...bareContinuation, answer("Rain today."), userMessage("thanks")] })).toBe(true);
+    expect(isConversationContinuation({ input: [userMessage("more")], previous_response_id: "resp_1" })).toBe(true);
+    expect(isConversationContinuation({ messages: [{ role: "user", content: "x" }] })).toBe(false);
+    expect(isConversationContinuation({ messages: [{ role: "user", content: "x" }, { role: "assistant", content: "y" }, { role: "user", content: "z" }] })).toBe(true);
+  });
 });
 
 describe("combo tool-loop continuation safety (#7298)", () => {
@@ -191,7 +201,7 @@ describe("combo tool-loop continuation safety (#7298)", () => {
     expect(wire[1]!.content).toEqual([{ type: "reasoning_text", text: " " }]);
   });
 
-  test("a tool-output continuation stays on the target that issued the call; the next user turn re-picks", async () => {
+  test("every later turn of a conversation stays on the target that served the previous one", async () => {
     let solHits = 0;
     const sol = serve(async request => {
       solHits += 1;
@@ -224,17 +234,56 @@ describe("combo tool-loop continuation safety (#7298)", () => {
     expect(await continuation.text()).toContain("Rain today.");
     expect(solHits).toBe(2);
     expect(deepseekHits).toBe(0);
-    expect(continuationLog.routeDecision?.selected?.reason).toBe(COMBO_TOOL_LOOP_PIN_REASON);
+    expect(continuationLog.routeDecision?.selected?.reason).toBe(COMBO_CONVERSATION_PIN_REASON);
 
-    // A new user turn is not pinned; the strict target accepts the foreign history it inherits.
+    // A new user message in the same conversation carries the same history, so it keeps the same
+    // target and that target's prompt cache instead of rotating to the other one.
+    const nextTurnLog: RequestLogContext = { model: "", provider: "" };
     const nextTurn = await post(config, [
       ...bareContinuation,
       answer("Rain today."),
       userMessage("thanks"),
-    ], lane);
+    ], lane, nextTurnLog);
     expect(nextTurn.status).toBe(200);
-    expect(await nextTurn.text()).toContain("You're welcome.");
+    expect(await nextTurn.text()).toContain("get_weather");
+    expect(solHits).toBe(3);
+    expect(deepseekHits).toBe(0);
+    expect(nextTurnLog.routeDecision?.selected?.reason).toBe(COMBO_CONVERSATION_PIN_REASON);
+
+    // A new conversation on another lane is placed by normal selection.
+    const fresh = await post(config, [userMessage("hello")], { "thread-id": "thread-other" });
+    expect(fresh.status).toBe(200);
     expect(deepseekHits).toBe(1);
+  });
+
+  test("a translated Claude Code turn with no session header keeps its target through its bridge identity", async () => {
+    let solHits = 0;
+    const sol = serve(() => {
+      solHits += 1;
+      return Response.json(responsesBody("gpt-6.1-sol", [answer("from sol")]));
+    });
+    let deepseekHits = 0;
+    const deepseek = serve(() => {
+      deepseekHits += 1;
+      return Response.json(responsesBody("deepseek-flash", [answer("from deepseek")]));
+    });
+    const config = combo({
+      primary: provider("openai-responses", baseUrl(sol)),
+      strict: strictResponses(baseUrl(deepseek)),
+    }, [{ provider: "primary", model: "gpt-6.1-sol" }, { provider: "strict", model: "deepseek-flash" }], { strategy: "round-robin", stickyLimit: 1 });
+    const bridged = (input: Item[], claudeBridgePoolSession: string) => handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "combo/auto", input, tools, stream: false, store: false }),
+    }), config, { model: "", provider: "" }, { claudeBridgePoolSession });
+
+    expect((await bridged([userMessage("hi")], "transcript-a")).status).toBe(200);
+    expect(solHits).toBe(1);
+    const later = await bridged([userMessage("hi"), answer("from sol"), userMessage("and now?")], "transcript-a");
+    expect(later.status).toBe(200);
+    expect(await later.text()).toContain("from sol");
+    expect(solHits).toBe(2);
+    expect(deepseekHits).toBe(0);
   });
 
   test("a continuation on another lane is not pinned to this lane's target", async () => {
