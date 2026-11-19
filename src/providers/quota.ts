@@ -183,21 +183,20 @@ function clearQuotaProbeWarnings(name: string): void {
 /**
  * Hand freshly committed provider reports to the optional quota-reset observer.
  *
- * Lazy import on purpose: this module is statically reachable from
- * src/server/responses/core.ts (via oauth/anthropic-routing.ts), so a static edge would put
- * the observer on every install's request path. The observer keeps its own persisted
- * last-seen map instead of receiving a previous snapshot. Account identity is resolved
- * synchronously, before any await, because pool failover rewrites `activeAccountId` during
- * routing and a later async read would attribute this report to another account. Observations
- * are serialized through a promise chain because Bun does not resolve concurrent import()
- * calls in call order, and an out-of-order baseline swap manufactures false resets.
+ * Lazy import on purpose: this module is statically reachable from src/server/responses/core.ts
+ * (via oauth/anthropic-routing.ts), so a static edge would put the observer on every install's
+ * request path. The observer keeps its own last-seen map and is never passed `previous`: that is
+ * empty exactly when quotas reset (the cache key digests quota values), so it would hide every
+ * reset. Account identity is resolved before any await, because pool failover rewrites
+ * `activeAccountId` during routing. Observations are serialized through a promise chain because
+ * Bun does not resolve concurrent import() calls in order, and a reordered swap fakes resets.
  */
 let pendingProviderObservation: Promise<void> = Promise.resolve();
 
 /**
  * Stable per-account observation key for one provider report. A probe-bound key report keys by
- * the full digest of the credential it sent, because the 8-character apiKeyPoolEntryId is a
- * cache discriminator that two distinct keys can share. Other providers keep the legacy id.
+ * the full digest of the credential it sent, because two distinct keys can share the 8-character
+ * apiKeyPoolEntryId. Other providers keep the legacy id byte for byte, so baselines survive.
  */
 function providerObservationAccountKey(provider: string, config: OcxConfig, report?: ProviderQuotaReport): string {
   const oauthAccountId = getAccountSet(provider)?.activeAccountId;
@@ -299,6 +298,7 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
       const commitKeyCandidate = cacheKeyWithAggregationState(config);
       commitKey = typeof commitKeyCandidate === "string" ? commitKeyCandidate : await commitKeyCandidate;
     }
+    // Reconcile both rows and empty results after all awaits against the last recorded sign-in.
     Object.entries(config.providers).forEach(([name, provider], index) => {
       if (provider.adapter === "claude-cli" && provider.disabled !== true) probeResults[index] = heldClaudeCliObservedQuota(name);
     });
