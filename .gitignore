@@ -30,6 +30,9 @@ devlog/**/security-advisory-draft*
 # "Security working notes" section of AGENTS.md.
 .tmp/
 .opencode/
+# Amp session archives: deploy compose files, telemetry, and source tarballs.
+# One 496 MB archive in a primary checkout was staged into every cli-lane slot.
+.amp-archive/
 
 # Capability probes from the trusted-artifact directory check
 # (src/lab/artifacts/secure-fs.ts detectArtifactIoMode). The probe is normally
