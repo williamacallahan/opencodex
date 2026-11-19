@@ -97,6 +97,17 @@ describe("OpenAI Chat reasoning wire policy parity", () => {
     for (const body of Object.values(bodies)) expect(body.reasoning_effort).toBe(effort);
   });
 
+  test("translated Chat keeps a provider omission when the model map has no none entry", () => {
+    const target: OcxProviderConfig = {
+      adapter: "openai-chat",
+      baseUrl: "https://api.openai.com/v1",
+      reasoningEffortMap: { none: "__omit__" },
+      modelReasoningEffortMap: { "gpt-6-luna": { high: "medium" } },
+      modelReasoningEfforts: { "gpt-6-luna": ["none", "low", "medium", "high", "xhigh", "max"] },
+    };
+    expect(finalToggleBodies(input, target, "gpt-6-luna").translated).not.toHaveProperty("reasoning_effort");
+  });
+
   test("plain reasoning disable uses the gateway object on both final wires", () => {
     const bodies = finalBodies(input);
     const projection = Object.fromEntries(Object.entries(bodies).map(([builder, body]) => [
