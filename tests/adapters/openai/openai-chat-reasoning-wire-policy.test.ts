@@ -87,6 +87,16 @@ function finalToggleBodies(
 }
 
 describe("OpenAI Chat reasoning wire policy parity", () => {
+  test.each(["none", "low", "medium", "high", "xhigh", "max"])("preserves declared %s on both final wires", effort => {
+    const target: OcxProviderConfig = {
+      adapter: "openai-chat",
+      baseUrl: "https://api.openai.com/v1",
+      modelReasoningEfforts: { "gpt-6-luna": ["none", "low", "medium", "high", "xhigh", "max"] },
+    };
+    const bodies = finalToggleBodies({ ...input, reasoning_effort: effort }, target, "gpt-6-luna");
+    for (const body of Object.values(bodies)) expect(body.reasoning_effort).toBe(effort);
+  });
+
   test("plain reasoning disable uses the gateway object on both final wires", () => {
     const bodies = finalBodies(input);
     const projection = Object.fromEntries(Object.entries(bodies).map(([builder, body]) => [

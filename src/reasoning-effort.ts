@@ -256,6 +256,8 @@ export function mapReasoningEffort(provider: OcxProviderConfig, modelId: string,
   }
 
   const supported = configuredReasoningEfforts(provider, modelId);
+  // On Chat, omission applies the provider default, which may enable reasoning.
+  if (boundary === "none" && provider.adapter === "openai-chat" && supported?.includes("none")) return "none";
   const codexEffort = supported !== undefined ? clampToSupportedCodexEffort(boundary, supported) : requestToCodexEffort(boundary);
   if (!codexEffort) return undefined;
 
