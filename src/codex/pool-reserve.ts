@@ -49,7 +49,7 @@ export function holdsPoolReserveWindow(accountId: string): boolean {
   return getAccountQuota(accountId)?.customWindows?.some(window => window.label === LABEL) === true;
 }
 
-function hasFreshPoolReserve(accountId: string, now = Date.now()): boolean {
+export function hasFreshPoolReserve(accountId: string, now = Date.now()): boolean {
   return getAccountQuota(accountId)?.customWindows?.some(window => window.label === LABEL
     && Number.isFinite(window.percent) && window.percent >= 0 && window.percent < 100
     && typeof window.resetAt === "number" && Number.isFinite(window.resetAt) && resetAtToMs(window.resetAt) > now

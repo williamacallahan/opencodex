@@ -6,7 +6,7 @@ import type { OcxRuntimeProviderConfig } from "./auth-context-provider";
 export type { OcxRuntimeProviderConfig } from "./auth-context-provider";
 export { stripCodexRuntimeProviderFields } from "./auth-context-provider";
 import { bindPoolCreditPolicy, poolCreditHoldResetAt, poolContextCreditHoldResetAt, poolCreditRecoveryNeeded, poolContextCreditRecoveryNeeded, poolCreditRecoveryRetryAt, poolUnavailableUntilKnownHorizon } from "./pool-credit-policy";
-import { hasVerifiedPoolReserve, poolLunaReserveSelection } from "./pool-reserve";
+import { hasFreshPoolReserve, hasVerifiedPoolReserve, poolLunaReserveSelection } from "./pool-reserve";
 import { adoptLegacyLineageAffinity } from "./routing/thread-affinity";
 import { nextQuotaQueryDelay } from "./quota-query-backoff";
 import { noteMainAccountActivity } from "./main-account-external-usage";
@@ -780,8 +780,9 @@ export function createCodexAuthDispatchGuard(
       const ownsTrial = ctx.probeQuotaScope === "reserve" && ctx.probeLeaseId !== undefined
         && trial?.probeLeaseId === ctx.probeLeaseId && trial.probeLeaseGeneration === (trial.cooldownGeneration ?? 0);
       if (!isCodexAccountGenerationLive(ctx.accountId, ctx.generation)) throw new CodexPoolAuthenticationError("Selected Codex account credential changed while waiting to send");
+      const verified = ctx.fixedAccount ? hasFreshPoolReserve(ctx.accountId, now) : hasVerifiedPoolReserve(ctx.accountId, now);
       if (hold || (trial?.quotaAvoidUntil ?? 0) > now
-        || (!ownsTrial && (trial?.probeLeaseId !== undefined || !hasVerifiedPoolReserve(ctx.accountId, now)))) {
+        || (!ownsTrial && (trial?.probeLeaseId !== undefined || !verified))) {
         throw new CodexAccountCooldownError(ctx.accountId, hold?.cooldownUntil ?? trial?.quotaAvoidUntil ?? 0, hold?.cooldownSource, "reserve");
       }
     }

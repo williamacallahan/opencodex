@@ -61,7 +61,17 @@ export async function executePassthroughResponse(
     ), nativeExchange.providerExecutedCallTypes);
     const context = admissionState.authCtx;
     if (context.kind !== "pool" || !context.poolReserve || !context.probeLeaseId) return guarded;
-    const wrapped = finalizeAccountLease(guarded, () => releaseCodexAuthContextProbeLease(context));
+    const signal = requestContext.options.abortSignal ?? requestContext.req.signal;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      signal.removeEventListener("abort", release);
+      releaseCodexAuthContextProbeLease(context);
+    };
+    signal.addEventListener("abort", release, { once: true });
+    if (signal.aborted) release();
+    const wrapped = finalizeAccountLease(guarded, release);
     reserveTrialAttached = true;
     return wrapped;
   } finally {
