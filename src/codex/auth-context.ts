@@ -111,23 +111,17 @@ import { AgentAssertionUnsupportedError, authorizationCredential, hasAgentAssert
 /**
  * One conversation tree keys as ONE cohort (#4780).
  *
- * Upstream keys its prompt cache on something the whole tree shares -- `prompt_cache_key` is the
- * session id, or `{source}:{parent_thread_id}` for an internal session -- and one `AgentControl`
- * whose `session_id` is the root thread's id is shared with every sub-agent. While the proxy
- * keyed per thread, two requests could carry an identical `prompt_cache_key` and be served by
- * different accounts, so the split member asserted a warm prefix that was deterministically cold
- * on its account. Nothing failed; the prompt was replayed in full and the tokens burned.
+ * Upstream keys its prompt cache on something the whole tree shares (`prompt_cache_key` is the
+ * session id, or `{source}:{parent_thread_id}` for an internal session). Keyed per thread, two
+ * requests with an identical `prompt_cache_key` could be served by different accounts, so the
+ * split member asserted a warm prefix that was cold on its account and the prompt was replayed.
  *
- * THIS IS NOT A REVERT OF #4546 wp8. wp8 fixed a different defect -- a child bound under the RAW
- * parent id, an identity unrelated to the root's own binding, so siblings shared an entry the
- * root was not on and a grandchild landed on a key nobody had bound. A cohort key has no such
- * incoherence, because the root's own binding IS the cohort key. What wp8 additionally gave each
- * thread, a binding of its own, is what this deliberately gives up.
+ * This is not a revert of #4546 wp8, which fixed a child bound under the RAW parent id; the root's
+ * own binding IS the cohort key here. What this gives up is wp8's per-thread binding.
+ * Which requests produce no key at all is unchanged.
  *
- * Which requests produce no key at all is unchanged, through both units.
- *
- * The derivation itself lives in ./lineage so a lineage record's conversation key and the key
- * the thread actually binds under can never drift apart.
+ * The derivation lives in ./lineage so a lineage record's conversation key and the key the
+ * thread binds under cannot drift apart.
  */
 export function codexPoolAffinityKey(headers: Headers, now = Date.now()): string | undefined {
   // `now` is threaded rather than read inside because a parent-only turn resolves its key
@@ -158,15 +152,11 @@ function poolStateEligible(
 /**
  * Does main have a live credential for a request that carries main's own bearer?
  *
- * The one expression final authentication and every preview must agree on, for the same reason
- * `poolStateEligible` is: preview exists to predict the resolution, and a preview that scores main
- * differently hands subagent fallback a different account than the one that serves (#4850).
- *
- * A forwardable request-owned bearer IS main's live credential -- it is exactly what would be
- * sent if selection named main -- so the honest answer is yes, without reading the stored
- * credential. An effective manual pin answers yes as it always did. The answer is no while the
- * physical identity is fenced for a different reason, because retained recovery and a profile
- * drain must keep main out of routing even for a request holding its own bearer.
+ * Final authentication and every preview must agree on this, like `poolStateEligible`, or
+ * subagent fallback gets a different account than the one that serves (#4850). A forwardable
+ * request-owned bearer IS main's live credential, so the answer is yes without reading the stored
+ * credential; an effective manual pin answers yes. The answer is no while the physical identity is
+ * fenced for another reason, since retained recovery and a profile drain keep main out of routing.
  */
 export function requestOwnedMainCredentialIsLive(inputs: {
   preserveRequestOwnedMainPin: boolean;
@@ -199,11 +189,8 @@ export function requestOwnedMainCredentialIsLive(inputs: {
  * Neither may read or write a stored-credential binding or lineage. The optional request-owned
  * affinity namespace is separate from this predicate.
  *
- * Exported so that a preview asks the question with the code that answers it, instead of a
- * restatement that can drift. It drifted once already: preview read a family relation from raw
- * request headers before this function had decided anything, so it could follow a Pool family
- * binding while the resolution below deliberately created no affinity -- and model fallback then
- * evaluated eligibility against an account the request would never be authenticated as.
+ * Exported so a preview asks with the code that answers it; a restatement drifted once, letting
+ * preview follow a Pool family binding the resolution deliberately created no affinity for.
  */
 export function codexPoolStateEligible(
   headers: Headers,
@@ -408,16 +395,13 @@ export class CodexMainProfileDrainingError extends Error {
 }
 
 /**
- * #2108: a reboot could leave this fence closed until `ocx restart`, and the report was
- * unactionable because the settled reason was never written anywhere. It cannot ride the
- * message (claude-messages.ts matches that string exactly to keep the fence a 503 rather
- * than an Anthropic 529) and it cannot ride a header (/api/logs reads only error.message
- * from the body, and the Claude surface rebuilds its response headers from scratch), so
- * stdout is the one surface that covers every path this fence fires on.
+ * #2108: a reboot could leave this fence closed until `ocx restart` with the settled reason written
+ * nowhere. It cannot ride the message (claude-messages.ts matches that string exactly to keep a
+ * 503 rather than an Anthropic 529) or a header (/api/logs reads only error.message, and the
+ * Claude surface rebuilds its headers), so stdout is the one surface covering every path.
  *
- * Deduped per distinct reason: the original report shows three 503s in eleven seconds and
- * a real client retries harder than that, so a per-request line would bury the signal.
- * Only the reason is emitted; the snapshot's homeId is derived from a profile directory.
+ * Deduped per distinct reason, since a client retries faster than a per-request line could stay
+ * readable. Only the reason is emitted; the snapshot's homeId derives from a profile directory.
  */
 const reportedFenceReasons = new Set<NativeMainStartupBlockReason>();
 
@@ -592,24 +576,17 @@ export class CodexReserveHelperUnsupportedError extends CodexReserveUnavailableE
 
 /**
  * Every account bound to this conversation is held after upstream failures, the recovery
- * budget for this window is spent, and there is no detour left -- so this request is refused
+ * budget for this window is spent, and there is no detour left, so this request is refused
  * BEFORE any upstream I/O (#4701).
  *
- * This is not a quota cooldown, and the message below says so. It subclasses
- * {@link CodexAccountCooldownError} for one reason: the deadline-carrying refusal has exactly
- * one representation in this codebase, and roughly a dozen transports already map it to a 429
- * with `Retry-After` and treat it as an expected terminal answer rather than a credential
- * fault. Introducing a parallel type would mean either re-deriving that handling in every one
- * of them or silently falling through to a 500 in the ones that were missed.
+ * This is not a quota cooldown. It subclasses {@link CodexAccountCooldownError} because the
+ * deadline-carrying refusal has one representation, which about a dozen transports already map to
+ * a 429 with `Retry-After`. The quota wording ("cooling down", `ocx account clear-cooldown`) must
+ * not be inherited, so {@link cooldownErrorMessage} returns this message verbatim.
  *
- * What must NOT be inherited is the quota wording -- "cooling down", `ocx account
- * clear-cooldown` -- because none of it describes a 5xx hold and following it would do
- * nothing. {@link cooldownErrorMessage} therefore returns its message verbatim, as for every subclass.
- *
- * `cooldownUntil` carries the limiter's own change point, which is strictly in the future:
- * either the moment the held account may next be probed or the moment the recovery window
- * moves, whichever is later. A refusal that answered `now` would busy-loop the caller into
- * the same load it just declined.
+ * `cooldownUntil` is the limiter's own change point, strictly in the future: when the held account
+ * may next be probed or the recovery window moves, whichever is later. Answering `now` would
+ * busy-loop the caller into the load it just declined.
  */
 export class CodexRecoveryWithheldError extends CodexAccountCooldownError {
   /** The sibling still remembered for this thread, when one exists but is itself unusable. */
@@ -856,14 +833,11 @@ function callerIsCooledPoolAccount(headers: Headers, config: OcxConfig, accountI
 /**
  * Does the caller's own credential belong to a Pool subscription that is currently cooled?
  *
- * The cooldown fallback below asks this of the SELECTED account, which was sufficient while a
- * request-owned bearer could not make main a candidate: the cooled account was the selection, so
- * the question and the refusal sat at the same place. Once main takes part in ordering (#5019) the
- * cooled account is no longer selected, and serving its own credential as main would resurrect the
- * cooldown it is inside — so eligibility has to ask the same question of every cooled sibling.
- *
- * `callerIsCooledPoolAccount` fails closed on an unreadable caller identity, which is preserved
- * here: an opaque bearer counts as owning any cooled subscription rather than escaping it.
+ * The cooldown fallback asks this of the SELECTED account, which sufficed until main could take
+ * part in ordering (#5019): then the cooled account is no longer selected, and serving its own
+ * credential as main would resurrect the cooldown, so eligibility asks it of every cooled sibling.
+ * `callerIsCooledPoolAccount` fails closed on an unreadable caller identity: an opaque bearer
+ * counts as owning any cooled subscription.
  */
 function callerOwnsAnyCooledPoolSubscription(
   headers: Headers,
@@ -1058,14 +1032,11 @@ export interface CodexAccountSelectionAdmission {
  * Wait, bounded, for an owned startup's main-policy binding, then fail closed while it is still
  * in flight.
  *
- * #5694 turned `codexMainAccountHardLock` on by default, so this fence stopped being an opt-in
- * rarity and started intercepting ordinary requests: for the seconds a Windows startup spends
- * recovering, sweeping stages, and binding the pinned home, every caller-owned direct request
- * was answered with a 503 "native-main profile maintenance is active; retry". Waiting is the
- * right answer for a window that closes on its own -- the request resumes and the hard lock
- * below still decides on identity and quota, exactly as it does after startup. A gate still
- * pending at the deadline (retained recovery, a manual-recovery requirement) is a real refusal,
- * and that is the one case that keeps the draining error.
+ * #5694 made `codexMainAccountHardLock` default on, so this fence began intercepting ordinary
+ * requests during a Windows startup's recovery, stage sweep, and home binding with a 503. Waiting
+ * is right for a window that closes on its own; the hard lock below still decides on identity and
+ * quota afterwards. A gate still pending at the deadline (retained recovery, a manual-recovery
+ * requirement) is a real refusal and keeps the draining error.
  *
  * Both reads are memory-only: neither this fence nor the wait probes a foreign home.
  */
@@ -1404,17 +1375,12 @@ async function resolveCodexAuthContextUnannotated(
       : undefined;
     eligibility.modelEligibleAccountIds = modelEligibleAccountIds;
     // #4768: the flagships stay visible and never fail closed, so this is evidence routing may
-    // ORDER by, not evidence it may refuse on. Read synchronously from rosters discovery has
-    // already gathered -- no upstream fetch joins the request path for the most commonly
-    // requested models in the product -- and passed to selection as a preference that is dropped
-    // whenever honouring it would leave no candidate.
-    //
-    // Under the SAME exclusion the entitlement snapshot above uses. The reader validates each
-    // cached roster against the account's current credential, and for native main that is a
-    // synchronous read of the physical stored token -- exactly what this request is forbidden to
-    // touch while a profile switch drains it or while it is served by a request-owned credential.
-    // Excluding main here costs nothing: the preference is an ordering hint, so main becomes
-    // unknown rather than denied, and unknown leaves selection exactly as it was.
+    // ORDER by, not refuse on. Read synchronously from rosters discovery already gathered, so no
+    // upstream fetch joins the request path, and dropped whenever honouring it would leave no
+    // candidate. Under the SAME exclusion as the entitlement snapshot above: validating a cached
+    // roster for native main reads the physical stored token, which this request must not touch
+    // while a profile switch drains it or a request-owned credential serves it. Main becomes
+    // unknown rather than denied, which leaves selection as it was.
     const deniedModelAccountIds = cachedDeniedCodexAccountIdsForModel(
       options.modelId,
       undefined,
@@ -1875,18 +1841,14 @@ function substitutedMainHeaders(
 }
 
 /**
- * Build the upstream auth headers for one Codex turn.
+ * Build the upstream auth headers for one Codex turn. The two credential domains meet here only:
  *
- * The two credential domains meet here, and only here:
- *
- * - `pool` / `main-pool` always OVERWRITE with the stored account credential. Whatever the
- *   caller sent is irrelevant to what we send upstream.
- * - `main` with an admission-bearer caller (#1686) must substitute the stored main credential.
- *   The caller proved admission with one of OUR secrets, which must never leave the process, so
- *   the only two acceptable outcomes are replaced-with-stored-main or fail-before-any-IO.
- *   Silently forwarding would be the leak validateForwardAdmissionCredential exists to prevent.
- * - `main` with a dedicated-header caller keeps the existing intentional passthrough: the bearer
- *   there is the user's own ChatGPT credential, not ours.
+ * - `pool` / `main-pool` always OVERWRITE with the stored account credential; the caller's is irrelevant.
+ * - `main` with an admission-bearer caller (#1686) must substitute the stored main credential. The
+ *   caller proved admission with one of OUR secrets, which must never leave the process, so the
+ *   outcomes are replaced-with-stored-main or fail-before-any-IO (validateForwardAdmissionCredential).
+ * - `main` with a dedicated-header caller keeps the intentional passthrough: that bearer is the
+ *   user's own ChatGPT credential.
  */
 export function materializeCodexUpstreamAuth(
   headers: Headers,

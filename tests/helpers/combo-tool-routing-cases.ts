@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { isComboTargetInCooldown } from "../../src/combos";
-import { responsesSuccess } from "./combo-failover-upstream";
+import { chatSuccess, responsesSuccess } from "./combo-failover-upstream";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 
 interface Harness<Server> {
@@ -63,4 +63,39 @@ for (const stream of [false, true]) {
     expect(isComboTargetInCooldown("free", { provider: "a", model: "m1" })).toBe(false);
   });
 }
+test("429 -> model-scoped image 400 -> healthy target does not abort the turn", async () => {
+  const hits: string[] = [];
+  const quota = serve(() => {
+    hits.push("quota");
+    return Response.json({ error: { type: "rate_limit_error", message: "Rate limit exceeded" } }, { status: 429 });
+  });
+  const textOnly = serve(() => {
+    hits.push("text-only");
+    return Response.json({ error: {
+      type: "invalid_request_error", code: null, param: "input",
+      message: "Model 'gpt-5.3-codex-spark' does not support image inputs. Try again with a vision model.",
+    } }, { status: 400 });
+  });
+  const vision = serve(() => {
+    hits.push("vision");
+    return chatSuccess("vision fallback recovered", "m3");
+  });
+  const config = comboConfig({
+    a: provider("openai-chat", baseUrl(quota), "key-a"),
+    b: provider("openai-responses", baseUrl(textOnly), "key-b"),
+    c: provider("openai-chat", baseUrl(vision), "key-c"),
+  });
+  const response = await post(config, {
+    input: [{ type: "message", role: "user", content: [
+      { type: "input_text", text: "inspect this" },
+      { type: "input_image", image_url: "data:image/png;base64,AA==" },
+    ] }],
+  });
+  const text = await response.text();
+  expect(response.status).toBe(200);
+  expect(text).toContain("vision fallback recovered");
+  expect(text).not.toContain("does not support image inputs");
+  expect(hits).toEqual(["quota", "text-only", "vision"]);
+  expect(isComboTargetInCooldown("free", { provider: "b", model: "m2" })).toBe(false);
+});
 }

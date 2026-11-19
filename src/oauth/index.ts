@@ -390,15 +390,12 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
 /**
  * Removed provider ids that still name a live successor.
  *
- * `devin-cli` was merged into `devin` (import-first login absorbed the CLI
- * credential import; devlog/_fin/260913_devin_provider_merge). The id can
- * still arrive here from a saved config row or a stored credential slot that
- * the startup migration has not rekeyed yet, and from a user typing the old
- * name at `ocx login`. It is deliberately NOT an OAUTH_PROVIDERS entry:
- * keeping one would re-expose it as a separate dashboard/login row, and its
- * `oauthConfig("devin-cli")` would throw at module load once the registry row
- * is gone. The alias map covers the paths that must keep working — refresh
- * policy resolution below, and the login-cli dispatch that warns and reroutes.
+ * `devin-cli` was merged into `devin` (devlog/_fin/260913_devin_provider_merge). The id can still
+ * arrive from a saved config row or stored credential slot the startup migration has not rekeyed,
+ * and from a user typing the old name at `ocx login`. It is deliberately NOT an OAUTH_PROVIDERS
+ * entry: that would re-expose a separate dashboard/login row, and `oauthConfig("devin-cli")`
+ * would throw at module load. The alias map covers refresh policy resolution below and the
+ * login-cli dispatch that warns and reroutes.
  */
 export const DEPRECATED_OAUTH_PROVIDER_ALIASES: Record<string, string> = {
   "devin-cli": "devin",

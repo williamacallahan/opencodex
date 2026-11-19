@@ -374,14 +374,12 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           loopbackPolicy(),
         );
       }
-      // Auth and CORS decisions below read `policy`, not `config`. For the public listener the
-      // two are the same object, so its behaviour is unchanged; for the loopback listener the
-      // view substitutes 127.0.0.1 as the bind address, which is what routes it through the
-      // same code path a plain loopback bind has always taken — Host-header check included.
-      // Routing, provider selection and response bodies keep using `config`.
-      // The Claude intercept listener is loopback by construction (the CONNECT proxy binds
-      // 127.0.0.1 and the request was rewritten onto a loopback origin), and its callers carry
-      // Anthropic credentials, not opencodex admission tokens — so it takes the loopback view too.
+      // Auth and CORS decisions below read `policy`, not `config`. For the public listener they are
+      // the same object; for the loopback listener the view substitutes 127.0.0.1 as the bind
+      // address, routing it through the plain loopback path, Host-header check included. Routing,
+      // provider selection and response bodies keep using `config`. The Claude intercept listener
+      // is loopback by construction and its callers carry Anthropic credentials, not opencodex
+      // admission tokens, so it takes the loopback view too.
       const policy: RequestPolicyView = ingress === "hub-link"
         ? linkPolicyView!
         : ingress === "unauthenticated-loopback" || ingress === "claude-intercept" || ingress === "local-control"
@@ -677,13 +675,10 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         return response;
       }
 
-      // Readiness: like /healthz this is exact GET and unauthenticated (so a client can
-      // back off BEFORE knowing the admission token), but stricter than liveness. The
-      // body carries only sanitized identity + the fixed status enum; the sync message,
-      // warning text, catalog path, provider output, and account data are never exposed.
-      // POST or "/readyz/" must NOT match (exact pathname + GET method): answer them
-      // with a JSON 404 here so they can never be silently accepted by the GUI SPA
-      // fallback (which would serve index.html with HTTP 200 once gui/dist exists).
+      // Readiness: like /healthz, exact GET and unauthenticated (so a client can back off BEFORE
+      // knowing the admission token), but stricter: the body carries only sanitized identity and the
+      // fixed status enum. POST or "/readyz/" get a JSON 404 here so the GUI SPA fallback can never
+      // accept them with HTTP 200 once gui/dist exists.
       if (readyzPath !== undefined) {
         if (readyzPath !== "/readyz" || req.method !== "GET") {
           return withCors(formatErrorResponse(404, "not_found", messagesUnknownEndpointMessage(req)), req, policy);
@@ -772,15 +767,13 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       }
 
       if (url.pathname === "/v1/catalog" && (req.method === "GET" || req.method === "HEAD")) {
-        // #809: remote Codex clients need the model catalog, and the only prior source was
-        // GET /api/catalog behind management auth — so operators had to hand out an admin
-        // token to read a list of models. This route fixes that on the data plane instead of
-        // widening /api/*, which stays exactly as restricted as before.
+        // #809: remote Codex clients need the model catalog, previously only behind management auth
+        // (GET /api/catalog), forcing operators to hand out an admin token. This data-plane route
+        // leaves /api/* as restricted as before.
         //
-        // resolveApiAuth (not resolveResponsesApiAuth) for the same reason /v1/models uses
-        // it: nothing here forwards a caller credential upstream, so accepting the dedicated
-        // header, a recognized bearer, or x-api-key is safe — and rejecting x-api-key would
-        // 401 Anthropic-SDK clients holding a perfectly valid data credential.
+        // resolveApiAuth (not resolveResponsesApiAuth), as /v1/models does: nothing here forwards a
+        // caller credential upstream, so the dedicated header, a recognized bearer, or x-api-key is
+        // safe, and rejecting x-api-key would 401 Anthropic-SDK clients with a valid data credential.
         const admission = resolveApiAuth(req, policy);
         if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
         if (!isAllowedRequestOrigin(req, policy)) {
@@ -822,18 +815,14 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         }
         const headers: Record<string, string> = {
           "content-type": "application/json",
-          // Identity-varying content behind a credential: never let a shared cache keep it,
-          // and never hand out a validator it could revalidate with. `no-cache` alone does
-          // not prevent storage — it forces revalidation, and the revalidation is exactly
-          // what would cross identities here, because this body varies by key type and key
-          // id while the ETag would be derived from bytes alone. A store keyed on URL plus
-          // validator could then serve one credential's representation to another. Proving
-          // an identity-partitioned cache key across every intermediary in the path is a
-          // much larger commitment than the bandwidth a 304 saves on this payload, so this
-          // route declines the trade: no-store, no ETag, no 304.
+          // Identity-varying content behind a credential: never let a shared cache keep it or hand out
+          // a validator. `no-cache` only forces revalidation, and revalidating is what would cross
+          // identities: the body varies by key type and key id while the ETag derives from bytes alone,
+          // so a store keyed on URL plus validator could serve one credential's representation to
+          // another. This route declines the trade: no-store, no ETag, no 304.
           //
-          // GET /api/catalog keeps its validator. That route is management-authenticated
-          // and loopback-scoped, and its representation does not vary by data-key identity.
+          // GET /api/catalog keeps its validator: management-authenticated, loopback-scoped, and its
+          // representation does not vary by data-key identity.
           "cache-control": "no-store",
         };
         const version = await persistedCodexVersion();
@@ -859,37 +848,30 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       }
 
       if (url.pathname === "/v1/hub-state" && (req.method === "GET" || req.method === "HEAD")) {
-        // #4236: a connected client had no way to learn which providers this hub can actually
-        // serve, so `ocx status` on the client reported the CLIENT's empty credential store as
-        // if it were the truth — "xai ✗ not logged in" on a machine whose hub has xAI logged
-        // in. The fix is one least-privilege data-plane read, in the /v1/catalog (#809)
-        // tradition: same admission resolver, same origin check, no parameters, no caller
-        // credential forwarded upstream, and a body of booleans plus model ids. Widening
-        // `/api/*` or handing the client an admin token to read `GET /api/providers` would
-        // have traded a reporting defect for a credential one.
+        // #4236: a connected client could not learn which providers this hub serves, so `ocx status`
+        // on the client reported the CLIENT's empty credential store as the truth. The fix is one
+        // least-privilege data-plane read in the /v1/catalog (#809) tradition: same admission
+        // resolver, same origin check, no parameters, no caller credential forwarded upstream, and a
+        // body of booleans plus model ids. Handing the client an admin token to read
+        // `GET /api/providers` would have traded a reporting defect for a credential one.
         //
-        // What it discloses beyond /v1/catalog and /v1/models, exactly: `hasCredential`,
-        // `loggedIn`, `authMode`, the featured roster, and the NAME and adapter of an ENABLED
-        // provider those routes omit for want of a usable credential — which is the point of
-        // the route. A `disabled` provider is NOT exported (`buildHubState` drops it), because
-        // the catalog filters it out too and naming it here would be the only place a data key
-        // learns of it.
+        // It discloses beyond /v1/catalog and /v1/models exactly: `hasCredential`, `loggedIn`,
+        // `authMode`, the featured roster, and the NAME and adapter of an ENABLED provider those
+        // routes omit for want of a usable credential. A `disabled` provider is NOT exported
+        // (`buildHubState` drops it), since the catalog filters it out too.
         //
-        // Placed between /v1/catalog and /v1/models so all three least-privilege client reads
-        // stay in sight of each other.
+        // Placed between /v1/catalog and /v1/models, beside the other least-privilege client reads.
         const admission = resolveApiAuth(req, policy);
         if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
         if (!isAllowedRequestOrigin(req, policy)) {
           return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin data-plane request blocked"), req, policy);
         }
-        // Role gate AFTER admission, deliberately: answering an unauthenticated caller would
-        // turn this into a free "is that machine a hub?" probe. A standalone or client install
-        // gains no public surface — only a hub or an active `hub-link` listener serves it.
+        // Role gate AFTER admission, deliberately: answering an unauthenticated caller would be a
+        // free "is that machine a hub?" probe. A standalone or client install gains no public surface.
         //
-        // Built, not formatErrorResponse'd, for the same reason /v1/catalog builds its 404: the
-        // code has to distinguish "this route exists and this host is not a hub" from "this
-        // build has no such route", which is the difference between admission proof and a
-        // vacuous pass in tests/server/api-key-attribution.test.ts.
+        // Built, not formatErrorResponse'd, like /v1/catalog's 404: the code must distinguish "this
+        // route exists and this host is not a hub" from "this build has no such route", the
+        // difference between admission proof and a vacuous pass in tests/server/api-key-attribution.test.ts.
         if (config.runtimeRole !== "hub" && ingress !== "hub-link") {
           return withCors(
             new Response(JSON.stringify({
@@ -1050,32 +1032,25 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         const wantsAnthropicList = wantsDesktopConfig || req.headers.get("anthropic-version") !== null
           || url.searchParams.get("flavor") === "anthropic";
         /**
-         * Whether a NATIVE slug may carry a Fast sibling.
+         * Whether a NATIVE slug may carry a Fast sibling. Both halves are required: upstream asserts
+         * the tier per model (`additional_speed_tiers`, as the Codex picker's toggle), but an operator
+         * capability override or the final wire resolution can still make the route ineligible, and
+         * `decideTier` would then drop the tier the row advertised.
          *
-         * Both halves are required. Upstream asserts the tier per model — the same
-         * `additional_speed_tiers` the Codex picker's own toggle is built from — but an
-         * operator capability override or the final wire resolution can still make the
-         * route ineligible, and `decideTier` would then drop the tier the row advertised.
-         *
-         * Declared here, above the Claude discovery call, because that call reads it while
-         * the raw OpenAI mapper further down does too; defining it there would leave this
-         * use in its temporal dead zone.
+         * Declared above the Claude discovery call and the raw OpenAI mapper that both read it, to
+         * stay out of the temporal dead zone.
          */
         const nativeFastEligible = (metadataId: string): boolean =>
           catalogFastRowEligible(config, { provider: OPENAI_CODEX_PROVIDER_ID, id: metadataId, native: true });
 
         /**
-         * Whether a routed catalog row may carry a Fast sibling.
+         * Whether a routed catalog row may carry a Fast sibling. A combo has no `config.providers`
+         * entry (declaring a provider named `combo` is rejected, combos/types.ts:191), so provider
+         * lookup cannot classify it. Its aggregated `supportsServiceTier` is already true only when
+         * EVERY member supports the tier (aggregation.ts:201), the right rule for a row that fans out
+         * to all of them.
          *
-         * A combo is its own namespace with no `config.providers` entry — declaring a
-         * provider named `combo` is rejected (combos/types.ts:191) — so provider lookup
-         * cannot classify it. Its aggregated `supportsServiceTier` is already true only
-         * when EVERY member supports the tier (aggregation.ts:201), which is the right
-         * rule for a row that fans out to all of them.
-         *
-         * Declared beside nativeFastEligible, above the Claude discovery call that reads
-         * both; defining it near the raw OpenAI mapper below would leave that use in its
-         * temporal dead zone.
+         * Declared beside nativeFastEligible for the same temporal-dead-zone reason.
          */
         const catalogRowFastEligible = (m: { provider: string; id: string; supportsServiceTier?: boolean }): boolean =>
           catalogFastRowEligible(config, m);
@@ -1150,14 +1125,11 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         }
         // OpenAI list shape: native gpt bare + routed models namespaced "<provider>/<id>"
         // (pure availability list — disabled natives are omitted entirely).
-        // Grok Build discovers models through this endpoint too, and its model picker only
-        // enables /effort for entries that advertise the reasoning ladder in the Grok model
-        // catalog shape (supports_reasoning_effort + reasoning_efforts[]). The Codex catalog
-        // branch above already carries the same ladders, so mirror them here — native rows
-        // from the upstream snapshot, routed rows from the configured provider tiers. The
-        // default uses the same canonical fallback as the Codex catalog resolver
-        // (configured default, then medium, then high, then the first tier). Extra fields
-        // are ignored by plain OpenAI clients.
+        // Grok Build discovers models here too, and its picker only enables /effort for entries that
+        // advertise the reasoning ladder in the Grok catalog shape (supports_reasoning_effort +
+        // reasoning_efforts[]). Mirror the Codex catalog branch's ladders: native rows from the
+        // upstream snapshot, routed rows from configured tiers, default via the same canonical
+        // fallback. Plain OpenAI clients ignore the extra fields.
         const grokEffortOption = (value: string, isDefault: boolean) => ({
           value,
           label: `${value[0].toUpperCase()}${value.slice(1)} Effort`,
@@ -1230,14 +1202,10 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             return disabledModels.has(id) ? [] : [{ id, metadataId }];
           })
         );
-        // What a scoped key may see, filtered by the same predicate that refuses
-        // it on the data plane, so the catalog and the send path cannot disagree.
-        // This is a convenience, never the boundary: hiding a row only stops a
-        // client that reads the catalog first, which is why the refusal lives on
-        // the request path and this filter reuses it rather than replacing it.
-        // Filtering happens where the resolved provider and model are still in
-        // hand -- a published id is a selector, and re-resolving one here would
-        // re-run combo selection just to render a list.
+        // What a scoped key may see, filtered by the predicate that refuses it on the data plane so
+        // the catalog and send path cannot disagree. A convenience, never the boundary: the refusal
+        // stays on the request path. Filtering happens where the resolved provider and model are in
+        // hand, since re-resolving a published id would re-run combo selection just to render a list.
         const listScope = resolveAdmissionModelScope(config, admission);
         const listAllows = (providerName: string, modelId: string): boolean =>
           routeAllowedByScope(listScope, { providerName, modelId });
@@ -1956,16 +1924,11 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             : withManagementCors(new Response(null, { status: 401, headers: { "Cache-Control": "no-store" } }), req, config);
         }
         if (req.method === "POST") {
-          // This endpoint is reachable WITHOUT a credential — that is the point of a pairing
-          // exchange — so the body limit has to hold against a caller who controls the
-          // framing. A declared Content-Length is a claim, not a bound: omit the header and
-          // `Number(null ?? "0")` is 0, send `Transfer-Encoding: chunked` and there is no
-          // header at all. Both used to pass the pre-check and land in `req.text()`, which
-          // buffers whatever arrives. The post-check then measured a string the process had
-          // already been forced to hold.
-          //
-          // So the declared length is only a cheap early reject, and the real bound is
-          // applied while reading: stop at limit+1 bytes and never accumulate more.
+          // This endpoint is reachable WITHOUT a credential (a pairing exchange), so the body limit
+          // must hold against a caller who controls the framing. A declared Content-Length is a claim:
+          // omit it, or send `Transfer-Encoding: chunked`, and both used to pass the pre-check into
+          // `req.text()`, which buffers whatever arrives. So the declared length is only an early
+          // reject, and the real bound is applied while reading: stop at limit+1 bytes.
           const declaredLength = Number(req.headers.get("content-length") ?? "0");
           if (!Number.isFinite(declaredLength) || declaredLength > GUI_PAIRING_EXCHANGE_BODY_LIMIT) {
             return withManagementCors(Response.json({ error: "pairing exchange body too large" }, { status: 413, headers: { "Cache-Control": "no-store" } }), req, config);

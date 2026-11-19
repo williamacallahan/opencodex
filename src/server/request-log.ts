@@ -138,17 +138,9 @@ export interface RequestLogContext extends UpstreamErrorDiagnostics {
   logicalRequestId?: string;
   /** Process-local privacy-bounded cache diagnostic; never persisted with request logs. */
   cacheDiagnosticDraft?: CacheDiagnosticDraft;
-  /**
-   * Internal live reference to this request's execution budget; omitted from RequestLogEntry and
-   * JSONL. Read at final-log time so the row reports the budget's FINAL state rather than a
-   * snapshot taken before the recovery legs that the row is meant to explain.
-   */
+  /** Live reference to this request's execution budget; not logged. Read at final-log time so the row reports its FINAL state. */
   executionBudget?: RequestExecutionBudget;
-  /**
-   * True once usage counts were taken from a response wire rather than reported raw by the
-   * adapter. It decides cache provenance: the normalizer writes zero-default token-detail
-   * objects, so an all-zero cache detail from a parsed wire is not a measured cache miss.
-   */
+  /** True once usage counts came from a parsed response wire; an all-zero cache detail from one is not a measured cache miss. */
   usageWireParsed?: boolean;
   /**
    * Configured name of the provider that declared `reportsNativeCache` on the latest physical send
@@ -157,11 +149,7 @@ export interface RequestLogContext extends UpstreamErrorDiagnostics {
   nativeCacheProvider?: string;
   /** Configured name of the provider on the latest physical send; the registry is read by it, not by the account label. */
   sentProvider?: string;
-  /**
-   * Every affinity reason recorded for this request, in order. `affinityReason` keeps the final
-   * one for the existing row shape; a request that moved twice has two causes and losing the
-   * first one loses the more expensive half of the story.
-   */
+  /** Every affinity reason for this request, in order; `affinityReason` keeps only the final one. */
   affinityMoveReasons?: CodexAffinityReason[];
   /** TTFT: ms from request start to the first non-empty model output delta (WP4, devlog 040). */
   firstOutputMs?: number;
@@ -183,12 +171,7 @@ export interface RequestLogContext extends UpstreamErrorDiagnostics {
    *  product: widening that enum would merge Responses and Chat Completions,
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
-  /**
-   * Set when an adapter answered the turn locally and no upstream request was made
-   * (`ProviderAdapter.localTerminal`). A fixed identifier naming the code path, never
-   * conversation-derived: it exists so a request log showing zero sends is explainable
-   * rather than looking like a lost request.
-   */
+  /** Adapter-supplied fixed identifier set when an adapter answered locally (`ProviderAdapter.localTerminal`), so zero sends is explainable. */
   localTerminalReason?: string;
   /** Stable non-PII Codex Pool account identity for durable usage attribution. */
   accountLogLabel?: string;
@@ -226,12 +209,7 @@ export interface RequestLogContext extends UpstreamErrorDiagnostics {
   responseModelEcho?: string;
   usage?: OcxUsage;
   usageLogInputTokens?: number;
-  /**
-   * The output ceiling this request may actually spend, for the durable spend reservation
-   * (#4707). Captured from the caller's `max_output_tokens`; absent when the caller omitted it
-   * and the adapter's own provider/model default decides, in which case only the input estimate
-   * is reserved up front and settlement corrects it.
-   */
+  /** Output ceiling for the durable spend reservation (#4707), from the caller's `max_output_tokens`; absent means only the input estimate is reserved. */
   spendOutputCeilingTokens?: number;
   /** Pre-send input estimate reserved for spend only; unlike usageLogInputTokens it never enters usage. */
   spendInputEstimateTokens?: number;
@@ -273,11 +251,7 @@ export interface RequestLogContext extends UpstreamErrorDiagnostics {
   streamErrorFollowed?: true;
   /** Recognized structured terminal code whose exact identity must survive status mapping. */
   terminalErrorCode?: typeof CYBER_POLICY_ERROR_CODE;
-  /**
-   * Proxy-owned error code for a request OpenCodex terminated locally, before or instead of an
-   * upstream send. Status-derived classification cannot name these: there is no upstream
-   * message to classify, and the status alone would read as a provider failure.
-   */
+  /** Proxy-owned error code for a request terminated locally, where status alone would read as a provider failure. */
   errorCode?: string;
   /** Structured reason from `response.incomplete`; internal-only input to log classification. */
   terminalIncompleteReason?: string;
@@ -336,11 +310,7 @@ export interface RequestLogEntry extends UpstreamErrorDiagnostics {
   genStartMs?: number;
   lastOutputMs?: number;
   surface?: "claude" | "claude-desktop" | "grok";
-  /**
-   * Set when the proxy answered this turn locally and sent nothing upstream. Without it a zero-send
-   * row is indistinguishable from a request that vanished. A fixed adapter-supplied identifier,
-   * never conversation-derived.
-   */
+  /** Set when the proxy answered locally and sent nothing upstream, so a zero-send row is not mistaken for a lost request. */
   localTerminalReason?: string;
   /** The matched configured key's id. Set ONLY for admissionKind "configured" —
    *  never a sentinel, so a hand-edited entry whose id happens to be "loopback"
@@ -395,11 +365,7 @@ export interface RequestLogEntry extends UpstreamErrorDiagnostics {
   attempts?: PersistedUsageAttempt[];
   /** True when persistence normalization drops any attempt. */
   attemptNormalizationDropped?: boolean;
-  /**
-   * Upstream spend for the whole logical request: sends aggregated across attempts and combo
-   * children, split into settled and unresolved, with the budget state and move reasons that
-   * explain them. Per-attempt `sendCount` stays the accounting source; this is the total.
-   */
+  /** Upstream spend for the whole logical request (sends across attempts and combo children); per-attempt `sendCount` stays the accounting source. */
   spend?: PersistedRequestSpend;
   /** Whether this row's cache detail was observed, synthesized for the wire, or absent. */
   cacheProvenance?: CacheTelemetryProvenance;
@@ -653,13 +619,8 @@ export function hydrateRequestLogsFromDisk(
 }
 
 /**
- * Rebuild the Logs ring after retention deleted rows from the ledger.
- *
- * Without this a compaction is invisible where an operator actually looks: the ring holds up to
- * 2,000 entries independently of the file, so rows deleted from disk keep serving through
- * /api/logs until eviction or a restart -- the dashboard showing history the ledger no longer
- * has. Observers are deliberately not replayed; they exist to watch NEW rows arrive, and
- * replaying a rehydration through them would announce two thousand arrivals that did not happen.
+ * Rebuild the Logs ring after retention deleted rows from the ledger, so /api/logs stops serving
+ * history the ledger no longer has. Observers are not replayed: they watch NEW rows arrive.
  */
 export function rehydrateRequestLogsAfterLedgerReplacement(
   reader: () => PersistedUsageEntry[] = () => readRecentUsageEntries(MAX_LOG_SIZE),
@@ -680,14 +641,9 @@ export function addRequestLog(entry: RequestLogEntry) {
   }
   entry = projectErrorDetail(entry);
   if (attemptNormalizationDropped && entry.attemptNormalizationDropped !== true) entry = { ...entry, attemptNormalizationDropped: true };
-  // Sanitize ONCE, at the ingress, and use that one value for both destinations.
-  //
-  // `addFinalRequestLog` is not the only way in: `addRequestLog` is exported and callable
-  // directly, and it retained the caller's entry verbatim in the in-memory ring while only the
-  // field-by-field disk projection below saw a sanitized value. That split let `/api/logs`
-  // serve a raw upstream-supplied marker — a newline in it can forge a record boundary in a
-  // line-oriented viewer — while `usage.jsonl` looked clean, which is the worst shape for a
-  // sanitization bug because the safe surface is the one you check.
+  // Sanitize ONCE, at the ingress, for both destinations: `addRequestLog` is exported and callable
+  // directly, and a raw marker in the ring (a newline can forge a record boundary in a viewer)
+  // would reach /api/logs while `usage.jsonl` looked clean.
   const shadowCallRewrittenFrom = sanitizeLogMetadataString(entry.shadowCallRewrittenFrom);
   const identity = modelIdentityLogFields(entry), servedModel = identity.servedModel;
   const claudeCompatibility = normalizeClaudeCompatibilityUsageLog(entry.claudeCompatibility);
@@ -1245,18 +1201,8 @@ export function httpStatusForRequestLogTerminal(
   if (status === "incomplete" && (logCtx?.terminalHttpStatus === 429 || logCtx?.terminalHttpStatus === 402)) {
     return logCtx.terminalHttpStatus;
   }
-  /**
-   * [Decision Log]
-   * - 목적과 의도: Keep request logs aligned with the successful HTTP/SSE contract.
-   * - 기존 구현 및 제약 조건: All incomplete terminals were recorded as 502 even when the
-   *   client-requested output limit was reached normally.
-   * - 검토한 주요 대안: Treat every incomplete as success, or infer the reason from display text.
-   * - 선택한 방식: Only structured max_output_tokens incompletes map to 200.
-   * - 다른 대안 대신 이 방식을 선택한 이유: Stall, EOF, and unknown incompletes must remain
-   *   visible failures, and display text is not a stable classification contract.
-   * - 장점, 단점 및 영향: Logs stop reporting false upstream errors while retaining the
-   *   incomplete terminal detail; native callers without a structured reason keep old behavior.
-   */
+  // Only structured max_output_tokens incompletes map to 200; stall, EOF, and unknown incompletes
+  // stay visible failures, and display text is not a stable classification contract.
   if (status === "incomplete" && logCtx?.terminalIncompleteReason === "max_output_tokens") {
     return 200;
   }
@@ -1269,13 +1215,10 @@ export function httpStatusForRequestLogTerminal(
 /**
  * Aggregate one logical request's upstream spend from the rows that recorded it.
  *
- * Attempts are the accounting source and combo children are attempts of the same context, so a
- * sum over `logCtx.attempts` is the send count for one user turn — the number the amplification
- * in #4546 is measured in. A terminal status is what makes a send explainable, so the split is
- * drawn there rather than at success: a 502 is settled spend, an attempt abandoned in flight is
- * not. The budget's own counter is folded in as `reserved` because a leg that re-sent without
- * opening an attempt row is charged and unobserved, and that difference belongs in
- * `unresolved` rather than quietly inflating `settled`.
+ * Attempts are the accounting source, and combo children are attempts of the same context. A
+ * terminal status makes a send explainable (a 502 is settled spend, an abandoned attempt is not).
+ * The budget's own counter is folded in as `reserved`: a leg that re-sent without opening an
+ * attempt row is charged and unobserved, and belongs in `unresolved`, not `settled`.
  */
 export function requestSpendRecord(
   logCtx: Pick<RequestLogContext, "executionBudget" | "affinityMoveReasons" | "affinityReason" | "affinity">,
@@ -1331,12 +1274,9 @@ export function noteCodexSelectionAffinity(logCtx: RequestLogContext, authCtx: C
 }
 
 /**
- * The affinity scope a released binding belonged to: one thread, one model lane.
- *
- * Both halves are part of the key. A thread holds a separate binding per model lane, so a
- * quota refusal on one lane and a transient streak on another are two releases; keyed by thread
- * alone the second overwrites the first and one of the two rows reports a cause that never
- * happened on it.
+ * The affinity scope a released binding belonged to: one thread, one model lane. Both halves are
+ * the key, since keyed by thread alone a quota refusal on one lane would overwrite a transient
+ * streak on another.
  */
 export interface AffinityModelLane {
   model: string;
@@ -1383,15 +1323,9 @@ export function clearNoAccountAffinityReasonsForTests(): void {
 /**
  * Report a selection that produced no account, on the request that failed because of it.
  *
- * A no-account resolve reaches no auth context, so until now its cause was handed to whichever
- * later resolve happened to succeed — and a pool that stays exhausted never produces one, leaving
- * the failure permanently unexplained. Attaching the reason to THIS request's own record is what
- * makes the failure self-describing: the row is written, persisted and hydrated like any other,
- * and it survives a restart.
- *
- * Deliberately not a separate synthetic row. `/api/usage` counts one row as one request, so an
- * extra event row would report a request that never existed and skew the very cost totals this
- * work exists to make trustworthy.
+ * A no-account resolve reaches no auth context, so a pool that stays exhausted would leave the
+ * failure permanently unexplained. The reason rides THIS request's own record, which persists and
+ * hydrates like any other. It is not a synthetic row: `/api/usage` counts one row as one request.
  */
 export function recordNoAccountAffinityFailure(
   logCtx: RequestLogContext,

@@ -1012,13 +1012,12 @@ export interface OcxConfig {
    * credential (issue #1102).
    *
    * Why a separate listener rather than an exemption on the main one: when `hostname` is a
-   * wildcard, every caller needs `x-opencodex-api-key`, but a `codex app-server` spawned
-   * directly from the resolved entrypoint never goes through the generated shim and so never
-   * inherits the token. Exempting "loopback-looking peers" on the public listener would be
-   * unsound — `requestIP()` only proves the last transport hop, and Docker Desktop port
-   * forwarding, host-network containers, WSL mirrored networking and tunnels all terminate
-   * remote connections locally. Binding a second socket to 127.0.0.1 makes the kernel refuse
-   * remote connections outright, so there is no address to judge.
+   * wildcard, every caller needs `x-opencodex-api-key`, but a `codex app-server` spawned directly
+   * from the resolved entrypoint skips the generated shim and never inherits the token. Exempting
+   * "loopback-looking peers" on the public listener would be unsound: `requestIP()` only proves the
+   * last transport hop, and Docker Desktop forwarding, host-network containers, WSL mirrored
+   * networking and tunnels all terminate remote connections locally. A second socket bound to
+   * 127.0.0.1 makes the kernel refuse remote connections outright.
    *
    * The public listener's admission policy is unchanged. This adds an explicit local trust
    * surface: every process on the machine can reach it, spend account quota, and consume paid
@@ -1028,16 +1027,14 @@ export interface OcxConfig {
    *
    *  - `{ enabled: true, port: N }` — a distinct port (the #1102 form). N must differ from the
    *    proxy port.
-   *  - `{ enabled: true }` — the "companion" form: bind `127.0.0.1:<proxy port>`. Legal only
-   *    when `hostname` is a specific non-loopback, non-wildcard address (a tailnet or LAN IP),
-   *    because otherwise the public socket already owns that loopback address. This is the
-   *    one-port hub shape: remote clients dial `hostname:port`, local processes dial
-   *    `127.0.0.1:port`, and every integration that hardcodes `http://127.0.0.1:<proxy port>`
-   *    keeps working on a hub whose public bind they cannot reach (#4236).
+   *  - `{ enabled: true }` — the "companion" form: bind `127.0.0.1:<proxy port>`. Legal only when
+   *    `hostname` is a specific non-loopback, non-wildcard address (a tailnet or LAN IP), because
+   *    otherwise the public socket already owns that loopback address. This is the one-port hub
+   *    shape: remote clients dial `hostname:port`, local processes dial `127.0.0.1:port`, and
+   *    integrations hardcoding `http://127.0.0.1:<proxy port>` keep working (#4236).
    *
-   * Neither form is OS-assigned. A changing port would break already-running app-servers
-   * holding the previous `base_url` — the exact symptom #1102 reported and we disproved for
-   * token rotation.
+   * Neither form is OS-assigned: a changing port would break running app-servers holding the
+   * previous `base_url`, the symptom #1102 reported.
    */
   unauthenticatedLoopbackListener?:
     | { enabled: false }

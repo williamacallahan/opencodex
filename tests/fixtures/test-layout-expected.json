@@ -1711,5 +1711,6 @@
   "cli-link-policy.test.ts": "cli",
   "link-child-catalog-oracle.test.ts": "e2e-style",
   "messages-hybrid.test.ts": "claude-integration",
-  "provider-quota-codex-lb.test.ts": "providers"
+  "provider-quota-codex-lb.test.ts": "providers",
+  "claude-messages-token-estimate.test.ts": "claude-integration"
 }

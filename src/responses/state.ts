@@ -704,21 +704,13 @@ async function writeBoundedSnapshot(path: string, attemptLimit: number): Promise
       const payload = snapshotPayload(selectSnapshotEntries(states, snapshotTotalBytes(), SNAPSHOT_ENTRY_MAX_BYTES));
       const payloadBytes = Buffer.byteLength(payload, "utf8");
       const payloadDigest = Bun.hash(payload).toString(36);
-      // A mutation does not always change what gets persisted: entries past the
-      // per-entry or total byte bound are dropped from the selection, and spill
-      // demotion moves bytes out of it. Re-writing a byte-identical 24 MiB file
-      // buys nothing, so compare first — but the cached digest describes what THIS
-      // process last wrote, which is not the same claim as "that is what is on disk
-      // now". A second proxy sharing the home, or anything that rewrites the file
-      // in place, leaves the digest describing bytes that are gone. Before every
-      // release-of-a-write, the previous behaviour rewrote unconditionally and so
-      // repaired that silently; skipping without checking would turn a repaired
-      // snapshot into a lost one at the next restart.
-      //
-      // Verify against the file itself, keyed to the resolved target so a retargeted
-      // symlink is also a miss. Reading back a matching-size file costs far less
-      // than the atomic replace it avoids, and only happens when the digest already
-      // matched — the amplification this fixes is the repeated WRITE, not the read.
+      // A mutation does not always change what is persisted (entries past the byte bounds are
+      // dropped, spill demotion moves bytes out), so compare before re-writing an identical
+      // file. The cached digest only describes what THIS process last wrote; a second proxy
+      // sharing the home may have changed the file, and skipping blindly would turn a repaired
+      // snapshot into a lost one. So verify against the file itself, keyed to the resolved
+      // target so a retargeted symlink is also a miss. The read only happens when the digest
+      // already matched; the amplification avoided is the repeated WRITE.
       const unchanged = lastSnapshotDigest !== null
         && payloadDigest === lastSnapshotDigest
         && payloadBytes === lastSnapshotBytes

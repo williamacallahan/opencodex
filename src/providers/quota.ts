@@ -148,15 +148,12 @@ async function probeProviderQuota(
   if (provider.authMode === "oauth" && configuredAnthropicInstance(config, name)) return await fetchAnthropicQuota(name, config);
   if (provider.authMode === "oauth" && name === ANTIGRAVITY_OAUTH_STORE_KEY) return await fetchAntigravityQuota(name, { ...provider });
   if (provider.authMode === "oauth" && name === "kiro") return await fetchKiroQuota(name);
-  // meta-muse: a device-logged-in account can be probed at the key endpoint; an
-  // imported or pasted one cannot, and falls back to its last in-band observation.
-  // The probe is tried first and its failure is never fatal to the row.
+  // meta-muse: only a device-logged-in account can be probed; others fall back to the last in-band observation.
   if (provider.authMode === "oauth" && hasPassiveAccountQuota(name)) {
     return (await fetchMuseKeyQuota(name)) ?? await fetchPassiveProviderQuota(name);
   }
   const reader = keyQuotaReaderForProvider(name, provider);
-  // Keep destination/auth fields bound to the same request as the reader's captured
-  // bearer, even if the live provider object changes while the quota probe awaits.
+  // Copy the provider so destination/auth stay bound to the reader's captured bearer across awaits.
   return reader ? await reader(name, { ...provider }) : null;
 }
 
@@ -188,36 +185,19 @@ function clearQuotaProbeWarnings(name: string): void {
  *
  * Lazy import on purpose: this module is statically reachable from
  * src/server/responses/core.ts (via oauth/anthropic-routing.ts), so a static edge would put
- * the observer and its sink registry on every install's request path.
- *
- * No previous snapshot is passed. The observer keeps its own persisted last-seen map,
- * because `previous` here is bound only when `cache.key === key` and the key digest at
- * cacheKeyWithAggregationState includes quota values and their freshness — so it is empty
- * exactly when a reset happened.
- *
- * Account identity is resolved SYNCHRONOUSLY, before any await. Two reasons, both observed:
- * pool failover rewrites `activeAccountId` during request routing
- * (promoteAnthropicActiveAccount -> setActiveAccount), so a 429 between this commit and a
- * later async read would attribute this report to a different account and overwrite that
- * account's baseline with these numbers. fetchAnthropicQuota already captures
- * `probedAccountId` before awaiting for exactly this reason; the observer must not be
- * sloppier than the cache it observes.
- *
- * Observations are serialized through a module-level promise chain for the same reason as
- * the codex seam: Bun does not resolve concurrent import() calls in call order, and an
- * out-of-order baseline swap manufactures false resets that then burn the durable
- * idempotence key.
+ * the observer on every install's request path. The observer keeps its own persisted
+ * last-seen map instead of receiving a previous snapshot. Account identity is resolved
+ * synchronously, before any await, because pool failover rewrites `activeAccountId` during
+ * routing and a later async read would attribute this report to another account. Observations
+ * are serialized through a promise chain because Bun does not resolve concurrent import()
+ * calls in call order, and an out-of-order baseline swap manufactures false resets.
  */
 let pendingProviderObservation: Promise<void> = Promise.resolve();
 
 /**
- * Stable per-account observation key for one provider report.
- *
- * OAuth providers key by active account id. A probe-bound key report instead carries the
- * full digest of the credential it actually sent (report-cache), because the 8-character
- * apiKeyPoolEntryId is a cache discriminator, not an identity: two distinct keys can share
- * it, and that collision must not hand one key's baseline to another. Providers without
- * that binding keep the legacy id byte for byte, so their persisted baselines survive.
+ * Stable per-account observation key for one provider report. A probe-bound key report keys by
+ * the full digest of the credential it sent, because the 8-character apiKeyPoolEntryId is a
+ * cache discriminator that two distinct keys can share. Other providers keep the legacy id.
  */
 function providerObservationAccountKey(provider: string, config: OcxConfig, report?: ProviderQuotaReport): string {
   const oauthAccountId = getAccountSet(provider)?.activeAccountId;
@@ -261,8 +241,7 @@ function notifyProviderQuotaSnapshot(
       for (const observation of observations) observer.observeQuotaSnapshot({ scope: observation.scope, accountKey: observation.accountKey, windows: providerWindowObservations(observation.quota), ...(observation.retainUnknownWindows ? { retainUnknownWindows: observation.retainUnknownWindows } : {}) });
     })
     .catch(() => {
-      // Detection is best-effort: a quota refresh must never fail because of it. Swallowing
-      // here also keeps the chain alive — a rejected link would poison every later one.
+      // Best-effort; a rejected link would also poison every later one in the chain.
     });
 }
 
@@ -287,15 +266,11 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
   const claudeSignIn = forceRefresh ? undefined : refreshClaudeCliSignIn(config);
   if (claudeSignIn) await claudeSignIn;
   const now = Date.now();
-  // The cache fast path must not extend a preserved last-good row past its 30-minute bound:
-  // a row preserved at age 29:59 plus a full 5-minute TTL would otherwise serve until ~35min.
-  // An OBSERVED row is exempt: it carries the observation time, which is older than the bound
-  // by construction and never becomes fresher on its own. Without the exemption a single
-  // configured passive provider makes this predicate permanently false, so every dashboard
-  // poll re-probes every OTHER provider upstream instead of serving the 5-minute cache.
+  // The fast path must not extend a preserved last-good row past its bound. An OBSERVED row is
+  // exempt: it carries the observation time and never becomes fresher on its own, so without
+  // the exemption one passive provider would force every poll to re-probe the others.
+  // The cache key is only a discriminator; the stored response is re-validated before serving.
   const currentCache = getProviderQuotaReportCache();
-  // The cache key is a cheap discriminator, not an identity: the stored response is
-  // re-validated against this caller's configuration before it is served.
   const cacheFresh = currentCache && currentCache.key === key && now - currentCache.ts < CACHE_TTL_MS
     && currentCache.response.reports.every(item =>
       (item.observed === true || now - item.updatedAt < LAST_GOOD_MAX_AGE_MS)
@@ -324,7 +299,6 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
       const commitKeyCandidate = cacheKeyWithAggregationState(config);
       commitKey = typeof commitKeyCandidate === "string" ? commitKeyCandidate : await commitKeyCandidate;
     }
-    // Reconcile both rows and empty results after all awaits against the last recorded sign-in.
     Object.entries(config.providers).forEach(([name, provider], index) => {
       if (provider.adapter === "claude-cli" && provider.disabled !== true) probeResults[index] = heldClaudeCliObservedQuota(name);
     });
@@ -335,17 +309,14 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
     const terminalFailures = new Set(Object.keys(config.providers).filter((_, index) => (
       probeResults[index] === TERMINAL_QUOTA_FAILURE || probeResults[index] === AUTHORITATIVE_EMPTY_QUOTA
     )));
-    // Keep bounded last-good rows when a probe fails transiently; terminal-invalid provider
-    // responses explicitly suppress their old row. Never re-stamp preserved timestamps.
-    // Note: the cache key encodes the provider set (name/adapter/authMode/disabled/baseUrl),
-    // so previous rows always correspond to currently configured, enabled providers — a
-    // disabled or removed provider changes the key and starts from an empty previous set.
+    // Keep bounded last-good rows when a probe fails transiently; terminal-invalid responses
+    // suppress their old row. Never re-stamp preserved timestamps. The cache key encodes the
+    // provider set, so previous rows always belong to currently configured, enabled providers.
     const cutoff = Date.now() - LAST_GOOD_MAX_AGE_MS;
     const byProvider = new Map<string, ProviderQuotaReport>();
     const generationMismatchedProviders = new Set<string>();
     for (const item of previous) {
-      // Same exemption as the fast path. A passive row reaching `previous` is not a probe
-      // that went quiet — there is no probe — so age cannot condemn it.
+      // Same observed-row exemption as the fast path.
       if (item.observed !== true && item.updatedAt < cutoff) continue;
       if (isProviderQuotaReportCurrent(item) && keyReportCredentialCurrent(item, config.providers[item.provider])) byProvider.set(item.provider, item);
       else generationMismatchedProviders.add(item.provider);
@@ -359,7 +330,6 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
         generationMismatchedProviders.add(item.provider);
       }
     }
-    // Terminal-invalid probes suppress their previous row (transient failures keep it).
     for (const provider of terminalFailures) {
       byProvider.delete(provider);
       generationMismatchedProviders.delete(provider);
@@ -488,8 +458,7 @@ async function fetchAccountQuota(
     if (provider === "google-antigravity" && cached.quotaFailure && cached.quotaFailureIsCurrent?.() !== true) return { ...cached, quotaFailure: undefined };
     return cached;
   }
-  const flightKey = key;
-  const joinable = accountQuotaInflight.get(flightKey);
+  const joinable = accountQuotaInflight.get(key);
   if (joinable) {
     const joined = await joinable;
     const joinedCurrent = joined.isCurrent?.();
@@ -505,7 +474,6 @@ async function fetchAccountQuota(
       try { return epoch === explicitAccountEpoch && diagnosticIdentity !== undefined && diagnosticIdentity === antigravityQuotaDiagnosticIdentity(accountId); }
       catch { return false; }
     };
-    const antigravityIsCurrent = () => quotaFailureIsCurrent();
     const diagnosticFields = () => quotaFailure && quotaFailureIsCurrent() ? { quotaFailure, quotaFailureIsCurrent } : {};
     const unavailable = (): AccountQuotaCacheEntry => {
       const entry: AccountQuotaCacheEntry = {
@@ -513,7 +481,7 @@ async function fetchAccountQuota(
         quota: cached?.quota ?? null,
         unavailable: true,
         ...(provider === "kiro" ? { identity: kiroIdentity } : {}),
-        ...(provider === "google-antigravity" ? { isCurrent: antigravityIsCurrent } : {}),
+        ...(provider === "google-antigravity" ? { isCurrent: quotaFailureIsCurrent } : {}),
         ...diagnosticFields(),
       };
       if (entry.isCurrent?.() !== false && mayCommitAccountQuotaKey(key, writerGeneration)
@@ -534,9 +502,7 @@ async function fetchAccountQuota(
       } else {
         const token = await getTokenForAccountQuotaProbe(provider, accountId);
         if (provider === "google-antigravity") {
-          // Per-account Gem/Cla windows (#1082). The project id is part of the stored
-          // credential; without it the probe cannot be made, and that is "unavailable",
-          // never 0%.
+          // Per-account Gem/Cla windows (#1082). Without the stored project id the probe is "unavailable", never 0%.
           const credential = getAccountCredential(provider, accountId);
           diagnosticIdentity = credential?.access === token ? antigravityQuotaDiagnosticIdentity(accountId, credential) : undefined;
           if (!diagnosticIdentity || !credential?.projectId) throw new Error("antigravity account unavailable");
@@ -547,12 +513,12 @@ async function fetchAccountQuota(
           return { ts: Date.now(), quota: null, unavailable: true };
         }
       }
-      if (provider === "google-antigravity" && !antigravityIsCurrent()) return { ts: Date.now(), quota: null, unavailable: true };
+      if (provider === "google-antigravity" && !quotaFailureIsCurrent()) return { ts: Date.now(), quota: null, unavailable: true };
       if (!quota) return unavailable();
       const entry: AccountQuotaCacheEntry = {
         ts: Date.now(), quota,
         ...(provider === "kiro" ? { identity: kiroIdentity } : {}),
-        ...(provider === "google-antigravity" ? { isCurrent: antigravityIsCurrent } : {}),
+        ...(provider === "google-antigravity" ? { isCurrent: quotaFailureIsCurrent } : {}),
       };
       if (mayCommitAccountQuotaKey(key, writerGeneration)
         && entry.isCurrent?.() !== false
@@ -563,22 +529,18 @@ async function fetchAccountQuota(
       }
       return entry;
     } catch (error) {
-      // The probe itself reports HTTP and transport failures as results; what throws here is the
-      // credential side (missing/paused account, failed refresh, no project). A refresh that hit
-      // its deadline is a timeout to retry, not an account the operator must re-sign.
+      // The probe reports HTTP and transport failures as results; a throw here is the credential
+      // side. A refresh that hit its deadline is a timeout to retry, not an account to re-sign.
       if (provider === "google-antigravity") quotaFailure = thrownQuotaFailure(error) === "timeout" ? "timeout" : "account_unavailable";
       return unavailable();
     }
   })().finally(() => {
-    if (accountQuotaInflight.get(flightKey) === probe) accountQuotaInflight.delete(flightKey);
+    if (accountQuotaInflight.get(key) === probe) accountQuotaInflight.delete(key);
   });
-  accountQuotaInflight.set(flightKey, probe);
+  accountQuotaInflight.set(key, probe);
   return probe;
 }
-/**
- * Per-account quota rows for a provider's logged-in accounts. Probes run in parallel; a
- * single failing account never blocks the others.
- */
+/** Per-account quota rows for a provider's logged-in accounts; probes run in parallel. */
 export async function fetchProviderAccountQuotas(
   provider: string,
   forceRefresh = false,

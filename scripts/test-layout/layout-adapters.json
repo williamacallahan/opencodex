@@ -31,5 +31,10 @@
   "claude-chat-tool-dispatch.test.ts": "claude-integration",
   "claude-chat-tool-dispatch-routes.test.ts": "claude-integration",
   "anthropic-affinity-restart.test.ts": "adapters/anthropic",
-  "anthropic-affinity-store.test.ts": "adapters/anthropic"
+  "anthropic-affinity-store.test.ts": "adapters/anthropic",
+  "anthropic-revoked-token.test.ts": "adapters/anthropic",
+  "messages-revoked-token.test.ts": "claude-integration",
+  "anthropic-revoked-token-continuation.test.ts": "adapters/anthropic",
+  "anthropic-revoked-token-sidecars.test.ts": "adapters/anthropic",
+  "anthropic-revoked-token-boundaries.test.ts": "adapters/anthropic"
 }

@@ -1054,31 +1054,26 @@ Responses models still accept an explicit `modelAdapters` override.
 When reading an older saved configuration, OpenCodex ignores obsolete Chat/Responses overrides for the newly pinned Gemini and Qwen models, along with their formerly valid Responses-only hosted-tool preferences. Other providers, accounts and routing remain available. Reads leave the file unchanged; a later explicit configuration edit saves the upgraded values. New overrides for these native models are still rejected.
 Gemini uses `low`, `medium` and `high` thinking levels; higher requested efforts clamp to `high`.
 
-OpenCode Go requires a stable session identifier for routing. OpenCodex sends
-`claude-haiku-5-5`, like the MiniMax models, over the Anthropic Messages wire, matching
-[OpenCode Go's endpoint table](https://opencode.ai/docs/go/#endpoints). OpenCodex derives
-its Go session header from Codex thread/session headers, or from a client's
-`x-opencode-session` header when Codex headers are absent. This applies to direct
-Chat Completions requests and requests bridged to Responses. Even an `ocx_`-prefixed
-inbound value is treated as client input and
-hashed into Go affinity; the internal bridge carries the original value, so native
-Chat, bridged Chat, and Responses derive the same result. Explicit provider-config
-session headers are operator overrides and are sent unchanged. Clients must keep the
-identifier stable within a conversation and distinct across conversations. A request
-without any session identifier is not given an inferred cross-request identity; it is
-instead sent under a session allocated for that request alone, isolated from every
-other request (see the provider reference for how that value is carried).
-For Claude Messages, configured OpenCode Go session headers remain authoritative.
-Otherwise, valid explicit session or thread headers take precedence, and valid
-conversation identity in `metadata.user_id` supplies the fallback. This fallback is
-applied to the final Go destination, including random combo selections and fallback
-attempts, rather than the preliminary route. Shared system-prompt cache keys do
-not identify conversations, and Go-specific identity is not sent to non-Go targets.
-Generated Pi provider configurations enable `compat.sendSessionAffinityHeaders`
-so Pi sends its per-session identity to the proxy. Existing manually managed Pi
-configurations can set this option on their `opencodex` provider as well.
-Pi can omit session affinity when `cacheRetention` is `none`; enable cache retention
-when a stable upstream session is required.
+OpenCode Go requires a stable session identifier for routing. OpenCodex sends `claude-haiku-5-5`, like the
+MiniMax models, over the Anthropic Messages wire, matching [OpenCode Go's endpoint
+table](https://opencode.ai/docs/go/#endpoints). OpenCodex derives its Go session header from Codex
+thread/session headers, or from a client's `x-opencode-session` header when Codex headers are absent. This
+applies to direct Chat Completions requests and requests bridged to Responses. Even an `ocx_`-prefixed
+inbound value is treated as client input and hashed into Go affinity; the internal bridge carries the
+original value, so native Chat, bridged Chat, and Responses derive the same result. Explicit
+provider-config session headers are operator overrides and are sent unchanged. Clients must keep the
+identifier stable within a conversation and distinct across conversations. A request without any session
+identifier is not given an inferred cross-request identity; it is instead sent under a session allocated
+for that request alone, isolated from every other request (see the provider reference for how that value
+is carried). For Claude Messages, configured OpenCode Go session headers remain authoritative. Otherwise,
+valid explicit session or thread headers take precedence, and valid conversation identity in
+`metadata.user_id` supplies the fallback. This fallback is applied to the final Go destination, including
+random combo selections and fallback attempts, rather than the preliminary route. Shared system-prompt
+cache keys do not identify conversations, and Go-specific identity is not sent to non-Go targets.
+Generated Pi provider configurations enable `compat.sendSessionAffinityHeaders` so Pi sends its
+per-session identity to the proxy. Existing manually managed Pi configurations can set this option on
+their `opencodex` provider as well. Pi can omit session affinity when `cacheRetention` is `none`; enable
+cache retention when a stable upstream session is required.
 
 **MiMo tool-call echoes.** On OpenCode Go and other Chat Completions routes, a bare
 `<tool_call>` block is hidden when it duplicates one structured call to the same tool
@@ -1192,21 +1187,19 @@ complete declared-tool call with no native counterpart is restored only after a 
 interrupted or filtered turns leave the markup as text. Create Provider-API keys at
 [Command Code Studio](https://commandcode.ai/studio/).
 
-For a provider using the native `command-code` adapter, `projectContext: "on"` opts into
-sending local project files in the `/alpha/generate` `memory`, `taste`, and `skills` fields.
-With `projectContext` unset or `"off"`, no project files (`AGENTS.md`, taste, or skills)
-are read or sent; the existing `config` metadata payload is unchanged.
-The roots are resolved from the **opencodex proxy process working directory**, not from a
-caller's remote workspace. The loader reads `AGENTS.md`, `.commandcode/taste/taste.md`,
-and `SKILL.md` files in immediate child directories of `.commandcode/skills`,
-`.agents/skills`, and `.pi/skills` under that working directory. Enabling the option sends
-the collected contents upstream to the configured Command Code endpoint. It is rejected
-for other adapters. Asynchronous path checks keep reads inside the resolved working
-directory, including when that directory is a filesystem root; only regular-file
-content is read. Skill-directory symlinks resolving inside that directory are allowed;
-those resolving outside are rejected. Every visited entry counts toward the scan budget; at
-most 16 skills are selected. File bytes, total skill bytes, and loading time are bounded;
-unreadable or missing files produce empty fields. Stable results are cached for 30 seconds;
+For a provider using the native `command-code` adapter, `projectContext: "on"` opts into sending local
+project files in the `/alpha/generate` `memory`, `taste`, and `skills` fields. With `projectContext` unset
+or `"off"`, no project files (`AGENTS.md`, taste, or skills) are read or sent; the existing `config`
+metadata payload is unchanged. The roots are resolved from the **opencodex proxy process working
+directory**, not from a caller's remote workspace. The loader reads `AGENTS.md`,
+`.commandcode/taste/taste.md`, and `SKILL.md` files in immediate child directories of
+`.commandcode/skills`, `.agents/skills`, and `.pi/skills` under that working directory. Enabling the
+option sends the collected contents upstream to the configured Command Code endpoint. It is rejected for
+other adapters. Asynchronous path checks keep reads inside the resolved working directory, including when
+that directory is a filesystem root; only regular-file content is read. Skill-directory symlinks resolving
+inside that directory are allowed; those resolving outside are rejected. Every visited entry counts toward
+the scan budget; at most 16 skills are selected. File bytes, total skill bytes, and loading time are
+bounded; unreadable or missing files produce empty fields. Stable results are cached for 30 seconds;
 timeouts and filesystem-admission refusals are not cached, so a later request can retry.
 
 **OrcaRouter authentication and discovery.** Choose either `ocx login orcarouter-oauth` for
@@ -1698,30 +1691,30 @@ management API is `/api/providers/keys` and returns masked keys only.
 
 Each configured key row in the dashboard provides dedicated Pause and Resume controls (along with
 `ocx account pause` and `ocx account resume` in the CLI). A paused key is excluded from automatic
-request routing, failover, and cooldown recovery (a media call the Responses xAI image/video bridge has
-already planned keeps the key it was planned with). If another enabled row shares the same key reference, it remains usable. When the last enabled row for the active reference is paused, OpenCodex
-automatically selects the next usable unpaused key in the pool in ring order. If all keys in the pool
+request routing, failover, and cooldown recovery (a media call the Responses xAI image/video bridge
+has already planned keeps the key it was planned with). If another enabled row shares the same key
+reference, it remains usable. When the last enabled row for the active reference is paused,
+OpenCodex automatically selects the next usable unpaused key in ring order. If all keys in the pool
 are paused, requests that need that provider return HTTP 403 `permission_error` until a key is
-resumed. The built-in Images route can still use another eligible upstream. Selecting a paused
-key row resumes and activates it. Resume clears the pause while preserving a healthy active key;
-the resumed key becomes active when no usable key is currently selected.
+resumed. The built-in Images route can still use another eligible upstream. Selecting a paused key
+row resumes and activates it. Resume clears the pause while preserving a healthy active key; the
+resumed key becomes active when no usable key is currently selected.
 
 ### Switching accounts from the terminal
 
 Use `ocx account list`, `ocx account current`, and `ocx account use` to inspect or switch the same
 Codex, OAuth, and API-key pools without opening the dashboard. See the
-[CLI reference](/reference/cli/providers-accounts/#ocx-account-subcommand) for commands, JSON output, and
-new-session behavior.
+[CLI reference](/reference/cli/providers-accounts/#ocx-account-subcommand) for commands, JSON
+output, and new-session behavior.
 
 #### Subscription tier in account listings
 
 `ocx account list <provider> --json` and `GET /api/oauth/accounts` report a `plan` field on every
-OAuth account, using the same name and placement as the OpenAI/Codex provider so a consumer can
-read one shape across providers.
-
-The field is always present. It is `null` when the tier is unknown, which is deliberate: an
-**absent** key means the proxy predates this field, while `null` means this version looked and the
-provider did not report a tier. Collapsing the two would let a consumer quietly assume a tier.
+OAuth account, with the same name and placement as the OpenAI/Codex provider so a consumer reads one
+shape across providers. The field is always present. It is `null` when the tier is unknown,
+deliberately: an **absent** key means the proxy predates this field, while `null` means this version
+looked and the provider did not report a tier. Collapsing the two would let a consumer quietly
+assume a tier.
 
 For Anthropic accounts (both pools) the value comes from the authenticated account profile that
 OpenCodex already reads: the organization's rate-limit tier, reported as labels such as `max_20x`,
@@ -1829,16 +1822,15 @@ Cursor is still not shown in key-login lists.
 
 ### Ollama Cloud
 
-Ollama Cloud is a hosted (not local) Ollama. Configure it at `https://ollama.com/v1` with a key
-from [ollama.com/settings/keys](https://ollama.com/settings/keys). opencodex reaches it over
-Ollama's own REST API (`POST /api/chat`) rather than the OpenAI-compatible surface, and discovers
-the live model roster from the provider, so new Ollama Cloud models appear without a config
-change. opencodex classifies its cloud
-lineup by vision capability so the [vision sidecar](/guides/sidecars/) only kicks in for
-text-only models. Text-only models (e.g. `glm-5.2`, `deepseek-v4-flash`, `gpt-oss`, `qwen3-coder`,
-`minimax-m2.x`, `nemotron-3-*`) are listed in `noVisionModels`; vision-native models (e.g.
-`kimi-k2.6`, `minimax-m3`, `gemma4`, `qwen3.5`, `gemini-3-flash-preview`) are not. Matching is
-tolerant of Ollama's `:size` tags, so `gpt-oss` covers `gpt-oss:120b` and `gpt-oss:20b`.
+Ollama Cloud is a hosted (not local) Ollama. Configure it at `https://ollama.com/v1` with a key from
+[ollama.com/settings/keys](https://ollama.com/settings/keys). opencodex reaches it over Ollama's own REST
+API (`POST /api/chat`) rather than the OpenAI-compatible surface, and discovers the live model roster from
+the provider, so new Ollama Cloud models appear without a config change. opencodex classifies its cloud
+lineup by vision capability so the [vision sidecar](/guides/sidecars/) only kicks in for text-only models.
+Text-only models (e.g. `glm-5.2`, `deepseek-v4-flash`, `gpt-oss`, `qwen3-coder`, `minimax-m2.x`,
+`nemotron-3-*`) are listed in `noVisionModels`; vision-native models (e.g. `kimi-k2.6`, `minimax-m3`,
+`gemma4`, `qwen3.5`, `gemini-3-flash-preview`) are not. Matching is tolerant of Ollama's `:size` tags, so
+`gpt-oss` covers `gpt-oss:120b` and `gpt-oss:20b`.
 
 Ollama currently documents structured outputs as unsupported on Ollama Cloud. For canonical
 `ollama-cloud`, opencodex therefore refuses structured-output requests (`text.format`) with a clear
@@ -1858,23 +1850,22 @@ Point opencodex at a local OpenAI-compatible server — usually with a blank key
 ## Any OpenAI-compatible endpoint
 
 If a provider speaks Chat Completions, the `openai-chat` adapter handles it — choose **Custom** in the
-dashboard or `custom` in `ocx init` and enter the base URL. See the
-[Configuration reference](/reference/configuration/) for every provider field
-(`headers`, `noReasoningModels`, `noVisionModels`, `models`, …).
+dashboard or `custom` in `ocx init` and enter the base URL. See the [Configuration
+reference](/reference/configuration/) for every provider field (`headers`, `noReasoningModels`,
+`noVisionModels`, `models`, …).
 
 For Claude models reached through the translated Chat adapter, opencodex flattens tool-schema root
 `oneOf`, `anyOf`, and `allOf` into an object. This uses the actual upstream model id whose final
-slash-separated segment starts with `claude-` (case-insensitive), not every model on the gateway.
-Nested schemas retain their existing normalization. Root required fields are retained; `allOf`
-branch required fields are merged, while `oneOf`/`anyOf` branch required fields are not promoted.
-Local root-branch references are followed for at most 64 references across the schema; unresolved,
-cyclic, external, over-budget references or referenced compositions leave the root composition intact
-and may be rejected upstream. Inline nested compositions also stay intact when they contain unread
-properties or references, or exceed 256 inspected entries per tool schema; constraint-only
-nesting still flattens. Property schemas and literal values are not scanned by this guard. Nested
-references are preserved. Flattening is lossy: branch constraints
-disappear and later property definitions win, so tools must validate arguments. Existing Zen and
-Azure schema compatibility rules remain in effect.
+slash-separated segment starts with `claude-` (case-insensitive), not every model on the gateway. Nested
+schemas retain their existing normalization. Root required fields are retained; `allOf` branch required
+fields are merged, while `oneOf`/`anyOf` branch required fields are not promoted. Local root-branch
+references are followed for at most 64 references across the schema; unresolved, cyclic, external,
+over-budget references or referenced compositions leave the root composition intact and may be rejected
+upstream. Inline nested compositions also stay intact when they contain unread properties or references,
+or exceed 256 inspected entries per tool schema; constraint-only nesting still flattens. Property schemas
+and literal values are not scanned by this guard. Nested references are preserved. Flattening is lossy:
+branch constraints disappear and later property definitions win, so tools must validate arguments.
+Existing Zen and Azure schema compatibility rules remain in effect.
 
 See [Verify a custom remote gateway](/guides/custom-gateway/) for the setup and validation checklist.
 
@@ -1933,56 +1924,53 @@ reviewer fields. Field-by-field rules live in the
 ## Rate limits in the providers overview
 
 The **Rate limits** section of the Providers overview shows live utilization
-bars refreshed from each provider's own usage/billing endpoint when one exists.
-The bars show how much of a window (5-hour, weekly, monthly, or
-provider-specific) is already consumed.
+bars, refreshed from each provider's own usage/billing endpoint when one exists, showing how
+much of a window (5-hour, weekly, monthly, or provider-specific) is already consumed.
 
-Providers with a live probe: OpenAI/Codex, Anthropic, xAI, Cursor, Kimi,
-Google Antigravity, OpenCode Go, OpenRouter, DeepSeek, ClinePass, Z.AI, MiniMax,
-Moonshot, Venice, Synthetic, DeepInfra, Neuralwatt, Command Code, and any a6api-backed
-or Abliteration custom provider.
+Providers with a live probe: OpenAI/Codex, Anthropic, xAI, Cursor, Kimi, Google Antigravity, OpenCode
+Go, OpenRouter, DeepSeek, ClinePass, Z.AI, MiniMax, Moonshot, Venice, Synthetic, DeepInfra,
+Neuralwatt, Command Code, and any a6api-backed or Abliteration custom provider.
 
-**codex-lb pool quota.** A key-authenticated OpenAI Responses provider with an HTTPS base URL
-on a host other than `chatgpt.com` and the path `/backend-api/codex` (with an optional trailing
-slash) shows the relay's available pool windows. With **Codex credits** enabled, it also shows
-the pool credit balance, including negative balances. If the relay reports missing workspace
-balances, the credit balance is hidden while available quota windows remain visible. A relay
-that reports Luna Reserve also shows a **Luna Reserve** row: the remaining share across the seats
-that report a Reserve bucket, with the earliest reset. A pool where no seat reports one shows no
-row: ChatGPT serves Reserve to seats that never list it, so judge Reserve by the relay's served
-`gpt-reserve` requests. The row is informational and never stops requests to other models.
+**codex-lb pool quota.** A key-authenticated OpenAI Responses provider with an HTTPS base URL on a
+host other than `chatgpt.com` and the path `/backend-api/codex` (with an optional trailing slash)
+shows the relay's available pool windows. With **Codex credits** enabled, it also shows the pool
+credit balance, including negative balances. If the relay reports missing workspace balances, the
+credit balance is hidden while available quota windows remain visible. A relay that reports Luna
+Reserve also shows a **Luna Reserve** row: the remaining share across the seats that report a Reserve
+bucket, with the earliest reset. A pool where no seat reports one shows no row: ChatGPT serves Reserve
+to seats that never list it, so judge Reserve by the relay's served `gpt-reserve` requests. The row is
+informational and never stops requests to other models.
 
 **Kimi Coding Plan quota.** Account login and API-key providers on the canonical
 `https://api.kimi.com/coding/v1` endpoint read `/usages`. API-key providers on the regional
-`https://api.kimi.ai/coding/v1` endpoint read `/usages` from that same origin; account login
-stays on `api.kimi.com`. Plans that report
-`usages.limit_month_total` (or `monthTotal`) show a monthly utilization bar, with
-`limit_month_code` (or `monthCode`) as the fallback when total usage is unavailable.
-The `used_ratio` / `usedRatio` fraction must be in `[0, 1]` before conversion to a consumed
-percentage; invalid ratios are ignored. Empty or unusable `usages` containers do not hide
-usable monthly data in another supported envelope. Any reported reset time is retained.
-Existing 5-hour, weekly, and total subscription-credit
-windows remain separate, and an absent monthly window is not shown as 0%.
+`https://api.kimi.ai/coding/v1` endpoint read it from that same origin; account login stays on
+`api.kimi.com`. Plans that report `usages.limit_month_total` (or `monthTotal`) show a monthly
+utilization bar, with `limit_month_code` (or `monthCode`) as the fallback when total usage is
+unavailable. The `used_ratio` / `usedRatio` fraction must be in `[0, 1]` before conversion to a
+consumed percentage; invalid ratios are ignored. Empty or unusable `usages` containers do not
+hide usable monthly data in another supported envelope. Any reported reset time is retained.
+Existing 5-hour, weekly, and total subscription-credit windows remain separate, and an absent
+monthly window is not shown as 0%.
 
-**Abliteration credits.** A provider of any name whose `baseUrl` is
-`https://api.abliteration.ai` or `https://api.abliteration.ai/v1` reads
-`GET https://api.abliteration.ai/v1/credits` with its active key as a Bearer token and does not
-follow redirects. `total_credits` minus `total_usage` is the remaining USD balance, shown as a
-credits bar of consumed spend. An account with no credits shows no bar. A rejected key clears the
-row; `503 credit_balance_unavailable`, 408, and 429 keep the last reading.
+**Abliteration credits.** A provider of any name whose `baseUrl` is `https://api.abliteration.ai` or
+`https://api.abliteration.ai/v1` reads `GET https://api.abliteration.ai/v1/credits` with its active
+key as a Bearer token and does not follow redirects. `total_credits` minus `total_usage` is the
+remaining USD balance, shown as a credits bar of consumed spend. An account with no credits shows no
+bar. A rejected key clears the row; `503 credit_balance_unavailable`, 408, and 429 keep the last
+reading.
 
-**OpenCode Go quota.** The canonical `opencode-go` preset reads
-`GET https://opencode.ai/zen/go/v1/usage` with the configured key as a Bearer token and
-does not follow redirects. The response's rolling, weekly, and monthly `percent` values are
-already-consumed utilization: rolling maps to the 5-hour bar, while weekly and monthly keep
-their matching bars. OpenCodex does not reconstruct dollar caps from local usage logs, and a
-provider using a non-canonical `baseUrl` is never sent the key for this probe.
+**OpenCode Go quota.** The canonical `opencode-go` preset reads `GET
+https://opencode.ai/zen/go/v1/usage` with the configured key as a Bearer token and does not follow
+redirects. The response's rolling, weekly, and monthly `percent` values are already-consumed
+utilization: rolling maps to the 5-hour bar, while weekly and monthly keep their matching bars.
+OpenCodex does not reconstruct dollar caps from local usage logs, and a provider using a non-canonical
+`baseUrl` is never sent the key for this probe.
 
 **Z.AI GLM Coding Plan quota.** The `zai`, `glm`, `glm-cn`, and `zhipu-bigmodel-coding`
-presets read `GET /api/monitor/usage/quota/limit` and do not follow redirects. The probe
-runs against the region the provider points at:
-`api.z.ai` (bare or `/api/coding/paas/v4`) or `open.bigmodel.cn` (bare,
-`/api/coding/paas/v4`, or the OpenAI Responses endpoint `/api/v1`).
+presets read `GET /api/monitor/usage/quota/limit` and do not follow redirects. The probe runs
+against the region the provider points at: `api.z.ai` (bare or `/api/coding/paas/v4`) or
+`open.bigmodel.cn` (bare, `/api/coding/paas/v4`, or the OpenAI Responses endpoint `/api/v1`). A
+provider using a non-canonical `baseUrl` is never sent the key for this probe.
 
 Authentication differs by region: `api.z.ai` takes the key as a Bearer token, while
 `open.bigmodel.cn` expects the key directly in `Authorization` with no scheme prefix and
@@ -1990,14 +1978,12 @@ rejects a Bearer header. The response's `limits` rows fill the utilization bars:
 `TOKENS_LIMIT` / `CREDIT_LIMIT` rows with `unit` 3 / `number` 5 fill the 5-hour bar and
 `unit` 6 / `number` 1 the weekly bar.
 
-`TIME_LIMIT` rows are **not** model quota and are ignored. They are the shared monthly
-MCP call allowance for Web Search, Web Reader, and Zread, so treating them as a model
-window would let a spent web-search budget read as exhausted model capacity in
-quota-aware account ranking. A plan that reports only `TIME_LIMIT` rows therefore shows
-no quota bars rather than a fabricated one, and windows the plan does not report stay
-absent instead of rendering as 0%.
+`TIME_LIMIT` rows are **not** model quota and are ignored. They are the shared monthly MCP call
+allowance for Web Search, Web Reader, and Zread, so treating them as a model window would let a
+spent web-search budget read as exhausted model capacity in quota-aware account ranking. A plan
+that reports only `TIME_LIMIT` rows therefore shows no quota bars rather than a fabricated one,
+and windows the plan does not report stay absent instead of rendering as 0%.
 
-A provider using a non-canonical `baseUrl` is never sent the key for this probe.
 ### Diagnosing an Antigravity quota refresh
 
 The account quota view and `ocx account list google-antigravity --quota --refresh` distinguish access denial, rate limiting, blocked destinations or redirects, DNS/connection/timeouts, and unusable quota data. Last-known bars remain visible with their observation time when a refresh fails. Reauthentication retires diagnoses from the previous credential; a successful refresh clears the failure.

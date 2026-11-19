@@ -1,4 +1,5 @@
 {
   "claude-keychain-healthz.test.ts": "claude-integration",
-  "claude-keychain-read.test.ts": "oauth"
+  "claude-keychain-read.test.ts": "oauth",
+  "claude-messages-token-estimate.test.ts": "claude-integration"
 }
