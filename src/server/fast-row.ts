@@ -14,6 +14,7 @@ import {
   knownEffortRowIds,
   loadDetectedCursorEffortTable,
   parseEffortRowId,
+  parseNoReasoningEffortRowId,
   parseRequestEffortRowId,
   type EffortRowKnownIds,
   type ParsedEffortRowId,
@@ -266,6 +267,12 @@ export function parseSyntheticRowId(
   return effortRow && effortBaseCarriesFastMarker(effortRow.baseId, knownIds)
     ? { fastRow: null, effortRow: null }
     : { fastRow: null, effortRow };
+}
+
+/** Consume a client's explicit no-reasoning selector once, before replay or child routing. */
+export function parseClientSyntheticRowId(id: string, config: OcxConfig): ParsedSyntheticRow {
+  const effortRow = parseNoReasoningEffortRowId(id, config);
+  return effortRow ? { fastRow: null, effortRow } : parseSyntheticRowId(id, config);
 }
 
 /** Fast-only resolution for surfaces that never parsed an effort row. */

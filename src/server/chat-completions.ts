@@ -112,8 +112,7 @@ import { resolveProtocolSettings } from "../protocols/settings";
 import { markProtocolBlocked, markProtocolEntry, suppressProtocolTrace } from "../protocols/trace";
 import { recordProtocolShadowPlan } from "../protocols/shadow-plan";
 import { jsonCompletionSse } from "./chat-native-sse";
-import { parseRequestEffortRowId } from "./effort-row";
-import { parseSyntheticRowId } from "./fast-row";
+import { parseClientSyntheticRowId } from "./fast-row";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
 import { CODEX_RESERVE_HELPER_UNSUPPORTED_MESSAGE, isCodexReserveHelperUnsupported } from "../codex/loopback-target";
 import { applyDroidReasoningDefault, droidReasoningDefault, DROID_DEFAULT_EFFORT_HEADER } from "./droid-reasoning-default";
@@ -230,7 +229,7 @@ async function handleChatCompletionsWithBudget(
   }
 
   const requestedModel = chatBody.model as string;
-  const { fastRow, effortRow } = parseSyntheticRowId(requestedModel, config);
+  const { fastRow, effortRow } = parseClientSyntheticRowId(requestedModel, config);
   const droidDefaultEffort = effortRow
     ? undefined
     : droidReasoningDefault(req.headers.get(DROID_DEFAULT_EFFORT_HEADER), chatBody);

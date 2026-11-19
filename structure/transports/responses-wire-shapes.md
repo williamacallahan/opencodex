@@ -60,6 +60,12 @@ string on this wire instead of the numeric `thinking_budget` the Chat wire appli
 stays unpinned. `tests/providers/alibaba-token-plan-wire-defaults.test.ts` covers the pins and the
 replay flag.
 
+`src/server/effort-row.ts` resolves `provider/model--none` only for a routed model with
+`none` in its stored and effective effort lists. An exact configured ID takes precedence.
+Chat Completions and direct Responses ingress check it even when automatic Cursor effort
+rows are off. They remove the suffix once, before replay or child routing, and apply the
+base model's normal effort and admission policy.
+
 Trusted custom Responses relays may opt into `preserveResponsesInputItemIds` and `preserveResponsesMessageMetadata` for launcher replay (#6220). Ordinary destinations still strip IDs when `store: false` and private `internal_chat_message_metadata_passthrough`; xAI custom-call ID repair remains active.
 Exact upstream IDs in a provider’s `arkKimiResponsesModels` opt in to the Ark Kimi Responses projection. Drop only `output.encrypted_content` from includes. Drop only the cipher on an unreferenced empty-summary reasoning item immediately before a user message when preceded by a user or matching function call/result pair. A developer message is also an eligible following boundary, but only after a matching function call/result pair; a preceding user alone does not qualify. Preserve meaningful or unknown fields, and leave forward auth and other models untouched. Google metadata follows the [destination-scoped replay projection](../providers/google.md#google-tool-call-thought-signature-replay).
 

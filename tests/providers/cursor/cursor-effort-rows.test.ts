@@ -261,6 +261,42 @@ describe("Cursor effort variant rows", () => {
     }
   });
 
+  test.each([
+    ["chat/completions", handleChatCompletions], ["responses", handleResponses],
+  ] as const)("%s clients can select declared none by model ID without Cursor effort rows", async (path, handle) => {
+    const upstream = mockChatUpstream();
+    const releaseSpendHome = acquireOwnedSpendHome();
+    try {
+      const config = ingressConfig(new URL("/v1", upstream.server.url).href);
+      config.cursorEffortRows = false;
+      const provider = config.providers.fixture!;
+      provider.modelReasoningEfforts!["claude-effort-row-fixture"] = ["none", "low", "high", "max"];
+      const model = "fixture/claude-effort-row-fixture--none";
+      const turn = () => handle(new Request(`http://localhost/v1/${path}`, {
+        method: "POST",
+        headers: childHeaders,
+        body: JSON.stringify(path === "responses"
+          ? { model, reasoning: { effort: "high" }, input: "hello" }
+          : { model, reasoning_effort: "high", messages: [{ role: "user", content: "hello" }] }),
+      }), config, { model: "", provider: "" });
+      for (const fastRows of [true, false]) {
+        config.fastRows = fastRows;
+        const response = await turn();
+        expect(response.status).toBe(200);
+        await response.text();
+        expect(upstream.captured.at(-1)).toMatchObject({ model: "claude-effort-row-fixture", reasoning_effort: "none" });
+      }
+      provider.models = ["claude-effort-row-fixture", "claude-effort-row-fixture--none"];
+      const realModel = await turn();
+      expect(realModel.status).toBe(200);
+      await realModel.text();
+      expect(upstream.captured.at(-1)).toMatchObject({ model: "claude-effort-row-fixture--none", reasoning_effort: "high" });
+    } finally {
+      upstream.server.stop(true);
+      releaseSpendHome();
+    }
+  });
+
   test("Messages effort rows resolve after route directives and before native passthrough", async () => {
     const upstream = mockChatUpstream();
     const releaseSpendHome = acquireOwnedSpendHome();

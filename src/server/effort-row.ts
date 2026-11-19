@@ -6,15 +6,19 @@ import {
 } from "../integrations/cursor-effort-table";
 import {
   canonicalizeReasoningEfforts,
+  configuredReasoningEfforts,
   isDeclaredReasoningEffort,
 } from "../reasoning-effort";
-import { knownModelIdsForProvider } from "../router";
+import { hasOwnProvider } from "../config/provider-name";
+import { resolveModelAlias } from "../providers/default-aliases";
+import { knownModelIdsForProvider, previewRouteModel } from "../router";
 import { policyModelId, policyPublicModelId } from "../routing/profile";
 import type { OcxConfig } from "../types";
 import { routedSlug } from "../providers/slug-codec";
 import { predictCursorEffort } from "./models-capabilities";
 
 const EFFORT_ROW_SEPARATOR = "--";
+const NO_REASONING_ROW_SUFFIX = `${EFFORT_ROW_SEPARATOR}none`;
 
 export interface ParsedEffortRowId {
   baseId: string;
@@ -94,12 +98,43 @@ export function parseEffortRowId(
   if (separator <= 0) return null;
   const baseId = id.slice(0, separator);
   const effort = id.slice(separator + EFFORT_ROW_SEPARATOR.length);
-  // "none" is never published as a row (discovery filters it), so it is never accepted either.
+  // Cursor rows don't advertise none. A fully qualified, explicitly declared none has its own check.
   if (effort === "none" || !isDeclaredReasoningEffort(effort)) return null;
   if (predictCursorEffort(baseId, options.table ?? null, options.supportsReasoning).ladder !== null) {
     return null;
   }
   return { baseId, effort };
+}
+
+/** A model-only client can explicitly turn off reasoning for a proven routed model. */
+export function parseNoReasoningEffortRowId(id: string, config: OcxConfig): ParsedEffortRowId | null {
+  if (!id.endsWith(NO_REASONING_ROW_SUFFIX)) return null;
+  const baseId = id.slice(0, -NO_REASONING_ROW_SUFFIX.length);
+  const slash = baseId.indexOf("/");
+  if (slash <= 0) return null;
+  const providerName = baseId.slice(0, slash);
+  const modelId = baseId.slice(slash + 1);
+  if (!hasOwnProvider(config.providers, providerName)) return null;
+  const provider = config.providers[providerName];
+  const ladders = provider.modelReasoningEfforts;
+  if (!ladders || !Object.hasOwn(ladders, modelId) || !ladders[modelId]?.includes("none")) return null;
+
+  const known = knownModelIdsForProvider(providerName, provider, config);
+  const requestedModel = id.slice(slash + 1);
+  if (!known.includes(modelId) || isKnownId(knownEffortRowIds(config), id)
+    || provider.retainModels?.includes(requestedModel) || Object.hasOwn(provider.modelDisplayNames ?? {}, requestedModel)
+    || resolveModelAlias(config, provider, known, requestedModel, providerName)) return null;
+  try {
+    const route = previewRouteModel(config, baseId);
+    if (route.routeKind === "explicit-provider" && route.providerName === providerName && route.modelId === modelId
+      && configuredReasoningEfforts(route.provider, modelId, { refreshMetadata: false })?.includes("none")) {
+      return { baseId, effort: "none" };
+    }
+  } catch {
+    // A disabled or unavailable base cannot claim this selector; leave the original ID to routing.
+    return null;
+  }
+  return null;
 }
 
 /** Parse one ingress selector against the current config and installed Cursor table. */

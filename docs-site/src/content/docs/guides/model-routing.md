@@ -67,6 +67,14 @@ through to one another.
 8. **Default provider** — if nothing matched, the id is sent to `config.defaultProvider` unchanged.
    (If no default provider is configured, or it is disabled, routing throws.)
 
+## Select no reasoning by model ID
+
+If your Chat Completions or Responses client cannot send an explicit `none`, add
+`--none` to `provider/model`. Use this only for a routed model whose saved effort
+list includes `none`. OpenCodex sends the base model with `none` instead of the
+client's default effort. A real model ID or alias with the same name still wins.
+If your client can send an effort directly, use its effort control instead.
+
 ## Model alias templates
 
 `aliasTemplate` (opt-in, per provider) names every model of that provider that has no manual or built-in alias, for example `"aliasTemplate": "{providerAlias}-{modelBasename}"` on a provider whose alias is `CC` turns `reflection/beam:free` into `CC-beam-free`. Only two literal placeholders exist: `{providerAlias}` (the provider's alias; a template that uses it does nothing for a provider without one) and `{modelBasename}` (the last `/` segment of the model id with `:` written as `-`), and `{modelBasename}` is required. The aliases are derived whenever models are resolved and are never written to the config, so a new model gets its alias as soon as it is discovered and removing the template removes them at once.
