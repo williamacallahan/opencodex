@@ -13,7 +13,7 @@ import { resetQuotaQueryBackoffForTests } from "../../src/codex/quota-query-back
 import { POOL_RESERVE_FRESHNESS_MS, poolLunaReserveSelection } from "../../src/codex/pool-reserve";
 import { clearAccountNeedsReauth } from "../../src/codex/account-runtime-state";
 import { clearCodexUpstreamHealth, clearThreadAccountMap, getCodexQuotaHealthSnapshot, recordCodexUpstreamOutcome } from "../../src/codex/routing";
-import { bindThreadAffinity, deleteThreadAffinity, getThreadAffinity } from "../../src/codex/routing/thread-affinity";
+import { bindThreadAffinity, deleteThreadAffinity, getThreadAffinity, handOffThreadAffinityGeneration, noteThreadServed } from "../../src/codex/routing/thread-affinity";
 import { forgetCodexFailureWindows, isCodexFailureWindowDegraded, noteCodexFailureWindowSample } from "../../src/codex/routing/failure-window";
 import { codexFailureWindowOutcomeMeta } from "../../src/codex/routing/failure-window";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
@@ -45,6 +45,9 @@ function config(): OcxConfig {
     autoSwitchThreshold: 0, activeCodexAccountId: A, creditCodexAccountIds: [],
     codexAccounts: [A, B].map(id => ({ id, email: `${id}@example.test`, isMain: false, plan: "pro" })),
   };
+}
+function servedIncluded(thread: string, id: string) {
+  noteThreadServed(thread, "gpt-6-luna", { accountId: id, generation: accountStore.readCodexAccountRecord(id)?.generation ?? 0, capacity: "included" }, now);
 }
 function ordinary(id: string, percent = 100) { updateAccountQuota(id, percent, now + 86_400_000); }
 function reserve(id = B, percent = 25, observedAt = now, resetAt = now + 604_800_000) {
@@ -219,18 +222,45 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     const { ctx, request } = await build(cfg);
     expect(ctx.accountId).toBe(B); expect(JSON.parse(request.body).model).toBe("gpt-reserve");
   });
-  test("a thread bound to a seat with included quota still goes to Reserve on a depleted seat (case d)", async () => {
+  test("a thread bound to a seat with included quota keeps it; a new thread goes to Reserve on a depleted seat (case d)", async () => {
     reserve(); ordinary(A, 40);
     bindThreadAffinity("luna-on-included", A, now, "shared");
     bindThreadAffinity("luna-on-held", B, now, "shared");
-    const moved0 = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", {}, undefined, "luna-on-included", now);
-    expect(moved0.reserve).toBe(true); expect(moved0.quotaScope).toBe("reserve");
+    // A binding written at selection, before any response was accepted, does not hold the thread off Reserve.
+    const unserved = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", {}, undefined, "luna-on-included", now);
+    expect(unserved.reserve).toBe(true);
+    // Once A served it, a later turn keeps its warm seat and that seat's encrypted reasoning instead of moving to Reserve.
+    servedIncluded("luna-on-included", A);
+    const kept = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", {}, undefined, "luna-on-included", now);
+    expect(kept.reserve).toBe(false); expect(kept.quotaScope).toBe("shared"); expect(kept.options.poolCapacity).toBe("included");
     const headers = new Headers({ "session-id": "included-bound", "thread-id": "included-bound-thread" });
     const first = await build(config(), "gpt-6-luna", headers);
     expect(first.ctx.accountId).toBe(B);
     expect(JSON.parse(first.request.body).model).toBe("gpt-reserve");
     const moved = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", {}, undefined, "luna-on-held", now);
     expect(moved.reserve).toBe(true); expect(moved.quotaScope).toBe("reserve");
+    // An alternate send that served included Luna is never bound; its record alone narrows the next turn to that seat.
+    servedIncluded("luna-alternate", A);
+    expect(getThreadAffinity("luna-alternate", "shared")).toBeUndefined();
+    const alternate = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", {}, undefined, "luna-alternate", now);
+    expect(alternate.reserve).toBe(false); expect([...alternate.options.modelEligibleAccountIds ?? []]).toEqual([A]);
+  });
+  test("a refresh of the serving seat's credential mid-turn keeps the seat; the turn's stale completion erases nothing", () => {
+    reserve(); ordinary(A, 40);
+    const before = accountStore.readCodexAccountRecord(A)?.generation ?? 0;
+    servedIncluded("luna-refreshed", A);
+    saveCodexAccountCredential(A, { accessToken: "refreshed-access-a", refreshToken: "refreshed-refresh-a",
+      chatgptAccountId: `fixture-workspace-${A}`, expiresAt: now + 86_400_000 });
+    handOffThreadAffinityGeneration(A, before, before + 1);
+    noteThreadServed("luna-refreshed", "gpt-6-luna", { accountId: A, generation: before, capacity: "included" }, now);
+    const kept = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", {}, undefined, "luna-refreshed", now);
+    expect(kept.reserve).toBe(false); expect([...kept.options.modelEligibleAccountIds ?? []]).toEqual([A]);
+  });
+  test("with no seat offering Reserve, the seat that completed the last Luna turn still keeps the thread", () => {
+    ordinary(A, 40); ordinary(B, 40); noReserve(A); noReserve(B);
+    servedIncluded("luna-no-reserve", B);
+    const kept = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", {}, undefined, "luna-no-reserve", now);
+    expect(kept.reserve).toBe(false); expect([...kept.options.modelEligibleAccountIds ?? []]).toEqual([B]);
   });
   test("a depleted seat with no Reserve window is chosen for Reserve before a seat with included quota (case a)", async () => {
     ordinary(A, 40);
@@ -426,25 +456,32 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
       return Response.json({ id: "resp_file_issuer", object: "response", status: "completed", created_at: 1,
         model, output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } });
     }, { preconnect() {} }));
-    const send = (input: unknown = "ping") => handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
-      headers: { "content-type": "application/json", "session-id": "files", "thread-id": "files" },
+    const send = (input: unknown = "ping", thread = "files") => handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
+      headers: { "content-type": "application/json", "session-id": thread, "thread-id": thread },
       body: JSON.stringify({ model: "openai/gpt-6-luna", input, stream: false }),
     }), cfg, { model: "", provider: "" });
     const release = acquireOwnedSpendHome();
     try {
       expect((await send()).status).toBe(200);
       setAccountQuotaFromParsed(B, { customWindows: [] });
+      // The conversation that issued the file stays on its seat, so it can read the file.
+      expect((await send([{ role: "user", content: [{ type: "input_file", file_id: "file_a" }] }])).status).toBe(200);
+      expect(models).toEqual(["gpt-6-luna", "gpt-6-luna"]);
+      // Once the issuing seat can serve neither included Luna nor its own Reserve, the turn's Reserve trial lands on another seat,
+      // which cannot read the file: the refusal is unsent and releases that trial.
+      ordinary(A, 100); noReserve(A);
       const refusal = await send([{ role: "user", content: [{ type: "input_file", file_id: "file_a" }] }]);
       expect(refusal.status).toBe(400);
-      expect(models).toEqual(["gpt-6-luna"]);
+      expect(models).toEqual(["gpt-6-luna", "gpt-6-luna"]);
       now += 300_000;
-      expect((await send()).status).toBe(200);
-      expect(models).toEqual(["gpt-6-luna", "gpt-reserve"]);
+      expect((await send("ping", "files-later")).status).toBe(200);
+      expect(models).toEqual(["gpt-6-luna", "gpt-6-luna", "gpt-reserve"]);
     } finally { release(); }
   });
   test("a stale included-owner binding does not suppress Reserve", () => {
     reserve(); ordinary(A, 40);
     bindThreadAffinity("stale-included-owner", A, now, "shared");
+    servedIncluded("stale-included-owner", A);
     // Replacing A's credential advances its generation, so the resolver will release this
     // binding. The planner must not treat it as a live included owner and spend included
     // quota while B's Reserve is available.
@@ -546,14 +583,16 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     const { ctx, request } = await build(cfg);
     expect(ctx.accountId).toBe(B); expect(JSON.parse(request.body).model).toBe("gpt-reserve");
   });
-  test("a bound included seat that new-thread steering avoids still yields to Reserve", () => {
+  test("a bound included seat that new-thread steering avoids keeps its conversation", () => {
     reserve(); ordinary(A, 40);
     bindThreadAffinity("luna-on-degraded", A, now, "shared");
+    servedIncluded("luna-on-degraded", A);
     try {
       for (let sample = 0; sample < 20; sample++) noteCodexFailureWindowSample(config(), A, true, now);
       expect(isCodexFailureWindowDegraded(A, now)).toBe(true);
-      const moved = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", {}, undefined, "luna-on-degraded", now);
-      expect(moved.reserve).toBe(true); expect(moved.quotaScope).toBe("reserve");
+      // Steering shapes new placements only; a selectable bound seat is released by the involuntary paths.
+      const kept = poolLunaReserveSelection(config(), "gpt-6-luna", "shared", {}, undefined, "luna-on-degraded", now);
+      expect(kept.reserve).toBe(false); expect(kept.quotaScope).toBe("shared");
     } finally { forgetCodexFailureWindows(); }
   });
   test("with no seat offerable for Reserve, Luna selection options and scope are returned untouched", () => {

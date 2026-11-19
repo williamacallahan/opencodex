@@ -236,12 +236,14 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
   });
   test("a conversation native ordinary Luna served keeps native ordinary Luna on its next turn", async () => {
     seats(false);
-    const lane = { "thread-id": "native-conversation" };
+    const lane = { "session-id": "native-conversation", "thread-id": "native-conversation" };
     relay = refusedConnect;
     expect((await post(config(), {}, lane)).status).toBe(200);
     expect(calls).toEqual(["relay:gpt-6-luna", "native:gpt-6-luna"]);
     calls.length = 0;
     relay = () => sse("gpt-6-luna", "ok");
+    // B gains a fresh Reserve grant between turns: the conversation still keeps the seat and capacity that served it.
+    seats();
     const laterTurn = { input: [{ role: "user", content: "ping" }, { type: "message", role: "assistant", content: [{ type: "output_text", text: "pong" }] }, { role: "user", content: "again" }] };
     expect((await post(config(), laterTurn, lane)).status).toBe(200);
     expect(calls).toEqual(["native:gpt-6-luna"]);

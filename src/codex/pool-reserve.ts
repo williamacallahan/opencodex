@@ -6,10 +6,14 @@ import { NATIVE_RESERVE_MODEL } from "./catalog/native-models";
 import { getAccountQuota } from "./quota";
 import { resetAtToMs, type StoredAccountQuota, type WhamUsageResponse } from "./quota-types";
 import { grantsReserve, reserveLimits } from "./reserve-availability";
-import { getEligiblePoolAccounts, isCodexAccountSelectable } from "./routing/selection";
-import { getThreadAffinity, isThreadAffinityExpired, isThreadAffinityGenerationLive } from "./routing/thread-affinity";
+import { getEligiblePoolAccounts, getPoolAccountPlanForSelection, isCodexAccountSelectable, shouldFailover } from "./routing/selection";
+import { mayRebindAffinityForQuota } from "./routing/cache-affinity";
+import { computeCodexUsageScore } from "./routing/cooldown-math";
+import { getEffectiveCodexAutoSwitchThreshold } from "./account-auto-switch";
+import { codexAccountUsesCreditsAfterLimit } from "./account-credit-use";
+import { getThreadAffinity, isThreadAffinityExpired, isThreadAffinityGenerationLive, lastThreadServe } from "./routing/thread-affinity";
 import { isCodexAccountGenerationLive } from "./account-store";
-import { scopedHealthFor, type CodexQuotaScope } from "./routing/health-store";
+import { hasUnrecoveredCodexQuotaRefusal, scopedHealthFor, type CodexQuotaScope } from "./routing/health-store";
 import { canTryUnknownCodexReserve } from "./routing/probe-lease";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers-destination";
 
@@ -96,8 +100,9 @@ export function poolReserveHoldResetAt(accountId: string, now = Date.now()): num
 
 /**
  * Every Luna request goes first to Reserve on a seat whose included usage is spent. Only when no
- * such seat can serve Reserve does it use Luna on a seat that still has included usage. A soft
- * thread binding to an included seat does not outrank Reserve, and a seat whose Reserve scope is
+ * such seat can serve Reserve does it use Luna on a seat that still has included usage. A thread an
+ * included seat already served stays there unless the cache-affinity policy allows a quota move; a
+ * binding that never served does not outrank Reserve, and a seat whose Reserve scope is
  * cooling from a refusal is skipped by the same selection. Selection keeps its pause, credential,
  * health, affinity and priority policies.
  */
@@ -122,6 +127,27 @@ export function poolLunaReserveSelection(
     else if (pinnedAccountId === undefined && !verifiedOnly && !holdsPoolReserveWindow(id)
       && canTryUnknownCodexReserve(id, now)) unknown.add(id);
   }
+  // The seat and capacity that completed this thread's last Luna turn; a later serve on another seat or capacity
+  // outranks an older Reserve binding.
+  const served = affinityKey === undefined || modelId === undefined ? undefined : lastThreadServe(affinityKey, modelId, now);
+  // A thread included Luna already served keeps that seat under the same rule that governs any bound
+  // conversation (#4546): only a move the cache-affinity policy allows for quota may take it elsewhere, so
+  // a later turn never trades its warm prompt cache and that seat's encrypted reasoning for another seat's
+  // Reserve. A strict Reserve leg (`reserve-only`) is a first placement and is not held here.
+  const ownerId = pinnedAccountId !== undefined || intent === "reserve-only" || served?.capacity !== "included" ? undefined : served.accountId;
+  if (ownerId !== undefined && ownerId !== excludeId && (options.modelEligibleAccountIds?.has(ownerId) ?? true)) {
+    // The roster narrows to the seat that served, which a completion on an alternate seat never bound.
+    const includedOnly: CodexAccountUsabilityOptions = { ...options, poolCapacity: "included", modelEligibleAccountIds: new Set([ownerId]) };
+    const threshold = getEffectiveCodexAutoSwitchThreshold(config, ownerId);
+    const usage = computeCodexUsageScore(getAccountQuota(ownerId), getPoolAccountPlanForSelection(config, ownerId, includedOnly),
+      now, codexAccountUsesCreditsAfterLimit(config, ownerId));
+    // The resolver's own bound-seat health test: a live failure streak or an unrecovered quota refusal releases the thread.
+    if (isCodexAccountSelectable(config, ownerId, now, quotaScope, includedOnly)
+      && !shouldFailover(config, ownerId, now) && !hasUnrecoveredCodexQuotaRefusal(ownerId, quotaScope)
+      // The caller's own options, not `includedOnly`: an included capacity always retains in that policy, and the
+      // operator's `pool.cacheAffinity: false` must still let a seat over its auto-switch threshold go to Reserve.
+      && !mayRebindAffinityForQuota(config, ownerId, usage, threshold, options)) return { ...unchanged, options: includedOnly };
+  }
   if (verified.size === 0 && unknown.size === 0 && !verifiedOnly) return unchanged;
   const reserveOptions: CodexAccountUsabilityOptions = { ...options, modelEligibleAccountIds: verified, poolCapacity: "reserve" };
   // An operator pin keeps its seat; it only chooses between that seat's own Reserve and the unchanged request.
@@ -132,6 +158,7 @@ export function poolLunaReserveSelection(
   // A thread already served by Reserve keeps its seat while that seat can still serve it.
   const serving = affinityKey === undefined ? undefined : getThreadAffinity(affinityKey, "reserve");
   if (serving && !isThreadAffinityExpired(serving, now) && isThreadAffinityGenerationLive(serving)
+    && (served === undefined || (served.capacity === "reserve" && served.accountId === serving.accountId))
     && isCodexAccountSelectable(config, serving.accountId, now, "reserve", reserveOptions)) {
     return { options: reserveOptions, quotaScope: "reserve", reserve: true };
   }

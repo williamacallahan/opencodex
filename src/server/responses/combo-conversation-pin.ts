@@ -22,6 +22,7 @@ import { pickComboTarget, targetKey, type ComboPick } from "../../combos";
 import type { NormalizedComboTarget } from "../../combos/types";
 import type { OcxConfig } from "../../types";
 import { recallComboTargetForLane } from "./combo-session-recall";
+import { isCompactionItemType } from "../../responses/compaction";
 
 export const COMBO_CONVERSATION_PIN_REASON = "combo-conversation-pin";
 
@@ -33,10 +34,11 @@ function itemType(item: unknown): string | undefined {
 
 const isToolOutputItem = (item: unknown): boolean => itemType(item)?.endsWith("_output") === true;
 
-/** An item an earlier response produced, or the tool result answering one. */
+/** An item an earlier response produced (a compacted history or a stored-item reference included), or the tool result answering one. */
 function isEarlierTurnItem(item: unknown): boolean {
   const type = itemType(item);
-  if (type === "reasoning" || type?.endsWith("_call") === true || type?.endsWith("_output") === true) return true;
+  if (type === "reasoning" || type === "item_reference" || isCompactionItemType(type)
+    || type?.endsWith("_call") === true || type?.endsWith("_output") === true) return true;
   return (item as { role?: unknown } | undefined)?.role === "assistant";
 }
 

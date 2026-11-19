@@ -28,9 +28,12 @@ an absent catalog row or one refused request never shows that Reserve is unavail
 for an automatic pool Reserve turn, not the wire model, so it cannot count them; codex-lb's request
 log can, and its `/v1/usage` `luna_reserve.served_*` fields report them for the codex-lb route. A
 stored window that is full, elapsed or stale keeps the seat out, and `poolReserveHoldResetAt` holds a
-selected seat in that state for 60 seconds rather than sending. A thread bound to a seat with included
-capacity does not keep Luna there: a soft binding never outranks Reserve, while a thread already
-served by Reserve keeps that seat. A genuine completion on an alternate establishes Reserve affinity
+selected seat in that state for 60 seconds rather than sending. A thread already served by included
+Luna keeps that seat while it stays selectable for included capacity: only a move the cache-affinity
+policy allows for quota (`mayRebindAffinityForQuota`, which honors `pool.cacheAffinity: false` and the
+auto-switch threshold) releases it to Reserve, so a later turn keeps its warm prompt cache and that
+seat's encrypted reasoning. A strict `reserve-only` combo leg is a first placement and is not held. A
+thread already served by Reserve keeps that seat. A genuine completion on an alternate establishes Reserve affinity
 without changing shared affinity. An operator pin requires a fresh reported grant both at selection
 and at dispatch, because a pinned request cannot move after a refusal.
 A Reserve refusal cools only the seat's `reserve` health scope and leaves its shared quota untouched.
@@ -72,4 +75,4 @@ Atomic replacement and account identity checks stay with the existing writer and
 controlled timers: idle debounce, consecutive sustained-update windows, cancellation and
 home reset, removed rows, latest provider callbacks, and recovery after a failed write.
 
-When Reserve is offerable on a depleted seat, a Luna thread moves to it even from an eligible included owner; a live Reserve binding keeps its seat after the old owner's ordinary quota resets. The canonical legacy-lineage adoption preserves the original binding clocks, and the planner compares those last-use times; it creates no separate owner record.
+When Reserve is offerable on a depleted seat, a new Luna thread goes to it, while a thread bound to a selectable included owner stays there unless the cache-affinity policy allows a quota move; a live Reserve binding keeps its seat after the old owner's ordinary quota resets. The canonical legacy-lineage adoption preserves the original binding clocks, and the planner compares those last-use times; it creates no separate owner record.

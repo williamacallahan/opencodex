@@ -169,7 +169,8 @@ Given this order:
 2. `openai/gpt-5.6-sol`
 3. `google/gemini-3-pro`
 
-each request starts with Anthropic. A retryable Anthropic failure moves that request to OpenAI; a
+each conversation starts with Anthropic (its later turns stay on the target that served it, see
+[A conversation stays on one target](#a-conversation-stays-on-one-target)). A retryable Anthropic failure moves that request to OpenAI; a
 retryable OpenAI failure can move it to Google. A terminal error stops immediately instead of
 trying the remaining targets.
 
@@ -324,7 +325,8 @@ afresh.
 
 A session is identified by the client's own session headers (`thread-id`, `session_id` or
 `session-id`, `x-codex-parent-thread-id`, or a promoted `x-session-id`) together with the API key
-that admitted the request and the Combo. Requests without a session header are never pinned,
+that admitted the request and the Combo; a translated Claude Code turn, which sends no session
+header, uses its own transcript identity. Requests without any session identity are never pinned,
 `prompt_cache_key` is never used as a session identity, and two API keys never share a pin.
 
 JEV decides again, and the new decision replaces the pin, when:
@@ -851,15 +853,25 @@ When routing Claude Code to the canonical ChatGPT Codex backend, OpenCodex remov
 
 A combo can also advance after an intact HTTP 400 `invalid_request_error` that specifically rejects `user`, reports `unsupported_value` for `reasoning.effort`/`reasoning_effort`, or reports `param: input` with an exact model-scoped `does not support image inputs` rejection, and after the exact vendor envelope `{"code":"invalid-argument","error":"Invalid reasoning effort."}`. When a combo target refuses the requested reasoning effort, the combo first retries that target at the next lower published effort rung, one rung per refusal and within the shared send budget; this applies to any recognized effort refusal. If no lower rung succeeds, a refusal in one of the shapes above advances to another target without cooling the rejected one, keeping that target's original 400 when the next rung has no send left; other effort refusals stay terminal. A route that refuses the request's media with code `unsupported_input_modality`, such as image input sent to a CLI provider route without a verified multimodal contract, advances the same way. These are mismatches for this request, not evidence that the target is unhealthy. Direct requests retain their single effort-downgrade repair. Compatibility recovery does not silently change `none` into a different effort or broaden the combo hop to arbitrary invalid requests. Policy refusals, cancellation and already-committed output remain non-replayable. A single-target request still returns an unresolved upstream rejection.
 
-## Tool calls stay on one target
+## A conversation stays on one target
 
-When a model asks your client to run a tool, the request that returns the tool result finishes the
-same assistant turn. OpenCodex sends that request to the target that issued the tool call, as long
-as the target is still enabled, still in the combo, and out of cooldown. This holds for every
-strategy, including JEV, which skips its decision for that request. The next user message chooses a
-target normally.
+A combo places a conversation's first request with its strategy. Every later request of the same
+conversation, one that carries an earlier turn's output (an assistant message, reasoning, a tool
+call or result, a compacted history) or a `previous_response_id`, goes to the target that served the
+previous turn, as long as that target is still enabled, still in the combo, and out of cooldown.
+The conversation keeps its account and its warm prompt cache instead of starting cold on another
+target. This holds for failover, round-robin, random, least-used and reset-window combos. A JEV
+combo re-decides each user turn by design and keeps only a tool loop on its target; its opt-in
+session pin is described above.
 
-Tracking uses the client's thread or session id, so a client that sends neither gets a normal pick.
+In a failover combo the pin never outlives your policy: a remembered target that the current
+fallback policy no longer allows from the primary is not kept. For `combo/gpt-6-luna`-style combos this also means a
+conversation keeps its Luna capacity: Reserve-first placement applies to a conversation's first
+turn, not to its later ones.
+
+Tracking uses the client's thread or session id; a translated Claude Code turn, which sends
+neither, uses its own transcript identity, so each Claude Code conversation and subagent keeps its
+target. A client that sends no identity gets a normal pick on every request.
 If the original target is unavailable or fails, the combo fails over as usual, and the new target
 receives the earlier tool calls in a form it accepts. DeepSeek thinking models get a one-space
 reasoning placeholder for a tool call that another model issued without reasoning. Gemini gets

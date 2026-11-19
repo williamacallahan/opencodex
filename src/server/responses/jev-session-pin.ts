@@ -7,9 +7,9 @@
  *
  * Identity. A pin is keyed by the admitted caller (the salted context principal of the matched
  * data-plane key, or `loopback`), the Combo id and the explicit session lane from
- * `sessionLaneIdFromRequest` (thread, session and parent-thread headers). A request without an
- * explicit session identity never pins, and a body field such as `prompt_cache_key` is never an
- * identity on its own.
+ * `sessionLaneIdFromRequest` (thread, session and parent-thread headers), or for a translated Claude
+ * Code turn its principal-scoped transcript identity. A request without either never pins, and a
+ * body field such as `prompt_cache_key` is never an identity on its own.
  *
  * Lifetime. A pin is written only after the target JEV applied for this session completes a
  * response, and it is refreshed by every later completion on that same target, including tool-loop

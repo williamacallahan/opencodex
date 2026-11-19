@@ -639,6 +639,35 @@ export async function executeComboResponses(
   const comboLane = sessionLaneIdFromRequest(req.headers) ?? options.claudeBridgePoolSession;
   // A later turn of a known conversation stays on the target that served the previous one while that target
   // is still selectable (#7298). Override routes never record a lane target, so they never pin either.
+  const comboHopAllowed = (from: (typeof combo.targets)[number], to: (typeof combo.targets)[number]): boolean => {
+    try {
+      const [source, destination] = [from, to].map(target => routeConcreteModel(config, `${target.provider}/${target.model}`));
+      return fallbackHopAllowed(config, {
+        site: "combo", route: `combo/${comboId}`, aliases: [requestedModel], trigger: "unavailable", admission: options.admission,
+        from: { provider: source!.providerName, model: source!.modelId }, to: { provider: destination!.providerName, model: destination!.modelId },
+      });
+    } catch { return false; }
+  };
+  // In a failover combo a pin keeps continuity, never a detour the operator no longer allows: the remembered
+  // target must still be reachable from the primary under the current fallback policy.
+  const failoverOrder = (combo.strategy ?? "failover") === "failover";
+  // A target's concrete route when this caller's key may reach it; an unresolvable target is unreachable.
+  const scopedRoute = (target: (typeof combo.targets)[number]) => {
+    try {
+      const route = routeConcreteModel(config, `${target.provider}/${target.model}`);
+      return routeAllowedByScope(admissionScope, route) ? route : undefined;
+    } catch { return undefined; }
+  };
+  const pinEligible = (target: (typeof combo.targets)[number]): boolean => {
+    if (!((meteredAllowed || !target.metered) && targetEligible(target))) return false;
+    const primary = combo.targets[0];
+    if (!failoverOrder || !primary || targetKey(primary) === targetKey(target)) return true;
+    // The same resolved ends the proactive hop guard below uses, so an unresolvable (disabled) primary keeps its selector.
+    return fallbackHopAllowed(config, {
+      site: "combo", route: `combo/${comboId}`, aliases: [requestedModel], trigger: "unavailable", admission: options.admission,
+      from: resolvedComboDestination(config, primary), to: resolvedComboDestination(config, target),
+    });
+  };
   const conversationPin = options.compactionRoutingOverride || options.mainHardLockFallbackOverride
     ? undefined
     : conversationPinnedPick({
@@ -647,7 +676,7 @@ export async function executeComboResponses(
       lane: comboLane,
       body,
       toolLoopOnly: combo.strategy === "jev",
-      eligible: target => (meteredAllowed || !target.metered) && targetEligible(target),
+      eligible: pinEligible,
       now: initialNow,
     });
   // Native Reserve -> codex-lb -> native ordinary Luna places a conversation's first turn, or one whose previous
@@ -661,20 +690,7 @@ export async function executeComboResponses(
     return !unreadableEncryptedAgentTask && !req.headers.has(CODEX_TURN_STATE_HEADER)
       && !(isPlainObject(metadata) && CODEX_TURN_STATE_HEADER in metadata)
       && canPortConversationState(collectConversationStateCarriers(rawBody)).portable;
-  }, target => {
-    try {
-      const route = routeConcreteModel(config, `${target.provider}/${target.model}`);
-      return routeAllowedByScope(admissionScope, route) ? route : undefined;
-    } catch { return undefined; }
-  }, targetEligible, (from, to) => {
-    try {
-      const [source, destination] = [from, to].map(target => routeConcreteModel(config, `${target.provider}/${target.model}`));
-      return fallbackHopAllowed(config, {
-        site: "combo", route: `combo/${comboId}`, aliases: [requestedModel], trigger: "unavailable", admission: options.admission,
-        from: { provider: source!.providerName, model: source!.modelId }, to: { provider: destination!.providerName, model: destination!.modelId },
-      });
-    } catch { return false; }
-  });
+  }, scopedRoute, targetEligible, comboHopAllowed);
   let lunaStage: "off" | "reserve" | "relay" | "done" = "off";
   const comboLegCount = lunaLegs?.legCount ?? combo.targets.length;
   const comboSendScope = isRequestExecutionBudget(options.sendBudget)

@@ -172,6 +172,9 @@ describe("isToolLoopContinuation", () => {
     expect(isConversationContinuation({ input: [userMessage("hi"), answer("hello"), userMessage("more")] })).toBe(true);
     expect(isConversationContinuation({ input: [...bareContinuation, answer("Rain today."), userMessage("thanks")] })).toBe(true);
     expect(isConversationContinuation({ input: [userMessage("more")], previous_response_id: "resp_1" })).toBe(true);
+    // After a remote compaction the history is one compaction item between user messages.
+    expect(isConversationContinuation({ input: [userMessage("hi"), { type: "compaction", encrypted_content: "opaque" }, userMessage("next")] })).toBe(true);
+    expect(isConversationContinuation({ input: [{ type: "item_reference", id: "msg_1" }, userMessage("next")] })).toBe(true);
     expect(isConversationContinuation({ messages: [{ role: "user", content: "x" }] })).toBe(false);
     expect(isConversationContinuation({ messages: [{ role: "user", content: "x" }, { role: "assistant", content: "y" }, { role: "user", content: "z" }] })).toBe(true);
   });
