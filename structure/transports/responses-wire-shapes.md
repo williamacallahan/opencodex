@@ -23,17 +23,15 @@ The [decoded checkpoint continuation contract](responses.md#decoded-checkpoint-c
 
 ## Direct MCP calls in code mode
 
-On routed bridge or converted-custom passthrough paths, when the request declares a
-freeform/custom code-mode `exec`, a structured call to
-`mcp__<server>__<tool>` can be restored as an `exec` call to the matching nested host tool.
-The same applies to a provider-added `default.` prefix when neither explicit `default.` nor
-`default__` identity was declared.
-The request must carry verified custom-tool provenance: an ordinary JSON function named
-`exec` does not authorize this repair. Explicitly declared MCP tools keep their identity,
-legacy shell catalogs stay unchanged, and unknown nested tools fail at the host.
-Names and arguments are serialized as data; plain-text tool-call transcripts are never
-promoted into executable calls by this rule. Native forwarding and injection lack this
-restoration step, so their undeclared-tool guard still rejects a direct MCP call.
+On routed bridge or converted-custom passthrough paths, when the request declares a freeform/custom
+code-mode `exec`, a structured call to `mcp__<server>__<tool>` can be restored as an `exec` call to
+the matching nested host tool. The same applies to a provider-added `default.` prefix when neither
+explicit `default.` nor `default__` identity was declared. The request must carry verified
+custom-tool provenance: an ordinary JSON function named `exec` does not authorize this repair.
+Explicitly declared MCP tools keep their identity, legacy shell catalogs stay unchanged, and unknown
+nested tools fail at the host. Names and arguments are serialized as data; plain-text tool-call
+transcripts are never promoted into executable calls by this rule. Native forwarding and injection
+lack this restoration step, so their undeclared-tool guard still rejects a direct MCP call.
 
 Per-wire request and stream shapes on the Responses data plane: mixed-wire model defaults, xAI
 agent-message continuation, declared-tool membership by inbound wire, and passthrough SSE stream
@@ -77,10 +75,11 @@ existing wire and tier policy. The OAuth lane is service-tier classified per mod
 `devlog/_fin/260923_grok47_parity/010_probe-evidence.md` records 4.7): grok-4.7, grok-4.6, grok-4.5,
 grok-4.3, grok-4.20-0309-reasoning, grok-4.20-0309-non-reasoning, grok-build-0.1 and
 grok-composer-2.5-fast accept `service_tier: "priority"` over Grok OAuth and echo it, so those
-routes resolve Fast-eligible, publish `--fast` rows, and forward a caller-sent tier on either wire (`chatServiceTier: true`) — except OAuth grok-4.7, whose Fast serializes `grok-4.7-build-fast` with no tier ([xAI Grok](../providers/xai-grok.md#oauth-fast-tier-priority-processing)).
-grok-4.20-multi-agent-0309 stays unclassified with its
-caller-tier pin: the gateway accepts the field but answers `service_tier: "default"`, a live
-downgrade rather than a fast tier.
+routes resolve Fast-eligible, publish `--fast` rows, and forward a caller-sent tier on either wire
+(`chatServiceTier: true`) — except OAuth grok-4.7, whose Fast serializes `grok-4.7-build-fast` with
+no tier ([xAI Grok](../providers/xai-grok.md#oauth-fast-tier-priority-processing)).
+grok-4.20-multi-agent-0309 stays unclassified with its caller-tier pin: the gateway accepts the
+field but answers `service_tier: "default"`, a live downgrade rather than a fast tier.
 
 Startup removes legacy Grok 4.5/4.6 Chat overrides once and persists the provider-owned
 `xaiResponsesDefaultVersion` marker. Later explicit Chat choices survive restarts. The migration
@@ -225,8 +224,8 @@ preserving preview tools. The two OpenCode Zen destinations gate that on a Contr
 because they serve nothing else; on the direct Meta destination (`https://api.meta.ai/v1/responses`)
 the destination is the whole predicate, because Meta's refusal is a gateway schema rule for every
 Muse model it serves, its default `muse-spark-1.3` is not a Contributor id, and a missing model id
-still strips. Because the predicate is the host, a custom provider pointed at that exact URL gets the
-same strip.
+still strips. Because the predicate is the host, a custom provider pointed at that exact URL gets
+the same strip.
 Meta's `api.meta.ai` route uses `src/adapters/openai-responses/muse-tool-catalog.ts` to capture current declarations before history rewrites or deduplication: current wrappers become `tools`, declarations retain their schemas over search discoveries, historical discovery stays replay data, and historical custom calls retain their conversion without live authority. Historical catalogs are not validated as current declarations; once input items carry replay provenance tags, the tags decide membership instead of the numeric prefix, so an earlier rewrite that shortened the input (Zed lifting a replayed wrapper) cannot shift the boundary. The reserved `functions` group and nested function definitions become public function declarations. Catalog validation also covers string/omitted input; unrepresentable namespace children and malformed current catalogs fail locally with HTTP 400 (`tests/responses/responses-muse-tool-choice.test.ts`).
 Direct Meta Muse / Meta Model Responses (`https://api.meta.ai/v1`) also rejects function tool
 names longer than 64 characters or containing characters outside `[a-zA-Z0-9_-]`. After namespace
@@ -413,23 +412,21 @@ The delivering reader owns refusal evidence before EOF; asynchronous tee inspect
 Inspection still applies the bare-error rule at EOF for account health. Real terminals and caller cancellation take precedence. Unknown codes retain `upstream_error` / `upstream_server_error` in the client tail; on the streaming path the log status takes the frame's Codex WebSocket wrapper 5xx when stated (buffered JSON callers keep their own presentation status). Refusal precedence is unchanged and classification adds no replay or retry. Bare-error log status is provisional until a genuine terminal supersedes it through `src/server/request-log-terminal-status.ts`.
 Native recovery preflight keeps the rejected body reader and bounded prefix for normal mid-stream failure, without decrypt retry.
 
-Native Responses may rebuild once when encrypted function/custom-tool output or
-agent-message content receives the exact known decrypt rejection before output
-commits. Recovery replaces only encrypted parts with an omission marker, preserves
-the raw request object used by continuation persistence guards, and uses the same
-adapter and cancellation path. A missing Content-Type is allowed only under the
-existing successful streaming condition. Default combo preflight classification
-is unchanged; only the native recovery caller supplies the exact error predicate.
+Native Responses may rebuild once when encrypted function/custom-tool output or agent-message
+content receives the exact known decrypt rejection before output commits. Recovery replaces only
+encrypted parts with an omission marker, preserves the raw request object used by continuation
+persistence guards, and uses the same adapter and cancellation path. A missing Content-Type is
+allowed only under the existing successful streaming condition. Default combo preflight
+classification is unchanged; only the native recovery caller supplies the exact error predicate.
 
-Both shapes carry the inbound caller-abort signal separately from the turn/shutdown
-controller. A caller-driven read rejection is 499/client_cancel without pool penalty;
-a genuine upstream reset seen while reading the stream remains synthetic 502; the
-pre-header case is a different verdict and is covered by
-[ambiguous connection-reset replay boundary](responses-failover.md#ambiguous-connection-reset-replay-boundary).
-An already received terminal, including
-one completed by the error-path parser flush, retains its real outcome. Eager relays
-remove the caller listener when done and close signal-cancelled downstream streams even
-when the response-body cancel hook has not run.
+Both shapes carry the inbound caller-abort signal separately from the turn/shutdown controller. A
+caller-driven read rejection is 499/client_cancel without pool penalty; a genuine upstream reset
+seen while reading the stream remains synthetic 502; the pre-header case is a different verdict and
+is covered by [ambiguous connection-reset replay
+boundary](responses-failover.md#ambiguous-connection-reset-replay-boundary). An already received
+terminal, including one completed by the error-path parser flush, retains its real outcome. Eager
+relays remove the caller listener when done and close signal-cancelled downstream streams even when
+the response-body cancel hook has not run.
 
 The two-shape contract is mirror-commented in `src/server/index.ts`; the real
 `core.ts` gate is source-invariant-tested by `tests/responses/passthrough-abort.test.ts`,
@@ -447,22 +444,19 @@ synthetic stream failures use the same credential mask in both streaming relays.
 
 > Decision record: [ADR-6162](../decisions/ADR-6162-responses-http-sse.md)
 
-Canonical ChatGPT forward streaming has one transport-specific exception. A
-stable Bun runtime at or above 1.4.0 may use Codex's upstream
-`responses_websockets` transport; bundled Bun 1.3.14, prereleases, and
-unverifiable runtime identities stay on HTTP/SSE. A successful upstream WS
-response is re-encoded to the same SSE surface and forced through the bounded
-eager single-reader relay instead of `tee()`: raw and enveloped frames are capped
-at 4 MiB and the WS producer queue at 8 MiB. Overflow closes the upstream and
-the downstream relay emits its terminal `response.failed` event plus `[DONE]`.
-Pre-open HTTP fallback remains unmarked and follows the ordinary configured
-stream path.
+Canonical ChatGPT forward streaming has one transport-specific exception. A stable Bun runtime at or
+above 1.4.0 may use Codex's upstream `responses_websockets` transport; bundled Bun 1.3.14,
+prereleases, and unverifiable runtime identities stay on HTTP/SSE. A successful upstream WS response
+is re-encoded to the same SSE surface and forced through the bounded eager single-reader relay
+instead of `tee()`: raw and enveloped frames are capped at 4 MiB and the WS producer queue at 8 MiB.
+Overflow closes the upstream and the downstream relay emits its terminal `response.failed` event
+plus `[DONE]`. Pre-open HTTP fallback remains unmarked and follows the ordinary configured stream
+path.
 
-At the canonical ChatGPT destination, HTTP Responses Lite intent is copied into
-the native per-frame WS metadata key, and the routing hint is derived from the
-final outgoing model/tier. No caller identity is synthesized. Noncanonical
-opt-in gateways keep their own metadata policy. Oversized/unsupported-runtime
-HTTP fallback preserves the original HTTP body and Lite header.
+At the canonical ChatGPT destination, HTTP Responses Lite intent is copied into the native per-frame
+WS metadata key, and the routing hint is derived from the final outgoing model/tier. No caller
+identity is synthesized. Noncanonical opt-in gateways keep their own metadata policy.
+Oversized/unsupported-runtime HTTP fallback preserves the original HTTP body and Lite header.
 
 No wire model carries a model-specific Lite override: the retired `gpt-5.3-codex-spark` body
 normalization is gone, so Lite intent is whatever the caller or configured header says. A changed
@@ -500,12 +494,11 @@ That unrefed fallback holds only the socket and cleanup state, removes its close
 Without native `terminate()`, disposal attempts `close()` without a fallback timer or observer; retained disposal requests close and optional terminate immediately.
 `tests/responses/codex-ws-handshake-validation.test.ts` covers native stalled-peer teardown and optional-method cleanup.
 
-This is connection reuse, not native incremental-input synthesis: complete HTTP
-inputs are never trimmed and no previous response id is invented. Explicit
-continuation IDs, named lanes, warmup and background requests remain outside this
-pool. A fresh credential-dispatch guard runs before every warm send. Per-exchange
-listeners, response/item correlation and metadata ownership detach before release.
-No pool timer or shutdown registration exists before eligible traffic activates it.
+This is connection reuse, not native incremental-input synthesis: complete HTTP inputs are never
+trimmed and no previous response id is invented. Explicit continuation IDs, named lanes, warmup and
+background requests remain outside this pool. A fresh credential-dispatch guard runs before every
+warm send. Per-exchange listeners, response/item correlation and metadata ownership detach before
+release. No pool timer or shutdown registration exists before eligible traffic activates it.
 
 Translated response request-log tracking and the heartbeat relay also reuse
 `createSseInspector`. This keeps every client-facing SSE observation path on
