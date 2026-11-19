@@ -22,6 +22,7 @@ import { createWebsocketHandler } from "../../src/server/index/websocket-handler
 import { tryReserveCodexWebSocket } from "../../src/codex/websocket-registry";
 import { buildResponsesWsData, type WsData } from "../../src/server/ws-bridge";
 import type { DataPlaneAdmission } from "../../src/server/auth-cors";
+import type { RequestLogContext } from "../../src/server/request-log";
 import { createProtocolEnvelope } from "../../src/protocols/envelope";
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
 
@@ -73,11 +74,11 @@ function seats(reserveOnB = true) {
   updateAccountQuota(A, 40, now + 86_400_000); updateAccountQuota(B, 100, now + 86_400_000);
   setAccountQuotaFromParsed(B, { customWindows: [{ label: "Luna Reserve", percent: reserveOnB ? 25 : 100, resetAt: now + 604_800_000, observedAt: now }] });
 }
-async function post(cfg: OcxConfig, extra: Record<string, unknown> = {}, headers: Record<string, string> = {}, signal?: AbortSignal) {
+async function post(cfg: OcxConfig, extra: Record<string, unknown> = {}, headers: Record<string, string> = {}, signal?: AbortSignal, logCtx: RequestLogContext = { model: "", provider: "" }) {
   const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST", signal,
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify({ model: "combo/luna", input: "ping", stream: true, prompt_cache_key: "luna-order", ...extra }) }),
-    cfg, { model: "", provider: "" }, { admission: local, ...(signal ? { abortSignal: signal } : {}) });
+    cfg, logCtx, { admission: local, ...(signal ? { abortSignal: signal } : {}) });
   return { status: response.status, text: await response.text() };
 }
 
@@ -216,6 +217,45 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     seats(false);
     expect((await post(config(), extra)).status).toBe(200);
     expect(calls).toEqual(["native:gpt-6-luna"]);
+  });
+  test("a later turn of a conversation the relay served stays on the relay: no Reserve re-plan, no move to native", async () => {
+    seats(false);
+    const lane = { "thread-id": "luna-conversation" };
+    expect((await post(config(), {}, lane)).status).toBe(200);
+    expect(calls).toEqual(["relay:gpt-6-luna"]);
+    calls.length = 0;
+    seats();
+    const laterTurn = { input: [
+      { role: "user", content: "ping" },
+      { type: "reasoning", id: "rs_1", summary: [], encrypted_content: "relay-cipher" },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "pong" }] },
+      { role: "user", content: "again" },
+    ] };
+    expect((await post(config(), laterTurn, lane)).status).toBe(200);
+    expect(calls).toEqual(["relay:gpt-6-luna"]);
+  });
+  test("a conversation native ordinary Luna served keeps native ordinary Luna on its next turn", async () => {
+    seats(false);
+    const lane = { "thread-id": "native-conversation" };
+    relay = refusedConnect;
+    expect((await post(config(), {}, lane)).status).toBe(200);
+    expect(calls).toEqual(["relay:gpt-6-luna", "native:gpt-6-luna"]);
+    calls.length = 0;
+    relay = () => sse("gpt-6-luna", "ok");
+    const laterTurn = { input: [{ role: "user", content: "ping" }, { type: "message", role: "assistant", content: [{ type: "output_text", text: "pong" }] }, { role: "user", content: "again" }] };
+    expect((await post(config(), laterTurn, lane)).status).toBe(200);
+    expect(calls).toEqual(["native:gpt-6-luna"]);
+  });
+  test("a session-only caller naming bare gpt-6-luna binds its seat and reuses it on the next turn", async () => {
+    seats(false);
+    const session = { session_id: "opencode-session-1" };
+    const first: RequestLogContext = { model: "", provider: "" };
+    expect((await post(config(), { model: "gpt-6-luna" }, session, undefined, first)).status).toBe(200);
+    expect(first.affinity).toBe("new_bind");
+    const second: RequestLogContext = { model: "", provider: "" };
+    expect((await post(config(), { model: "gpt-6-luna" }, session, undefined, second)).status).toBe(200);
+    expect(second.affinity).toBe("reused");
+    expect(calls).toEqual(["native:gpt-6-luna", "native:gpt-6-luna"]);
   });
   test("a non-codex-lb Luna endpoint is not treated as the relay", async () => {
     seats(false);

@@ -80,7 +80,7 @@ describe("Responses core module boundaries", () => {
     const ingress = readResponsesCoreModule("core-pipeline.ts");
     const native = readResponsesCoreModule("passthrough-execution.ts");
     expect(ingress).toContain("const passthroughResult = await executePassthroughResponse(");
-    expect(ingress).toContain("if (passthroughResult instanceof Response) return passthroughResult;");
+    expect(ingress).toContain("if (passthroughResult instanceof Response) {\n          passthroughOwnsTrial = true;\n          return passthroughResult;");
     expect(ingress).toContain("sendBudgetState.pendingHopPermit === unclaimedHop");
     expect(ingress.indexOf("await executePassthroughResponse("))
       .toBeLessThan(ingress.indexOf("const sidecarPlans = await executeResponsesSidecars("));
@@ -89,7 +89,7 @@ describe("Responses core module boundaries", () => {
     // tool ownership before return. Both awaits must stay inside the lease owner;
     // the delivery call itself need not be the return expression.
     expect(native).toContain("const response = await deliverPassthroughResponse(");
-    const guardedReturn = "return attachResponseToolOwnership(guardDirectPassthroughBodyInactivity(";
+    const guardedReturn = "const guarded = attachResponseToolOwnership(guardDirectPassthroughBodyInactivity(";
     expect(native).toContain(guardedReturn);
     expect(native.indexOf("await deliverPassthroughResponse("))
       .toBeLessThan(native.indexOf(guardedReturn));
@@ -97,7 +97,7 @@ describe("Responses core module boundaries", () => {
       .toBeLessThan(native.indexOf("} finally {"));
     expect(native.indexOf("admissionState.pendingHostAdmissionLease = null;"))
       .toBeLessThan(native.indexOf("await preparePassthroughExchange("));
-    expect(native).toMatch(/finally\s*\{\s*if \(nativeHostState\.lease\)\s*\{\s*releaseUpstreamHostAdmission\(nativeHostState\.lease\);\s*releaseCodexAuthContextProbeLease\(admissionState\.authCtx\);/);
+    expect(native).toMatch(/finally\s*\{\s*if \(nativeHostState\.lease\) releaseUpstreamHostAdmission\(nativeHostState\.lease\);\s*if \(!reserveTrialAttached && \(nativeHostState\.lease \|\|[^{]*\{\s*releaseCodexAuthContextProbeLease\(admissionState\.authCtx\);/);
     expect(ingress).toMatch(/finally\s*\{\s*releasePendingSend\(\);\s*if \(admissionState\.pendingHostAdmissionLease\)/);
   });
 
