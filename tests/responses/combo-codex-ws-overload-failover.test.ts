@@ -32,7 +32,7 @@ const HOME_KEYS = ["HOME", "OPENCODEX_HOME", "CODEX_HOME"] as const;
 const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"] as const;
 
 type Listener = (event: unknown) => void;
-type Step = "quota-then-refuse" | "quota-output-then-refuse";
+type Step = "quota-then-refuse" | "quota-output-then-refuse" | "reserve-started-then-refuse";
 
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -59,8 +59,13 @@ class FakeWebSocket {
       this.frame({ type: "response.output_item.added", response_id: id, output_index: 0,
         item: { id: "msg_1", type: "message", role: "assistant", content: [] } });
     }
-    this.frame({ type: "error", status: 503,
-      error: { type: "server_error", code: "server_is_overloaded", message: "Our servers are currently overloaded." } });
+    if (step === "reserve-started-then-refuse") {
+      this.frame({ type: "response.failed", response: { id, status: "failed", output: [],
+        error: { code: "usage_limit_reached", message: "Limit reached" } } });
+    } else {
+      this.frame({ type: "error", status: 503,
+        error: { type: "server_error", code: "server_is_overloaded", message: "Our servers are currently overloaded." } });
+    }
   }
 
   addEventListener(type: string, listener: Listener) {
@@ -193,14 +198,14 @@ function comboConfig(): OcxConfig {
   } as OcxConfig;
 }
 
-async function send() {
+async function send(config = comboConfig()) {
   const logCtx: RequestLogContext = { model: "", provider: "" };
   const request = new Request("http://localhost/v1/responses", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ model: "chain/overload", input: "hello", stream: true, store: false }),
   });
-  const response = await handleResponses(request, comboConfig(), logCtx, {
+  const response = await handleResponses(request, config, logCtx, {
     codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME,
     sendBudget: createRequestExecutionBudget(),
   });
@@ -225,6 +230,22 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect(logCtx.attempts).toHaveLength(2);
     expect(logCtx.attempts?.[0]?.status).toBe(503);
     expect(logCtx.attempts?.[1]?.provider).toBe("fallback");
+  });
+
+  test("Reserve accepted before an empty quota terminal does not replay through the combo", async () => {
+    FakeWebSocket.plan = ["reserve-started-then-refuse"];
+    const config = comboConfig();
+    config.combos!.overload!.targets[0]!.model = "gpt-6-luna";
+    config.codexAccounts![0]!.plan = "pro";
+    const now = Date.now();
+    setAccountQuotaFromParsed(WORK, { weeklyPercent: 100, weeklyResetAt: Math.floor(now / 1000) + 3_600,
+      customWindows: [{ label: "Luna Reserve", percent: 10, observedAt: now, resetAt: Math.floor(now / 1000) + 3_600 }] });
+    const { response, body } = await send(config);
+    expect(FakeWebSocket.instances.flatMap(socket => socket.sent).map(frame => JSON.parse(frame).model)).toEqual(["gpt-reserve"]);
+    expect(fallbackSends).toBe(0);
+    expect(response.status).toBe(200);
+    expect(body).toContain("response.failed");
+    expect(body).not.toContain("resp_fallback");
   });
 
   test("output after the rate-limit frame still commits the native target", async () => {

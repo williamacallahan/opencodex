@@ -19,7 +19,7 @@ import { codexFailureWindowOutcomeMeta } from "../../src/codex/routing/failure-w
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import {
   resolveCodexAuthContext, applyCodexAuthContextToProvider, materializeCodexUpstreamAuth,
-  createCodexAuthDispatchGuard, CodexPoolExhaustedError, CodexPoolAccountCreditsOffError, cooldownErrorResponse,
+  createCodexAuthDispatchGuard, CodexAccountCooldownError, CodexPoolExhaustedError, CodexPoolAccountCreditsOffError, cooldownErrorResponse,
 } from "../../src/codex/auth-context";
 import { createResponsesPassthroughAdapter } from "../../src/adapters/openai-responses";
 import { prepareCodexWsRequest, CODEX_RESPONSES_HTTP_URL } from "../../src/server/responses/codex-ws-request";
@@ -316,12 +316,16 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
       expect((await send("warm-thread")).status).toBe(200);
       expect(sends.at(-1)).toEqual({ account: `fixture-workspace-${A}`, model: "gpt-reserve", key: "warm-thread" });
       setAccountQuotaFromParsed(B, { ...currentQuota, customWindows: [] });
+      expect((await send("warm-thread")).status).toBe(200);
       refuseA = true;
       expect((await send("warm-thread")).status).toBe(200);
-      expect(sends.slice(2)).toEqual([
-        { account: `fixture-workspace-${A}`, model: "gpt-reserve", key: "warm-thread" },
-        { account: `fixture-workspace-${B}`, model: "gpt-reserve", key: "warm-thread" },
+      expect((await send("warm-thread")).status).toBe(200);
+      expect(sends.slice(2).map(({ account }) => account)).toEqual([
+        `fixture-workspace-${A}`, `fixture-workspace-${A}`, `fixture-workspace-${B}`, `fixture-workspace-${B}`,
       ]);
+      expect(sends.slice(2).map(({ model, key }) => [model, key])).toEqual(
+        Array.from({ length: 4 }, () => ["gpt-reserve", "warm-thread"]),
+      );
     } finally { release(); }
   });
   test("concurrent real turns do not repeat an unknown Reserve trial or retry before its hold", async () => {
@@ -369,6 +373,44 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
       await first;
       release();
     }
+  });
+  test.each(["cancel", "quota", "incomplete JSON"])("a Reserve trial settles on %s without proving success", async ending => {
+    const cfg = config(); cfg.providers.openai = { ...base, codexAccountMode: "pool" };
+    ordinary(A, 40);
+    const models: string[] = [];
+    spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      expect(request.url).toBe(CODEX_RESPONSES_HTTP_URL);
+      const { model } = await request.json();
+      models.push(model);
+      if (models.length === 1) {
+        if (ending === "incomplete JSON") return Response.json({ object: "response", status: "incomplete", model, output: [] });
+        const terminal = { type: "response.failed", response: { id: "resp_trial", object: "response", model,
+          status: "failed", error: { code: "usage_limit_reached", message: "Limit reached" } } };
+        return new Response(ending === "quota" ? `event: response.failed\ndata: ${JSON.stringify(terminal)}\n\n`
+          : new ReadableStream({ start(controller) {
+            controller.enqueue(new TextEncoder().encode('event: response.created\ndata: {"type":"response.created","response":{"id":"resp_trial"}}\n\n'));
+          } }), { headers: { "content-type": "text/event-stream", "retry-after": "900" } });
+      }
+      return Response.json({ id: "resp_next", object: "response", status: "completed", created_at: 1,
+        model, output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } });
+    }, { preconnect() {} }));
+    const send = (stream = false) => handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "openai/gpt-6-luna", input: "ping", stream }),
+    }), cfg, { model: "", provider: "" });
+    const release = acquireOwnedSpendHome();
+    try {
+      const response = await send(ending !== "incomplete JSON");
+      if (ending === "cancel") await response.body?.cancel();
+      else await response.text();
+      expect(models).toEqual(["gpt-reserve"]);
+      const interval = ending === "quota" ? 900_000 : 300_000;
+      now += interval - 1;
+      expect((await send()).status).toBe(200);
+      now += 1;
+      expect((await send()).status).toBe(200);
+      expect(models).toEqual(["gpt-reserve", "gpt-6-luna", "gpt-reserve"]);
+    } finally { release(); }
   });
   test("a stale included-owner binding does not suppress Reserve", () => {
     reserve(); ordinary(A, 40);
@@ -519,12 +561,13 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     noReserve(B);
     expect(() => guard(headers)).toThrow(CodexPoolAccountCreditsOffError);
   });
-  test("a retracted grant leaves the seat unreported, so the dispatch guard still lets Reserve through", async () => {
+  test.each(["retracted", "expired"])("a %s Reserve grant cannot become an unleased trial during pacing", async state => {
     reserve(); noReserve(A);
     const { ctx, headers } = await build();
     const guard = createCodexAuthDispatchGuard(ctx, config(), "gpt-6-luna")!;
-    setAccountQuotaFromParsed(B, { customWindows: [] });
-    expect(() => guard(headers)).not.toThrow();
+    if (state === "retracted") setAccountQuotaFromParsed(B, { customWindows: [] });
+    else now += POOL_RESERVE_FRESHNESS_MS + 1;
+    expect(() => guard(headers)).toThrow(CodexAccountCooldownError);
   });
   test("ordinary header updates cannot refresh an old Reserve grant", async () => {
     reserve(); noReserve(A); now += POOL_RESERVE_FRESHNESS_MS + 1; ordinary(B);
@@ -575,6 +618,36 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
       expect(response.status).toBe(200);
       expect(capture).toHaveBeenCalled();
       expect(getAccountQuota(B)?.weeklyPercent).toBe(100);
+    } finally { release(); }
+  });
+  test("Compact records the first Reserve refusal before the alternate can time out", async () => {
+    const cfg = config(); cfg.providers.openai = { ...base, codexAccountMode: "pool" };
+    reserve(A); reserve(B); cfg.accountPoolStrategy = "fill-first";
+    const retryAt = now + 900_000;
+    const sends: Array<string | null> = [];
+    const observedHolds: Array<number | undefined> = [];
+    spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      expect(request.url).toBe(`${CODEX_RESPONSES_HTTP_URL}/compact`);
+      expect((await request.json()).model).toBe("gpt-reserve");
+      sends.push(request.headers.get("chatgpt-account-id"));
+      if (sends.length === 1) return Response.json({ error: { code: "usage_limit_reached", message: "Limit reached" } }, {
+        status: 429, headers: { "retry-after": "900" },
+      });
+      observedHolds.push(getCodexQuotaHealthSnapshot(A, "reserve", now)?.cooldownUntil);
+      now += 30_000;
+      throw new DOMException("Upstream timed out", "TimeoutError");
+    }, { preconnect() {} }));
+    const release = acquireOwnedSpendHome();
+    try {
+      const response = await handleResponsesCompact(new Request("http://localhost/v1/responses/compact", { method: "POST",
+        headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "openai/gpt-6-luna", input: "ping" }),
+      }), cfg, { model: "", provider: "" });
+      expect(response.status).toBe(502);
+      expect(sends).toEqual([`fixture-workspace-${A}`, `fixture-workspace-${B}`]);
+      expect(observedHolds).toEqual([retryAt]);
+      expect(getCodexQuotaHealthSnapshot(A, "reserve", now)?.cooldownUntil).toBe(retryAt);
+      expect(getCodexQuotaHealthSnapshot(B, "reserve", now)).toBeNull();
     } finally { release(); }
   });
   for (const compact of [false, true]) test.each(["reserve", "reserve-before-included", "ordinary", "sol"])(`Responses${compact ? " compact" : ""} HTTP %s dispatches only the expected upstream model`, async state => {

@@ -63,6 +63,14 @@ function hasFreshPoolReserve(accountId: string, now = Date.now()): boolean {
  * so an unreported seat is tried and the upstream stays the entitlement authority. A stored window
  * that is exhausted, elapsed or stale is evidence against Reserve and keeps the seat out.
  */
+export function hasVerifiedPoolReserve(accountId: string, now: number): boolean {
+  if (hasFreshPoolReserve(accountId, now)) return true;
+  if (holdsPoolReserveWindow(accountId)) return false;
+  const success = scopedHealthFor(accountId, "reserve")?.reserveSuccess;
+  return success !== undefined && success.at <= now && now - success.at <= POOL_RESERVE_FRESHNESS_MS
+    && isCodexAccountGenerationLive(accountId, success.credentialGeneration);
+}
+
 function poolReserveOfferable(accountId: string, now: number): boolean {
   return hasFreshPoolReserve(accountId, now) || !holdsPoolReserveWindow(accountId);
 }
@@ -105,15 +113,9 @@ export function poolLunaReserveSelection(
       || codexUsageLimitResetAt(getAccountQuota(id), account.plan, now) === undefined) continue;
     const health = scopedHealthFor(id, "reserve");
     if (health?.probeLeaseId !== undefined) continue;
-    if (hasFreshPoolReserve(id, now)) {
-      verified.add(id);
-    } else {
-      if (pinnedAccountId !== undefined || holdsPoolReserveWindow(id)) continue;
-      const success = health?.reserveSuccess;
-      if (success && success.at <= now && now - success.at <= POOL_RESERVE_FRESHNESS_MS
-        && isCodexAccountGenerationLive(id, success.credentialGeneration)) verified.add(id);
-      else if (!verifiedOnly && canTryUnknownCodexReserve(id, now)) unknown.add(id);
-    }
+    if (pinnedAccountId === undefined ? hasVerifiedPoolReserve(id, now) : hasFreshPoolReserve(id, now)) verified.add(id);
+    else if (pinnedAccountId === undefined && !verifiedOnly && !holdsPoolReserveWindow(id)
+      && canTryUnknownCodexReserve(id, now)) unknown.add(id);
   }
   if (verified.size === 0 && unknown.size === 0 && !verifiedOnly) return unchanged;
   const reserveOptions: CodexAccountUsabilityOptions = { ...options, modelEligibleAccountIds: verified, poolCapacity: "reserve" };

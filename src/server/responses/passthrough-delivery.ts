@@ -505,6 +505,7 @@ export async function deliverPassthroughResponse(
       provider: logCtx.provider,
     };
     const headers = sanitizePassthroughHeaders(upstreamResponse.headers, passthroughHeaderOptions);
+    if (admissionState.authCtx.kind === "pool" && admissionState.authCtx.poolReserve) logCtx.wireModel = nativeExchange.request.outboundModelId;
     if (!upstreamResponse.ok) noteUpstreamRequestId(logCtx, headers);
     const resolvedModel = headers.get("openai-model") ?? undefined;
     if (resolvedModel) {
@@ -526,6 +527,7 @@ export async function deliverPassthroughResponse(
       route.provider,
       route.modelId,
       logCtx,
+      upstreamResponse,
     );
     let terminalOutcomeRecorded = false;
     const terminalRecorder = recordTerminalOutcome

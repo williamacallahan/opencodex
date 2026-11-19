@@ -15,6 +15,7 @@ import { resolveStallTimeoutMs } from "../../stall-timeout";
 import { releaseUpstreamHostAdmission } from "../../codex/upstream-host-health";
 import { releaseCodexAuthContextProbeLease } from "../../codex/auth-context";
 import { attachResponseToolOwnership } from "./response-tool-ownership";
+import { finalizeAccountLease } from "./core-lifetime";
 
 /** Owns the native host lease across dispatch, recovery, and response construction. */
 export async function executePassthroughResponse(
@@ -28,6 +29,7 @@ export async function executePassthroughResponse(
 ): Promise<Response | PassthroughAdapterHandoff> {
   const nativeHostState: PassthroughAdmissionState = { lease: admissionState.pendingHostAdmissionLease };
   admissionState.pendingHostAdmissionLease = null;
+  let reserveTrialAttached = false;
   try {
     const nativeExchange = await preparePassthroughExchange(
       requestContext,
@@ -52,14 +54,19 @@ export async function executePassthroughResponse(
     // Delivery has already classified SSE (including a missing upstream content type)
     // and consumed bounded JSON/errors. Guard only its remaining direct body, outside
     // the relay/lifetime wrappers so their prefetch cannot arm our inactivity clock.
-    return attachResponseToolOwnership(guardDirectPassthroughBodyInactivity(
+    const guarded = attachResponseToolOwnership(guardDirectPassthroughBodyInactivity(
       response,
       nativeExchange.upstream.signal,
       resolveStallTimeoutMs(requestContext.config.stallTimeoutSec, { localUpstream: nativeExchange.localUpstream }),
     ), nativeExchange.providerExecutedCallTypes);
+    const context = admissionState.authCtx;
+    if (context.kind !== "pool" || !context.poolReserve || !context.probeLeaseId) return guarded;
+    const wrapped = finalizeAccountLease(guarded, () => releaseCodexAuthContextProbeLease(context));
+    reserveTrialAttached = true;
+    return wrapped;
   } finally {
-    if (nativeHostState.lease) {
-      releaseUpstreamHostAdmission(nativeHostState.lease);
+    if (nativeHostState.lease) releaseUpstreamHostAdmission(nativeHostState.lease);
+    if (!reserveTrialAttached && (nativeHostState.lease || (admissionState.authCtx.kind === "pool" && admissionState.authCtx.poolReserve))) {
       releaseCodexAuthContextProbeLease(admissionState.authCtx);
     }
   }
