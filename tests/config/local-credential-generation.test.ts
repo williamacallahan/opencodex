@@ -511,6 +511,22 @@ test("ordinary churn inside a watched ancestor does not re-arm the observer or a
   });
 });
 
+// Every store read hardens its file; on the hub an unchanged-mode chmod per read advanced the
+// generation about three times a second, each advance a durable write on the request thread.
+test.skipIf(process.platform === "win32")("reading an already-private credential store leaves the generation unchanged", async () => {
+  await withLocalCredentialFixture(async f => {
+    f.start();
+    const store = await import("../../src/codex/account-store");
+    store.saveCodexAccountCredential("fixture", fixtureCredential);
+    const before = await settleGeneration(f.inventory);
+    for (let i = 0; i < 6; i += 1) expect(store.getCodexAccountCredential("fixture")).not.toBeNull();
+    await expectStableGeneration(f.inventory, before);
+    chmodSync(join(f.home, "codex-accounts.json"), 0o644);
+    store.getCodexAccountCredential("fixture");
+    expect(lstatSync(join(f.home, "codex-accounts.json")).mode & 0o777).toBe(0o600);
+  });
+});
+
 test("a same-identity rename of a watched ancestor still advances the generation", async () => {
   await withLocalCredentialFixture(async f => {
     f.start();

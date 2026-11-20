@@ -38,10 +38,12 @@ export function hardenConfigDir(): void {
   // have changed the protected directory used by the test-home boundary.
   assertNotRealHomeUnderTest(dir);
   // Follow directory links as before, but never apply directory permissions to a file.
-  try { if (!statSync(dir).isDirectory()) return; } catch { return; }
+  let dirMode: number;
+  try { const stat = statSync(dir); if (!stat.isDirectory()) return; dirMode = stat.mode & 0o777; } catch { return; }
   // Windows privacy is enforced by NTFS ACLs. chmod only changes DOS attributes there;
   // doing it before the ACL lookup can invalidate its ctime-based successful observation.
-  if (!windowsSecretAclApplies()) {
+  // Elsewhere an unchanged-mode chmod still changes ctime and wakes the credential watcher.
+  if (!windowsSecretAclApplies() && dirMode !== 0o700) {
     try { chmodSync(dir, 0o700); } catch { /* best-effort */ }
   }
   if (windowsSecretAclApplies() && !configDirHardeningFlights.has(dir)) {
