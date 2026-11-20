@@ -11,6 +11,7 @@ import { runGeminiWebSearch } from "../../src/web-search/gemini-executor";
 import { describeImageAnthropic } from "../../src/vision/anthropic-describe";
 import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../../src/types";
 import { captureGatherFlight } from "../../src/codex/catalog/gather-capture";
+import { routeModel } from "../../src/router";
 
 const originalFetch = globalThis.fetch;
 let fetchCalls = 0;
@@ -106,6 +107,19 @@ describe("nativeHarnessOnly send gates", () => {
     } as unknown as OcxConfig;
     const capture = captureGatherFlight(config, () => ({ kind: "refreshing" }));
     expect(capture.providers.map(provider => provider.name)).toEqual(["fixture-chat"]);
+    expect(fetchCalls).toBe(0);
+  });
+
+  test("a bare model id skips the agy-reserved row and reaches the provider that served it before", () => {
+    const config = {
+      defaultProvider: "google",
+      providers: {
+        google: { adapter: "google", authMode: "key", apiKey: "fixture-key", baseUrl: "https://generativelanguage.googleapis.com", googleMode: "ai-studio", models: ["gemini-3.8-flash"] },
+        "google-antigravity": { adapter: "google", authMode: "oauth", baseUrl: "https://daily-cloudcode-pa.googleapis.com", googleMode: "cloud-code-assist", defaultModel: "gemini-3.8-flash", models: ["gemini-3.8-flash"] },
+      },
+    } as unknown as OcxConfig;
+    bindNativeHarnessConfig({ nativeHarnessOnly: true });
+    expect(routeModel(config, "gemini-3.8-flash").providerName).toBe("google");
     expect(fetchCalls).toBe(0);
   });
 });

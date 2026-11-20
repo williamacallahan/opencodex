@@ -20,10 +20,12 @@ import { assertProviderDestinationAllowed } from "./lib/destination-policy";
 import {
   PROVIDER_REGISTRY,
   providerCodexAccountMode,
+  effectiveGoogleMode,
 } from "./providers/registry";
 // Imported from the module directly rather than through the registry facade, which is at its
 // file-size cap.
 import { registryModelIdKeys } from "./providers/registry/model-ids";
+import { nativeHarnessFor } from "./lib/native-harness";
 import { providerMatchesRegistryTransportWithStaticGuards } from "./providers/static-model-discovery";
 import {
   isCanonicalOpenAiForwardProvider,
@@ -245,7 +247,10 @@ export { reconcileRouterWarningMemos, routedProviderConfig } from "./providers/r
 function activeProviderEntries(config: OcxConfig): [string, OcxProviderConfig][] {
   return Object.entries(config.providers)
     .filter(([name, provider]) => name !== LEGACY_CHATGPT_PROVIDER_ID && provider.disabled !== true
-      && !(name === "anthropic2" && anthropicInstanceRowShapeMatches(name, provider)));
+      && !(name === "anthropic2" && anthropicInstanceRowShapeMatches(name, provider))
+      // A row reserved to agy serves only the /agy lane; letting it win a bare model id would refuse a
+      // request another provider used to serve. Anthropic rows stay: the strict lane routes bare `claude-*`.
+      && nativeHarnessFor(provider, effectiveGoogleMode(name, provider)) !== "agy");
 }
 
 export class NoEnabledOpenAiProviderError extends Error {
