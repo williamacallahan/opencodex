@@ -170,6 +170,11 @@ function isCanonicalForwardSystemMessage(item: unknown): item is Record<string, 
   );
 }
 
+/** The public Responses API's plain-string `input`, as the one-message list it stands for. */
+export function stringInputAsMessages(text: string): unknown[] {
+  return [{ type: "message", role: "user", content: [{ type: "input_text", text }] }];
+}
+
 /**
  * The public Responses API accepts a plain-string `input`, input system messages, and
  * `truncation`, but the canonical ChatGPT Codex forward endpoint rejects all three (a string input
@@ -184,7 +189,7 @@ function isCanonicalForwardSystemMessage(item: unknown): item is Record<string, 
 export function normalizeCanonicalForwardPromptEnvelope(raw: unknown): unknown {
   if (!isPlainObject(raw)) return raw;
   const body = typeof raw.input === "string"
-    ? { ...raw, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: raw.input }] }] }
+    ? { ...raw, input: stringInputAsMessages(raw.input) }
     : raw;
   const stripTruncation = Object.hasOwn(body, "truncation");
   const input = Array.isArray(body.input) ? body.input : undefined;

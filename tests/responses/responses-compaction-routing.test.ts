@@ -594,6 +594,25 @@ describe("routed compaction for key-mode openai-responses (#422)", () => {
     expect(compactionItems.length).toBe(1);
   });
 
+  test("v1 compact keeps a plain-string input as history on the routed turn", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      return jsonResponse(completedPayload("handoff summary"));
+    }) as typeof fetch;
+    const res = await admittedCompact(new Request("http://localhost/v1/responses/compact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gw/some-model", input: "Keep the migration constraint" }),
+    }), keyProviderConfig(), { model: "", provider: "" });
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(bodies.length).toBe(1);
+    expect((bodies[0]!.input as unknown[])[0]).toEqual(
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Keep the migration constraint" }] },
+    );
+  });
+
   test("routed chat compaction drops the structured-output format", async () => {
     const bodies: Array<Record<string, unknown>> = [];
     globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {

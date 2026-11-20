@@ -153,6 +153,7 @@ import { buildResponsesTransport, copyResponsesClientMetadata } from "../../adap
 import { scrubOcxCompactionItems, stripCanonicalOnlyInputItems, stripCanonicalOnlyTopLevelFields, stripInternalChatMessageMetadataPassthrough } from "../../adapters/openai-responses/request-strips";
 import { dropResponsesReasoningInputItems } from "../../adapters/openai-responses/reasoning";
 import { requiresPlaintextReasoningReplay } from "../../adapters/openai-responses/passthrough";
+import { stringInputAsMessages } from "../../adapters/openai-responses/canonical-forward";
 import { destinationDecodesNativeCompactionBlob, isOpenAiOperatedResponsesDestination } from "../../providers/openai-tiers-destination";
 import { bindRouteReasoningReplayScope } from "./core-replay";
 import { commitReasoningReplayServingIdentity } from "../../responses/reasoning-replay-cache";
@@ -637,6 +638,9 @@ export async function handleResponsesCompact(
   if (typeof raw.model !== "string" || raw.model.length === 0) {
     return formatErrorResponse(400, "invalid_request_error", "compaction request requires a model");
   }
+  // Every compaction path reads `input` as history: the routed turn would drop a plain string and
+  // the canonical backend rejects one, so give native, handoff, and routed sends the list form.
+  if (typeof raw.input === "string") raw.input = stringInputAsMessages(raw.input);
   // A malformed proxy-owned envelope is a caller error, so reject it before routing or
   // credential resolution can spend a token refresh on a request that cannot succeed.
   const invalidEnvelope = findInvalidRetainedCompactionEnvelope(raw.input);
