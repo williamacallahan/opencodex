@@ -39,7 +39,7 @@ export function hardenConfigDir(): void {
   assertNotRealHomeUnderTest(dir);
   // Follow directory links as before, but never apply directory permissions to a file.
   let dirMode: number;
-  try { const stat = statSync(dir); if (!stat.isDirectory()) return; dirMode = stat.mode & 0o777; } catch { return; }
+  try { const stat = statSync(dir); if (!stat.isDirectory()) return; dirMode = stat.mode & 0o7777; } catch { return; }
   // Windows privacy is enforced by NTFS ACLs. chmod only changes DOS attributes there;
   // doing it before the ACL lookup can invalidate its ctime-based successful observation.
   // Elsewhere an unchanged-mode chmod still changes ctime and wakes the credential watcher.

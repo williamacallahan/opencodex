@@ -61,6 +61,9 @@ export async function executePassthroughResponse(
     ), nativeExchange.providerExecutedCallTypes);
     const context = admissionState.authCtx;
     if (context.kind !== "pool" || !context.poolReserve || !context.probeLeaseId) return guarded;
+    // A terminal failure needs no body-lifetime wrapper: the finally releases the trial without
+    // locking the response that the combo failure callback retains for its parent.
+    if (guarded.status >= 400) return guarded;
     const signal = requestContext.options.abortSignal ?? requestContext.req.signal;
     let released = false;
     const release = () => {

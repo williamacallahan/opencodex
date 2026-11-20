@@ -11,6 +11,7 @@ import {
   responseStateMetrics,
   setResponseStateByteCapForTests,
   setResponseStateSnapshotByteCapForTests,
+  type StoredResponseState,
 } from "../../src/responses/state";
 import { responseSpillDirectory } from "../../src/responses/spill-store";
 import { setPlatformForTests } from "../../src/lib/windows-secret-acl";
@@ -101,5 +102,43 @@ describe("Responses snapshot spill stub retention", () => {
       input: "next",
     }));
     expect(newestReplay).toContain("ssss");
+  });
+
+  test("randomized resident-cap pruning retains the same continuations and spill references", async () => {
+    let seed = 0x5eed;
+    const random = () => {
+      seed = (seed * 1_664_525 + 1_013_904_223) >>> 0;
+      return seed / 0x1_0000_0000;
+    };
+    setResponseStateByteCapForTests(1_000_000);
+    const ids = Array.from({ length: 24 }, (_, index) => `resp_random_${String(index).padStart(2, "0")}`);
+    for (const id of ids) rememberLarge(id, "x".repeat(400 + Math.floor(random() * 1_600)));
+    // Same-id replacements move entries behind their older neighbors in map order.
+    for (const index of [1, 4, 9, 15, 20]) {
+      rememberLarge(ids[index]!, `replacement-${index}-${"r".repeat(400 + Math.floor(random() * 1_600))}`);
+    }
+    setResponseStateByteCapForTests(1_024);
+    rememberLarge("resp_random_trigger", "trigger");
+    await flushResponseState();
+
+    const snapshot = JSON.parse(readFileSync(join(home, "responses-state.json"), "utf8")) as {
+      states: Array<[string, StoredResponseState]>;
+    };
+    const expectedPayloads = new Map([
+      ["resp_random_15", "replacement-15-"],
+      ["resp_random_20", "replacement-20-"],
+      ["resp_random_trigger", "trigger"],
+    ]);
+    expect(snapshot.states.map(([id]) => id)).toEqual([...expectedPayloads.keys()]);
+    const spillFileNames: string[] = [];
+    for (const [id, entry] of snapshot.states) {
+      expect(entry.kind).toBe("spill");
+      if (entry.kind !== "spill") continue;
+      spillFileNames.push(entry.spill.fileName);
+      const replay = JSON.stringify(expandPreviousResponseInput({ previous_response_id: id, input: "next" }));
+      expect(replay).toContain(expectedPayloads.get(id));
+    }
+    expect(readdirSync(responseSpillDirectory(home)).filter(name => name.endsWith(".spill.json")).sort())
+      .toEqual(spillFileNames.sort());
   });
 });

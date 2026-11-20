@@ -916,17 +916,20 @@ function pruneResponses(at = now()): void {
     if (!oldest) break;
     deleteEntry(oldest);
   }
-  // Unconditional RAM cap. Resident payloads demote durably; stubs/tombstones are
-  // deleted only when even their bounded metadata cannot fit the override.
+  // Demote residents durably; delete stubs/tombstones only when their metadata cannot fit the override.
   const cap = byteCap();
+  const candidates = [...states];
+  let candidateIndex = 0, hasPendingResident = false;
   while (storedResponseBytes - currentPendingResidentBytes() > cap && states.size > 0) {
-    const oldestResident = [...states].find(([id, entry]) => entry.kind === "resident"
-      && !spillQueueHoldsResidentCandidate(id, entry));
-    const hasPendingResident = !oldestResident && [...states].some(([id, entry]) => entry.kind === "resident"
-      && spillQueueHoldsResidentCandidate(id, entry));
-    if (hasPendingResident) break;
-    const oldestId = oldestResident?.[0] ?? states.keys().next().value as string | undefined;
-    if (!oldestId) break;
+    let oldestId: string | undefined;
+    for (; !oldestId && candidateIndex < candidates.length; candidateIndex += 1) {
+      const [id, candidate] = candidates[candidateIndex]!;
+      if (states.get(id) !== candidate || candidate.kind !== "resident") continue;
+      if (spillQueueHoldsResidentCandidate(id, candidate)) hasPendingResident = true;
+      else oldestId = id;
+    }
+    if (!oldestId && hasPendingResident) break;
+    if (!(oldestId ??= states.keys().next().value as string | undefined)) break;
     const entry = states.get(oldestId)!;
     if (entry.kind !== "resident") {
       deleteEntry(oldestId);
@@ -935,6 +938,7 @@ function pruneResponses(at = now()): void {
     if (windowsSecretAclApplies()) {
       if (spillQueueShouldDeferDemotion(oldestId, entry, storedResponseBytes - currentPendingResidentBytes(), cap)) break;
       queuePendingResponseSpill(oldestId, entry);
+      hasPendingResident = true;
       continue;
     }
     try {
