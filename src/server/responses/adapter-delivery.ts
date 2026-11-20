@@ -84,7 +84,8 @@ export async function deliverAdapterResponse(
   } = responseEffects;
   const { routedCompaction } = sidecarState;
   const bodyInactivityMs = resolveStallTimeoutMs(config.stallTimeoutSec, { localUpstream });
-  const upstreamRequestsStream = parsed.stream || requiresStreamingResponses(route.provider);
+  const upstreamRequestsStream = () => parsed.stream || ("passthrough" in transportState.activeAdapter
+    && transportState.activeAdapter.passthrough && requiresStreamingResponses(route.provider));
   const recoverThinkingSignature = (events: AsyncIterable<AdapterEvent>): AsyncIterable<AdapterEvent> =>
     thinkingSignatureRecovery.wrap(events, async function* () {
       const result = await refetchThinkingSignature();
@@ -106,7 +107,7 @@ export async function deliverAdapterResponse(
       }
       try {
         const bodyInactivityMs = resolveStallTimeoutMs(config.stallTimeoutSec, { localUpstream: adapterExchange.localUpstream });
-        const retryEvents = upstreamRequestsStream
+        const retryEvents = upstreamRequestsStream()
           ? readResponseStreamWithInactivity(response, upstream.signal, bodyInactivityMs,
             guarded => transportState.activeAdapter.parseStream(guarded, translatorBudget, logCtx.activeTierMetadata))
           : (async function* () {
@@ -293,11 +294,11 @@ export async function deliverAdapterResponse(
   }
 
   if (transportState.activeAdapter.parseResponse
-    || (upstreamRequestsStream && transportState.activeAdapter.parseStream)) {
+    || (upstreamRequestsStream() && transportState.activeAdapter.parseStream)) {
     let events: AdapterEvent[];
     try {
       const initialEvents: AdapterEvent[] = [];
-      if (upstreamRequestsStream && transportState.activeAdapter.parseStream) {
+      if (upstreamRequestsStream() && transportState.activeAdapter.parseStream) {
         // The canonical ChatGPT adapter coerces its actual upstream request to SSE even for a
         // JSON client. Routed compaction still owns the non-streaming client response, so fold
         // that SSE through the adapter instead of handing it to parseResponse as JSON.

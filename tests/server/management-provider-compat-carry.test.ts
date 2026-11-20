@@ -130,6 +130,14 @@ interface CarryCase {
 }
 
 const CASES: Record<ProviderCompatCarryField, CarryCase> = {
+  responsesStreamOnly: {
+    seed: { responsesStreamOnly: true },
+    probe: provider => {
+      const parsed = parseRequest({ model: MODEL, input: "hi", stream: false });
+      const built = withTestTranslatorBudget(createResponsesPassthroughAdapter({ ...provider, adapter: "openai-responses" })).buildRequest(parsed, { headers: new Headers() });
+      return (JSON.parse(String(built.body)) as { stream: boolean }).stream;
+    },
+  },
   modelSamplingDefaults: {
     seed: { modelSamplingDefaults: { [MODEL]: { temperature: 1, topP: 1 } } },
     probe: provider => {
@@ -238,6 +246,22 @@ function withoutField(provider: OcxProviderConfig, field: ProviderCompatCarryFie
 }
 
 describe("an unrelated POST overwrite keeps each compatibility setting on the next request", () => {
+  test("a Responses destination keeps stream-only on save but respects explicit false and destination moves", async () => {
+    const provider: OcxProviderConfig = { adapter: "openai-responses", baseUrl: BASE_URL, apiKey: "sk-relay", responsesStreamOnly: true };
+    await withServer({ relay: provider }, async url => {
+      const save = (row: OcxProviderConfig) => send(url, "/api/providers", "POST", { name: "relay", provider: row });
+      expect((await save({ adapter: "openai-responses", baseUrl: BASE_URL, apiKey: "sk-relay" })).status).toBe(200);
+      const saved = loadConfig().providers.relay!;
+      expect(saved.responsesStreamOnly).toBe(true);
+      expect(CASES.responsesStreamOnly.probe(saved)).toBe(true);
+      expect((await save({ ...saved, responsesStreamOnly: false })).status).toBe(200);
+      expect(loadConfig().providers.relay!.responsesStreamOnly).toBe(false);
+      expect(CASES.responsesStreamOnly.probe(loadConfig().providers.relay!)).toBe(false);
+      expect((await save(provider)).status).toBe(200);
+      expect((await save({ adapter: "openai-responses", baseUrl: "https://other-relay.example/v1", apiKey: "sk-relay" })).status).toBe(200);
+      expect(loadConfig().providers.relay!.responsesStreamOnly).toBeUndefined();
+    });
+  });
   test("every carried field has a case", () => {
     expect(Object.keys(CASES).sort()).toEqual([...PROVIDER_COMPAT_CARRY_FIELDS].sort());
   });

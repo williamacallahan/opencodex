@@ -51,6 +51,7 @@ const RETRY_POLICY_VALIDATORS = {
  * table.
  */
 export const PROVIDER_COMPAT_CARRY_FIELDS = [
+  "responsesStreamOnly",
   "preserveReasoningContentModels",
   "preserveResponsesReasoningContent",
   "promoteAdditionalTools",

@@ -60,6 +60,27 @@ async function send(provider: OcxProviderConfig): Promise<{ response: Response; 
 }
 
 describe("responsesStreamOnly destinations", () => {
+  test("a model routed to Chat receives and returns non-streaming JSON", async () => {
+    let upstreamStream: unknown;
+    let upstreamUrl = "";
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      upstreamUrl = String(url);
+      upstreamStream = (JSON.parse(String(init?.body)) as { stream?: unknown }).stream;
+      return Response.json({ id: "chat_1", object: "chat.completion", model: "gpt-6-luna", choices: [{ index: 0, message: { role: "assistant", content: "chat answer" }, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } });
+    }) as typeof fetch;
+    releaseSpendHome ??= acquireOwnedSpendHome();
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "relay/gpt-6-luna", input: "hi", stream: false }),
+    }), { providers: { relay: { ...relay, responsesStreamOnly: true, modelAdapters: { "gpt-6-luna": "openai-chat" } } } } as unknown as OcxConfig,
+    { model: "", provider: "" }, { inboundWire: "responses" });
+    const json = await response.json() as { output?: Array<{ content?: Array<{ text?: string }> }>; usage?: { input_tokens?: number; output_tokens?: number } };
+    expect(upstreamUrl).toContain("/chat/completions");
+    expect(upstreamStream).toBe(false);
+    expect(json.output?.[0]?.content?.[0]?.text).toBe("chat answer");
+    expect(json.usage?.input_tokens).toBe(3);
+    expect(json.usage?.output_tokens).toBe(2);
+  });
   test("a non-streaming client gets JSON folded from the upstream stream", async () => {
     const { response, upstreamStream } = await send({ ...relay, responsesStreamOnly: true });
     expect(upstreamStream).toBe(true);
