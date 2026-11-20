@@ -12,7 +12,7 @@ import { isCodexAccountCooldownResponse } from "../../codex/account-cooldown-res
 import { resolveWireProtocolOverride } from "../adapter-resolve";
 import { parseSyntheticRowId } from "../fast-row";
 import { resolveOpenAiVirtualModel } from "../../providers/openai-virtual-models";
-import { comboCooldownRetryAfterSeconds, isDefiniteContextOverflow, type CodexAccountModelRefusal } from "../../combos/failover";
+import { clearComboTargetCooldownIfUnchanged, comboCooldownRetryAfterSeconds, isDefiniteContextOverflow, type CodexAccountModelRefusal } from "../../combos/failover";
 import { fallbackHopAllowed, fallbackTriggerForStatus, guardFallbackHop } from "../../routing/fallback-policy";
 import {
   isCodexReasoningEffort,
@@ -897,7 +897,7 @@ export async function executeComboResponses(
     }
     let selected = choices.find(choice => choice.candidate.key === decision.targetKey) ?? first;
     let selectionUnavailable = false;
-    if (pick.cooldownReprobeTargets && !options.abortSignal?.aborted) {
+    if ((pick.cooldownReprobeTargets || selected.pick.poolCooldownRevision !== undefined) && !options.abortSignal?.aborted) {
       // Another request can replace a cooldown while the decision is awaited. Recheck the
       // original reservation, current availability and request eligibility without reserving again.
       const currentChoices = eligibleJevComboChoices(config, comboId, targetEligible, Date.now(), pick.cooldownReprobeTargets);
@@ -1255,13 +1255,16 @@ export async function executeComboResponses(
       if (childLog.usage) logCtx.usage = childLog.usage;
     };
     const completedTarget = { provider: pick.target.provider, model: pick.target.model };
-    const writerGeneration = pick.writerGeneration;
+    const { poolCooldownRevision, writerGeneration } = pick;
     let consumedChildFailure: ConsumedComboFailure | undefined;
     let preflightModelRefusal: CodexAccountModelRefusal | undefined;
     let failedInPreflight = false;
     const callbackGate = createChildPassthroughCallbackGate({
       ...options,
       onResponseComplete: model => {
+        if (poolCooldownRevision !== undefined && attempt.sendCount > 0) {
+          clearComboTargetCooldownIfUnchanged(comboId, completedTarget, poolCooldownRevision);
+        }
         // The live config can change while the child is streaming. Never retain credentials.
         const currentCombo = getCombo(config, comboId);
         const provider = config.providers[completedTarget.provider];
@@ -1628,16 +1631,18 @@ export async function executeComboResponses(
     );
     const failureNow = Date.now();
     const attemptedTargets: string[] = pick.attempted;
-    // A Reserve-window rejection says nothing about the same native target's included capacity.
-    const reserveCapacityRefused = legIntent === "reserve-only" && (attempt.sendCount === 0 || failure.response.status === 429
-      || (failure.response.status === 402 && isReserveQuotaCode(failure.upstreamCode ?? failure.upstreamType)
-        && !failure.upstreamRootCode && (!failure.upstreamType || isReserveQuotaCode(failure.upstreamType))));
-    const failureCooldownScope = reserveCapacityRefused || isPolicyCandidateRefusal(failure.response) ? "none" : comboFailureCooldownScope(failure.response.status, failure.classificationText, {
+    const classifiedScope = comboFailureCooldownScope(failure.response.status, failure.classificationText, {
       code: failure.upstreamCode,
       malformedResponseFormat: failure.malformedResponseFormat,
       openRouterOpaque400: failure.openRouterOpaque400,
       providerModerationRefusal: failure.providerModerationRefusal,
     });
+    // A Reserve-window rejection is narrower than explicit provider-wide evidence.
+    const reserveCapacityRefused = legIntent === "reserve-only" && (attempt.sendCount === 0
+      || (failure.response.status === 429 && classifiedScope === "target")
+      || (failure.response.status === 402 && isReserveQuotaCode(failure.upstreamCode ?? failure.upstreamType)
+        && !failure.upstreamRootCode && (!failure.upstreamType || isReserveQuotaCode(failure.upstreamType))));
+    const failureCooldownScope = reserveCapacityRefused || isPolicyCandidateRefusal(failure.response) ? "none" : classifiedScope;
     const failedTargetKey = targetKey(pick.target);
     let failedTargetCooldownRecorded = false;
     // The dispatch rewrote this to name the pool account that actually served the turn.

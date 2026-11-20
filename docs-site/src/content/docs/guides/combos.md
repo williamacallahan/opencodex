@@ -745,6 +745,9 @@ cooldown.
 For an Anthropic OAuth or Codex pool, a 429 tied to one account that the pool has cooled does
 not cool the whole combo target. Other accounts behind that target remain available. A 429 with
 no identified, cooled pool account still cools the target, as do provider-wide failures.
+For a native Codex pool, a seat with newly usable quota or Luna Reserve can serve the target
+before a target-specific 429 expires. Only a completed upstream turn clears the cooldown;
+that capacity does not override a provider-wide 429 or let another seat use a turn-state handle.
 
 ### Last-resort targets
 

@@ -321,8 +321,8 @@ bridged Messages or Chat turn (`protocolSource`, every Claude Code turn) plans t
 capacity intent always takes the bridge child, which forwards that intent. The plan also requires both added hops (native to codex-lb, codex-lb to native) to pass
 `fallbackHopAllowed`, so provider fallback turned off keeps today's order. Any other turn, and any other combo,
 keeps its configured order.
-The `reserve-only` leg's own refusal (nothing sent, or a 429) never cools the native target and is not quota
-evidence for the ladder; any other failure after a send cools it as usual. In
+The `reserve-only` leg's own refusal (nothing sent, or a target-scoped 429) never cools the native target and is not quota
+evidence for the ladder; an explicit provider-wide 429 or other cooldown-eligible failure after a send cools it as usual. In
 `resolveCodexAuthContext` it refuses with a zero-send `CodexReserveUnavailableError` unless a stored pool seat
 can serve Reserve; caller-owned or native main credentials and Direct mode never stand in for it.
 Native ordinary Luna follows a codex-lb failure only when the relay provably never received the turn: no

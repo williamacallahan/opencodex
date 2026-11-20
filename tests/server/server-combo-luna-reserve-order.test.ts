@@ -7,12 +7,13 @@ import { handleResponses } from "../../src/server/responses";
 import { CODEX_RESPONSES_HTTP_URL } from "../../src/server/responses/codex-ws-request";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { clearAccountQuota, setAccountQuotaFromParsed, updateAccountQuota } from "../../src/codex/quota";
-import { clearCodexUpstreamHealth, clearThreadAccountMap } from "../../src/codex/routing";
+import { clearCodexUpstreamHealth, clearThreadAccountMap, recordCodexUpstreamOutcome } from "../../src/codex/routing";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import { clearAccountNeedsReauth } from "../../src/codex/account-runtime-state";
 import { resetQuotaQueryBackoffForTests } from "../../src/codex/quota-query-backoff";
 import { planLunaReserveLegs } from "../../src/server/responses/combo-luna-legs";
-import { clearComboSelectionState, clearComboTargetCooldowns, isComboTargetInCooldown } from "../../src/combos";
+import { clearComboSelectionState, clearComboTargetCooldowns, coolComboTarget, isComboTargetInCooldown } from "../../src/combos";
+import { issueTurnStateHandle, TURN_STATE_HEADER, turnStateBinding } from "../../src/server/turn-state-handles";
 import { clearComboRecallForTests } from "../../src/server/responses/combo-session-recall";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
@@ -127,6 +128,51 @@ afterEach(async () => {
 });
 
 describe("combo Luna leg order: native Reserve, relay, native ordinary, metered", () => {
+  test.each([false, true])("a cooled pool target reaches Reserve on the wire (redirected: %s)", async redirected => {
+    const target = { provider: "openai", model: redirected ? "gpt-6.2-sol" : "gpt-6-luna" };
+    const cfg: OcxConfig = {
+      ...config({}, [target]), codexFailureWindow: false, upstreamFailoverThreshold: 1,
+      ...(redirected ? { blockedModelRedirects: { [target.model]: "gpt-6-luna" } } : {}),
+    };
+    seats();
+    updateAccountQuota(A, 100, now + 86_400_000);
+    setAccountQuotaFromParsed(A, { customWindows: [{ label: "Luna Reserve", percent: 100, resetAt: now + 604_800_000, observedAt: now }] });
+    recordCodexUpstreamOutcome(cfg, B, 503, { now, fixedAccount: true });
+    now += 60_000; // The 30-second hold ended; the five-minute failure streak has not.
+    coolComboTarget("luna", target, { status: 429, retryAfter: "86400" });
+    const result = await post(cfg);
+    expect(calls).toEqual(["native:gpt-reserve"]);
+    expect(result.text).toContain("response.completed");
+    expect(isComboTargetInCooldown("luna", target)).toBe(false);
+  });
+
+  test("another seat's Reserve cannot clear the cooldown for a turn-state owner that cannot send", async () => {
+    const target = { provider: "openai", model: "gpt-6-luna" };
+    seats();
+    updateAccountQuota(A, 100, now + 86_400_000);
+    setAccountQuotaFromParsed(A, { customWindows: [{ label: "Luna Reserve", percent: 100, resetAt: now + 604_800_000, observedAt: now }] });
+    const handle = issueTurnStateHandle("fixture-state", turnStateBinding("openai", new Headers({
+      authorization: `Bearer fixture-access-${A}`, "chatgpt-account-id": `fixture-workspace-${A}`,
+    })));
+    coolComboTarget("luna", target, { status: 429, retryAfter: "86400" });
+    const result = await post(config(), {}, { [TURN_STATE_HEADER]: handle });
+    expect(result.status).toBe(409);
+    expect(result.text).toContain("does not own a usable turn state");
+    expect(calls).toEqual([]);
+    expect(isComboTargetInCooldown("luna", target)).toBe(true);
+  });
+
+  test("a provider-wide 429 from native Reserve stays cooled even while ordinary Luna has a seat", async () => {
+    const target = { provider: "openai", model: "gpt-6-luna" };
+    seats();
+    native = () => Response.json({ error: { message: "Monthly usage limit reached" } },
+      { status: 429, headers: { "retry-after": "86400" } });
+    expect((await post(config())).status).toBe(200);
+    expect(isComboTargetInCooldown("luna", target)).toBe(true);
+    expect((await post(config())).status).toBe(200);
+    expect(calls).toEqual(["native:gpt-reserve", "relay:gpt-6-luna", "relay:gpt-6-luna"]);
+  });
+
   test.each([429, 402])("a Reserve %i moves to the relay, and a relay pre-connect failure moves to native ordinary Luna", async status => {
     seats(); native = body => body.model === "gpt-reserve" ? Response.json({ error: { code: "usage_limit_reached" } }, { status }) : sse(body.model, "ok");
     relay = refusedConnect;

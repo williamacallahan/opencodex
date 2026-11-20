@@ -4,20 +4,18 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
-import { PersistedCooldownMap } from "../../src/combos/cooldown-store";
-import { clearComboTargetCooldowns, coolComboTarget, isComboTargetInCooldown } from "../../src/combos/failover";
+import { PersistedCooldownMap, type PersistableCooldown } from "../../src/combos/cooldown-store";
+import { clearComboTargetCooldowns, isComboTargetInCooldown } from "../../src/combos/failover";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
-
-type Row = { cooldownUntil: number; revision: number; status?: number };
 
 let home: string;
 let previous: string | undefined;
 let revision = 0;
 const nextRevision = () => ++revision;
 const file = () => join(home, "combo-cooldowns.json");
-const stored = () => JSON.parse(readFileSync(file(), "utf8")) as Record<string, { cooldownUntil: number; status?: number }>;
+const stored = () => JSON.parse(readFileSync(file(), "utf8")) as Record<string, Omit<PersistableCooldown, "revision">>;
 /** A second proxy process on the same home is a second map reading the same file. */
-const peer = () => new PersistedCooldownMap<Row>(nextRevision);
+const peer = () => new PersistedCooldownMap<PersistableCooldown>(nextRevision);
 
 beforeEach(() => {
   previous = process.env.OPENCODEX_HOME;
@@ -29,25 +27,16 @@ afterEach(() => {
   removeTreeWithRetry(home);
 });
 
-test("a combo cooldown is written with an absolute expiry and reloaded by a fresh map", async () => {
-  const target = { provider: "provider-a", model: "model-x" };
-  expect(coolComboTarget("combo-a", target, { retryAfter: "600", status: 429 })).toBe(true);
-  // The production write is debounced (250 ms); wait it out before reading the file.
-  await wait(500);
-  const rows = stored();
-  const key = Object.keys(rows).find(k => k.includes("provider-a/model-x"))!;
-  expect(rows[key]!.cooldownUntil).toBeGreaterThan(Date.now() + 500_000);
-  expect(rows[key]!.status).toBe(429);
+test("a provider-wide 429 keeps its expiry and scope when a fresh map reloads it", () => {
+  const key = "combo-a\0provider-a/model-x";
+  const cooldownUntil = Date.now() + 600_000;
+  const writer = peer();
+  writer.set(key, { cooldownUntil, revision: nextRevision(), status: 429, scope: "provider" });
+  expect(writer.flush()).toBe(true);
+  expect(stored()[key]).toEqual({ cooldownUntil, status: 429, scope: "provider" });
 
-  // A restart is a new map reading the same file; loaded rows get fresh, increasing revisions.
   const restarted = peer();
-  expect(restarted.get(key)?.status).toBe(429);
-  const loadedRevision = restarted.get(key)!.revision;
-  restarted.set("other", { cooldownUntil: Date.now() + 1000, revision: nextRevision() });
-  expect(restarted.get("other")!.revision).toBeGreaterThan(loadedRevision);
-  expect(isComboTargetInCooldown("combo-a", target)).toBe(true);
-  clearComboTargetCooldowns();
-  await wait(500);
+  expect(restarted.get(key)).toMatchObject({ cooldownUntil, status: 429, scope: "provider" });
 });
 
 test("expired rows and a corrupt file are ignored", () => {

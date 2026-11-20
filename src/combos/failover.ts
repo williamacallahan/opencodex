@@ -7,7 +7,7 @@ import { hasConflictingReasoningEffortCode } from "../providers/reasoning-metada
 import { isKiroAccountProfileRefusal } from "../adapters/kiro-refusal";
 import type { OcxComboTarget } from "../types";
 import { targetKey } from "./types";
-import { PersistedCooldownMap } from "./cooldown-store";
+import { PersistedCooldownMap, type PersistableCooldown } from "./cooldown-store";
 import { registerOptionalShutdownHook } from "../lib/optional-shutdown-hooks";
 import { isDefiniteContextOverflow } from "../lib/context-overflow-verdict";
 
@@ -18,12 +18,6 @@ import {
   sweepExpiredOnWrite,
   type GenerationContext,
 } from "../lib/state-store-sweeper";
-
-interface TargetCooldown {
-  cooldownUntil: number;
-  revision: number;
-  status?: number;
-}
 
 const DEFAULT_COOLDOWN_MS = 60_000;
 const MAX_COOLDOWN_MS = 10 * 60_000;
@@ -55,7 +49,7 @@ const HTTP_MONTH_INDEX: Record<string, number> = {
 // Never reset: an in-flight reservation may still refer to an entry cleared from the map.
 let nextCooldownRevision = 0;
 // Disk-backed (combo-cooldowns.json): a restart keeps every live, reset-aware cooldown.
-const targetCooldowns = new PersistedCooldownMap<TargetCooldown>(() => ++nextCooldownRevision);
+const targetCooldowns = new PersistedCooldownMap(() => ++nextCooldownRevision);
 registerOptionalShutdownHook("combo-target-cooldowns", () => targetCooldowns.flushForShutdown());
 let lastReconciledGeneration = 0;
 let liveComboTargets = new Set<string>();
@@ -202,10 +196,7 @@ export function comboTargetCooldownRevision(
     ? targetCooldowns.get(cooldownMapKey(comboId, target))?.revision : undefined;
 }
 
-/**
- * The revision of a live cooldown recorded for a 429, else undefined. A 402 is left out: it can
- * carry a credential rejection that capacity elsewhere in a pool does not answer.
- */
+/** Only a known target-scoped 429 can yield to pool capacity. Legacy rows lack scope evidence. */
 export function comboTargetRateLimitCooldownRevision(
   comboId: string,
   target: Pick<OcxComboTarget, "provider" | "model">,
@@ -213,7 +204,7 @@ export function comboTargetRateLimitCooldownRevision(
 ): number | undefined {
   if (!isComboTargetInCooldown(comboId, target, now)) return undefined;
   const entry = targetCooldowns.get(cooldownMapKey(comboId, target));
-  return entry?.status === 429 ? entry.revision : undefined;
+  return entry?.status === 429 && entry.scope === "target" ? entry.revision : undefined;
 }
 
 /** Lift only the reserved write; a replacement with even the same expiry survives. */
@@ -295,6 +286,7 @@ export function coolComboTarget(
     cooldownMs?: number;
     writerGeneration?: number;
     status?: number;
+    scope?: NonNullable<PersistableCooldown["scope"]>;
     code?: string | null;
     message?: string;
   },
@@ -329,6 +321,7 @@ export function coolComboTarget(
     // Local fallbacks are capped at ten minutes; explicit server delays at one day.
     cooldownUntil: now + (serverDelayMs ?? Math.min(Math.max(cooldownMs, 1), MAX_COOLDOWN_MS)),
     status: options?.status,
+    ...(options?.status === 429 ? { scope: options.scope ?? "target" } : {}),
   });
   sweepExpiredOnWrite(now);
   return true;

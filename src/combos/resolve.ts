@@ -13,7 +13,7 @@ import {
   type ComboFailureCooldownScope,
 } from "./failover";
 import { quotaResetRemainingMs } from "./reset-window";
-import { releaseRecoveredPoolQuotaCooldowns } from "./pool-cooldown-release";
+import { poolQuotaCooldownRevision } from "./pool-cooldown-release";
 import { getCombo, resolveComboId, targetKey } from "./types";
 import type { NormalizedComboConfig, NormalizedComboTarget } from "./types";
 import {
@@ -29,6 +29,8 @@ export interface ComboPick {
   writerGeneration: number;
   /** Cooled targets this request alone may probe, each bound to the cooldown write it reserved. */
   cooldownReprobeTargets?: Record<string, number>;
+  /** A pool 429 this target may lift only after a completed upstream send. */
+  poolCooldownRevision?: number;
 }
 
 interface SelectionState {
@@ -322,8 +324,6 @@ function reserveAllCooledTargets(
   eligible?: (target: NormalizedComboTarget) => boolean,
 ): Map<string, number> | undefined {
   const combo = getCombo(config, comboId);
-  // A recovered pool target is selectable again, so it must not count as cooled here and spend a reprobe pass.
-  if (combo) releaseRecoveredPoolQuotaCooldowns(config, comboId, combo, now);
   if (!combo?.cooldownReprobe?.enabled) return;
   const state = selectionState.get(comboId);
   if (state?.lastCooldownReprobeAt !== undefined
@@ -334,8 +334,8 @@ function reserveAllCooledTargets(
   };
   // Ordinary selection skips cooled targets without evaluating their request predicate.
   // Preserve that behavior when a sibling is already available.
-  if (combo.targets.some(target => !isComboTargetInCooldown(comboId, target, now)
-    && reprobeEligible(target))) return;
+  if (combo.targets.some(target => (!isComboTargetInCooldown(comboId, target, now)
+    || poolQuotaCooldownRevision(config, comboId, target, now) !== undefined) && reprobeEligible(target))) return;
   const usable = combo.targets.filter(reprobeEligible);
   if (usable.length === 0) return;
   // Each reserved key is bound to the cooldown entry observed here. A replacement entry —
@@ -375,7 +375,6 @@ export function pickComboTarget(
   if (!combo) throw new UnknownComboError(comboId);
   const excluded = new Set(options.exclude ?? []);
   const now = options.now ?? Date.now();
-  releaseRecoveredPoolQuotaCooldowns(config, comboId, combo, now);
   const cooldownReprobeTargets = new Map(options.cooldownReprobeTargets);
   if (options.allowCooldownReprobe !== false && !options.preview && excluded.size === 0) {
     for (const [key, revision] of reserveAllCooledTargets(config, comboId, now, options.eligible) ?? []) {
@@ -386,11 +385,16 @@ export function pickComboTarget(
     const revision = cooldownReprobeTargets.get(targetKey(target));
     return revision !== undefined && revision === comboTargetCooldownRevision(comboId, target, now);
   };
-  const eligible = (target: NormalizedComboTarget): boolean =>
-    targetProviderIsUsable(config, target, now)
-    && (reprobeBypass(target) || !isComboTargetInCooldown(comboId, target, now))
-    && !excluded.has(targetKey(target))
-    && (options.eligible?.(target) ?? true);
+  const poolCooldowns = new Map<string, number | undefined>();
+  const eligible = (target: NormalizedComboTarget): boolean => {
+    const key = targetKey(target);
+    if (excluded.has(key) || !targetProviderIsUsable(config, target, now)) return false;
+    if (!reprobeBypass(target) && isComboTargetInCooldown(comboId, target, now)) {
+      if (!poolCooldowns.has(key)) poolCooldowns.set(key, poolQuotaCooldownRevision(config, comboId, target, now));
+      if (poolCooldowns.get(key) === undefined) return false;
+    }
+    return options.eligible?.(target) ?? true;
+  };
 
   let targetIndex = -1;
   if (combo.strategy === "round-robin") {
@@ -460,12 +464,14 @@ export function pickComboTarget(
 
   if (targetIndex < 0) return null;
   const target = combo.targets[targetIndex]!;
+  const poolCooldownRevision = poolCooldowns.get(targetKey(target));
   return {
     comboId,
     target,
     targetIndex,
     attempted: [...excluded, targetKey(target)],
     writerGeneration,
+    ...(poolCooldownRevision !== undefined ? { poolCooldownRevision } : {}),
     ...(cooldownReprobeTargets.size > 0 ? { cooldownReprobeTargets: Object.fromEntries(cooldownReprobeTargets) } : {}),
   };
 }
@@ -564,6 +570,7 @@ export function advanceComboAfterFailure(
     for (const target of cooldownTargets) {
       const recorded = coolComboTarget(pick.comboId, target, {
         ...options,
+        scope: options.cooldownScope,
         cooldownMs: options.cooldownMs ?? combo?.cooldownMs,
         writerGeneration: pick.writerGeneration,
       });

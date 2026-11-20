@@ -7,7 +7,7 @@ import { clearAccountNeedsReauth } from "../../src/codex/auth-api";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import { clearAccountQuota, setAccountQuotaFromParsed } from "../../src/codex/quota";
 import { clearCodexUpstreamHealth, clearThreadAccountMap } from "../../src/codex/routing";
-import { clearComboSelectionState, clearComboTargetCooldowns } from "../../src/combos";
+import { clearComboSelectionState, clearComboTargetCooldowns, coolComboTarget, isComboTargetInCooldown } from "../../src/combos";
 import { handleResponses } from "../../src/server/responses";
 import { codexWsPool } from "../../src/server/responses/codex-ws-pool";
 import { createRequestExecutionBudget } from "../../src/lib/request-execution-budget";
@@ -235,7 +235,9 @@ describe("a failover combo moves past a native Codex overload that preceded any 
   test("Reserve accepted before an empty quota terminal does not replay through the combo", async () => {
     FakeWebSocket.plan = ["reserve-started-then-refuse"];
     const config = comboConfig();
-    config.combos!.overload!.targets[0]!.model = "gpt-6-luna";
+    const target = config.combos!.overload!.targets[0]!;
+    target.model = "gpt-6-luna";
+    coolComboTarget("overload", target, { status: 429, retryAfter: "86400" });
     config.codexAccounts![0]!.plan = "pro";
     const now = Date.now();
     setAccountQuotaFromParsed(WORK, { weeklyPercent: 100, weeklyResetAt: Math.floor(now / 1000) + 3_600,
@@ -246,6 +248,7 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect(response.status).toBe(200);
     expect(body).toContain("response.failed");
     expect(body).not.toContain("resp_fallback");
+    expect(isComboTargetInCooldown("overload", target)).toBe(true);
   });
 
   test("output after the rate-limit frame still commits the native target", async () => {

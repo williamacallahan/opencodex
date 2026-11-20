@@ -67,12 +67,12 @@ test("a day-long pool quota cooldown holds while every pool account is spent", (
   expect(isComboTargetInCooldown("sol", POOL)).toBe(true);
 });
 
-test("the pool target returns as soon as one pool account's window resets", () => {
+test("a reset window makes the pool target selectable without clearing its cooldown on a pick", () => {
   spendWholePool();
   coolComboTarget("sol", POOL, { retryAfter: "86400", status: 429 });
   setAccountQuotaFromParsed("pool-reset", { weeklyPercent: 0, weeklyResetAt: weekAhead() });
   expect(pickComboTarget(config(), "sol")?.target.provider).toBe("openai");
-  expect(isComboTargetInCooldown("sol", POOL)).toBe(false);
+  expect(isComboTargetInCooldown("sol", POOL)).toBe(true);
 });
 
 test("a Luna pool quota cooldown releases when a spent account can try Reserve", () => {
