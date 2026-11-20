@@ -12,7 +12,10 @@ import { startServer } from "../../src/server";
 import { resetTurnStateHandlesForTests } from "../../src/server/turn-state-handles";
 import type { OcxConfig } from "../../src/types";
 import { fakeChatGptJwt } from "../helpers/fake-chatgpt-jwt";
+import { ownedServiceHomeInspection } from "../helpers/owned-service-home-inspection";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+
+const inspectNativeCodexOwnership = ownedServiceHomeInspection("turn-state handle e2e fixture");
 
 /**
  * End to end: the proxy obtains a turn-state token from a (mock) ChatGPT Codex WebSocket upstream,
@@ -150,7 +153,7 @@ const forwardedTurnState = (index: number) => (sentFrames[index]?.client_metadat
 
 describe("a turn-state handle obtained from an upstream response is redeemed on the next request", () => {
   test("HTTP: the handle in the response header maps back to the upstream token", async () => {
-    const server = startServer(0);
+    const server = startServer(0, { inspectNativeCodexOwnership });
     try {
       const handle = await httpTurn(server, "a", "first");
       // Non-vacuous: the upstream answered and the client received a handle, not the token.
@@ -170,7 +173,7 @@ describe("a turn-state handle obtained from an upstream response is redeemed on 
     saveConfig(config);
     const path = join(home, "codex-affinity.sqlite");
     if (!durable) mkdirSync(path);
-    const server = startServer(0);
+    const server = startServer(0, { inspectNativeCodexOwnership });
     const threadId = "fixture-thread";
     const headers = new Headers({ "x-opencodex-api-key": KEYS.a, "thread-id": threadId, "session-id": threadId });
     const req = new Request(new URL("/v1/responses", server.url), { headers });
@@ -220,7 +223,7 @@ describe("a turn-state handle obtained from an upstream response is redeemed on 
       return Response.json({ id: "resp_relay", object: "response", model: "m", status: "completed", output: [] });
     }, { preconnect() {} });
     try {
-      const server = startServer(0);
+      const server = startServer(0, { inspectNativeCodexOwnership });
       try {
         const handle = await httpTurn(server, "a", "native");
         expect(handle).toMatch(/^ocx-ts-[0-9a-f]{32}$/);
@@ -235,7 +238,7 @@ describe("a turn-state handle obtained from an upstream response is redeemed on 
   });
 
   test("WebSocket: the handle in the relayed metadata frame maps back to the upstream token", async () => {
-    const server = startServer(0);
+    const server = startServer(0, { inspectNativeCodexOwnership });
     try {
       const [first] = await wsTurns(server, "a", [{ input: "first" }]);
       expect(sentFrames).toHaveLength(1);
@@ -258,7 +261,7 @@ describe("a turn-state handle obtained from an upstream response is redeemed on 
         createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() } }];
       saveConfig(config);
     }
-    const server = startServer(0);
+    const server = startServer(0, { inspectNativeCodexOwnership });
 
     try {
       const [handleA, handleB] = await Promise.all([httpTurn(server, "a", "turn-a"), httpTurn(server, "b", "turn-b")]);
