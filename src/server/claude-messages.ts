@@ -1367,7 +1367,7 @@ async function handleClaudeMessagesWithBudget(
       callerAnthropicBeta: req.headers.get("anthropic-beta"),
       sessionKey: anthropicSessionKeyFromParts({
         sessionIdHeader: req.headers.get("session_id")?.trim() || req.headers.get("x-claude-code-session-id"),
-        threadIdHeader: req.headers.get("thread_id"),
+        threadIdHeader: req.headers.get("thread-id"),
         clientThreadId: conversationIdFromClaudeMetadata(isRec(nativeBody.metadata) ? nativeBody.metadata : undefined),
         promptCacheKey: typeof internalBody.prompt_cache_key === "string" ? internalBody.prompt_cache_key : null,
         promptCacheKeyIsSharedCohort: cacheKeySource === "system",
@@ -1474,7 +1474,7 @@ async function handleClaudeMessagesWithBudget(
         clientIdentity: captureAnthropicClientIdentity(req.headers),
         sessionKey: anthropicSessionKeyFromParts({
           sessionIdHeader: req.headers.get("session_id")?.trim() || req.headers.get("x-claude-code-session-id"),
-          threadIdHeader: req.headers.get("thread_id"),
+          threadIdHeader: req.headers.get("thread-id"),
           clientThreadId: logCtx.conversationId,
           promptCacheKey: typeof internalBody.prompt_cache_key === "string" ? internalBody.prompt_cache_key : null,
           promptCacheKeyIsSharedCohort: cacheKeySource === "system",
