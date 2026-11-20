@@ -1135,6 +1135,7 @@ export interface OcxConfig {
    * `ocx stop` / `ocx restore`. Set false to opt out of history remapping.
    */
   syncResumeHistory?: boolean;
+  /** Subscription accounts serve only their own vendor's harness; see src/lib/native-harness.ts. */ nativeHarnessOnly?: boolean;
   /** Freshness window (ms) for the per-provider live `/models` cache. Defaults to 5 min. */
   modelCacheTtlMs?: number;
   /** Evictable retained app-state budget in MiB. Default 256; valid 64..4096. */

@@ -12,6 +12,7 @@ import { reconcileCodexQuotaAccounts } from "../codex/quota";
 import { reconcileQuotaRecovery, sweepExpiredQuotaRecovery } from "../codex/quota-401-recovery";
 import { bindUpstreamRequestCompressionConfig } from "../server/responses/request-compression";
 import { bindWorkflowBudgetConfig } from "./workflow-budget-config";
+import { bindNativeHarnessConfig } from "./native-harness";
 import {
   listLiveCodexAccountIds,
   reconcileCodexRoutingHealth,
@@ -84,6 +85,7 @@ export function setLiveStateStoreConfig(config: OcxConfig): void {
   // never come through here, so the outbound compression opt-in follows the running server only.
   bindUpstreamRequestCompressionConfig(config);
   bindWorkflowBudgetConfig(config);
+  bindNativeHarnessConfig(config);
   notifyLiveConfigObservers(config);
 }
 

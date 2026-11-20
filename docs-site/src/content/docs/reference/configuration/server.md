@@ -759,6 +759,35 @@ flags stay off. Validated writes reject malformed input.
 [`apiSurfaces`](#api-surfaces-apisurfaces)). It writes only when a setting flag is given. The
 dashboard's API page and `PATCH /api/protocols/settings` use the same validation.
 
+## Native harness accounts (`nativeHarnessOnly`)
+
+`nativeHarnessOnly: true` keeps each subscription with its vendor's own client. Google Antigravity
+accounts serve only the Antigravity CLI (`agy`), and Anthropic subscription (OAuth) accounts serve
+only Claude Code on the strict lanes (`/strict`, or a native `claude-` model on `/hybrid`). Every
+other way OpenCodex could use those accounts refuses before anything is sent: Codex, Chat and
+translated Messages turns, combos, the web-search and vision sidecars, Antigravity image
+generation, the `claude-cli` provider and Compatibility Lab probes. OpenCodex also stops sending
+Google any request of its own that presents an Antigravity client identity (model discovery, quota
+probes, project discovery); only the standard OAuth token refresh remains. Anthropic account reads
+(usage, profile, model list) are unchanged. Default: off. A malformed value counts as on. Claude Code
+must reach a subscription account through `/strict` or `/hybrid` (or with `claudeCode.strictPassthrough`
+set); the ordinary `/v1/messages` translation, which `ocx claude` uses by default, is refused.
+
+With the switch on, point `agy` at the hub and it load-balances across the hub's Antigravity
+accounts:
+
+```bash
+CLOUD_CODE_URL="https://<hub>/agy/<data-plane key>" agy
+```
+
+The hub forwards each Cloud Code call exactly as `agy` sent it and changes only the bearer to a
+pooled account's token. The data-plane key rides in the path because `agy` cannot add a header; a
+key whose `allowedProviders` omits `google-antigravity` is refused. Requests from anything other
+than `agy` are refused. Each `agy` sign-in keeps one pooled account between turns; an account that
+runs out returns Google's own error, and `agy`'s next turn moves to a healthy account. Because the
+hub recognizes a caller by its sign-in token, a session can also move when `agy` refreshes that
+token (about hourly). The lane sends directly to Google and does not use a configured egress proxy.
+
 ## Claude Code (`claudeCode`)
 
 These settings govern `/v1/messages`, `/v1/messages/count_tokens`, the `ocx claude` launcher, and the Claude dashboard page. Whether the Messages API is served at all is decided by [`apiSurfaces`](#api-surfaces-apisurfaces), which inherits `claudeCode.enabled` while unset.

@@ -1,3 +1,4 @@
+import { NativeHarnessRefusal, nativeHarnessOnly } from "../lib/native-harness";
 import { resolveAnthropicHelperSnapshot, fetchAnthropicHelper, anthropicHelperMessagesUrl } from "../sidecar/anthropic-binding";
 import { isAnthropicInstanceId } from "../providers/anthropic-instance-id";
 import type { OAuthAccessSnapshot } from "../oauth";
@@ -255,6 +256,7 @@ export async function runAnthropicWebSearch(
   config?: OcxConfig,
   dispatchSidecarSend?: AuxiliaryModelSend,
 ): Promise<SidecarOutcome> {
+  if (nativeHarnessOnly()) return { text: "", sources: [], error: new NativeHarnessRefusal("anthropic").message };
   const url = anthropicHelperMessagesUrl(provider.baseUrl);
   let token: string;
   let snapshot: OAuthAccessSnapshot | undefined;

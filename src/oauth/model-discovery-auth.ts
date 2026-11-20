@@ -1,5 +1,6 @@
 import { assertWorkBuddyDestination } from "../providers/workbuddy";
 import type { OcxProviderConfig } from "../types";
+import { nativeHarnessOnly } from "../lib/native-harness";
 import { isBuiltinAnthropicInstanceRow } from "../providers/anthropic-instance";
 import { resolveProviderModelDiscoveryUrl } from "../providers/model-discovery";
 import { resolveProviderTransport } from "../providers/xai-transport";
@@ -9,6 +10,8 @@ export function mayResolveModelsOAuth(name: string, provider: OcxProviderConfig 
   // The DSH account token is pinned to its own adapter and fixed DeepSeek hosts. Its catalog is
   // static, so no discovery path may resolve it, whatever adapter or baseUrl the row was edited to.
   if (name === "dsh-account") return false;
+  // Cloud Code fetchAvailableModels presents an Antigravity identity; the switch reserves it for agy.
+  if (name === "google-antigravity" && nativeHarnessOnly()) return false;
   if (name === "workbuddy-ai" || provider?.adapter === "workbuddy-ai") {
     if (name !== "workbuddy-ai" || provider?.adapter !== "workbuddy-ai" || provider.disabled) return false;
     try { assertWorkBuddyDestination(provider.baseUrl); return true; } catch { return false; }

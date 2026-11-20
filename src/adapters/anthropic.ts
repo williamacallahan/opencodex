@@ -35,6 +35,7 @@ import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { decodeServerSentEvents } from "../lib/sse-decoder";
 import { isLikelyRealAnthropicThinkingSignature } from "../responses/reasoning-envelope";
 import { isTranslatorBudgetExceededError, retainTranslatedEventBatch, type TranslatorBudget } from "../lib/translator-budget";
+import { assertNativeHarnessSend } from "../lib/native-harness";
 import { isReasoningEffortOmitted, modelRecordValue } from "../reasoning-effort";
 import { resolveThinkingEnabled } from "../clients/reasoning-controls";
 import { resolveReasoningCapabilities } from "../providers/reasoning-capabilities";
@@ -1044,6 +1045,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
     formatErrorBody: formatAnthropicErrorBody,
 
     async buildRequest(parsed: OcxParsedRequest, incoming?: IncomingMeta) {
+      if (isOAuth) assertNativeHarnessSend("anthropic");
       if (typeof provider.apiKey !== "string" || provider.apiKey.trim() === "") {
         if (isOAuth) {
           throw new Error("anthropic oauth token missing — run ocx login anthropic");

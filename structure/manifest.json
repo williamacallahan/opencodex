@@ -607,6 +607,13 @@
       "documents": ["src/server/messages-native.ts", "src/server/messages-native-integrity.ts", "src/types/config.ts"]
     },
     {
+      "path": "transports/agy-passthrough.md",
+      "tier": 3,
+      "title": "Antigravity CLI Pass-through and Native Harness Accounts",
+      "scope": "The /agy byte-preserving Cloud Code lane, its pooled account choice, and the nativeHarnessOnly subscription-account boundary.",
+      "documents": ["src/server/agy-passthrough.ts", "src/server/agy-passthrough-accounts.ts", "src/lib/native-harness.ts"]
+    },
+    {
       "path": "providers/anthropic-progress.md",
       "tier": 4,
       "title": "Anthropic progress updates",
