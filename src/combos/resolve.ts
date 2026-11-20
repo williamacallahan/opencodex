@@ -322,6 +322,8 @@ function reserveAllCooledTargets(
   eligible?: (target: NormalizedComboTarget) => boolean,
 ): Map<string, number> | undefined {
   const combo = getCombo(config, comboId);
+  // A recovered pool target is selectable again, so it must not count as cooled here and spend a reprobe pass.
+  if (combo) releaseRecoveredPoolQuotaCooldowns(config, comboId, combo, now);
   if (!combo?.cooldownReprobe?.enabled) return;
   const state = selectionState.get(comboId);
   if (state?.lastCooldownReprobeAt !== undefined
