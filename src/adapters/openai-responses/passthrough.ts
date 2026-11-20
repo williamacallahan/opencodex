@@ -510,15 +510,6 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         if (override && override.kind !== "main-pool") {
           finalBody = isolateCodexPoolClientMetadata(finalBody, override.chatgptAccountId);
         }
-        const routingHeaders = new Headers(headers);
-        applyCodexRoutingHint(routingHeaders, finalBody);
-        // Static headers may use mixed casing. Remove every stale spelling
-        // without normalizing unrelated headers returned by this adapter.
-        for (const name of Object.keys(headers)) {
-          if (name.toLowerCase() === CODEX_ROUTING_HINT_HEADER) delete headers[name];
-        }
-        const hint = routingHeaders.get(CODEX_ROUTING_HINT_HEADER);
-        if (hint !== null) headers[CODEX_ROUTING_HINT_HEADER] = hint;
       }
       const tierLog = createAdapterTierMetadata(
         parsed.options?.tierObservation,
@@ -554,6 +545,15 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         wireBody = stripInternalReasoningEnabled(wireBody);
       }
       wireBody = poolReserveWireBody(wireBody, provider);
+      if (isCanonicalOpenAiForwardProvider(provider)) {
+        const routingHeaders = new Headers(headers);
+        applyCodexRoutingHint(routingHeaders, wireBody);
+        for (const name of Object.keys(headers)) {
+          if (name.toLowerCase() === CODEX_ROUTING_HINT_HEADER) delete headers[name];
+        }
+        const hint = routingHeaders.get(CODEX_ROUTING_HINT_HEADER);
+        if (hint !== null) headers[CODEX_ROUTING_HINT_HEADER] = hint;
+      }
       const body = JSON.stringify(wireBody);
       const releaseBodyObservation = translatorBudget.observeExternallyCapped(
         "passthrough_serialization",

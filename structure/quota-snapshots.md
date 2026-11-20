@@ -44,7 +44,7 @@ A combo leg can set a request-local `PoolCapacityIntent` (`HandleResponsesOption
 Before the selector changes scope, `src/codex/auth-context.ts` still adopts a live legacy parent binding onto the current cohort key in the existing quota scope; it decides the seat only when no seat is offerable for Reserve.
 The existing selector still enforces pause, plan, credential, failure-window and account-wide holds.
 Reserve uses its independent quota scope; shared Responses serialization changes only the wire model
-to `gpt-reserve` for HTTP and WebSocket. Ordinary headers cannot renew its five-minute WHAM observation,
+to `gpt-reserve` for HTTP and WebSocket. The canonical Responses routing hint is derived from the final wire body, including the Reserve model and any service tier. Ordinary headers cannot renew its five-minute WHAM observation,
 and Reserve headers do not overwrite ordinary quota, even when an optional Pool history writer was not
 captured. The header publisher uses the normalized wire model and automatic Reserve request mode;
 writer availability does not determine which quota the response describes. At the physical send, a

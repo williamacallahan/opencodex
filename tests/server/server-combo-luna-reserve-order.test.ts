@@ -42,6 +42,7 @@ let release: (() => void) | undefined;
 let now = 0;
 type Call = string;
 let calls: Call[] = [];
+let nativeHints: (string | null)[] = [];
 let relay: (request: Request, body: { model: string }) => Response | Promise<Response>;
 let native: (body: { model: string }) => Response | Promise<Response>;
 let metered: () => Response;
@@ -104,14 +105,14 @@ beforeEach(() => {
       chatgptAccountId: `fixture-workspace-${id}`, expiresAt: now + 86_400_000 });
   }
   clearAccountNeedsReauth("__main__");
-  calls = [];
+  calls = []; nativeHints = [];
   native = body => sse(body.model, "ok");
   relay = () => sse("gpt-6-luna", "ok");
   metered = () => sse("gpt-6-luna", "ok");
   spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(input, init);
     const body = await request.clone().json() as { model: string };
-    if (request.url === CODEX_RESPONSES_HTTP_URL) { calls.push(`native:${body.model}`); return native(body); }
+    if (request.url === CODEX_RESPONSES_HTTP_URL) { calls.push(`native:${body.model}`); nativeHints.push(request.headers.get("x-codex-routing-hint")); return native(body); }
     if (request.url.startsWith("https://relay.example.test")) { calls.push(`relay:${body.model}`); return relay(request, body); }
     if (request.url.startsWith("https://metered.example.test")) { calls.push(`metered:${body.model}`); return metered(); }
     throw new Error(`unexpected upstream ${request.url}`);
@@ -142,6 +143,7 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     coolComboTarget("luna", target, { status: 429, retryAfter: "86400" });
     const result = await post(cfg);
     expect(calls).toEqual(["native:gpt-reserve"]);
+    expect(nativeHints).toEqual(["model=gpt-reserve"]);
     expect(result.text).toContain("response.completed");
     expect(isComboTargetInCooldown("luna", target)).toBe(false);
   });
@@ -394,6 +396,7 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(response.status).toBe(200);
     await response.text();
     expect(calls).toEqual(["native:gpt-reserve", "native:gpt-6-luna"]);
+    expect(nativeHints).toEqual(["model=gpt-reserve", "model=gpt-6-luna"]);
   });
   test("a non-Luna failover combo costs no extra route resolution", () => {
     const targets = Array.from({ length: 30 }, (_, index) => ({ provider: "openai", model: `gpt-6-sol-${index}` }));
