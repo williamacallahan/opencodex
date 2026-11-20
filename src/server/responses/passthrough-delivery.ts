@@ -174,7 +174,7 @@ import {
 import { restoreRoutedCustomCallsInJson } from "../../responses/custom-tool-compat";
 import { restoreRoutedToolSearchCallsInJson } from "../../responses/tool-search-compat";
 import { responsesJsonToSseStream } from "../responses-json-events";
-import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
+import { isCanonicalOpenAiForwardProvider, requiresStreamingResponses } from "../../providers/openai-tiers";
 import {
   BUFFERED_RESPONSES_TOTAL_TIMEOUT_MS,
   bufferedResponsesReadOptions,
@@ -481,12 +481,12 @@ export async function deliverPassthroughResponse(
     const verdict = await guardBufferedComboRequiredTool(candidate, parsed._rawBody, route.provider.adapter);
     return verdict.ok ? undefined : verdict;
   };
-  const canonicalBufferedJson = clientRequestedStream !== true
-    && isCanonicalOpenAiForwardProvider(route.provider);
+  const streamOnlyBufferedJson = clientRequestedStream !== true
+    && requiresStreamingResponses(route.provider);
   const originalContentType = upstreamResponse.headers.get("content-type");
   if (isUsageDebugEnabled() && originalContentType) logCtx.usageDebugContentType = originalContentType;
   if (responseEffects.plaintextV2AgentMessageToolNames.size > 0
-    && upstreamResponse.ok && upstreamResponse.body && (parsed.stream || canonicalBufferedJson)
+    && upstreamResponse.ok && upstreamResponse.body && (parsed.stream || streamOnlyBufferedJson)
     && !hasResponseMediaType(upstreamResponse.headers, "text/event-stream")
     && !hasResponseMediaType(upstreamResponse.headers, "application/json")
     && !isCodexWsUpstreamResponse(upstreamResponse)
@@ -520,7 +520,7 @@ export async function deliverPassthroughResponse(
         && upstreamResponse.ok
         && !!upstreamResponse.body
         && !passthroughCt
-        && (parsed.stream || canonicalBufferedJson));
+        && (parsed.stream || streamOnlyBufferedJson));
     const recordTerminalOutcome = codexForwardTerminalOutcomeRecorder(
       config,
       admissionState.authCtx,
@@ -718,7 +718,7 @@ export async function deliverPassthroughResponse(
       // request state until their body ends would change the existing relay contract. The canonical
       // non-streaming fold below is different: nothing is published yet, so it defers this mutation
       // until both the raw and rewritten terminal snapshots validate.
-      if (!canonicalBufferedJson) {
+      if (!streamOnlyBufferedJson) {
         commitReasoningReplayServingRoute(nativeExchange.request.headers);
       }
       const terminalRepairPolicy = route.staticPolicy.model.responsesTerminalRepair;
@@ -863,7 +863,7 @@ export async function deliverPassthroughResponse(
       // are not the Responses wire shapes the snapshot must mirror.
       // Only validated client blocks may publish plaintext continuation state.
       // Raw inspection precedes rewriting on eager relays, so it cannot own this write.
-      const plaintextInspector = !canonicalBufferedJson
+      const plaintextInspector = !streamOnlyBufferedJson
         && !grokUpstreamEchoEnabled
         && responseEffects.plaintextV2AgentMessageToolNames.size > 0
         ? createSseInspector({ onCompletedResponse: rememberPassthroughResponseChecked })
@@ -975,7 +975,7 @@ export async function deliverPassthroughResponse(
         createTerminalErrorRedactionBlockRewrite(nativeExchange.request.headers, maskCredential),
         rememberPlaintextBlock,
         // Display-only projection must follow every continuation-cache observer.
-        (!canonicalBufferedJson || !options.comboAttempt) && isLocalCodexImageClient(req.headers, options.admission?.kind, options.inboundWire)
+        (!streamOnlyBufferedJson || !options.comboAttempt) && isLocalCodexImageClient(req.headers, options.admission?.kind, options.inboundWire)
           ? createHostedImageDisplayRewrite()
           : undefined,
       ].filter((rewrite): rewrite is NonNullable<typeof rewrite> => rewrite !== undefined);
@@ -984,7 +984,7 @@ export async function deliverPassthroughResponse(
         : undefined;
       const needsClientRewrite = clientBlockRewrite !== undefined;
 
-      if (canonicalBufferedJson) {
+      if (streamOnlyBufferedJson) {
         const signal = options.abortSignal ?? req.signal;
         // A turn whose head waited on reset selection keeps the deadline that wait already spent.
         const bufferedRead = bufferedResponsesReadOptions(resolveStallTimeoutMs(

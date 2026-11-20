@@ -1331,7 +1331,7 @@
   "responses-fetch-helpers-boundary.test.ts": "responses", "responses-field-backfill.test.ts": "responses",
   "responses-run-turn-key-pacing.test.ts": "responses", "responses-request-compression.test.ts": "responses",
   "responses-forward-dangling-call.test.ts": "responses", "responses-forward-incomplete-quota.test.ts": "responses",
-  "responses-forward-posit-continuation.test.ts": "responses", "responses-forward-prompt-envelope.test.ts": "responses",
+  "responses-forward-posit-continuation.test.ts": "responses", "responses-forward-prompt-envelope.test.ts": "responses", "responses-stream-only-destination.test.ts": "responses",
   "responses-freeform-wrapper-keys.test.ts": "responses", "responses-function-tool-repair.test.ts": "responses",
   "responses-hosted-tool-declaration.test.ts": "responses", "responses-hosted-tool-min-spread.test.ts": "responses",
   "responses-hosted-tool-conditional.test.ts": "responses",

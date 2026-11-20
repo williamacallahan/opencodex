@@ -1151,6 +1151,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   chatCompletionsPath: "editor",
   commandCodeVersion: "editor",
   statelessResponses: "editor",
+  responsesStreamOnly: "editor",
   requiresAdjacentResponsesToolResults: "editor",
   requiresPairedResponsesToolResults: "editor",
   annotateEmptyToolOutputs: "editor",

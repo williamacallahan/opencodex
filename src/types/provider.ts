@@ -395,6 +395,12 @@ export interface OcxProviderConfig {
    */
   statelessResponses?: boolean;
   /**
+   * This Responses destination accepts only `stream: true`, like the ChatGPT Codex backend it may
+   * relay. The hub streams upstream and folds the terminal stream back into JSON for a
+   * non-streaming client. The canonical backend implies it; set it for a relay of that backend.
+   */
+  responsesStreamOnly?: boolean;
+  /**
    * Responses upstream whose parser requires an unambiguous call batch and its matched
    * result batch to remain contiguous. Hook-injected context that splits the batch is
    * preserved after it, and parallel calls stay together with the reasoning turn that produced them.

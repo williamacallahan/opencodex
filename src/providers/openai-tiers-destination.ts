@@ -25,6 +25,11 @@ export function isCanonicalOpenAiForwardProvider(provider: OcxProviderConfig): b
     && normalizedBaseUrl(provider.baseUrl) === CODEX_FORWARD_BASE_URL;
 }
 
+/** The destination accepts only `stream: true`: the canonical backend, or a relay that declares it. */
+export function requiresStreamingResponses(provider: OcxProviderConfig): boolean {
+  return isCanonicalOpenAiForwardProvider(provider) || provider.responsesStreamOnly === true;
+}
+
 /**
  * Response evidence is separate from Fast capability and request serialization. Preserve the
  * known Codex exception (#2558); other destinations may declare their response contract without

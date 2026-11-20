@@ -371,6 +371,7 @@ export const providerConfigSchema = z.object({
   responsesPath: z.string().min(1).optional(),
   chatCompletionsPath: z.string().min(1).optional(),
   statelessResponses: z.boolean().optional(),
+  responsesStreamOnly: z.boolean().optional(),
   requiresAdjacentResponsesToolResults: z.boolean().optional(),
   requiresPairedResponsesToolResults: z.boolean().optional(),
   annotateEmptyToolOutputs: z.boolean().optional(),

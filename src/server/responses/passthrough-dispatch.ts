@@ -23,7 +23,7 @@ import { CopilotAutoAdapterHandoff, type ResponsesTransport } from "./request-tr
 import type { ResponsesEffects } from "./response-effects";
 import { createTransientSendPolicy, transientSendCapFor, type ResponsesSendBudget } from "./request-send-budget";
 import { renewMainQuotaDispatchForAttempt } from "../../codex/main-account-cache";
-import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
+import { isCanonicalOpenAiForwardProvider, requiresStreamingResponses } from "../../providers/openai-tiers";
 import { isLocalUpstream } from "../../lib/local-upstream";
 import { resolveConnectTimeoutMs } from "../../stall-timeout";
 import { codexSafetyBufferingFilterOptions, terminalStatusFromParsed } from "../relay";
@@ -302,12 +302,12 @@ export async function preparePassthroughExchange(
     // ChatGPT may omit Content-Type, so consulting `parsed.stream` here would mistake its SSE body
     // for non-streaming JSON and skip both opaque-state and safe-reset recovery.
     const upstreamRequestsStream = parsed.stream === true
-      || isCanonicalOpenAiForwardProvider(route.provider);
+      || requiresStreamingResponses(route.provider);
     // A JSON client still needs the canonical destination's HTTP/SSE response so delivery can
     // validate and fold it. Letting the forced `stream:true` body select the WebSocket transport
     // bypasses manual HTTP redirects and can turn a real 3xx into a connect timeout.
-    const canonicalBufferedJson = clientRequestedStream !== true
-      && isCanonicalOpenAiForwardProvider(route.provider);
+    const streamOnlyBufferedJson = clientRequestedStream !== true
+      && requiresStreamingResponses(route.provider);
     const imageGenCallAliases = route.provider.authMode === "forward"
       ? new Map<string, { namespace: string; name: string }>()
       : imageGenToolCallAliases(toolBridgeMaps.toolNsMap, parsed._rawBody, translatorBudget);
@@ -1004,7 +1004,7 @@ export async function preparePassthroughExchange(
             body: request.body,
           }, recovery), upstream.signal, sendConnectMs(), upstreamRequestsStream,
             providerFetch(route.provider, options.codexWsRuntimeIdentity, {
-              httpOnly: canonicalBufferedJson,
+              httpOnly: streamOnlyBufferedJson,
               nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
                 && responseEffects.plaintextV2AgentMessageToolNames.size === 0
                 ? options.nativeControl : undefined,
@@ -1145,7 +1145,7 @@ export async function preparePassthroughExchange(
               body: request.body,
             }, innerRecovery), upstream.signal, sendConnectMs(), upstreamRequestsStream,
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
-                httpOnly: canonicalBufferedJson,
+                httpOnly: streamOnlyBufferedJson,
                 nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
                   && responseEffects.plaintextV2AgentMessageToolNames.size === 0
                   ? options.nativeControl : undefined,
@@ -1266,7 +1266,7 @@ export async function preparePassthroughExchange(
           ? createCodexAuthDispatchGuard(admissionState.authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined;
         let replayNotified = false;
         const oauthReplayExecutor = providerFetch(route.provider, options.codexWsRuntimeIdentity, {
-            httpOnly: canonicalBufferedJson,
+            httpOnly: streamOnlyBufferedJson,
             nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
               && responseEffects.plaintextV2AgentMessageToolNames.size === 0
               ? options.nativeControl : undefined,
@@ -1416,7 +1416,7 @@ export async function preparePassthroughExchange(
               body: request.body,
             }, recovery), upstream.signal, sendConnectMs(), upstreamRequestsStream,
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
-                httpOnly: canonicalBufferedJson,
+                httpOnly: streamOnlyBufferedJson,
                 nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
                   && responseEffects.plaintextV2AgentMessageToolNames.size === 0
                   ? options.nativeControl : undefined,
@@ -1566,7 +1566,7 @@ export async function preparePassthroughExchange(
               body: request.body,
             }, recovery), upstream.signal, sendConnectMs(), upstreamRequestsStream,
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
-                httpOnly: canonicalBufferedJson,
+                httpOnly: streamOnlyBufferedJson,
                 nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
                   && responseEffects.plaintextV2AgentMessageToolNames.size === 0
                   ? options.nativeControl : undefined,
@@ -1680,7 +1680,7 @@ export async function preparePassthroughExchange(
           connectMs,
           passthroughEstimate,
           stream: upstreamRequestsStream,
-          httpOnly: canonicalBufferedJson,
+          httpOnly: streamOnlyBufferedJson,
           preOutputRefusalHold: preOutputRefusalHold && { ...preOutputRefusalHold, reserveFirstPlacement: false },
           onPhysicalSend: replayGuard.record,
           onResponse: (response, retryAuthCtx, retryRequest) => {
@@ -1923,7 +1923,7 @@ export async function preparePassthroughExchange(
           },
         ),
         { request, config, signal: upstream.signal, allowMissingContentType: !streamRecoveryContentType && upstreamRequestsStream,
-          delivery: canonicalBufferedJson ? "buffered-json" : options.comboAttempt ? "combo-child" : "direct-stream" },
+          delivery: streamOnlyBufferedJson ? "buffered-json" : options.comboAttempt ? "combo-child" : "direct-stream" },
       );
     }
     break;

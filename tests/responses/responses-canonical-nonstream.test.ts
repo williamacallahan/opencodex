@@ -1015,7 +1015,7 @@ describe("canonical ChatGPT transport for non-streaming Responses callers (#6162
 
   test("canonical buffered serving-state commit is ordered after both validations", () => {
     const source = readFileSync(repoPath("src/server/responses/passthrough-delivery.ts"), "utf8");
-    const branch = source.indexOf("if (canonicalBufferedJson) {");
+    const branch = source.indexOf("if (streamOnlyBufferedJson) {");
     const rawValidation = source.indexOf("if (!raw.ok)", branch);
     const clientValidation = source.indexOf("if (!client.ok)", rawValidation);
     const deferredCommit = source.indexOf("commitReasoningReplayServingRoute(nativeExchange.request.headers);", clientValidation);

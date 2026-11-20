@@ -27,7 +27,7 @@ import { persistKiroAccountState } from "../../providers/kiro-account-state-disk
 import { readDisplaySafeErrorText, normalizeUpstreamErrorText } from "./core-errors";
 import { sanitizeNonReplayableUpstreamError } from "./non-replayable-error";
 import { isNonReplayableResponse, isNonReplayableUpstreamCode } from "../../lib/upstream-retry";
-import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
+import { requiresStreamingResponses } from "../../providers/openai-tiers";
 import { currentTurnToolBridgeMaps, guardEmptyToolCatalogEvents, guardEmptyToolCatalogStream } from "../../lib/empty-tool-catalog";
 import { guardCompactionSummary } from "../../responses/compaction-summary";
 
@@ -84,7 +84,7 @@ export async function deliverAdapterResponse(
   } = responseEffects;
   const { routedCompaction } = sidecarState;
   const bodyInactivityMs = resolveStallTimeoutMs(config.stallTimeoutSec, { localUpstream });
-  const upstreamRequestsStream = parsed.stream || isCanonicalOpenAiForwardProvider(route.provider);
+  const upstreamRequestsStream = parsed.stream || requiresStreamingResponses(route.provider);
   const recoverThinkingSignature = (events: AsyncIterable<AdapterEvent>): AsyncIterable<AdapterEvent> =>
     thinkingSignatureRecovery.wrap(events, async function* () {
       const result = await refetchThinkingSignature();

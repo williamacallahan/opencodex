@@ -214,7 +214,7 @@ export function providerCompatFieldConfigError(provider: Record<string, unknown>
 const PROVIDER_PATCH_FIELDS: ReadonlySet<string> = new Set([
   "disabled", "adapter", "baseUrl", "defaultModel", "authMode", "apiKeyTransport", "note", "allowPrivateNetwork",
   "liveModels", "annotateEmptyToolOutputs", "fastEnabled", "xaiResponsesOptIn", "requestPacing",
-  "project", "location", "modelDiscovery", "thinkingDisplay", "modelThinkingDisplay",
+  "project", "location", "modelDiscovery", "thinkingDisplay", "modelThinkingDisplay", "responsesStreamOnly",
   "upstreamHttpVersion", "upstreamWebsocket", "contextWindow", "modelCapabilities", "modelContextTiers",
   "modelContextWindows", "modelSamplingDefaults", "pinnedReasoningEffort", "modelPinnedReasoningEfforts", "autoReviewModel",
   "autoReviewModelOverrides", "modelAutoCompactTokenLimits", "modelSupportsServiceTier", "modelSuppressSyntheticMax",
@@ -255,6 +255,13 @@ export function applyProviderCompatPatchFields(
   next: OcxProviderConfig,
 ): { touched: boolean } | { error: string } {
   let touched = false;
+  if (Object.hasOwn(rawBody, "responsesStreamOnly")) {
+    const value = rawBody.responsesStreamOnly;
+    if (value === null) delete next.responsesStreamOnly;
+    else if (typeof value !== "boolean") return { error: "responsesStreamOnly must be a boolean or null" };
+    else next.responsesStreamOnly = value;
+    touched = true;
+  }
   if (Object.hasOwn(rawBody, "proxy")) {
     const proxy = rawBody.proxy;
     if (proxy === null) delete next.proxy;

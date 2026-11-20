@@ -17,6 +17,7 @@ import {
   CODEX_FORWARD_BASE_URL,
   destinationDecodesNativeCompactionBlob,
   isCanonicalOpenAiForwardProvider,
+  requiresStreamingResponses,
   isOpenAiOperatedResponsesDestination,
   supportsNativeResponsesCompactionTrigger,
 } from "../../providers/openai-tiers";
@@ -494,12 +495,12 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         const originalChoice = isPlainObject(parsed._rawBody) ? parsed._rawBody.tool_choice : undefined;
         finalBody = normalizeMuseToolChoice(finalBody, originalChoice);
       }
-      // The canonical ChatGPT Codex endpoint is SSE-only even though the public Responses surface
+      // The canonical ChatGPT Codex endpoint (and a relay declaring responsesStreamOnly) is SSE-only even though the public Responses surface
       // permits an omitted/false `stream`. Keep the client's delivery preference on `parsed.stream`
       // and coerce only this final upstream copy; passthrough delivery folds the terminal stream
       // back into JSON for that client. `store` is intentionally untouched here because explicit
       // caller storage semantics are independent of the transport required by the destination.
-      if (isCanonicalOpenAiForwardProvider(provider)
+      if (requiresStreamingResponses(provider)
         && isPlainObject(finalBody)
         && finalBody.stream !== true) {
         finalBody = { ...finalBody, stream: true };
