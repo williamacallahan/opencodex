@@ -171,16 +171,21 @@ function isCanonicalForwardSystemMessage(item: unknown): item is Record<string, 
 }
 
 /**
- * The public Responses API accepts input system messages and `truncation`, but the canonical
- * ChatGPT Codex forward endpoint rejects both. Fold only fully textual system messages into the
- * existing top-level instructions and remove the unsupported flag at this destination boundary.
+ * The public Responses API accepts a plain-string `input`, input system messages, and
+ * `truncation`, but the canonical ChatGPT Codex forward endpoint rejects all three (a string input
+ * returns 400 "Input must be a list"). Wrap a string input as one user message, fold only fully
+ * textual system messages into the existing top-level instructions, and remove the unsupported
+ * flag at this destination boundary.
  *
  * The fold is atomic: if any system message contains a non-text block, keep every message in
  * place so the proxy never silently drops multimodal content. The backend may still reject that
  * unsupported shape, but it will not receive a partially rewritten prompt.
  */
-export function normalizeCanonicalForwardPromptEnvelope(body: unknown): unknown {
-  if (!isPlainObject(body)) return body;
+export function normalizeCanonicalForwardPromptEnvelope(raw: unknown): unknown {
+  if (!isPlainObject(raw)) return raw;
+  const body = typeof raw.input === "string"
+    ? { ...raw, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: raw.input }] }] }
+    : raw;
   const stripTruncation = Object.hasOwn(body, "truncation");
   const input = Array.isArray(body.input) ? body.input : undefined;
   if (!input) {

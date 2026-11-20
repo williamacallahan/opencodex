@@ -785,7 +785,7 @@ describe("canonical Responses adapter plaintext v2 integration", () => {
       model: "gpt-5.6-sol",
       store: false,
       stream: true,
-      input: "delegate",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "delegate" }] }],
       tools: [{
         type: "namespace",
         name: "collaboration",

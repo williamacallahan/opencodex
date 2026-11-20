@@ -72,6 +72,18 @@ describe("canonical ChatGPT forward prompt envelope", () => {
     ]);
   });
 
+  test("wraps a plain-string input as one user message, which the backend requires", () => {
+    const raw = { model: "gpt-5.6-luna", input: "Reply with ok" };
+    const body = outboundBody(canonicalForward, raw);
+    expect(body.input).toEqual([
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Reply with ok" }] },
+    ]);
+    expect(raw.input).toBe("Reply with ok");
+    // Every other destination accepts the public API's string form unchanged.
+    const keyed = outboundBody({ ...canonicalForward, baseUrl: "https://api.openai.com/v1", authMode: "key" }, raw);
+    expect(keyed.input).toBe("Reply with ok");
+  });
+
   test("keeps every system message when any one contains non-text content", () => {
     const input = [
       { type: "message", role: "system", content: "text" },
