@@ -36,7 +36,6 @@ import {
 } from "./memory-models";
 import { recallComboForLane } from "./combo-session-recall";
 import {
-  sessionLaneIdFromRequest,
   conversationIdFromResponsesRequest,
   assignNativeLogConversationId,
   fillHermesLogConversationFallback,
@@ -283,6 +282,7 @@ export async function prepareResponsesRequest(
   if (!concreteSelection && !options.compactionRoutingOverride && inboundWire === "responses") {
     options.compactionRoutingOverride = applyCompactionRoutingOverride(body, req.headers, config, {
       endpoint: "responses",
+      claudeBridgePoolSession: options.claudeBridgePoolSession,
       transport: options.inboundTransport,
     });
   }
@@ -343,7 +343,7 @@ export async function prepareResponsesRequest(
     if (typeof rawModel === "string" && !rawModel.includes("/") && isCompactionTrigger
       && !comboRows.fastRow && !comboEffortRow
       && !resolveComboId(config, rawModel)) {
-      const recalledComboId = recallComboForLane(config, sessionLaneIdFromRequest(req.headers), rawModel);
+      const recalledComboId = recallComboForLane(config, options.claudeBridgePoolSession, rawModel);
       if (recalledComboId) {
         (body as Record<string, unknown>).model = `combo/${recalledComboId}`;
       }
@@ -1715,6 +1715,9 @@ export async function prepareResponsesRequest(
           && parsed._nativeReasoningRetention?.accountSwitch === true,
         bindingKey: binding.bindingKey,
         servingAccountId: binding.accountId,
+        sameUploadedFileAccount: (firstAccountId, secondAccountId) =>
+          (!isRequestOwnedAffinityKey(binding.bindingKey) || callerMatchesObservedMain(callerAuthHeaders))
+          && sameCodexUploadedFileAccount(config, firstAccountId, secondAccountId),
         logCtx,
       });
     }

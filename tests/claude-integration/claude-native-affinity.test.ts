@@ -100,10 +100,13 @@ describe("Claude final canonical native affinity after a Go preliminary pick", (
           expect(response.status).toBe(200);
           const wire = seen.at(-1)!;
           expect(wire.url).toBe("https://chatgpt.com/backend-api/codex/responses");
-          expect(wire.headers.get("session_id")).toBe(explicit ? "caller-conversation" : expectedSession);
-          if (explicit) expect(wire.headers.get(explicit)).toBe("caller-conversation");
+          const session = wire.headers.get("session_id");
+          expect(session).toBe(wire.headers.get("session-id"));
+          expect(session).toBe(!explicit || explicit === "thread-id" ? expectedSession : "6955b84e-b9e5-41aa-898e-93f058940fbc");
+          expect(wire.headers.get("thread-id")).not.toBe("caller-conversation");
           expect(wire.headers.has("x-opencode-session")).toBe(false);
-          expect(wire.body.prompt_cache_key).toBe(key);
+          if (explicit === "thread-id") expect(wire.body.prompt_cache_key).not.toBe(key);
+          else expect(wire.body.prompt_cache_key).toBe(key);
           expect(req.headers.get("session_id")).toBe(explicit === "session_id" ? "caller-conversation" : null);
         } finally { entropy.mockRestore(); lease?.release(); }
       });

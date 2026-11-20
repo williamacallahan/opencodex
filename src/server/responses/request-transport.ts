@@ -7,7 +7,7 @@ import { appendLoadedToolDefinitions, toolLoadingModelMatches } from "../../clau
 import { applyChatToolDispatch } from "../../claude/chat-tool-dispatch";
 import { isRec } from "../../claude/inbound-records";
 import { isOpenCodeGoResponsesUrl } from "../../adapters/opencode-go-additional-tools";
-import { buildResponsesTransport } from "../../adapters/openai-responses/transport";
+import { bindSharedCodexWireIdentity, buildResponsesTransport } from "../../adapters/openai-responses/transport";
 import { anthropicBillingPhysicalFetch } from "../../providers/anthropic-billing-ownership";
 import { rebindPhysicalSend } from "../../lib/request-execution-budget";
 import { anthropicModelQuotaFor } from "../../oauth/anthropic-model-quota";
@@ -660,6 +660,7 @@ export async function prepareResponsesTransport(
         return buildWithOriginalCatalog({ ...requestParsed, _rawBody: projected }, incoming);
       };
     }
+    bindSharedCodexWireIdentity(resolved, provider, req.headers, options.admission, admissionState.authCtx.kind, options.claudeCodexWire);
     if (route.provider.authMode === "forward") return resolved;
     const binding: DispatchBinding | undefined = route.provider.authMode === "oauth"
       ? oauthSelection && servingOAuthSnapshot

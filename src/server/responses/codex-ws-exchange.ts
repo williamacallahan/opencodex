@@ -1,4 +1,5 @@
 import { NativeSteeringError } from "./native-steering";
+import { reserveQuotaPrelude } from "./combo-stream-preflight";
 import { NativeContinuationRefusalError } from "./native-continuation-refusal";
 import { mergeSteeringContinuation } from "./native-steering-settings";
 import { markNativeControlResponse } from "./native-response-control";
@@ -164,6 +165,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
     // different ids in one frame, or an id that differs from the first one seen. Independent of
     // socket reuse, so a cold one-shot socket is held to the same rule as a pooled one.
     let refusalEligible = holdEnabled;
+    let quotaPrelude = holdEnabled && preOutputRefusalHold?.reserveFirstPlacement ? reserveQuotaPrelude() : undefined;
     let refusalResponseId: string | null = null;
     let heldHeaders: Headers | null = null;
     let deferredCommit = false;
@@ -599,7 +601,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       upstreamFrames += 1;
       if (firstFrameAt === null) firstFrameAt = Date.now();
       const text = typeof event.data === "string" ? event.data : "";
-      if (!text) return;
+      if (!text) { quotaPrelude = undefined; return; }
       // UTF-8 byte length is always at least the JS string length. Reject this
       // cheap lower bound before parsing so an obviously oversized frame does
       // not create another large object graph.
@@ -613,7 +615,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         return;
       }
       const normalized = normalizeResponsesWsRelayEvent(text);
-      if (!normalized) return;
+      if (!normalized) { quotaPrelude = undefined; return; }
       const { type } = normalized;
       let relayText = normalized.text;
       let controlFrame = false;
@@ -635,6 +637,8 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         failStream("codex websocket frame exceeds the response size limit");
         return;
       }
+      const quotaVerdict = normalized.ambiguousTerminal ? undefined : quotaPrelude?.(normalized.payload, controlFrame);
+      if (quotaVerdict === undefined) quotaPrelude = undefined;
       if (!controlFrame && !type.startsWith("response.") && type !== "error") return;
       let steeringEnded = false;
       let refusalStatus: number | undefined;
@@ -662,7 +666,8 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
             if (beforeAcceptance) { failStream(error); return; }
             // Rejected metadata cannot change how an accepted turn is delivered.
           }
-          if (rejection && beforeAcceptance) {
+          if (rejection && beforeAcceptance && !(preOutputRefusalHold?.reserveFirstPlacement === false
+            && (rejection.status === 402 || rejection.status === 429))) {
             const projection = new Response(JSON.stringify({
               error: rejection.error ?? { type: "upstream_error", message: "Upstream rejected the request" },
             }), { status: rejection.status, headers: rejection.headers });
@@ -675,13 +680,13 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
             return;
           }
           if (rejection && (rejection.status === 402 || rejection.status === 429)) {
-            // A held or committed preamble keeps the quota failure in the body, not the retry ladder.
+            // Keep the quota evidence if the correlated first-placement check below declines the move.
             terminalQuota = { status: rejection.status, headers: rejection.headers };
           }
         }
         let holdFrame = false;
         if (holdOpen && refusalEligible) {
-          refusalStatus = codexWsPreOutputRefusalStatus(normalized.payload);
+          refusalStatus = typeof quotaVerdict === "number" ? quotaVerdict : codexWsPreOutputRefusalStatus(normalized.payload);
           if (refusalStatus !== undefined) {
             // Built before anything settles: a refusal whose metadata cannot be projected within the
             // header bounds is delivered the way it was before, in the committed body.

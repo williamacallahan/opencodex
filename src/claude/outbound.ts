@@ -450,6 +450,7 @@ export function responsesSseToAnthropicSse(
      * upstream sent no confirmed usage before the first frame. See `messageSnapshot` (#4857).
      */
     inputTokenFloor?: number;
+    nativeReasoningSelector?: string;
     nativeReasoningTagFor?: (blob: string) => string | undefined;
   },
 ): ReadableStream<Uint8Array> {
@@ -563,7 +564,7 @@ export function responsesSseToAnthropicSse(
           }
           const signature = open.reasoningSig ?? encodeReasoningEnvelope({
             txt: open.thinkingBuf ?? "",
-            ...(tag ? { nat: { ...native, model, tag } } : {}),
+            ...(tag ? { nat: { ...native, model: opts.nativeReasoningSelector ?? model, tag } } : {}),
           }, translatorBudget);
           emit("content_block_delta", {
             type: "content_block_delta", index: open.index,
@@ -1083,7 +1084,7 @@ export function responsesSseToAnthropicSse(
 }
 
 /** Non-streaming: /v1/responses JSON -> Anthropic message JSON. */
-export function responsesJsonToAnthropicMessage(json: unknown, model: string, translatorBudget?: TranslatorBudget, nativeReasoningTagFor?: (blob: string) => string | undefined): Rec {
+export function responsesJsonToAnthropicMessage(json: unknown, model: string, translatorBudget?: TranslatorBudget, nativeReasoningTagFor?: (blob: string) => string | undefined, nativeReasoningSelector = model): Rec {
   const body = isRec(json) ? json : {};
   const output = Array.isArray(body.output) ? body.output : [];
   const content: Rec[] = [];
@@ -1126,7 +1127,7 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string, tr
         const tag = native && nativeReasoningTagFor?.(native);
         if (parts.length > 0 || env?.sig || tag) {
           const text = env?.upd ? env.txt! : parts.join("\n\n");
-          const nat = tag ? { enc: native, model, tag, ...(typeof raw.id === "string" && raw.id.length > 0 ? { id: raw.id } : {}) } : undefined;
+          const nat = tag ? { enc: native, model: nativeReasoningSelector, tag, ...(typeof raw.id === "string" && raw.id.length > 0 ? { id: raw.id } : {}) } : undefined;
           content.push({ type: "thinking", thinking: text, signature: env?.sig ?? encodeReasoningEnvelope({ txt: text, ...(nat ? { nat } : {}) }, translatorBudget) });
         }
         break;

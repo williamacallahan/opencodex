@@ -200,11 +200,12 @@ describe("cache diagnostic", () => {
 
   test("reports the real pool-key derivation separately for each observed header set", () => {
     process.env.OPENCODEX_CACHE_DEBUG = "1";
-    const base = { session_id: "raw-capture-session", "session-id": "raw-affinity-session" };
+    const base = { session_id: "raw-affinity-session", "session-id": "raw-affinity-session" };
     const full = { ...base, "thread-id": "raw-affinity-thread" };
+    const conflicting = { ...full, session_id: "raw-capture-session" };
     const rawKey = codexPoolAffinityKey(new Headers(full));
     expect(rawKey).toBeDefined();
-    for (const headers of [base, { "thread-id": "raw-affinity-thread" }, { "x-session-id": "raw-capture-session" }]) {
+    for (const headers of [base, conflicting, { "thread-id": full["thread-id"] }, { "x-session-id": conflicting.session_id }]) {
       expect(codexPoolAffinityKey(new Headers(headers))).toBeUndefined();
       turn({ input: "a" }, undefined, { headers, outboundHeaders: full });
       const record = diagnosticRecords().at(-1)!;
@@ -219,7 +220,7 @@ describe("cache diagnostic", () => {
     expect(record.accountAffinity.inbound).toEqual(record.accountAffinity.outbound);
     expect(record.accountAffinity.inbound?.tag).not.toBe(record.session.inboundHeader.tag);
     const text = readFileSync(cacheDiagnosticPath(), "utf8");
-    for (const value of [rawKey!, ...Object.values(full)]) expect(text).not.toContain(value);
+    for (const value of [rawKey!, conflicting.session_id, ...Object.values(full)]) expect(text).not.toContain(value);
   });
 
   test("does not turn a missing outbound observation into an absent affinity key", () => {

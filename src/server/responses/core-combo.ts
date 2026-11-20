@@ -110,7 +110,6 @@ import {
   linkRequestSessionLane,
   reasoningReplayConversationIdFromResponsesRequest,
   sessionIdHeaderFromRequest,
-  sessionLaneIdFromRequest,
 } from "../request-log-conversation";
 import type { CodexAuthContext } from "../../codex/auth-context";
 import type { ResponsesTerminalStatus } from "../../bridge";
@@ -126,7 +125,7 @@ import {
   markNativePassthroughSseResponse,
   markEagerRelaySseResponse,
 } from "../relay";
-import { preflightComboStreamResponse } from "./combo-stream-preflight";
+import { isReserveQuotaCode, preflightComboStreamResponse } from "./combo-stream-preflight";
 import { planLunaReserveLegs, relayProvedNotStarted } from "./combo-luna-legs";
 import { CODEX_TURN_STATE_HEADER } from "../../codex/forward-transport-headers";
 import { canPortConversationState, collectConversationStateCarriers } from "./account-change-state";
@@ -634,9 +633,7 @@ export async function executeComboResponses(
   const targetEligible = (target: (typeof combo.targets)[number]): boolean =>
     payloadEligible(target) && recoveryEligible(target);
   const initialNow = Date.now();
-  // A translated Claude Code turn carries no session or thread header; its bridge identity is the same
-  // transcript-scoped key its pool seat binding uses, so every turn of one transcript shares one lane.
-  const comboLane = sessionLaneIdFromRequest(req.headers) ?? options.claudeBridgePoolSession;
+  const comboLane = options.claudeBridgePoolSession;
   // A later turn of a known conversation stays on the target that served the previous one while that target
   // is still selectable (#7298). Override routes never record a lane target, so they never pin either.
   const comboHopAllowed = (from: (typeof combo.targets)[number], to: (typeof combo.targets)[number]): boolean => {
@@ -679,18 +676,15 @@ export async function executeComboResponses(
       eligible: pinEligible,
       now: initialNow,
     });
-  // Native Reserve -> codex-lb -> native ordinary Luna places a conversation's first turn, or one whose previous
-  // target is unavailable; a pinned conversation keeps its target and that target's capacity. Only a turn any
-  // ChatGPT pool seat or relay can take is planned: any account-bound carrier (continuation id, provider
-  // conversation, uploaded file, encrypted reasoning, turn state in a header or the body) keeps today's order.
-  // A bridged Messages or Chat turn plans the same legs: a leg carrying a capacity intent always takes the
-  // bridge child below, which forwards that intent.
-  const lunaLegs = conversationPin ? undefined : planLunaReserveLegs(combo, () => {
+  const portableLunaLegs = planLunaReserveLegs(combo, () => {
     const metadata = isPlainObject(rawBody) ? rawBody.client_metadata : undefined;
     return !unreadableEncryptedAgentTask && !req.headers.has(CODEX_TURN_STATE_HEADER)
       && !(isPlainObject(metadata) && CODEX_TURN_STATE_HEADER in metadata)
       && canPortConversationState(collectConversationStateCarriers(rawBody)).portable;
   }, scopedRoute, targetEligible, comboHopAllowed);
+  // A native pin prefers the pool target, not its shared included usage. A relay pin stays on the relay.
+  const lunaLegs = !conversationPin || portableLunaLegs?.nativeKey === targetKey(conversationPin.target)
+    ? portableLunaLegs : undefined;
   let lunaStage: "off" | "reserve" | "relay" | "done" = "off";
   const comboLegCount = lunaLegs?.legCount ?? combo.targets.length;
   const comboSendScope = isRequestExecutionBudget(options.sendBudget)
@@ -994,6 +988,7 @@ export async function executeComboResponses(
   };
 
   let lastFailure: Response | null = null;
+  let originalReserveRefusal: Response | undefined;
   // Dispatched targets, not attempted picks: it indexes the declared target list so the clamp
   // below can tell how many targets are still entitled to a send.
   let comboTargetsDispatched = 0;
@@ -1040,7 +1035,7 @@ export async function executeComboResponses(
     const failedChildLog = returnsQuota ? quotaFailedChildLog : lastFailedChildLog;
     if (failedChildLog) adoptFailedChildLog(failedChildLog);
     if (targetsExhausted && toolChoiceRefusalsOnly === true) return comboUnavailableResponse("No available targets for combo; attempted targets cannot preserve mandatory tool_choice");
-    if (!lastFailure || ![400, 401, 403].includes(lastFailure.status)) return lastFailure!;
+    if (!lastFailure || ![400, 401, 403].includes(lastFailure.status)) return originalReserveRefusal ?? lastFailure!;
     if (quotaFailure) return quotaFailure;
     // The quota-refused target was cooled before this request picked, so the ladder never saw
     // its refusal. The cooldown, with its Retry-After, is still the honest answer.
@@ -1111,7 +1106,7 @@ export async function executeComboResponses(
       });
       if (!hop.ok) {
         if (lastFailedChildLog) adoptFailedChildLog(lastFailedChildLog);
-        return hop.response;
+        return originalReserveRefusal ?? hop.response;
       }
       pendingHopCommit = hop.commit;
     }
@@ -1152,6 +1147,10 @@ export async function executeComboResponses(
       // intact rather than to mint a synthetic error, and a later target only exists because
       // an earlier one already recorded one.
       return exhaustedFailure();
+    }
+    if (originalReserveRefusal) {
+      void originalReserveRefusal.body?.cancel().catch(() => undefined);
+      originalReserveRefusal = undefined;
     }
     // Admitted: only now is a guarded hop to this target recorded as taken.
     pendingHopCommit?.();
@@ -1301,12 +1300,10 @@ export async function executeComboResponses(
     let response: Response;
     try {
       const currentTargetProvider = pick.target.provider;
-      const remainingTargets = combo.strategy === "jev"
-        ? combo.targets.filter(target => !pick!.attempted.includes(targetKey(target)))
-        : combo.targets.slice(pick.targetIndex + 1);
-      const deferCodexResetDerivedCooldown = (combo.strategy === "failover" || combo.strategy === "jev")
-        && remainingTargets.some(target =>
-          target.provider === currentTargetProvider
+      const attempted = new Set(pick.attempted);
+      const deferCodexResetDerivedCooldown = (failoverOrder || combo.strategy === "jev")
+        && combo.targets.some(target =>
+          target.provider === currentTargetProvider && !attempted.has(targetKey(target))
           && targetEligible(target)
           && !isComboTargetInCooldown(comboId, target),
         );
@@ -1386,6 +1383,13 @@ export async function executeComboResponses(
       return clientCancelledResponse();
     }
 
+    if (legIntent === "reserve-only" && consumedChildFailure && response.ok) {
+      // A bounded native preflight already correlated the quota terminal. Do not infer it again
+      // from the sanitized stream, whose created event otherwise (correctly) counts as acceptance.
+      originalReserveRefusal = response;
+      response = consumedChildFailure.response;
+      terminalRecorder?.("failed", response.status);
+    }
     // A native Chat child reports a pre-stream failure by status before any byte, so its body
     // is never peeked; a non-OK one takes the ordinary failure path below.
     if (response.ok && !runTurnAdapterSseResponses.has(response) && clientWireOf(response) === undefined) {
@@ -1624,8 +1628,11 @@ export async function executeComboResponses(
     );
     const failureNow = Date.now();
     const attemptedTargets: string[] = pick.attempted;
-    // The strict Reserve leg's own refusal (nothing sent, or a Reserve 429) never cools the native target: ordinary Luna on it is still untried.
-    const failureCooldownScope = legIntent === "reserve-only" && (attempt.sendCount === 0 || failure.response.status === 429) || isPolicyCandidateRefusal(failure.response) ? "none" : comboFailureCooldownScope(failure.response.status, failure.classificationText, {
+    // A Reserve-window rejection says nothing about the same native target's included capacity.
+    const reserveCapacityRefused = legIntent === "reserve-only" && (attempt.sendCount === 0 || failure.response.status === 429
+      || (failure.response.status === 402 && isReserveQuotaCode(failure.upstreamCode ?? failure.upstreamType)
+        && !failure.upstreamRootCode && (!failure.upstreamType || isReserveQuotaCode(failure.upstreamType))));
+    const failureCooldownScope = reserveCapacityRefused || isPolicyCandidateRefusal(failure.response) ? "none" : comboFailureCooldownScope(failure.response.status, failure.classificationText, {
       code: failure.upstreamCode,
       malformedResponseFormat: failure.malformedResponseFormat,
       openRouterOpaque400: failure.openRouterOpaque400,
@@ -1656,7 +1663,10 @@ export async function executeComboResponses(
       cooldownMs: combo.cooldownMs,
       now: failureNow,
       cooldownScope: failureCooldownScope,
-      eligible: targetEligible,
+      // A pin may start in the middle. Ask its planned relay before resuming configured order.
+      eligible: legIntent === "reserve-only" && lunaLegs
+        ? target => targetKey(target) === lunaLegs.relayKey && targetEligible(target)
+        : targetEligible,
       status: failure.response.status,
       code: failure.upstreamCode,
       message: failure.classificationText,

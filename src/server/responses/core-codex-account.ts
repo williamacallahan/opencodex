@@ -1,3 +1,6 @@
+import { TURN_STATE_HEADER } from "../turn-state-handles";
+import { isPlainObject } from "../../lib/plain-data";
+import { getThreadAffinity, peekConversationStateIssuer } from "../../codex/routing/thread-affinity";
 import { conversationStateAccountId, releaseRequestOwnedMainOnOutcome, isKeyedRequestOwnedMain } from "../../codex/request-owned-affinity";
 import { CodexInstallationIdUnavailableError } from "../../codex/installation-id";
 import { captureAccountAutoPauseAttempt, wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
@@ -53,6 +56,7 @@ import {
   recordCodexModelDenialEvidence,
 } from "../../codex/model-entitlements";
 import type { TransientSendBudget } from "../../lib/upstream-retry";
+import { bindSharedCodexWireIdentity } from "../../adapters/openai-responses/transport";
 import { resolveAdapter, resolveWireProtocolOverride } from "../adapter-resolve";
 import { codexAccountSelectionForTurn } from "../lifecycle";
 import { isNativeMainTrafficBlocked } from "../../codex/native-profile-startup";
@@ -83,13 +87,12 @@ import { bindRouteReasoningReplayScope } from "./core-replay";
 import {
   conversationStateBindingFromAuth,
   applyAccountChangeConversationStateScrub,
+  collectConversationStateCarriers,
   conversationCarriesUploadedFiles,
 } from "./account-change-state";
 import {
   recordAdapterReasoning,
   recordAdapterTier,
-  sealRequestAttemptIdentity,
-  recordAttemptCredentialSource,
   noteProviderAttemptSend,
 } from "../request-log";
 import { codexAuthContextLogLabel } from "../../codex/account-label";
@@ -166,6 +169,11 @@ export function recordCodexPreOutputRefusalOutcome(
   });
 }
 
+function carriesAccountBoundTurnState(headers: Headers, body: unknown): boolean {
+  const metadata = isPlainObject(body) ? body.client_metadata : undefined;
+  return headers.has(TURN_STATE_HEADER) || (isPlainObject(metadata) && Object.hasOwn(metadata, TURN_STATE_HEADER));
+}
+
 /**
  * The pre-output refusal hold for one Pool send starting now (#6969), or undefined. Pool forward
  * sends only, and never a combo child, whose own stream preflight already advances on a zero-output
@@ -177,8 +185,19 @@ export function poolPreOutputRefusalHold(
   provider: OcxProviderConfig,
   connectMs: number,
   comboAttempt: boolean | undefined,
+  parsed: OcxParsedRequest,
+  headers: Headers,
 ): CodexWsPreOutputRefusalHold | undefined {
-  return !comboAttempt && usesCodexForwardPoolAuth(authCtx, provider) ? codexWsPreOutputRefusalHold(connectMs) : undefined;
+  if (!usesCodexForwardPoolAuth(authCtx, provider)) return undefined;
+  const hold = codexWsPreOutputRefusalHold(connectMs);
+  if (authCtx.kind !== "pool" || !authCtx.poolReserve) return comboAttempt ? undefined : hold;
+  const key = authCtx.affinityKey;
+  const bound = authCtx.fixedAccount || parsed.previousResponseId || carriesAccountBoundTurnState(headers, parsed._rawBody)
+    || (key && (getThreadAffinity(key, "reserve") || getThreadAffinity(key, "shared") || peekConversationStateIssuer(key)));
+  if (bound) return comboAttempt ? undefined : { ...hold, reserveFirstPlacement: false };
+  const carriers = collectConversationStateCarriers(parsed._rawBody);
+  const reserveFirstPlacement = !carriers.previousResponseId && !carriers.providerConversationId && !carriers.fileIds?.length;
+  return comboAttempt && !reserveFirstPlacement ? undefined : { ...hold, reserveFirstPlacement };
 }
 
 /**
@@ -749,20 +768,10 @@ export async function retryCodexPoolOnAlternateAccount(
       retryAuthCtx = firstAuthCtx;
     }
   }
-  // Exact account selectors may retry the same confirmed account above, but must never resolve
-  // an alternate. Quota failures and a refreshed entitlement miss remain terminal.
-  if (!retryAuthCtx && (firstAuthCtx.fixedAccount || args.sameAccountOnly === true)) {
-    recordUnmovedTransientOutcome();
-    return { kind: "no-alternate" };
-  }
-  // An uploaded file is readable only by the account it was sent to, so NO alternate can serve
-  // this body. Which account would be chosen does not change that, which is why this asks before
-  // the resolution rather than after it: refusing here reserves no send, cancels no response, and
-  // leaves the caller holding the first account's rejection to return unchanged (#4710). The
-  // initial-dispatch sites answer with a 400 instead, because there is no earlier response there
-  // to fall back to. A same-account replay -- the gated-model 400 ladder above -- is unaffected,
-  // since it never leaves the issuing account.
-  if (!retryAuthCtx && conversationCarriesUploadedFiles(parsed._rawBody)) {
+  // A seat pin, turn-state handle, or uploaded file cannot move. Preserve the original refusal
+  // without reserving a send; the same-account entitlement replay above remains valid.
+  if (!retryAuthCtx && (firstAuthCtx.fixedAccount || args.sameAccountOnly === true
+    || carriesAccountBoundTurnState(callerAuthHeaders, parsed._rawBody) || conversationCarriesUploadedFiles(parsed._rawBody))) {
     recordUnmovedTransientOutcome();
     return { kind: "no-alternate" };
   }
@@ -929,11 +938,9 @@ export async function retryCodexPoolOnAlternateAccount(
     await firstResponse.body?.cancel().catch(() => undefined);
     return { kind: "transport", error, authCtx: retryAuthCtx };
   }
-  const retryAdapter = resolveAdapter(
-    resolveWireProtocolOverride(route.providerName, route.modelId, retryProvider, inboundWire, route.staticPolicy),
-    config.cacheRetention,
-    route.providerName,
-  );
+  const wireProvider = resolveWireProtocolOverride(route.providerName, route.modelId, retryProvider, inboundWire, route.staticPolicy);
+  const retryAdapter = resolveAdapter(wireProvider, config.cacheRetention, route.providerName);
+  bindSharedCodexWireIdentity(retryAdapter, wireProvider, callerAuthHeaders, options.admission, retryAuthCtx.kind, options.claudeCodexWire);
   bindRouteReasoningReplayScope({
     parsed,
     providerName: route.providerName,
@@ -1075,12 +1082,9 @@ export async function retryCodexPoolOnAlternateAccount(
               options.onCodexAuthContextResolved?.(retryAuthCtx);
               route.provider = retryProvider;
               logCtx.provider = formatCodexProviderForLog(route.providerName, retryAuthCtx.accountId, config);
-              sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, retryAdapter.name, logCtx.accountLogLabel);
-              recordAttemptCredentialSource(logCtx.activeAttempt, route.providerName, route.provider, retryAdapter.name);
             }
             // A move seals the first account's attempt with the answer that account returned.
             if (logCtx.activeAttempt && logCtx.activeAttempt.status < 100) logCtx.activeAttempt.status = firstResponse.status;
-            noteProviderAttemptSend(logCtx, route.providerName, route.provider, passthroughEstimate, moveRecovery);
             return await fetchWithHeaderTimeout(
               request.url,
               { method: request.method, headers: request.headers, body: request.body },
@@ -1091,7 +1095,11 @@ export async function retryCodexPoolOnAlternateAccount(
                 httpOnly,
                 providerName: route.providerName,
                 modelId: route.modelId,
-                onPhysicalDispatch: body => args.onPhysicalSend?.(request, body),
+                onPhysicalDispatch: body => {
+                  args.onPhysicalSend?.(request, body);
+                  noteProviderAttemptSend(logCtx, route.providerName, route.provider, passthroughEstimate, moveRecovery,
+                    { adapter: retryAdapter.name, wireModel: request.outboundModelId });
+                },
                 preOutputRefusalHold: args.preOutputRefusalHold,
                 accountAutoPause: (name, provider, headers) => captureAccountAutoPauseAttempt(name, provider, { config, codex: retryAuthCtx }, headers),
                 onCodexWsQuota: codexWsQuotaObserver(retryAuthCtx, route.provider, route.modelId),

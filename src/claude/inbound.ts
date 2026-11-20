@@ -456,7 +456,7 @@ export function claudeCodeAgentId(headers: Headers): string | undefined {
   return value && /^[\x21-\x7e]{1,256}$/.test(value) ? value : undefined;
 }
 
-function claudeSessionKeyHash(userId: string): string {
+export function claudeSessionKeyHash(userId: string): string {
   return createHash("sha256").update(claudeSessionUserId(userId)).digest("hex");
 }
 
@@ -467,7 +467,12 @@ function claudeSessionKeyHash(userId: string): string {
  * session id are per CLI session, so those read this key instead.
  */
 export function claudeSessionCacheKey(userId: string): string {
-  return claudeSessionKeyHash(userId).slice(0, 32);
+  return claudeCacheGroupKey(claudeSessionKeyHash(userId));
+}
+
+export function claudeCacheGroupKey(sessionHash: string, agentId?: string): string {
+  return (agentId === undefined ? sessionHash
+    : createHash("sha256").update(`${sessionHash}:agent:${agentId}`).digest("hex")).slice(0, 32);
 }
 
 function translateAnthropicRequest(
@@ -619,27 +624,12 @@ function applyAnthropicSettings(
   const outputConfigFormat = formatFromOutputConfig(raw.output_config, body.model as string);
   if (outputConfigFormat) body.text = { format: outputConfigFormat };
   let cacheKeySource: ClaudeCacheKeySource = null;
-  if (isRec(raw.metadata) && typeof raw.metadata.user_id === "string") {
-    const userIdHash = createHash("sha256").update(raw.metadata.user_id).digest("hex");
+  const userId = isRec(raw.metadata) && typeof raw.metadata.user_id === "string" ? raw.metadata.user_id : undefined;
+  if (userId !== undefined) {
     // OpenAI and Azure reject `user` longer than 64 chars, and Claude Code's metadata.user_id
     // is a JSON blob well past that; send its 64-char hash instead of the raw value.
-    body.user = raw.metadata.user_id.length <= 64 ? raw.metadata.user_id : userIdHash;
-    // OpenAI-side prompt caching is routed by prompt_cache_key (Codex clients send
-    // their session id; without it consecutive /v1/messages turns reported
-    // cached_tokens: 0 on the ChatGPT backend — devlog 090). Claude Code's
-    // metadata.user_id embeds the session uuid, so hashing it yields a stable
-    // per-session key with a bounded length/charset. Remote Claude Code adds a per-turn
-    // attribution token (`tk`) to that blob; it is dropped, as Claude Code itself drops it,
-    // so every turn of one session keeps one key. Every subagent of the session carries the
-    // same user_id, so a session-only key gave the main loop and all its subagents (of any
-    // model) one key: OpenAI overflowed that key's routing budget, codex-lb pinned the whole
-    // tree to one seat, and the LLM gateway's rendezvous put it on one account. A subagent
-    // therefore keys apart by its agent id; the main loop keeps the session key.
-    const sessionKeyHash = claudeSessionKeyHash(raw.metadata.user_id);
-    body.prompt_cache_key = (claudeAgentId === undefined
-      ? sessionKeyHash
-      : createHash("sha256").update(`${sessionKeyHash}:agent:${claudeAgentId}`).digest("hex")
-    ).slice(0, 32);
+    body.user = userId.length <= 64 ? userId : createHash("sha256").update(userId).digest("hex");
+    body.prompt_cache_key = claudeCacheGroupKey(claudeSessionKeyHash(userId), claudeAgentId);
     cacheKeySource = "metadata";
   } else if (typeof cacheSystem === "string" || cacheSystem.length > 0) {
     // Claude Desktop sends no metadata.user_id (H1, devlog 130): without any key the

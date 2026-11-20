@@ -6,10 +6,10 @@ import { NATIVE_RESERVE_MODEL } from "./catalog/native-models";
 import { getAccountQuota } from "./quota";
 import { resetAtToMs, type StoredAccountQuota, type WhamUsageResponse } from "./quota-types";
 import { grantsReserve, reserveLimits } from "./reserve-availability";
-import { getEligiblePoolAccounts, isCodexAccountSelectable } from "./routing/selection";
-import { getThreadAffinity, isThreadAffinityExpired, isThreadAffinityGenerationLive } from "./routing/thread-affinity";
+import { getEligiblePoolAccounts, isCodexAccountSelectable, shouldFailover } from "./routing/selection";
+import { peekConversationStateIssuer, peekConversationStateStoredIssuerAccount, CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER, getThreadAffinity, isThreadAffinityExpired, isThreadAffinityGenerationLive } from "./routing/thread-affinity";
 import { isCodexAccountGenerationLive } from "./account-store";
-import { scopedHealthFor, type CodexQuotaScope } from "./routing/health-store";
+import { hasUnrecoveredCodexQuotaRefusal, scopedHealthFor, type CodexQuotaScope } from "./routing/health-store";
 import { canTryUnknownCodexReserve } from "./routing/probe-lease";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers-destination";
 
@@ -105,7 +105,14 @@ export function poolLunaReserveSelection(
   config: OcxConfig, modelId: string | undefined, quotaScope: CodexQuotaScope | undefined,
   options: CodexAccountUsabilityOptions, excludeId?: string, affinityKey?: string, now = Date.now(),
   pinnedAccountId?: string, verifiedOnly = false, intent?: PoolCapacityIntent,
-): { options: CodexAccountUsabilityOptions; quotaScope: CodexQuotaScope | undefined; reserve: boolean; discovery?: boolean } {
+): { options: CodexAccountUsabilityOptions; quotaScope: CodexQuotaScope | undefined; reserve: boolean; discovery?: boolean; servingAccountId?: string } {
+  if (options.retainAccountForUploadedFiles && affinityKey && modelHasPoolReserve(modelId)) {
+    const issuer = peekConversationStateIssuer(affinityKey, now);
+    const owner = issuer === CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER ? peekConversationStateStoredIssuerAccount(affinityKey) : issuer;
+    if (owner) options = { ...options, modelEligibleAccountIds: new Set(
+      !options.modelEligibleAccountIds || options.modelEligibleAccountIds.has(owner) ? [owner] : [],
+    ) };
+  }
   const unchanged = { options, quotaScope, reserve: false };
   if (!modelHasPoolReserve(modelId) || intent === "ordinary-only") return unchanged;
   // A pin cannot move after a refusal, so it is offered Reserve only on a fresh reported grant.
@@ -131,13 +138,19 @@ export function poolLunaReserveSelection(
   }
   // A thread already served by Reserve keeps its seat while that seat can still serve it.
   const serving = affinityKey === undefined ? undefined : getThreadAffinity(affinityKey, "reserve");
-  if (serving && !isThreadAffinityExpired(serving, now) && isThreadAffinityGenerationLive(serving)
-    && isCodexAccountSelectable(config, serving.accountId, now, "reserve", reserveOptions)) {
-    return { options: reserveOptions, quotaScope: "reserve", reserve: true };
+  if (serving && !isThreadAffinityExpired(serving, now) && isThreadAffinityGenerationLive(serving)) {
+    const id = serving.accountId;
+    const success = scopedHealthFor(id, "reserve")?.reserveSuccess;
+    const discovery = unknown.has(id) && success !== undefined && success.at <= now
+      && isCodexAccountGenerationLive(id, success.credentialGeneration);
+    const ownerOptions = { ...reserveOptions, modelEligibleAccountIds: new Set([id]) };
+    if ((verified.has(id) || discovery) && isCodexAccountSelectable(config, id, now, "reserve", ownerOptions)
+      && !hasUnrecoveredCodexQuotaRefusal(id, "reserve") && !shouldFailover(config, id, now)) {
+      return { options: ownerOptions, quotaScope: "reserve", reserve: true, discovery, servingAccountId: id };
+    }
   }
-  const verifiedOptions = { ...reserveOptions, modelEligibleAccountIds: verified };
-  if (verified.size > 0 && getEligiblePoolAccounts(config, excludeId, now, "reserve", verifiedOptions).length > 0) {
-    return { options: verifiedOptions, quotaScope: "reserve", reserve: true };
+  if (verified.size > 0 && getEligiblePoolAccounts(config, excludeId, now, "reserve", reserveOptions).length > 0) {
+    return { options: reserveOptions, quotaScope: "reserve", reserve: true };
   }
   const discoveryOptions = { ...reserveOptions, modelEligibleAccountIds: unknown };
   if (unknown.size > 0 && getEligiblePoolAccounts(config, excludeId, now, "reserve", discoveryOptions).length > 0) {

@@ -12,8 +12,8 @@
  * combo, out of cooldown and passing every per-request eligibility filter the caller supplies.
  * When it is not, normal selection (and normal failover) runs, and the strict serializers make
  * the foreign history acceptable instead: see `backfillBareToolCallTurnReasoning` and the Chat
- * adapter's reasoning placeholder. A conversation's first request, which carries no earlier
- * output, is placed by normal selection.
+ * adapter's reasoning placeholder. A lane with no completed turn uses normal selection,
+ * even if its caller sends history; a known lane needs no history in the request body.
  *
  * A JEV combo decides per user turn by design (#7525 owns its opt-in session pin), so it keeps only
  * the tool-loop pin: a request that ends in a tool output returns to the target that issued the call.
@@ -22,7 +22,6 @@ import { pickComboTarget, targetKey, type ComboPick } from "../../combos";
 import type { NormalizedComboTarget } from "../../combos/types";
 import type { OcxConfig } from "../../types";
 import { recallComboTargetForLane } from "./combo-session-recall";
-import { isCompactionItemType } from "../../responses/compaction";
 
 export const COMBO_CONVERSATION_PIN_REASON = "combo-conversation-pin";
 
@@ -33,14 +32,6 @@ function itemType(item: unknown): string | undefined {
 }
 
 const isToolOutputItem = (item: unknown): boolean => itemType(item)?.endsWith("_output") === true;
-
-/** An item an earlier response produced (a compacted history or a stored-item reference included), or the tool result answering one. */
-function isEarlierTurnItem(item: unknown): boolean {
-  const type = itemType(item);
-  if (type === "reasoning" || type === "item_reference" || isCompactionItemType(type)
-    || type?.endsWith("_call") === true || type?.endsWith("_output") === true) return true;
-  return (item as { role?: unknown } | undefined)?.role === "assistant";
-}
 
 /**
  * Whether this request resumes an assistant turn by returning tool results: its Responses
@@ -54,21 +45,6 @@ export function isToolLoopContinuation(body: unknown): boolean {
     const last = messages[messages.length - 1];
     return !!last && typeof last === "object" && (last as { role?: unknown }).role === "tool";
   }
-  return false;
-}
-
-/** Whether this request carries an earlier turn's output: a later turn of an existing conversation. */
-export function isConversationContinuation(body: unknown): boolean {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
-  const { input, messages, previous_response_id: previousResponseId } = body as {
-    input?: unknown; messages?: unknown; previous_response_id?: unknown;
-  };
-  if (typeof previousResponseId === "string" && previousResponseId.trim()) return true;
-  if (Array.isArray(input)) return input.some(isEarlierTurnItem);
-  if (Array.isArray(messages)) return messages.some(message => {
-    const role = (message as { role?: unknown } | undefined)?.role;
-    return role === "assistant" || role === "tool";
-  });
   return false;
 }
 
@@ -86,7 +62,7 @@ export function conversationPinnedPick(args: {
   eligible: (target: NormalizedComboTarget) => boolean;
   now?: number;
 }): ComboPick | undefined {
-  if (!(args.toolLoopOnly ? isToolLoopContinuation(args.body) : isConversationContinuation(args.body))) return undefined;
+  if (args.toolLoopOnly && !isToolLoopContinuation(args.body)) return undefined;
   const previous = recallComboTargetForLane(args.config, args.lane, args.comboId);
   if (!previous) return undefined;
   const previousKey = targetKey(previous);

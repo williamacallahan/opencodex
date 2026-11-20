@@ -397,7 +397,7 @@ describe("hybrid Messages public HTTP transport", () => {
       { provider: "gpt-pool", model: "gpt-fixture" }, { provider: "gpt-pool", model: "vendor/gpt-fixture" },
     ] } }; });
     for (let index = 0; index < 2; index++) {
-      const response = await post("/hybrid/v1/messages", encode(raw.replace(nativeModel, "ocx-claude-combo--hybrid")));
+      const response = await post("/hybrid/v1/messages", encode(raw.replace(nativeModel, "ocx-claude-combo--hybrid")), { "x-session-id": `fresh-${index}` });
       expect(response.status).toBe(200);
       await response.arrayBuffer();
     }

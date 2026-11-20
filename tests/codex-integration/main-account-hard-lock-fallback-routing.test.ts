@@ -13,7 +13,7 @@ import { NATIVE_RESERVE_MODEL } from "../../src/codex/catalog/native-models";
 import { deleteAllScopedHealth, setScopedHealth } from "../../src/codex/routing/health-store";
 import { handleResponses } from "../../src/server/responses";
 import { clearComboRecallForTests, recallComboForLane, rememberComboForLane } from "../../src/server/responses/combo-session-recall";
-import { sessionLaneIdFromRequest } from "../../src/server/request-log-conversation";
+import { admittedLane, loopbackAdmission } from "../helpers/combo-recall-admission";
 import { captureConfigGeneration } from "../../src/lib/state-store-sweeper";
 import type { RequestLogContext } from "../../src/server/request-log";
 import type { OcxConfig } from "../../src/types";
@@ -516,7 +516,7 @@ describe("applyMainHardLockFallbackOverride", async () => {
       "authorization": "Bearer caller-chatgpt-token",
       "chatgpt-account-id": "fallback-account-a",
     });
-    const lane = sessionLaneIdFromRequest(headers);
+    const lane = admittedLane(headers);
     rememberComboForLane(lane, "prior", { provider: "gateway", model: "prior-model" }, "prior-model", captureConfigGeneration());
 
     const comboLog: RequestLogContext = { model: "", provider: "" };
@@ -531,7 +531,7 @@ describe("applyMainHardLockFallbackOverride", async () => {
           { type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] },
         ],
       }),
-    }), cfg, comboLog);
+    }), cfg, comboLog, { admission: loopbackAdmission });
     expect(comboRes.status).toBe(200);
     await comboRes.text();
     expect(comboLog.requestedModel).toBe("gpt-5.3");

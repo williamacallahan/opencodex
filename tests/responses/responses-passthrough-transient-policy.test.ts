@@ -34,10 +34,14 @@ describe("the Responses passthrough lane reads the provider transient policy", (
 
   test("the ladder is resolved from the provider row, not a constant", () => {
     expect(packed).toContain(dense(
-      "const transientSendPolicy = () => transientRetryPolicyFor(route.provider);\n"
+      "createTransientSendPolicy(() => route.provider, () => sendBudgetState.targetSendsUsed,)",
+    ));
+    const budgetOwner = dense(readResponsesCoreModule("request-send-budget.ts"));
+    expect(budgetOwner).toContain(dense(
+      "const transientSendPolicy = () => transientRetryPolicyFor(provider());\n"
       + "const transientSendAttempts = (): number => transientSendCapFor(\n"
       + "  transientSendPolicy()?.attempts,\n"
-      + "  sendBudgetState.targetSendsUsed,\n"
+      + "  sendsUsed(),\n"
       + ");",
     ));
   });

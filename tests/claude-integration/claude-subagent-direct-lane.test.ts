@@ -10,6 +10,7 @@ import { join } from "node:path";
 import type { ProviderAdapter } from "../../src/adapters/base";
 import { saveCredential } from "../../src/oauth/store";
 import { clearGenericFailoverHealth } from "../../src/oauth/generic-account-failover";
+import { clearClaudeForkSessionsForTests } from "../../src/server/claude-fork-session";
 import { tryAdmitTurn } from "../../src/server/lifecycle";
 import type { AdapterEvent, OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
@@ -36,6 +37,7 @@ let testDir = "", previousHome: string | undefined, isolated: IsolatedCodexHome 
 let captured: OcxParsedRequest[];
 
 beforeEach(async () => {
+  clearClaudeForkSessionsForTests();
   clearGenericFailoverHealth();
   previousHome = process.env.OPENCODEX_HOME;
   isolated = installIsolatedCodexHome("ocx-subagent-direct-codex-");

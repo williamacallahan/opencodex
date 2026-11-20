@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { appendFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -22,7 +22,7 @@ import {
 } from "../../src/server/request-log";
 import { requestLogDto } from "../../src/server/management/shared";
 import { createRequestExecutionBudget } from "../../src/lib/request-execution-budget";
-import { readUsageEntries, resetUsageReadCacheForTests } from "../../src/usage/log";
+import { readUsageEntries, resetUsageReadCacheForTests, usageLogPath } from "../../src/usage/log";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 function attempt(
@@ -121,6 +121,40 @@ describe("logical-request spend aggregation", () => {
       const hydrated = requestLogEntryFromPersistedUsage(persisted);
       expect(hydrated.spend?.unresolved).toBe(1);
       expect(hydrated.affinityReason).toBe("quota_refusal");
+    } finally {
+      clearRequestLogsForTests();
+      resetUsageReadCacheForTests();
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousHome;
+      removeTreeWithRetry(home);
+    }
+  });
+
+  test("lineage affinity reasons survive persistence and hydration", () => {
+    const previousHome = process.env.OPENCODEX_HOME;
+    const home = mkdtempSync(join(tmpdir(), "ocx-lineage-log-"));
+    process.env.OPENCODEX_HOME = home;
+    clearRequestLogsForTests();
+    resetUsageReadCacheForTests();
+    try {
+      for (const affinityReason of ["lineage_parent", "lineage_sibling"] as const) {
+        addRequestLog({ requestId: affinityReason, timestamp: 1, model: "gpt-6-luna", provider: "openai",
+          status: 200, durationMs: 10, usageStatus: "unreported", affinity: "new_bind", affinityReason });
+      }
+      appendFileSync(usageLogPath(), `${JSON.stringify({ requestId: "unknown", timestamp: 1, model: "gpt-6-luna",
+        provider: "openai", status: 200, durationMs: 10, usageStatus: "unreported", affinity: "new_bind",
+        affinityReason: "unknown_reason" })}\n`);
+      resetUsageReadCacheForTests();
+      const rows = readUsageEntries();
+      for (const reason of ["lineage_parent", "lineage_sibling"]) {
+        const row = rows.find(entry => entry.requestId === reason);
+        expect(row?.affinity).toBe("new_bind");
+        expect(row?.affinityReason).toBe(reason);
+        expect(requestLogEntryFromPersistedUsage(row!).affinityReason).toBe(reason);
+      }
+      const unknown = rows.find(entry => entry.requestId === "unknown");
+      expect(unknown?.affinity).toBe("new_bind");
+      expect(unknown?.affinityReason).toBeUndefined();
     } finally {
       clearRequestLogsForTests();
       resetUsageReadCacheForTests();

@@ -100,6 +100,22 @@ describe("Claude native reasoning provenance", () => {
     }
   });
 
+  test.each(["json", "sse"])("%s reasoning keeps the normalized selector, not the displayed [1m] label", async format => {
+    const display = format === "json" ? `${MODEL}[1m]` : "display-alias";
+    const request = (signed?: string) => ({ ...turn(signed, display), ...(format === "sse" ? { system: `<!-- ocx-route: ${MODEL} -->` } : {}) });
+    const first = await send(config(), request(), () => format === "json" ? upstreamResponse() : new Response(
+      `event: response.output_item.done\ndata: ${JSON.stringify({ output_index: 0, item: { type: "reasoning", id: "rs_native", summary: [], encrypted_content: BLOB } })}\n\n`
+      + `event: response.completed\ndata: ${JSON.stringify({ response: { status: "completed", usage: { input_tokens: 2, output_tokens: 1 } } })}\n\n`,
+      { headers: { "content-type": "text/event-stream" } },
+    ));
+    // Brackets are outside the public model-label alphabet; the display contract stays unchanged.
+    expect(first.body).toHaveProperty("model", format === "json" ? "the requested model" : display);
+    const signed = signature(first.body);
+    expect(decodeReasoningEnvelope(signed)?.nat?.model).toBe(MODEL);
+    expect(JSON.stringify((await send(config(), request(signed))).wires[0])).toContain(BLOB);
+    expect(JSON.stringify((await send(config(provider(undefined, "different-key")), request(signed))).wires[0])).not.toContain(BLOB);
+  });
+
   test("model switch and transplanted, altered or conflicting tags never replay ciphertext", async () => {
     const signed = signature((await send(config(), turn())).body);
     const nat = decodeReasoningEnvelope(signed)!.nat!;

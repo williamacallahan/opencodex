@@ -3,7 +3,7 @@ import { registerComboToolRoutingCases } from "../helpers/combo-tool-routing-cas
 import { comboProviderFactory } from "../helpers/combo-provider";
 import { registerComboContextOverflowCases } from "../helpers/combo-context-overflow-cases";
 import { registerComboContextHeadroomCases } from "../helpers/combo-context-headroom-cases";
-import { sessionLaneIdFromRequest } from "../../src/server/request-log-conversation";
+import { admittedLane, loopbackAdmission } from "../helpers/combo-recall-admission";
 import { afterAll, afterEach, beforeEach, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
 import { logsFromApiBody } from "../helpers/logs-api";
 import { managementFetch as fetch, ManagementRequest as Request } from "../helpers/management-auth";
@@ -264,7 +264,7 @@ async function post(
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify({ model: "combo/free", input: "hello", stream: false, ...raw }),
-  }), config, { model: "", provider: "" }, options));
+  }), config, { model: "", provider: "" }, { admission: loopbackAdmission, ...options }));
 }
 
 let loggedRequestSequence = 0;
@@ -282,7 +282,7 @@ async function postLogged(
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify({ model: "combo/free", input: "hello", stream: false, ...raw }),
-  }), config, logCtx, options);
+  }), config, logCtx, { admission: loopbackAdmission, ...options });
   loggedRequestSequence += 1;
   return trackTurn(responseWithDeferredRequestLog(
     response,
@@ -306,7 +306,7 @@ async function postModelLogged(
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify({ model, input: "hello", stream: false, ...raw }),
-  }), config, logCtx, options);
+  }), config, logCtx, { admission: loopbackAdmission, ...options });
   loggedRequestSequence += 1;
   return trackTurn(responseWithDeferredRequestLog(
     response,
@@ -488,7 +488,7 @@ describe("server combo failover 030 activation matrix", () => {
           const headers = { session_id: "terminal-recall" };
           const a = await post(config, { model: "combo/alpha" }, {}, headers);
           expect(await a.json()).toMatchObject({ status: "completed", model: "m1" });
-          expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "terminal-recall" })), "m1")).toBe("alpha");
+          expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "terminal-recall" })), "m1")).toBe("alpha");
           const models: string[] = [];
           const completed = deferred();
           const b = await post(config, { model: "combo/beta", stream }, {
@@ -500,11 +500,11 @@ describe("server combo failover 030 activation matrix", () => {
             const expected = wire === "native" ? "final-b" : "m2";
             expect(body).toContain(`"model":"${expected}"`);
             expect(models).toEqual([expected]);
-            expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "terminal-recall" })), expected)).toBe("beta");
-            expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "terminal-recall" })), "m1")).toBeUndefined();
+            expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "terminal-recall" })), expected)).toBe("beta");
+            expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "terminal-recall" })), "m1")).toBeUndefined();
           } else {
             expect(models).toEqual([]);
-            expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "terminal-recall" })), "m1")).toBe("alpha");
+            expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "terminal-recall" })), "m1")).toBe("alpha");
           }
         });
       }
@@ -554,10 +554,10 @@ describe("server combo failover 030 activation matrix", () => {
         if (scenario === "completed") {
           await within(completed.promise);
           expect(models).toEqual(["final-b"]);
-          expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "native-sticky" })), "final-b")).toBe("beta");
+          expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "native-sticky" })), "final-b")).toBe("beta");
         } else {
           expect(models).toEqual([]);
-          expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "native-sticky" })), "m1")).toBe("alpha");
+          expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "native-sticky" })), "m1")).toBe("alpha");
         }
       });
     }
@@ -594,7 +594,7 @@ describe("server combo failover 030 activation matrix", () => {
             beta: { targets: [{ provider: "b", model: "m2" }] },
           };
           const headers = { session_id: "first-terminal-recall" };
-          const lane = sessionLaneIdFromRequest(new Headers(headers));
+          const lane = admittedLane(new Headers(headers));
           await (await post(config, { model: "combo/alpha" }, {}, headers)).text();
           expect(recallComboForLane(config, lane, "m1")).toBe("alpha");
           const completedModels: string[] = [];
@@ -629,12 +629,12 @@ describe("server combo failover 030 activation matrix", () => {
     const response = await post(config, { model: "combo/beta", stream: true }, {
       abortSignal: abort.signal, onResponseComplete: model => models.push(model),
     }, headers);
-    expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "cancel-recall" })), "m1")).toBe("alpha");
+    expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "cancel-recall" })), "m1")).toBe("alpha");
     abort.abort();
     held.release();
     await response.text().catch(() => undefined);
     expect(models).toEqual([]);
-    expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "cancel-recall" })), "m1")).toBe("alpha");
+    expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "cancel-recall" })), "m1")).toBe("alpha");
   });
 
   test("a held completed response cannot resurrect recall across combo delete and recreate", async () => {
@@ -670,8 +670,8 @@ describe("server combo failover 030 activation matrix", () => {
     held.release();
     await response.text();
     await within(completed.promise);
-    expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "recreated-recall" })), "m1")).toBe("alpha");
-    expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "recreated-recall" })), "final-b")).toBeUndefined();
+    expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "recreated-recall" })), "m1")).toBe("alpha");
+    expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "recreated-recall" })), "final-b")).toBeUndefined();
   });
 
   for (const media of ["image", "video"] as const) {
@@ -695,7 +695,7 @@ describe("server combo failover 030 activation matrix", () => {
       expect(tools).toContain(media === "image" ? "image_gen" : "video_gen");
       expect(frames.some(frame => frame.event === "response.completed")).toBe(true);
       expect(models).toEqual(["m1"]);
-      expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "media-recall" })), "m1")).toBe("free");
+      expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "media-recall" })), "m1")).toBe("free");
     });
   }
 
@@ -2012,7 +2012,7 @@ describe("server combo failover 030 activation matrix", () => {
     expect(modelHits.map(hit => hit.authorization)).toEqual(["Bearer key-a", "Bearer key-b"]);
     expect(modelHits.every(hit => hit.account === null)).toBe(true);
     expect(models).toEqual(["m2"]);
-    expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "web-search-recall" })), "m2")).toBe("free");
+    expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "web-search-recall" })), "m2")).toBe("free");
   });
 
   test.each(["valid", "chat-valid", "mismatched-account", "proxy-secret", "joined-proxy-secret", "explicit-null", "org-only-jwt"])("Combo sidecar auth stays off primary wires: %s", async authKind => {
@@ -3391,6 +3391,7 @@ describe("server combo failover 030 activation matrix", () => {
       method: "POST", headers: { "content-type": "application/json", session_id: "hop-recall" },
       body: JSON.stringify({ model: "combo/free", input: "hello", stream: true }),
     }), config, parent, {
+      admission: loopbackAdmission,
       onResponseComplete: model => { models.push(model); completed.resolve(); },
       onNativePassthroughTerminal: status => {
         statuses.push(status);
@@ -3404,8 +3405,8 @@ describe("server combo failover 030 activation matrix", () => {
     await within(finalized.promise);
     await within(completed.promise);
     expect(models).toEqual(["final-b"]);
-    expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "hop-recall" })), "final-b")).toBe("free");
-    expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "hop-recall" })), "m1")).toBeUndefined();
+    expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "hop-recall" })), "final-b")).toBe("free");
+    expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "hop-recall" })), "m1")).toBeUndefined();
     expect(statuses).toEqual(["completed"]);
     expect(cancels).toBe(0);
     expect(snapshots).toHaveLength(1);

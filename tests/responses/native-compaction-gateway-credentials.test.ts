@@ -13,7 +13,7 @@ import { setAccountQuotaFromParsed } from "../../src/codex/quota";
 import { codexPoolAffinityKey } from "../../src/codex/auth-context";
 import { peekConversationStateIssuer, rememberConversationStateIssuer } from "../../src/codex/routing/thread-affinity";
 import { handleResponsesCompact } from "../../src/server/responses";
-import { clearCompactHandoffRoutesForTests } from "../../src/server/responses/compact";
+import { clearCompactHandoffRoutesForTests } from "../../src/server/responses/compact-handoff-route";
 import { clearResponseStateForTests, clearResponseStateMemoryForTests } from "../../src/responses/state";
 import type { RequestLogContext } from "../../src/server/request-log";
 import type { OcxConfig } from "../../src/types";
@@ -187,6 +187,42 @@ describe("native compact account-change replay", () => {
       const response = await handleResponsesCompact(req, config(), { model: "", provider: "" });
       expect(response.status).toBe(200);
       expect(states).toEqual(issuer === "other" ? [null, null] : ["old-turn", "old-turn"]);
+    } finally { spy.mockRestore(); }
+  });
+
+  test.each(["other", "work"])("native compact sends only same-account ciphertext, issuer=%s", async issuer => {
+    const req = new Request("http://localhost/v1/responses/compact", {
+      method: "POST", headers: { "content-type": "application/json", authorization: "Bearer caller-token", "x-codex-parent-thread-id": `native-physical-${issuer}` },
+      body: JSON.stringify({ model: "gpt-5.5", input: [
+        { type: "reasoning", id: "rs_foreign", summary: [{ type: "summary_text", text: "readable summary" }], encrypted_content: "foreign-reasoning" },
+        { type: "compaction", encrypted_content: "foreign-compaction" },
+      ] }),
+    });
+    rememberConversationStateIssuer(codexPoolAffinityKey(req.headers)!, issuer);
+    const resolve = authContext.resolveCodexAuthContext;
+    const spy = spyOn(authContext, "resolveCodexAuthContext").mockImplementation((headers, cfg, mode, options) => {
+      const poolHeaders = new Headers(headers); poolHeaders.delete("authorization"); poolHeaders.delete("chatgpt-account-id");
+      return resolve(poolHeaders, cfg, mode, { ...options, requestScopedMainCredential: false });
+    });
+    const bodies: string[] = [];
+    globalThis.fetch = (async (_input, init) => {
+      bodies.push(String(init?.body));
+      expect(new Headers(init?.headers).get("chatgpt-account-id")).toBe("acc-work");
+      return Response.json({ object: "response.compaction", output: [] });
+    }) as typeof fetch;
+    try {
+      const response = await handleResponsesCompact(req, config(), { model: "", provider: "" });
+      expect(response.status).toBe(200);
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]).toContain("readable summary");
+      if (issuer === "other") {
+        expect(bodies[0]).not.toContain("foreign-reasoning");
+        expect(bodies[0]).not.toContain("foreign-compaction");
+        expect(bodies[0]).not.toContain("rs_foreign");
+      } else {
+        expect(bodies[0]).toContain("foreign-reasoning");
+        expect(bodies[0]).toContain("foreign-compaction");
+      }
     } finally { spy.mockRestore(); }
   });
 

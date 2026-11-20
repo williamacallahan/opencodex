@@ -30,7 +30,7 @@ const HOME_KEYS = ["HOME", "OPENCODEX_HOME", "CODEX_HOME"] as const;
 const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"] as const;
 
 type Listener = (event: unknown) => void;
-type Step = "refuse" | "ok" | "output-then-refuse" | "refuse-then-abort" | "transport-error" | "silent"
+type Step = "reserve-quota" | "refuse" | "ok" | "output-then-refuse" | "refuse-then-abort" | "transport-error" | "silent"
   | "heartbeat-then-refuse" | "heartbeat-output-then-refuse" | "unsafe-heartbeat-then-refuse"
   | "heartbeat-bare-then-refuse" | "heartbeat-then-abort";
 
@@ -61,6 +61,7 @@ class FakeWebSocket {
     this.emit("open", {});
     if (step === "silent") return;
     const id = `resp_${FakeWebSocket.instances.indexOf(this)}`;
+    if (step === "reserve-quota") this.frame({ type: "codex.rate_limits", rate_limits: { primary: { used_percent: 25, window_minutes: 10080 } } });
     this.frame({ type: "response.created", response: { id, status: "in_progress", output: [] } });
     if (step === "heartbeat-then-refuse" || step === "heartbeat-output-then-refuse"
       || step === "unsafe-heartbeat-then-refuse" || step === "heartbeat-bare-then-refuse"
@@ -74,6 +75,10 @@ class FakeWebSocket {
       if (step === "unsafe-heartbeat-then-refuse") this.frame({ type: "response.heartbeat", replayUnsafe: true });
     }
     this.frame({ type: "response.in_progress", response: { id, status: "in_progress", output: [] } });
+    if (step === "reserve-quota") {
+      this.frame({ type: "response.failed", response: { id, status: "failed", output: [], error: { code: "usage_limit_reached" } } });
+      return;
+    }
     if (step === "ok") {
       this.frame({ type: "response.completed", response: { id, status: "completed", output: [] } });
       return;
@@ -229,6 +234,15 @@ function failures(accountId: string): number {
 }
 
 describe("pooled native Codex recovers a pre-output upstream refusal (#6969)", () => {
+  test("a correlated zero-output Reserve refusal spends one alternate WebSocket send", async () => {
+    setAccountQuotaFromParsed(WORK, { weeklyPercent: 100, weeklyResetAt: Date.now() + 3_600_000 });
+    FakeWebSocket.plan = ["reserve-quota", "ok"];
+    const { response, body } = await send(poolConfig(), { model: "gpt-6-luna" });
+    expect(response.status).toBe(200);
+    expect(body).toContain("response.completed");
+    expect(sockets()).toEqual(["Bearer work-access", "Bearer other-access"]);
+    expect(FakeWebSocket.instances.flatMap(ws => ws.sent.map(frame => JSON.parse(frame).model))).toEqual(["gpt-reserve", "gpt-6-luna"]);
+  });
   test("the same account is retried first and serves the turn", async () => {
     FakeWebSocket.plan = ["refuse", "ok"];
     const { response, body, logCtx } = await send(poolConfig());

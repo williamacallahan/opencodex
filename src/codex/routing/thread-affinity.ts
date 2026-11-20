@@ -98,30 +98,13 @@ export type CodexAffinityMove =
  * account -- so the operator should not have to infer it from account labels across log lines,
  * which is how #4546 had to be diagnosed.
  */
-export type CodexAffinityReason =
-  | "healthy"
-  /** The request had no usable conversation key. */
-  | "no_conversation"
-  /** A caller-owned credential did not opt into affinity. */
-  | "request_owned"
-  | "quota_headroom"
-  | "quota_refusal"
-  | "transient"
-  | "transient_hold_expired"
-  | "unusable"
-  | "paused"
-  | "plan_excluded"
-  /** Credits are off for the account and one of its usage windows is full (#6334). */
-  | "credits_off"
-  | "cooldown"
-  | "quota_avoided"
-  | "generation"
-  | "expired"
-  | "model_lane"
-  /** First placement followed the parent's CURRENT serving account (#4546, wp8). */
-  | "lineage_parent"
-  /** First placement followed a compatible sibling's current serving account. */
-  | "lineage_sibling";
+export const CODEX_AFFINITY_REASONS = Object.freeze({
+  healthy: true, no_conversation: true, request_owned: true, quota_headroom: true,
+  quota_refusal: true, transient: true, transient_hold_expired: true, unusable: true,
+  paused: true, plan_excluded: true, credits_off: true, cooldown: true, quota_avoided: true,
+  generation: true, expired: true, model_lane: true, lineage_parent: true, lineage_sibling: true,
+});
+export type CodexAffinityReason = keyof typeof CODEX_AFFINITY_REASONS;
 
 export interface CodexAffinityDecision {
   move: CodexAffinityMove;

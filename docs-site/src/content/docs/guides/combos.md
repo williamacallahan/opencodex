@@ -94,9 +94,10 @@ The request then follows normal combo selection and failover.
 
 Explicit provider/combo selectors and configured combo aliases take precedence over this recall.
 Failed, incomplete, or cancelled responses do not replace the last successful selection. Recall is
-process-local and bounded to 256 conversations for 30 minutes, and to 1 KiB per remembered model
-name and 64 KiB in total; expired entries are also cleaned up in the background. A response whose
-model name is too large to retain leaves the previous selection untouched rather than clearing it.
+process-local and bounded to 2,048 conversation and Combo pairs, each kept for 24 hours after its
+last turn; a remembered model name is kept only as a fixed-size digest, and one longer than 1 KiB is
+not retained. A response whose model name is too large to retain leaves the previous selection
+untouched rather than clearing it.
 Recall does not store account credentials.
 Without usable conversation identity or valid remembered state, normal compaction routing applies.
 A restart clears the remembered state.
@@ -325,8 +326,9 @@ afresh.
 
 A session is identified by the client's own session headers (`thread-id`, `session_id` or
 `session-id`, `x-codex-parent-thread-id`, or a promoted `x-session-id`) together with the API key
-that admitted the request and the Combo; a translated Claude Code turn, which sends no session
-header, uses its own transcript identity. Requests without any session identity are never pinned,
+that admitted the request and the Combo; a translated Claude Code turn, which sends no Codex
+session header, uses the transcript identity of its admitted Claude session and agent. Requests
+without an admitted transcript identity are never pinned,
 `prompt_cache_key` is never used as a session identity, and two API keys never share a pin.
 
 JEV decides again, and the new decision replaces the pin, when:
@@ -866,9 +868,11 @@ session pin is described above.
 
 In a failover combo the pin never outlives your policy: a remembered target that the current
 fallback policy no longer allows from the primary is not kept. In `combo/gpt-6-luna`-style combos a
-pinned turn skips the combo's Reserve leg plan and keeps its target. On the hub's own ChatGPT pool,
-each Luna turn still asks a seat whose included usage is spent for Luna Reserve first, because
-Reserve is Luna-only capacity while included usage is shared with other models.
+turn pinned to the relay, or one that carries account-bound state such as encrypted reasoning, keeps
+its target. A portable turn pinned to the hub's own ChatGPT pool still runs the Reserve order: native
+Reserve, then the relay, then included Luna. On that pool each Luna turn asks a seat whose included
+usage is spent for Reserve first, because Reserve is Luna-only capacity while included usage is
+shared with other models.
 
 Tracking uses the client's thread or session id; a translated Claude Code turn, which sends
 neither, uses its own transcript identity, so each Claude Code conversation and subagent keeps its

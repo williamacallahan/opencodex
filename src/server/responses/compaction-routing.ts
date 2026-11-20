@@ -6,7 +6,6 @@ import { resolveComboId } from "../../combos/identifiers";
 import { resolvePolicyProfileId } from "../../routing/profile";
 import { parseClientSyntheticRowId } from "../fast-row";
 import { recallComboForLane } from "./combo-session-recall";
-import { sessionLaneIdFromRequest } from "../request-log-conversation";
 import { isLocalCompactionCheckpoint } from "../../responses/compaction-history-framing";
 
 /** `sourceModel` is the conversation's own selector before the rewrite. */
@@ -42,6 +41,7 @@ export interface CompactionRoutingOverrideOptions {
   /** Responses accepts remote triggers or opted-in local checkpoints; compact carries neither. */
   endpoint?: "responses" | "compact";
   transport?: "websocket";
+  claudeBridgePoolSession?: string;
 }
 
 export function applyCompactionRoutingOverride(
@@ -99,7 +99,7 @@ export function applyCompactionRoutingOverride(
   if (trigger === undefined) return null;
 
   const sourceModel = raw.model;
-  const sourceCombo = recallComboForLane(config, sessionLaneIdFromRequest(headers), sourceSelectorOf(config, sourceModel));
+  const sourceCombo = recallComboForLane(config, options.claudeBridgePoolSession, sourceSelectorOf(config, sourceModel));
   const targetCombo = resolveComboId(config, override.model.trim()) ?? undefined;
   raw.model = override.model.trim();
   if (override.reasoningEffort !== undefined) {

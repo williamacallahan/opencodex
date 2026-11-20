@@ -8,6 +8,9 @@ import { mergeProviderContinuationPayload } from "../../responses/provider-conti
 import { commitReasoningReplayServingIdentity } from "../../responses/reasoning-replay-cache";
 import { rememberServingConversationStateIssuer } from "./account-change-state";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
+import { bindThreadAffinity } from "../../codex/routing/thread-affinity";
+import { isMainQuotaDispatchLive } from "../../codex/main-account-cache";
+import { isCodexAccountGenerationLive } from "../../codex/account-store";
 import { contextRelayActivated } from "../../codex/context-compat";
 import { recordContextSessionOwner } from "../../codex/context-owner";
 import { resolveContextPrincipal } from "../auth-cors";
@@ -44,6 +47,12 @@ export function createResponsesEffects(
       || response.status !== "completed"
       || typeof response.model !== "string" || !response.model.trim()) return;
     responseCompletionNotified = true;
+    const ctx = admissionState.authCtx;
+    if (ctx.kind !== "main" && ctx.bindIncludedAlternateOnCompletion && ctx.affinityKey
+      && (ctx.kind === "pool" ? isCodexAccountGenerationLive(ctx.accountId, ctx.generation)
+        : ctx.mainQuotaDispatch && isMainQuotaDispatchLive(ctx.mainQuotaDispatch))) {
+      bindThreadAffinity(ctx.affinityKey, ctx.accountId, Date.now(), ctx.quotaScope);
+    }
     options.onResponseComplete?.(response.model);
   };
 

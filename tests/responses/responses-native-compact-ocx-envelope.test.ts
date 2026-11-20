@@ -2,8 +2,9 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handleResponsesCompact } from "../../src/server/responses";
-import { clearCompactHandoffRoutesForTests } from "../../src/server/responses/compact";
+import { handleResponses, handleResponsesCompact } from "../../src/server/responses";
+import { encodeReasoningEnvelope } from "../../src/responses/reasoning-envelope";
+import { clearCompactHandoffRoutesForTests } from "../../src/server/responses/compact-handoff-route";
 import { getDefaultConfig } from "../../src/config";
 import { encodeCompactionSummary, SUMMARY_PREFIX } from "../../src/responses/compaction";
 import { encodeRetainedCompaction } from "../../src/responses/retained-compaction";
@@ -69,6 +70,25 @@ test.each([
     { type: "message", role: "user", content: [{ type: "input_text", text: "retained reasoning context" }] },
     nativeItem(),
   ]);
+});
+
+test("ordinary canonical Responses dispatch retains local reasoning text as a summary", async () => {
+  const settings = getDefaultConfig();
+  settings.defaultProvider = "openai";
+  settings.providers = { openai: { adapter: "openai-responses", authMode: "forward", codexAccountMode: "direct", upstreamWebsocket: false, baseUrl: "https://chatgpt.com/backend-api/codex" } };
+  const calls: { url: string; body: string }[] = [];
+  globalThis.fetch = (async (url, init) => {
+    calls.push({ url: String(url), body: String(init?.body) });
+    return new Response('event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_fixture","status":"completed","output":[]}}\n\n', { headers: { "content-type": "text/event-stream" } });
+  }) as typeof fetch;
+  const req = new Request("http://localhost/v1/responses", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${fakeChatGptJwt({ chatgpt_account_id: "fixture-account" })}` }, body: JSON.stringify({ model: "gpt-5.5", stream: true, input: [{ type: "reasoning", summary: [], encrypted_content: encodeReasoningEnvelope({ txt: "local history text" }) }] }) });
+  const response = await handleResponses(req, settings, { model: "", provider: "" });
+  expect(response.status).toBe(200);
+  await response.text();
+  expect(calls).toHaveLength(1);
+  expect(calls[0]!.url).toBe("https://chatgpt.com/backend-api/codex/responses");
+  expect(calls[0]!.body).not.toContain("ocxr1:");
+  expect(JSON.parse(calls[0]!.body).input).toContainEqual({ type: "reasoning", summary: [{ type: "summary_text", text: "local history text" }], content: [] });
 });
 
 test("malformed ocx2 compact input is rejected locally as a caller error", async () => {

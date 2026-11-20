@@ -23,6 +23,7 @@ import {
   usageLogRevisionKey,
   type PersistedUsageEntry,
 } from "../../src/usage/log";
+import { addFinalRequestLog, beginRequestAttempt, noteProviderAttemptSend, type RequestLogContext } from "../../src/server/request-log";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 let testDir = "";
@@ -227,6 +228,22 @@ describe("usage log", () => {
     expect(rejected.attempts?.[0]?.accountLogLabel).toBeUndefined();
   });
 
+  test("a changed wire model splits physical sends on the same account, but an unsent attempt has no wire model", () => {
+    const attempt = beginRequestAttempt(1, "openai", "gpt-6-luna", "openai-responses");
+    const log: RequestLogContext = { provider: "openai", model: "gpt-6-luna", attempts: [attempt], activeAttempt: attempt };
+    const provider = { adapter: "openai-responses", authMode: "forward", baseUrl: "https://example.test" } as const;
+    addFinalRequestLog("unsent", Date.now(), log, 429);
+    noteProviderAttemptSend(log, "openai", provider, undefined, undefined, { wireModel: "gpt-reserve" });
+    attempt.status = 429;
+    noteProviderAttemptSend(log, "openai", provider, undefined, "rate-limit-429", { wireModel: "gpt-6-luna" });
+    addFinalRequestLog("moved", Date.now(), log, 200);
+    resetUsageReadCacheForTests();
+    const rows = readUsageEntries();
+    expect(rows.find(row => row.requestId === "unsent")?.attempts?.map(hop => [hop.sendCount, hop.wireModel])).toEqual([[0, undefined]]);
+    expect(rows.find(row => row.requestId === "moved")?.attempts?.map(hop => [hop.sendCount, hop.wireModel])).toEqual([
+      [1, "gpt-reserve"], [1, "gpt-6-luna"],
+    ]);
+  });
   test("persists the rate-limit-429 recovery kind on attempts", () => {
     const entry: PersistedUsageEntry = {
       requestId: "ocx-ratelimit-kind",

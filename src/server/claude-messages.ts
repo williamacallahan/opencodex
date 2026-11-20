@@ -19,7 +19,8 @@ import { recordLocalFailureDetail, type FailureDetail } from "./request-log-fail
  * unchanged. The Responses output (SSE or JSON) is converted back to Anthropic shape.
  */
 import { FORWARD_HEADERS } from "../adapters/openai-responses";
-import { resolveClaudeBridgePoolSession } from "./claude-bridge-pool-session";
+import { scopedConversationKey } from "./claude-bridge-pool-session";
+import { isThreadSpawnRequest } from "./effort-policy";
 import {
   admissionModelDeniedResponse, projectAdmissionModelDeniedLog,
   AdmissionModelDeniedError,
@@ -42,8 +43,9 @@ import {
   type MessagesDirectPlan,
 } from "./messages-antigravity-direct";
 import { claudeRequestShape } from "./claude-request-shape";
-import { claudeForkSessionKey, resolveClaudeFork } from "./claude-fork-session";
-import { AnthropicRequestError, callerCacheRetention, claudeCodeAgentId, claudeSessionCacheKey, DesktopModelMappingUnavailableError, extractOcxEffortDirective, extractOcxRouteDirective, nativeAnthropicProjection, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
+import { agentServingThreadKey } from "../oauth/session-affinity-key";
+import { rememberServedClaudeCacheGroup, resolveClaudeFork, servedClaudeCacheGroup } from "./claude-fork-session";
+import { AnthropicRequestError, callerCacheRetention, claudeCodeAgentId, claudeCacheGroupKey, claudeSessionKeyHash, DesktopModelMappingUnavailableError, extractOcxEffortDirective, extractOcxRouteDirective, nativeAnthropicProjection, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
 import { nativeReasoningTag, type NativeReasoningOwner } from "../responses/reasoning-replay-cache";
 import { isKnownDesktop3pModelId, resolveDesktop3pAlias } from "../claude/desktop-3p";
 import { resolveAlias, claudeCodeNativeAlias, legacyAliasForNative } from "../claude/alias";
@@ -94,7 +96,8 @@ import { evidenceFromBody } from "../routing/request-evidence";
 import { resolveWireProtocolOverride } from "./adapter-resolve";
 import type { OcxConfig } from "../types";
 import { readJsonRequestBody, readBoundedJsonRequestBody, resolveInboundBodyLimitBytes, DecompressedBodyTooLargeError, DuplicateJsonKeyError } from "./request-decompress";
-import { withCallerSessionIdentity } from "./caller-session-identity";
+import { claudeWireSessionId } from "../adapters/openai-responses/transport";
+import { callerSessionAlias, claudeTranscriptQualifier, promotedCallerSession, scopedWireHash, safeCallerSessionId, withCallerSessionIdentity } from "./caller-session-identity";
 import { addFinalRequestLog, httpStatusForRequestLogTerminal, nextRequestLogId, recordFirstOutput, type RequestLogContext } from "./request-log";
 import { admissionFields } from "./auth-cors";
 import { createFinalRequestLog } from "./inference/final-log";
@@ -309,12 +312,6 @@ function shouldForwardNativeHeader(name: string, value: string, config: OcxConfi
   if (lowerName !== "authorization" && lowerName !== "x-api-key") return true;
   const token = singleCredentialToken(lowerName, value);
   return !!token && !isProxyAdmissionSecret(token, config);
-}
-
-/** Format a 32-hex cache key as a uuid-shaped session id (version/variant nibbles forced). */
-function uuidFromHex(hex32: string): string {
-  const h = (hex32 + "0".repeat(32)).slice(0, 32);
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
 /**
@@ -789,10 +786,16 @@ async function handleClaudeMessagesWithBudget(
   let anthropicBody: unknown;
   let internalBody: Rec;
   let cacheKeySource: ClaudeCacheKeySource = null;
-  // A forked subagent collapses to the main loop below, once the body is read.
-  let claudeAgentId = claudeCodeAgentId(req.headers);
-  // A fork keeps its own transcript, so route continuity still keys by the real header value.
-  const rawClaudeAgentId = claudeAgentId;
+  const claudeAgentId = claudeCodeAgentId(req.headers);
+  const admission = logIds?.admission ?? ingress.admission;
+  const alias = callerSessionAlias(req.headers, admission);
+  let cacheAgentId = claudeAgentId;
+  let admittedDirectSessionId: string | undefined;
+  const threadlessSpawn = !safeCallerSessionId(req.headers.get("thread-id")) && isThreadSpawnRequest(req.headers);
+  let servedCacheGroup: ReturnType<typeof servedClaudeCacheGroup>;
+  let metadataConversationId: string | undefined;
+  let claudeBridgePoolSession: string | undefined;
+  let nativeReasoningSelector = "";
   let nativeReasoningReplay: ReadonlyMap<string, string> | undefined;
   const nativeReasoningMint: { owner?: NativeReasoningOwner } = {};
   let nativeProjectionOnlyError: AnthropicRequestError | undefined;
@@ -815,14 +818,38 @@ async function handleClaudeMessagesWithBudget(
     anthropicBody = hybridBody ?? await readAnthropicBody(req, translatorBudget, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));
     if (isRec(anthropicBody)) {
       const shape = claudeRequestShape(req.headers, anthropicBody);
-      // Only a truly absent header marks the main loop; an empty, oversized or repeated one is neither main loop nor agent.
-      shape.fork = resolveClaudeFork({
-        sessionKey: claudeForkSessionKey(anthropicBody, logIds?.admission ?? ingress.admission),
-        kind: claudeAgentId !== undefined ? "agent" : shape.agentId === "absent" ? "absent" : "ignored",
-        firstMessageDigest: shape.messagesPrefix?.[0], toolsDigest: shape.tools,
-      });
-      // A fork replays its parent's conversation: it keys, pools and fingerprints as its parent does.
-      if (shape.fork === "true") claudeAgentId = undefined;
+      const headerSession = alias ?? safeCallerSessionId(req.headers.get("x-claude-code-session-id"));
+      const metadata = isRec(anthropicBody.metadata) ? anthropicBody.metadata : undefined;
+      metadataConversationId = conversationIdFromClaudeMetadata(metadata);
+      const userId = metadataConversationId && typeof metadata?.user_id === "string" ? metadata.user_id : undefined;
+      const explicitThread = safeCallerSessionId(req.headers.get("thread-id"));
+      const session = alias === null ? undefined : headerSession ?? userId ?? explicitThread;
+      const admitted = !admission || admission.kind === "loopback" || !!admission.contextPrincipalId;
+      shape.fork = claudeAgentId === undefined ? "absent" : "false";
+      if (session && admitted) {
+        const principal = admission && admission.kind !== "loopback" ? admission.contextPrincipalId : undefined;
+        const rootHash = claudeSessionKeyHash(session);
+        // The metadata-based cache key predates the documented session header. Keep that warm
+        // group for a local legacy transcript, but never reuse its unscoped bytes across principals.
+        const wireRoot = principal ? scopedWireHash(principal, rootHash) : rootHash;
+        const cacheRoot = !principal && userId && userId !== session ? claudeSessionKeyHash(userId) : wireRoot;
+        const sessionId = claudeWireSessionId(wireRoot);
+        if (alias && admission) admittedDirectSessionId = principal ? promotedCallerSession(principal, alias) : alias;
+        // Codex lineage headers describe the native cohort. Here a thread is only a qualifier
+        // inside THIS Claude session, and the agent is always the actual agent, including forks.
+        const sessionKey = threadlessSpawn ? undefined
+          : scopedConversationKey(admission, headerSession ?? claudeWireSessionId(rootHash));
+        const qualifier = claudeTranscriptQualifier(explicitThread, claudeAgentId);
+        claudeBridgePoolSession = sessionKey && agentServingThreadKey(sessionKey, qualifier);
+        const served = servedClaudeCacheGroup(claudeBridgePoolSession);
+        shape.fork = served && claudeAgentId ? served.fork : resolveClaudeFork({ sessionKey,
+          kind: claudeAgentId !== undefined ? "agent" : shape.agentId === "absent" ? "absent" : "ignored",
+          firstMessageDigest: shape.messagesPrefix?.[0], toolsDigest: shape.tools,
+        });
+        if (shape.fork === "true") cacheAgentId = undefined;
+        servedCacheGroup = served ?? { sessionId, fork: shape.fork,
+          cacheKey: claudeCacheGroupKey(cacheRoot, claudeTranscriptQualifier(explicitThread, cacheAgentId)) };
+      }
       logCtx.claudeRequestShape = shape;
     }
     clientModelLabel = clientFacingModelLabel(isRec(anthropicBody) ? anthropicBody.model : undefined);
@@ -857,11 +884,9 @@ async function handleClaudeMessagesWithBudget(
         config,
         () => decodeClaudeFastSelector(requestedModel, cc),
       ));
-      if (effortRow) {
-        anthropicBody.model = effortRow.baseId;
-        effortOverride = effortRow.effort;
-      }
-      if (fastRow) anthropicBody.model = fastRow.baseId;
+      if (effortRow) effortOverride = effortRow.effort;
+      nativeReasoningSelector = fastRow?.baseId ?? effortRow?.baseId ?? requestedModel;
+      anthropicBody.model = nativeReasoningSelector;
     }
     // Debug capture (opt-in allowlist scalars) BEFORE the passthrough branch so
     // native, routed, and disabled-alias paths are all observable (devlog 130 B1).
@@ -882,12 +907,8 @@ async function handleClaudeMessagesWithBudget(
       recordDesktopRequest();
     }
     // Correlate before native passthrough so Anthropic-credential turns still filter/total (#330 / #522).
-    if (isRec(anthropicBody)) {
-      const claudeConversationId = conversationIdFromClaudeMetadata(
-        isRec(anthropicBody.metadata) ? anthropicBody.metadata : undefined,
-      );
-      if (claudeConversationId) logCtx.conversationId = claudeConversationId;
-    }
+    const logSession = metadataConversationId ?? normalizeLogConversationId(servedCacheGroup?.sessionId);
+    if (logSession) logCtx.conversationId = logSession;
     // A fast row blocks passthrough, unlike the chat case: native passthrough forwards the
     // caller's body with the caller's credential and never runs the Anthropic adapter, so the
     // proxy-owned `speed` + beta (anthropic-speed wire) and its usage.speed observation would be
@@ -977,14 +998,14 @@ async function handleClaudeMessagesWithBudget(
     }
     // On the direct lane the core receives only the request settings; the conversation is
     // already decoded into the IR. Without a plan the translation below runs as before.
-    directPlan = ingress.hybridMessages ? undefined : planMessagesAntigravityDirect(anthropicBody, cc, config, translatorBudget, claudeAgentId);
+    directPlan = ingress.hybridMessages ? undefined : planMessagesAntigravityDirect(anthropicBody, cc, config, translatorBudget, cacheAgentId);
     let translation = directPlan && {
       body: directPlan.settingsBody,
       cacheKeySource: directPlan.cacheKeySource,
       nativeReasoningReplay: directPlan.conversation.nativeReasoningReplay,
     };
     try {
-      translation ??= messagesToResponsesTranslation(anthropicBody, cc, translatorBudget, claudeAgentId);
+      translation ??= messagesToResponsesTranslation(anthropicBody, cc, translatorBudget, cacheAgentId);
     } catch (err) {
       // A native Messages route can discard an undecodable proxy envelope. Keep the
       // original error for any route that ultimately translates to Responses.
@@ -992,7 +1013,7 @@ async function handleClaudeMessagesWithBudget(
         || !isRec(anthropicBody)) throw err;
       const projected = nativeAnthropicProjection(anthropicBody, translatorBudget);
       if (projected === anthropicBody) throw err;
-      translation = messagesToResponsesTranslation(projected, cc, translatorBudget, claudeAgentId);
+      translation = messagesToResponsesTranslation(projected, cc, translatorBudget, cacheAgentId);
       nativeProjectionOnlyError = err;
     }
     internalBody = translation.body;
@@ -1069,7 +1090,7 @@ async function handleClaudeMessagesWithBudget(
     translatorBudget.releaseRetained(directSettingsBodyBytes, { kind: "request_copies" });
     directSettingsBodyBytes = 0;
     try {
-      const translation = messagesToResponsesTranslation(anthropicBody, cc, translatorBudget, claudeAgentId);
+      const translation = messagesToResponsesTranslation(anthropicBody, cc, translatorBudget, cacheAgentId);
       internalBody = translation.body;
       if (fastRow) internalBody.service_tier = "priority";
       internalBody.stream = true;
@@ -1390,19 +1411,8 @@ async function handleClaudeMessagesWithBudget(
   }
   // Carry Go identity out of band: a combo's preflight target may differ from its
   // actual dispatch/fallback target. Never add Go-only identity to replay headers.
-  const claudeNativeSessionId = cacheKeySource === "metadata"
-    && typeof internalBody.prompt_cache_key === "string"
-    && isRec(anthropicBody)
-    && conversationIdFromClaudeMetadata(isRec(anthropicBody.metadata) ? anthropicBody.metadata : undefined) !== undefined
-    ? uuidFromHex(internalBody.prompt_cache_key)
-    : undefined;
-  const metadataGoLane = normalizeLogConversationId(claudeNativeSessionId);
-  // The session's key, out of band: a subagent's body `prompt_cache_key` is per agent, while an
-  // Anthropic destination's account affinity and fingerprint session id are per CLI session.
-  const claudeSessionScopedKey = cacheKeySource === "metadata" && isRec(anthropicBody) && isRec(anthropicBody.metadata)
-    && typeof anthropicBody.metadata.user_id === "string"
-    ? claudeSessionCacheKey(anthropicBody.metadata.user_id)
-    : undefined;
+  const metadataGoLane = metadataConversationId && typeof internalBody.prompt_cache_key === "string"
+    ? normalizeLogConversationId(claudeWireSessionId(internalBody.prompt_cache_key)) : undefined;
   // Without any valid conversation identity, fall back to the request-scoped lane
   // allocated on the admitted client request (#4172): stable across retries and
   // route reconstruction, distinct per request, and never derived from a shared
@@ -1411,9 +1421,6 @@ async function handleClaudeMessagesWithBudget(
     ?? normalizeLogConversationId(req.headers.get("x-opencode-session"))
     ?? metadataGoLane
     ?? getOrAllocateRequestSessionLane(req);
-  const claudeBridgePoolSession = resolveClaudeBridgePoolSession({
-    ingress: req.headers, replay: headers, metadataSessionId: claudeNativeSessionId, admission: logIds?.admission,
-  });
   let internalReq: Request;
   try {
     // The UTF-16 JSON string and the Request's UTF-8 body coexist until dispatch.
@@ -1441,6 +1448,17 @@ async function handleClaudeMessagesWithBudget(
   // BEFORE translation (the translated Anthropic stream has no response.completed
   // frame, so tapping it records a bogus 502 with no usage/cache detail).
   const finalizeNativeLog = createFinalRequestLog(logIds, logCtx).finish;
+  const rememberCacheGroup = () => {
+    if (claudeBridgePoolSession && servedCacheGroup) rememberServedClaudeCacheGroup(claudeBridgePoolSession, servedCacheGroup);
+  };
+  const callerOwnsMain = trustedClaudeMainAuth !== undefined && trustedClaudeMainAuth.authorization === req.headers.get("authorization");
+  // A third-party marker cannot replace a verified Direct caller's explicit native session.
+  // Two conflicting native spellings still produce no alias, even for that caller.
+  if (alias === null && callerOwnsMain && !metadataConversationId && req.headers.has("x-session-id")) {
+    const nativeHeaders = new Headers(req.headers);
+    nativeHeaders.delete("x-session-id");
+    admittedDirectSessionId = callerSessionAlias(nativeHeaders) ?? undefined;
+  }
   const upstream = await handleResponses(internalReq, {
     ...buildClaudeReplayConfig(config),
     // Operator config wins; otherwise the caller's explicit TTLs (all 1h, or a pinned 5m) carry
@@ -1465,15 +1483,15 @@ async function handleClaudeMessagesWithBudget(
     } : {}),
     // Routing keeps Claude-only sidecar overrides; admission policy must follow the live owner.
     codexAuthPolicy: config,
-    ...(logIds?.admission ? { admission: logIds.admission } : {}),
+    ...(admission ? { admission } : {}),
     advisorAdmissionPolicy,
     // The translated request never forwards the caller credential; resolve the principal first.
     replayPrincipal: { clientPrincipalId: resolveContextPrincipal(req, config, logIds?.admission) },
     ...(logIds?.turnAdmissionLease ? { turnAdmissionLease: logIds.turnAdmissionLease } : {}),
     abortSignal: req.signal,
     promptCacheKeyIsSharedCohort: cacheKeySource === "system",
-    ...(claudeSessionScopedKey ? { sessionScopedCacheKey: claudeSessionScopedKey } : {}),
-    ...(rawClaudeAgentId !== undefined ? { claudeAgentId: rawClaudeAgentId } : {}),
+    ...(metadataConversationId ? { sessionScopedCacheKey: metadataConversationId } : {}),
+    ...(claudeAgentId !== undefined ? { claudeAgentId } : {}),
     // The body is Responses-shaped by now, but the client spoke Anthropic Messages.
     // Without this the replay would look native and a Responses-scoped wire default
     // would fire, disagreeing with the pre-flight decision above.
@@ -1496,8 +1514,10 @@ async function handleClaudeMessagesWithBudget(
         || (Array.isArray(cc?.chatToolDispatchModels) && cc.chatToolDispatchModels.length > 0))
       ? { tools: anthropicBody.tools, messages: anthropicBody.messages, tool_choice: anthropicBody.tool_choice } : undefined,
     claudeGoAffinity: { sessionLane: claudeGoSessionLane },
-    claudeNativeSessionId,
-    ...(claudeBridgePoolSession ? { claudeBridgePoolSession } : {}),
+    claudeCodexWire: alias === null ? { sessionId: null, cacheKey: null, ownedDirectSessionId: threadlessSpawn ? undefined : admittedDirectSessionId }
+      : threadlessSpawn ? { sessionId: null, cacheKey: servedCacheGroup?.cacheKey }
+      : servedCacheGroup && { ...servedCacheGroup, ownedDirectSessionId: callerOwnsMain ? admittedDirectSessionId : undefined },
+    claudeBridgePoolSession,
     stripClaudeMainAuthForNoncanonicalForward: true,
     ...(trustedClaudeMainAuth ? { trustedClaudeMainAuth } : {}),
     // Claude's internal stored-main enrichment is not an original caller credential.
@@ -1505,8 +1525,12 @@ async function handleClaudeMessagesWithBudget(
     callerDirectAuth: null,
     translatorBudget,
     ...(logIds ? { onFirstOutput: () => recordFirstOutput(logCtx, logIds.start) } : {}),
-    onNativePassthroughTerminal: status => finalizeNativeLog(httpStatusForRequestLogTerminal(status, logCtx), { terminalStatus: status, closeReason: "terminal" }),
+    onNativePassthroughTerminal: status => {
+      if (status === "completed") rememberCacheGroup();
+      finalizeNativeLog(httpStatusForRequestLogTerminal(status, logCtx), { terminalStatus: status, closeReason: "terminal" });
+    },
     onNativePassthroughCancel: () => finalizeNativeLog(499, { closeReason: "client_cancel" }),
+    onResponseComplete: rememberCacheGroup,
     clientModelLabel,
     ...(clientEncoder ? { clientEncoder } : {}),
     ...(directRoute && directPlan
@@ -1612,6 +1636,7 @@ async function handleClaudeMessagesWithBudget(
     const failureVerdictSink: MessagesFailureVerdictSink = {};
     const anthropicSse = responsesSseToAnthropicSse(response.body, clientFacingModelText(clientModelLabel), {
       translatorBudget,
+      nativeReasoningSelector,
       nativeReasoningTagFor: blob => nativeReasoningTag(nativeReasoningMint.owner, blob),
       failureVerdictSink: stream ? undefined : failureVerdictSink, proxyErrorContext: logCtx,
       // Only a floor, and only for the first frame: an upstream that reports usage early wins
@@ -1701,7 +1726,7 @@ async function handleClaudeMessagesWithBudget(
   }
   let message: Rec;
   try {
-    message = responsesJsonToAnthropicMessage(json, clientFacingModelText(clientModelLabel), translatorBudget, blob => nativeReasoningTag(nativeReasoningMint.owner, blob));
+    message = responsesJsonToAnthropicMessage(json, clientFacingModelText(clientModelLabel), translatorBudget, blob => nativeReasoningTag(nativeReasoningMint.owner, blob), nativeReasoningSelector);
   } catch (err) {
     if (!isTranslatorBudgetExceededError(err)) throw err;
     return anthropicErrorResponse(413, "upstream translation buffer exceeded the safe limit", "request_too_large", "translation_buffer_limit");
@@ -1712,6 +1737,7 @@ async function handleClaudeMessagesWithBudget(
       headers: { "Content-Type": "application/json", "Retry-After": "2" },
     });
   }
+  if (isRec(json) && json.status === "completed") rememberCacheGroup();
   if (!stream) {
     return new Response(JSON.stringify(message), { status: 200, headers: { "Content-Type": "application/json" } });
   }

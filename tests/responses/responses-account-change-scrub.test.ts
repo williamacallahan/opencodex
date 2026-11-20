@@ -16,6 +16,8 @@ import {
 import type { RequestLogContext } from "../../src/server/request-log";
 import type { OcxParsedRequest } from "../../src/types";
 import { sanitizeReasoningInputContent } from "../../src/adapters/openai-responses/reasoning";
+import { encodeReasoningEnvelope } from "../../src/responses/reasoning-envelope";
+import { encodeCompactionSummary } from "../../src/responses/compaction";
 
 const BINDING_KEY = "thread-account-change-scrub";
 const ENCRYPTED = "gAAAA" + "A".repeat(80);
@@ -165,7 +167,7 @@ describe("Codex pool account-change conversation-state scrub", () => {
     expect(applyAccountChangeConversationStateScrub({
       body, parsed, bindingKey: BINDING_KEY, servingAccountId: "account-b",
       preserveReasoningEncryptedContent: true,
-    })).toBe(false);
+    })).toBe(true);
     expect(parsed._dropForeignReasoningItemIds).toBe(true);
     const outbound = sanitizeReasoningInputContent(body, {
       dropForeignItemId: parsed._dropForeignReasoningItemIds,
@@ -281,6 +283,45 @@ describe("Codex pool account-change conversation-state scrub", () => {
     expect((body.client_metadata as Record<string, unknown>)["x-codex-turn-state"]).toBeUndefined();
     expect((body.client_metadata as Record<string, unknown>).other).toBe("keep");
   });
+  test("locally rebuildable history is portable but opaque, signed, malformed and file state is not", () => {
+    const local = [
+      { type: "reasoning", encrypted_content: encodeReasoningEnvelope({ txt: "history" }) },
+      { type: "compaction", encrypted_content: encodeCompactionSummary("summary") },
+    ];
+    expect(canPortConversationState(collectConversationStateCarriers({ input: local })).portable).toBe(true);
+    expect(sanitizeReasoningInputContent({ input: [local[0]] })).toEqual({ input: [{ type: "reasoning", summary: [{ type: "summary_text", text: "history" }], content: [] }] });
+    for (const item of [
+      reasoningBlob(),
+      { type: "reasoning", encrypted_content: encodeReasoningEnvelope({ txt: "history", sig: "signature" }) },
+      { type: "compaction", encrypted_content: "ocx1:!!!" },
+      { type: "message", content: [{ type: "input_file", file_id: "file_1" }] },
+    ]) {
+      expect(canPortConversationState(collectConversationStateCarriers({ input: [...local, item] })).portable).toBe(false);
+    }
+  });
+
+  test("a verified stored account moving to main retains its state, but an unverified alias does not", () => {
+    rememberConversationStateIssuer(BINDING_KEY, "pool-copy");
+    const body = { input: [reasoningBlob()] };
+    const parsed: Pick<OcxParsedRequest, "_stripReasoningEncryptedContent" | "_dropForeignReasoningItemIds"> = {};
+    expect(applyAccountChangeConversationStateScrub({ body, parsed, bindingKey: BINDING_KEY, servingAccountId: "__main__", sameUploadedFileAccount: (first, second) => first === "pool-copy" && second === "__main__" })).toBe(false);
+    expect(parsed._stripReasoningEncryptedContent).toBeUndefined();
+    expect(applyAccountChangeConversationStateScrub({ body, parsed, bindingKey: BINDING_KEY, servingAccountId: "__main__" })).toBe(true);
+    expect(parsed._stripReasoningEncryptedContent).toBe(true);
+  });
+
+  test("issuer-only move arms native state stripping while the same account retains it", () => {
+    rememberConversationStateIssuer(BINDING_KEY, "account-a");
+    const body = { input: [reasoningBlob(), { type: "compaction", encrypted_content: ENCRYPTED }] };
+    const parsed: Pick<OcxParsedRequest, "previousResponseId" | "_stripReasoningEncryptedContent" | "_stripNativeCompactionEncryptedContent" | "_dropForeignReasoningItemIds"> = {};
+    expect(applyAccountChangeConversationStateScrub({ body, parsed, bindingKey: BINDING_KEY, servingAccountId: "account-a" })).toBe(false);
+    expect(parsed._stripReasoningEncryptedContent).toBeUndefined();
+    expect(applyAccountChangeConversationStateScrub({ body, parsed, bindingKey: BINDING_KEY, servingAccountId: "account-b" })).toBe(true);
+    expect(parsed._stripNativeCompactionEncryptedContent).toBe(true);
+    const outbound = sanitizeReasoningInputContent(body, { stripEncryptedContent: parsed._stripReasoningEncryptedContent, dropForeignItemId: parsed._dropForeignReasoningItemIds });
+    expect(outbound).toEqual({ input: [{ type: "reasoning", summary: [{ type: "summary_text", text: "kept summary" }] }, body.input[1]] });
+  });
+
   test("canPortConversationState refuses continuation ids, provider ids and encrypted reasoning", () => {
     expect(canPortConversationState({})).toEqual({ portable: true });
     expect(canPortConversationState({ previousResponseId: "resp_1" })).toEqual({

@@ -138,6 +138,10 @@ export interface HandleResponsesOptions {
   claudeGoAffinity?: { sessionLane?: string };
   /** Validated Claude metadata identity; projected only into final canonical attempt headers. */
   claudeNativeSessionId?: string;
+  /** Only the physical Codex adapter may replace the translated provider's cache group and identity. */
+  claudeCodexWire?: { sessionId: string; cacheKey: string; ownedDirectSessionId?: string }
+    | { sessionId: null; cacheKey?: string; ownedDirectSessionId?: never }
+    | { sessionId: null; cacheKey: null; ownedDirectSessionId?: string };
   /** Private pool identity of a translated Claude turn or a session-only caller (validated, principal-scoped when derived); completes session-id/thread-id only on Codex account-selection headers and keys the combo lane. */
   claudeBridgePoolSession?: string;
   /** Original live policy owner; separate from caller-specific routing/sidecar snapshots. */

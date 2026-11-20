@@ -20,6 +20,12 @@ import {
 import type { OcxParsedRequest } from "../../types";
 import type { RequestLogContext } from "../request-log";
 import { formatErrorResponse } from "../../bridge/errors";
+import type { ConversationStateCarriers } from "../../routing/identity-domains";
+import { decodeCompactionSummary, encodeCompactionSummary, isCompactionItemType } from "../../responses/compaction";
+import { decodeRetainedCompaction } from "../../responses/retained-compaction";
+import { decodeReasoningEnvelope, encodeReasoningEnvelope } from "../../responses/reasoning-envelope";
+
+export { canPortConversationState } from "../../routing/identity-domains";
 
 export type ConversationStateScrubReason = "account-change";
 
@@ -45,57 +51,7 @@ export const ACCOUNT_CHANGE_FILE_SCOPE_MESSAGE =
   + "conversation, or start a new conversation for them. Sending the same request again "
   + "unchanged will not clear it.";
 
-export type PortabilityDenial =
-  | "previous-response-id"
-  | "provider-conversation-id"
-  | "uploaded-file-ids"
-  | "encrypted-reasoning";
-
-/**
- * The parts of a request that bind it to the credential that produced them.
- * Presence is what matters; the values stay opaque so nothing here logs ids.
- */
-export interface ConversationStateCarriers {
-  readonly previousResponseId?: string | null;
-  readonly providerConversationId?: string | null;
-  readonly fileIds?: readonly string[];
-  readonly encryptedReasoning?: unknown;
-}
-
-export type PortabilityVerdict =
-  | { readonly portable: true }
-  | { readonly portable: false; readonly reason: PortabilityDenial };
-
-function present(value: unknown): boolean {
-  if (value === undefined || value === null) return false;
-  if (typeof value === "string" || Array.isArray(value)) return value.length > 0;
-  return true;
-}
-
-/**
- * Whether a request's conversational state can move credentials at all.
- *
- * `src/routing/identity-domains.ts` owns this decision once that module lands
- * on this integration line (#4546). Keep the check in this one function so it
- * can be swapped for the shared export without hunting call sites.
- */
-export function canPortConversationState(
-  state: ConversationStateCarriers,
-): PortabilityVerdict {
-  if (present(state.previousResponseId)) {
-    return { portable: false, reason: "previous-response-id" };
-  }
-  if (present(state.providerConversationId)) {
-    return { portable: false, reason: "provider-conversation-id" };
-  }
-  if (present(state.fileIds)) {
-    return { portable: false, reason: "uploaded-file-ids" };
-  }
-  if (present(state.encryptedReasoning)) {
-    return { portable: false, reason: "encrypted-reasoning" };
-  }
-  return { portable: true };
-}
+export type { ConversationStateCarriers, PortabilityDenial, PortabilityVerdict } from "../../routing/identity-domains";
 
 function providerConversationIdFromBody(body: Record<string, unknown>): string | undefined {
   const conversation = body.conversation;
@@ -134,12 +90,29 @@ function collectFileIds(input: unknown): string[] {
   return ids;
 }
 
+function isPortableEnvelope(record: Record<string, unknown>): boolean {
+  const encrypted = record.encrypted_content;
+  if (typeof encrypted !== "string") return false;
+  if (record.type === "reasoning") {
+    const envelope = decodeReasoningEnvelope(encrypted);
+    return envelope !== null && typeof envelope.txt === "string" && !envelope.sig
+      && !envelope.red && !envelope.krc && !envelope.nat
+      && encodeReasoningEnvelope(envelope) === encrypted;
+  }
+  if (isCompactionItemType(record.type)) {
+    if (decodeRetainedCompaction(encrypted)) return true;
+    const summary = decodeCompactionSummary(encrypted);
+    return summary !== null && summary.length > 0 && encodeCompactionSummary(summary) === encrypted;
+  }
+  return false;
+}
+
 function hasEncryptedReasoning(input: unknown): boolean {
   if (!Array.isArray(input)) return false;
   for (const item of input) {
     if (!item || typeof item !== "object") continue;
     const record = item as Record<string, unknown>;
-    if (typeof record.encrypted_content === "string" && record.encrypted_content.length > 0) {
+    if (typeof record.encrypted_content === "string" && record.encrypted_content.length > 0 && !isPortableEnvelope(record)) {
       return true;
     }
     for (const key of ["content", "output"]) {
@@ -251,6 +224,7 @@ export interface ApplyAccountChangeConversationStateScrubArgs {
   servingAccountId: string;
   /** Account this request body was prepared for, when this is an in-request move. */
   priorAccountId?: string | null;
+  sameUploadedFileAccount?: (firstAccountId: string, secondAccountId: string) => boolean;
   parsed?: Pick<OcxParsedRequest, "previousResponseId" | "_stripReasoningEncryptedContent" | "_stripNativeCompactionEncryptedContent" | "_dropForeignReasoningItemIds">;
   /** Trusted canonical-native caller policy; does not make continuation or file ids portable. */
   preserveReasoningEncryptedContent?: boolean;
@@ -268,8 +242,10 @@ export function applyAccountChangeConversationStateScrub(
   const { body, bindingKey, servingAccountId, priorAccountId, parsed, logCtx } = args;
   if (!servingAccountId || !bindingKey) return false;
   const issuer = peekConversationStateIssuer(bindingKey);
-  const accountChanged = (issuer != null && issuer !== servingAccountId)
-    || (priorAccountId != null && priorAccountId !== servingAccountId);
+  const accountChanged = (issuer != null && issuer !== servingAccountId
+    && (issuer === CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER || !args.sameUploadedFileAccount?.(issuer, servingAccountId)))
+    || (priorAccountId != null && priorAccountId !== servingAccountId
+      && !args.sameUploadedFileAccount?.(priorAccountId, servingAccountId));
   if (!accountChanged) return false;
   // The issuer record can outlive the serving-route cache. Even a retained ciphertext cannot
   // make its reasoning item id resolvable in the new account's store.
@@ -280,7 +256,7 @@ export function applyAccountChangeConversationStateScrub(
     headerScrubbed = true;
   }
   const scrubbed = scrubUnportableConversationStateInPlace(body);
-  if (!scrubbed && !headerScrubbed) return false;
+  if (!scrubbed && !headerScrubbed && !collectConversationStateCarriers(body).encryptedReasoning) return false;
   if (parsed) {
     delete parsed.previousResponseId;
     parsed._stripNativeCompactionEncryptedContent = true;

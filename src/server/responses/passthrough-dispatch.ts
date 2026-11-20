@@ -21,7 +21,7 @@ import type {
 import type { PreparedResponsesRequest } from "./request-prepare";
 import { CopilotAutoAdapterHandoff, type ResponsesTransport } from "./request-transport";
 import type { ResponsesEffects } from "./response-effects";
-import { transientSendCapFor, type ResponsesSendBudget } from "./request-send-budget";
+import { createTransientSendPolicy, transientSendCapFor, type ResponsesSendBudget } from "./request-send-budget";
 import { renewMainQuotaDispatchForAttempt } from "../../codex/main-account-cache";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { isLocalUpstream } from "../../lib/local-upstream";
@@ -41,9 +41,9 @@ import {
   undeclaredToolCallName,
   undeclaredToolCallNameInResponse,
   normalizeDefaultNamespaceInResponse,
+  type ProviderExecutedCallType,
 } from "../responses-undeclared-tool-guard";
 import { collectSelfNamedNamespaceScrubAuthorization } from "../responses-self-named-namespace-scrub";
-import type { ProviderExecutedCallType } from "../responses-undeclared-tool-guard";
 import {
   releaseCodexAuthContextProbeLease,
   unwrapUpstreamRetryEvidenceError,
@@ -51,24 +51,21 @@ import {
   codexProbeQuotaScope,
   codexTransientProbeGrant,
   createCodexAuthDispatchGuard,
+  type CodexAuthContext,
 } from "../../codex/auth-context";
-import {
-  restoreRoutedNamespaceCalls,
-} from "../../responses/namespace-tool-compat";
+import { restoreRoutedNamespaceCalls, type RoutedNamespaceToolAliases } from "../../responses/namespace-tool-compat";
 import { restoreRoutedCustomCalls } from "../../responses/custom-tool-compat";
-import { formatErrorResponse } from "../../bridge";
+import { formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
 import { redactSecretString } from "../../lib/redact";
 import {
   collectFunctionCallRepairSchemas,
   repairFunctionCallsInJson,
 } from "../../responses/function-call-compat";
-import type { RoutedNamespaceToolAliases } from "../../responses/namespace-tool-compat";
 import { hasResponsesSnapshotRepair, repairResponsesSnapshotJson } from "../responses-snapshot-repair";
 import { backfillResponsesFieldsJson } from "./responses-field-backfill";
 import type { AdapterRequest } from "../../adapters/base";
 import { isXaiResponsesDestination, resolveProviderTransport } from "../../providers/xai-transport";
 import { CODE_MODE_EXEC_TOOL_NAME } from "../../types";
-import type { ResponsesTerminalStatus } from "../../bridge";
 import { hasPassiveAccountQuota, recordPassiveAccountQuota } from "../../providers/quota";
 import {
   isMuseSubscriptionUsagePayload,
@@ -77,12 +74,15 @@ import {
 import { restoreMuseToolNames } from "../../responses/muse-tool-name-alias";
 import { restorePlaintextV2AgentMessageCalls } from "../../responses/plaintext-v2-agent-messages";
 import {
+  createDeferredPoolSendRecorder,
+  noteProviderAttemptSend,
   recordAdapterReasoning,
   recordAdapterTier,
   sealRequestAttemptIdentity,
   recordAttemptCredentialSource,
+  noteAttemptRecoveryWithheld,
+  type RequestLogContext,
 } from "../request-log";
-import { noteAttemptRecoveryWithheld } from "../request-log";
 import {
   upstreamHostHealthKey,
   normalizeUpstreamHostCircuitThreshold,
@@ -115,9 +115,9 @@ import {
   clearCodexModelDenialEvidence,
   recordCodexModelDenialEvidence,
 } from "../../codex/model-entitlements";
-import { codexWsSocketDeathStage, isCodexWsUpstreamResponse } from "./codex-ws-wire";
+import { consumeComboFailure } from "./core-combo-failure";
+import { isCodexWsPreOutputRefusal, codexWsSocketDeathStage, isCodexWsUpstreamResponse } from "./codex-ws-wire";
 import { linkAbortSignal } from "./core-lifetime";
-import type { CodexAuthContext } from "../../codex/auth-context";
 import { checkOutboundBodySize, describeOutboundBodyRefusal } from "./outbound-body-guard";
 import { streamingContextOverflowResponse } from "./context-overflow";
 import {
@@ -138,7 +138,6 @@ import { captureAccountAutoPauseAttempt, wasAccountAutoPaused, wasPermanentAccou
 import { codexFailureWindowOutcomeMeta, recordCodexUpstreamOutcome } from "../../codex/routing";
 import { describeUpstreamConnectFailure } from "./upstream-error";
 import { markUpstreamNotStarted } from "./combo-luna-legs";
-import type { OpaqueBlobRecoveryGuard } from "./core-opaque-recovery";
 import {
   rateLimitRetryPolicyFor,
   rateLimitRetryDelayMs,
@@ -148,8 +147,7 @@ import type { AttemptRecoveryKind } from "../../usage/log";
 import { resolveWireProtocolOverride } from "../adapter-resolve";
 import { refreshPoolForwardAuth, refreshNativeMainForwardAuth, withClaudeNativeSession } from "./core-auth";
 import { bindRouteReasoningReplayScope } from "./core-replay";
-import type { OAuthAccessSnapshot } from "../../oauth";
-import { publicOAuthErrorPresentation, OAuthAccountPausedError, OAuthLoginRequiredError, OAuthTokenRefreshBusyError, publicOAuthAuthenticationErrorMessage } from "../../oauth";
+import { publicOAuthErrorPresentation, OAuthAccountPausedError, OAuthLoginRequiredError, OAuthTokenRefreshBusyError, publicOAuthAuthenticationErrorMessage, type OAuthAccessSnapshot } from "../../oauth";
 import { AnthropicAccountCooldownError } from "../../oauth/anthropic-routing";
 import { resolveCopilotApiBaseUrl } from "../../oauth/github-copilot";
 import {
@@ -160,6 +158,7 @@ import {
 } from "../../oauth/generic-account-failover";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "../../codex/catalog/native-models";
 import {
+  type OpaqueBlobRecoveryGuard,
   attemptOpaqueBlobRecovery,
   isEncryptedFunctionOutputRejection, retainedReasoningStreamCandidate, retainedReasoningStreamRejection,
   outboundResponsesBodyCarriesEncryptedFunctionOutput,
@@ -168,8 +167,7 @@ import {
   CONSOLE_GO_UPLOAD_RETRY_DELAY_MS,
   refusedReasoningEffortDowngrade, withRawBodyReasoningEffort,
 } from "./core-opaque-recovery";
-import type { RequestLogContext } from "../request-log";
-import { preflightComboStreamResponse } from "./combo-stream-preflight";
+import { preflightComboStreamResponse, preflightReserveFirstResponse } from "./combo-stream-preflight";
 import type { RequestFailureStage } from "../../lib/request-failure-model";
 import {
   ambiguousResendAllowanceFor, ambiguousResendAuthorizer, UnsafePhysicalReplacement,
@@ -742,33 +740,9 @@ export async function preparePassthroughExchange(
     const cleanupUpstreamAbort = linkAbortSignal(upstream, options.abortSignal ?? req.signal);
     const sendConnectMs = () => route.provider.authMode === "forward" ? resolveConnectTimeoutMs(config.connectTimeoutMs, { localUpstream: isLocalUpstream(request.url) }) : 0;
     const connectMs = resolveConnectTimeoutMs(config.connectTimeoutMs, { localUpstream: isLocalUpstream(route.provider.baseUrl) });
-    /**
-     * This leg's transient-5xx ladder cap, from the provider's own `transientRetryOn5xx`.
-     *
-     * The lane used to pass `TRANSIENT_RETRY_MAX_ATTEMPTS` at every call site, so an operator who
-     * configured the option on a key-auth `openai-responses` provider changed nothing in either
-     * direction, while the same provider on `openai-chat` was tuned normally. That asymmetry is
-     * #4893. The gate in `transientRetryPolicyFor` returns null for OAuth and forward providers,
-     * so the ChatGPT pool keeps exactly the ladder it has always had.
-     *
-     * Read per call rather than captured once, for two reasons. `route.provider` is reassigned
-     * inside the recovery loop by credential rotation and transport resolution, so a hoisted
-     * policy could outlive the provider row it came from. And the configured value is a total for
-     * the whole request, so it has to be measured against what the request has already sent at
-     * the moment each leg asks.
-     *
-     * Still bounded by the request: every site feeds this to `remainingTransientSendBudget` or
-     * `recoverySendAllowance`, which intersect it with the request-wide base allowance. So a
-     * provider can narrow this request's sends exactly and cannot widen the bound that exists to
-     * stop per-request amplification (#4546).
-     */
-    const transientSendPolicy = () => transientRetryPolicyFor(route.provider);
-    const transientSendAttempts = (): number => transientSendCapFor(
-      transientSendPolicy()?.attempts,
-      sendBudgetState.targetSendsUsed,
+    const { transientSendPolicy, transientSendAttempts, configuredTransientSendBudgetExhausted } = createTransientSendPolicy(
+      () => route.provider, () => sendBudgetState.targetSendsUsed,
     );
-    const configuredTransientSendBudgetExhausted = (): boolean =>
-      transientSendPolicy() !== null && transientSendAttempts() === 0;
     // Judged once on the inbound body and once per send on the body that physically leaves; the
     // split and its reasons live in the sibling module.
     const replayGuard = createNativeReplayGuard({
@@ -777,7 +751,13 @@ export async function preparePassthroughExchange(
       parsed,
       currentRequest: () => request,
     });
-    const recordPhysicalSend = replayGuard.sendHandler;
+    const { noteAttemptSend, recordPhysicalSend } = createDeferredPoolSendRecorder(
+      () => usesCodexForwardPoolAuth(admissionState.authCtx, route.provider),
+      recovery => transportState.noteRoutedAttemptSend(passthroughEstimate, recovery),
+      recovery => noteProviderAttemptSend(logCtx, route.providerName, route.provider, passthroughEstimate, recovery,
+        { wireModel: request.outboundModelId }),
+      replayGuard.sendHandler,
+    );
     /**
      * The operator's replacement grant for THIS logical request.
      *
@@ -838,7 +818,7 @@ export async function preparePassthroughExchange(
         modelId: route.modelId,
         dispatchOverride: oauthDispatch(request, parsed, "passthrough"),
         onPhysicalDispatch: recordPhysicalSend(() => {
-          transportState.noteRoutedAttemptSend(passthroughEstimate, "connection-reset");
+          noteAttemptSend("connection-reset");
           if (accounting.onPhysicalDispatch) accounting.onPhysicalDispatch();
           else if (report.beforeSend?.() === false) throw new SendBudgetExhaustedError(errorDestinationLabel(request.url));
           started = true;
@@ -1002,7 +982,8 @@ export async function preparePassthroughExchange(
     const initialAccounting = copilotSendAccounting();
     // #6969: Pool sends hold empty lifecycle frames so a pre-output refusal reaches the ladder below.
     const preOutputRefusals = new PoolPreOutputRefusals();
-    const preOutputRefusalHold = () => poolPreOutputRefusalHold(admissionState.authCtx, route.provider, connectMs, options.comboAttempt);
+    const firstPoolContext = admissionState.authCtx;
+    const preOutputRefusalHold = poolPreOutputRefusalHold(firstPoolContext, route.provider, connectMs, options.comboAttempt, parsed, req.headers);
     const onContinuationDispatch = createNativeContinuationDispatch(sendBudgetState, logCtx);
     try {
       // Transient-5xx pre-stream retry (devlog/_plan/260716_claudecode_hardening/010):
@@ -1016,7 +997,7 @@ export async function preparePassthroughExchange(
           // ratio has no denominator and the window collapses to its quiet-pool floor, which
           // would throttle recovery on a busy proxy exactly as hard as on an idle one (#4701).
           if (recovery === undefined) classifyPoolRecoveryDispatch("initial");
-          transportState.noteRoutedAttemptSend(passthroughEstimate, recovery);
+          noteAttemptSend(recovery);
           return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
             method: request.method,
             headers: request.headers,
@@ -1036,7 +1017,7 @@ export async function preparePassthroughExchange(
               onCodexWsQuota: codexWsQuotaObserver(admissionState.authCtx, route.provider, route.modelId),
               beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
                 ? createCodexAuthDispatchGuard(admissionState.authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
-              preOutputRefusalHold: preOutputRefusalHold(),
+              preOutputRefusalHold,
             }),
             route.provider.authMode === "forward")
             // Every real attempt response — including an intermediate 5xx the
@@ -1157,7 +1138,7 @@ export async function preparePassthroughExchange(
             if (!recoveryAccounting.onPhysicalDispatch && allowance.permit && !allowance.permit.use()) {
               throw new SendBudgetExhaustedError(errorDestinationLabel(request.url));
             }
-            transportState.noteRoutedAttemptSend(passthroughEstimate, innerRecovery ?? recovery);
+            noteAttemptSend(innerRecovery ?? recovery);
             return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
               method: request.method,
               headers: request.headers,
@@ -1311,7 +1292,7 @@ export async function preparePassthroughExchange(
         // have run it.
         upstreamResponse = await fetchWithTransientRetry(
           recovery => {
-            transportState.noteRoutedAttemptSend(passthroughEstimate, recovery ?? "oauth-401");
+            noteAttemptSend(recovery ?? "oauth-401");
             return fetchWithHeaderTimeout(
               request.url,
               applyUpstreamRecoveryInit({
@@ -1428,7 +1409,7 @@ export async function preparePassthroughExchange(
       try {
         upstreamResponse = await fetchWithTransientRetry(
           recovery => {
-            transportState.noteRoutedAttemptSend(passthroughEstimate, recovery ?? "oauth-401");
+            noteAttemptSend(recovery ?? "oauth-401");
             return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
               method: request.method,
               headers: request.headers,
@@ -1578,7 +1559,7 @@ export async function preparePassthroughExchange(
           recovery => {
             // The first send of every replay is itself a rate-limit retry; inner transient-5xx
             // recoveries keep their own label (recovery is provided for those).
-            transportState.noteRoutedAttemptSend(passthroughEstimate, recovery ?? "rate-limit-429");
+            noteAttemptSend(recovery ?? "rate-limit-429");
             return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
               method: request.method,
               headers: request.headers,
@@ -1623,6 +1604,9 @@ export async function preparePassthroughExchange(
     recordDistributedResponseFailure(lastDistributedResponse ?? upstreamResponse, config, route.providerName, options.abortSignal);
     captureAffinityResponse(upstreamResponse);
     if (usesCodexForwardPoolAuth(admissionState.authCtx, route.provider)) {
+      const reservePreflight = preflightReserveFirstResponse(upstreamResponse, admissionState.authCtx === firstPoolContext,
+        preOutputRefusalHold, logCtx, upstream.signal, upstreamRequestsStream);
+      if (reservePreflight) upstreamResponse = (await reservePreflight).response;
       let poolRetryOutcome: number | undefined;
       // A success is the freshest evidence there is about this pair, and it outranks any earlier
       // refusal: whatever the entitlement was when upstream declined, it is not that now. Both
@@ -1697,7 +1681,7 @@ export async function preparePassthroughExchange(
           passthroughEstimate,
           stream: upstreamRequestsStream,
           httpOnly: canonicalBufferedJson,
-          preOutputRefusalHold: preOutputRefusalHold(),
+          preOutputRefusalHold: preOutputRefusalHold && { ...preOutputRefusalHold, reserveFirstPlacement: false },
           onPhysicalSend: replayGuard.record,
           onResponse: (response, retryAuthCtx, retryRequest) => {
             adoptCodexWsStage(response, logCtx);
@@ -1725,7 +1709,12 @@ export async function preparePassthroughExchange(
         }
       }
     }
-    // #6969: a projection nothing above recovered goes on as the original stream, before any reader.
+    // The strict child's native pool is exhausted, not the parent combo. Give it the verified
+    // refusal; ordinary delivery still builds the client-safe stream if no hop is admitted.
+    if (options.poolCapacityIntent === "reserve-only" && options.onConsumedComboFailure
+      && isCodexWsPreOutputRefusal(upstreamResponse) && (upstreamResponse.status === 429 || upstreamResponse.status === 402)) {
+      options.onConsumedComboFailure(await consumeComboFailure(upstreamResponse, options.abortSignal));
+    }
     upstreamResponse = preOutputRefusals.restore(upstreamResponse);
     // The deterministic route record cannot classify history it never observed (restart, expiry,
     // eviction, or an older transcript). Inspect only a bounded clone of a 4xx whose exact outbound

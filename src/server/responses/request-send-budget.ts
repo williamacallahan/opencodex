@@ -1,3 +1,5 @@
+import type { OcxProviderConfig } from "../../types";
+import { transientRetryPolicyFor } from "../../providers/key-failover";
 import { createInferenceSendBudget } from "../inference/context";
 import { responsesSpendTarget } from "./request-spend-target";
 import type { ResponsesRequestContext } from "./core-options";
@@ -43,6 +45,38 @@ export function transientSendCapFor(
 ): number {
   if (configuredAttempts === undefined) return TRANSIENT_RETRY_MAX_ATTEMPTS;
   return Math.max(0, configuredAttempts - Math.max(0, sendsUsed));
+}
+
+
+export function createTransientSendPolicy(provider: () => OcxProviderConfig, sendsUsed: () => number) {
+  /**
+   * This leg's transient-5xx ladder cap, from the provider's own `transientRetryOn5xx`.
+   *
+   * The lane used to pass `TRANSIENT_RETRY_MAX_ATTEMPTS` at every call site, so an operator who
+   * configured the option on a key-auth `openai-responses` provider changed nothing in either
+   * direction, while the same provider on `openai-chat` was tuned normally. That asymmetry is
+   * #4893. The gate in `transientRetryPolicyFor` returns null for OAuth and forward providers,
+   * so the ChatGPT pool keeps exactly the ladder it has always had.
+   *
+   * Read per call rather than captured once, for two reasons. `route.provider` is reassigned
+   * inside the recovery loop by credential rotation and transport resolution, so a hoisted
+   * policy could outlive the provider row it came from. And the configured value is a total for
+   * the whole request, so it has to be measured against what the request has already sent at
+   * the moment each leg asks.
+   *
+   * Still bounded by the request: every site feeds this to `remainingTransientSendBudget` or
+   * `recoverySendAllowance`, which intersect it with the request-wide base allowance. So a
+   * provider can narrow this request's sends exactly and cannot widen the bound that exists to
+   * stop per-request amplification (#4546).
+   */
+  const transientSendPolicy = () => transientRetryPolicyFor(provider());
+  const transientSendAttempts = (): number => transientSendCapFor(
+    transientSendPolicy()?.attempts,
+    sendsUsed(),
+  );
+  const configuredTransientSendBudgetExhausted = (): boolean =>
+    transientSendPolicy() !== null && transientSendAttempts() === 0;
+  return { transientSendPolicy, transientSendAttempts, configuredTransientSendBudgetExhausted };
 }
 
 /** Owns the shared request send counter and recovery permits. */

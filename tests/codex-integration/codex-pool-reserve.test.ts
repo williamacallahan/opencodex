@@ -18,7 +18,7 @@ import { forgetCodexFailureWindows, isCodexFailureWindowDegraded, noteCodexFailu
 import { codexFailureWindowOutcomeMeta } from "../../src/codex/routing/failure-window";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import {
-  resolveCodexAuthContext, applyCodexAuthContextToProvider, materializeCodexUpstreamAuth,
+  codexPoolAffinityKey, resolveCodexAuthContext, applyCodexAuthContextToProvider, materializeCodexUpstreamAuth,
   createCodexAuthDispatchGuard, CodexAccountCooldownError, CodexReserveUnavailableError, CodexPoolExhaustedError, CodexPoolAccountCreditsOffError, cooldownErrorResponse,
 } from "../../src/codex/auth-context";
 import { createResponsesPassthroughAdapter } from "../../src/adapters/openai-responses";
@@ -28,6 +28,9 @@ import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { rebindPoolCreditPolicy } from "../../src/codex/pool-credit-policy";
+import { addFinalRequestLog, type RequestLogContext } from "../../src/server/request-log";
+import { readUsageEntries } from "../../src/usage/log";
+import { issueTurnStateHandle, turnStateBinding, TURN_STATE_HEADER } from "../../src/server/turn-state-handles";
 import { handleResponses } from "../../src/server/responses/core";
 import { handleResponsesCompact } from "../../src/server/responses/compact";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
@@ -264,6 +267,22 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     expect(retry.ctx.accountId).toBe(A);
     expect(JSON.parse(retry.request.body).model).toBe("gpt-6-luna");
   });
+  test("an aged unreported Reserve serve retains its seat ahead of a fresh grant", async () => {
+    noReserve(B);
+    const headers = new Headers({ "session-id": "aged", "thread-id": "aged" });
+    const first = await build(config(), "gpt-6-luna", headers);
+    if (first.ctx.kind !== "pool" || !first.ctx.probeLeaseId) throw new Error("expected a discovery lease");
+    expect(first.ctx.accountId).toBe(A);
+    recordCodexUpstreamOutcome(config(), A, 200, { ...codexFailureWindowOutcomeMeta(first.ctx), reserveServed: true,
+      threadId: first.ctx.affinityKey, probeQuotaScope: "reserve", probeLeaseId: first.ctx.probeLeaseId });
+    now += POOL_RESERVE_FRESHNESS_MS + 1;
+    reserve(B);
+    const continuation = await build(config(), "gpt-6-luna", headers);
+    expect(continuation.ctx.accountId).toBe(A);
+    expect(continuation.request.outboundModelId).toBe("gpt-reserve");
+    expect(() => createCodexAuthDispatchGuard(continuation.ctx, config(), "gpt-6-luna")?.(continuation.headers)).not.toThrow();
+    expect((await build()).ctx.accountId).toBe(B);
+  });
   test("a Reserve retry uses included Luna instead of exploring an unverified seat", async () => {
     const cfg = config();
     const third = "pool-reserve-c";
@@ -327,6 +346,71 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
       expect(sends.slice(2).map(({ model, key }) => [model, key])).toEqual(
         Array.from({ length: 4 }, () => ["gpt-reserve", "warm-thread"]),
       );
+    } finally { release(); }
+  });
+  test.each(["quota", "round-robin"] as const)("%s records only the accounts that sent a correlated Reserve refusal and its ordinary retry", async strategy => {
+    const cfg = config(); cfg.accountPoolStrategy = strategy; cfg.providers.openai = { ...base, codexAccountMode: "pool" };
+    ordinary(A, 40);
+    const headers = new Headers({ "thread-id": "stream-trial", "session-id": "stream-trial", "content-type": "application/json" });
+    const key = codexPoolAffinityKey(headers)!;
+    const log: RequestLogContext = { model: "", provider: "" };
+    const sends: string[] = [];
+    spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const { model } = await request.json(); sends.push(model);
+      if (model === "gpt-reserve") {
+        expect(getThreadAffinity(key, "reserve")).toBeUndefined();
+        const frames = [{ type: "codex.rate_limits", rate_limits: { primary: { used_percent: 25, window_minutes: 10080 } } },
+          { type: "response.created", response: { id: "resp_try", status: "in_progress", output: [] } },
+          { type: "response.failed", response: { id: "resp_try", status: "failed", output: [], error: { code: "usage_limit_reached", message: "Limit reached" } } } ];
+        return new Response(frames.map(frame => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+      }
+      return Response.json({ id: "resp_included", object: "response", status: "completed", model, output: [], created_at: 1 });
+    }, { preconnect() {} }));
+    const release = acquireOwnedSpendHome();
+    try {
+      const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST", headers,
+        body: JSON.stringify({ model: "openai/gpt-6-luna", input: "ping", stream: false }) }), cfg, log);
+      expect(response.status).toBe(200);
+      expect(sends).toEqual(["gpt-reserve", "gpt-6-luna"]);
+      expect(getThreadAffinity(key, "shared")?.accountId).toBe(A);
+      expect(getThreadAffinity(key, "reserve")).toBeUndefined();
+      addFinalRequestLog("reserve-refusal", now, log, response.status);
+      const row = readUsageEntries().find(entry => entry.requestId === "reserve-refusal");
+      expect(row?.attempts?.map(({ wireModel, status, sendCount }) => [wireModel, status, sendCount])).toEqual([
+        ["gpt-reserve", 429, 1], ["gpt-6-luna", 200, 1],
+      ]);
+    } finally { release(); }
+  });
+  test.each(["bound", "output", "foreign", "foreign-control", "ambiguous", "effect", "body-state", "body-state-http"])("an HTTP SSE %s turn is not sent to an alternate", async reason => {
+    const cfg = config(); cfg.providers.openai = { ...base, codexAccountMode: "pool", upstreamWebsocket: false };
+    ordinary(A, 40); reserve(B);
+    const headers = new Headers({ "content-type": "application/json" });
+    const withState = reason.startsWith("body-state");
+    if (!withState) { headers.set("thread-id", "sse-boundary"); headers.set("session-id", "sse-boundary"); }
+    const client_metadata = withState ? { [TURN_STATE_HEADER]: issueTurnStateHandle("fixture-state",
+      turnStateBinding("openai", new Headers({ "chatgpt-account-id": `fixture-workspace-${B}` }))) } : undefined;
+    if (reason === "bound") bindThreadAffinity(codexPoolAffinityKey(headers)!, B, now, "reserve");
+    const sends: string[] = [];
+    spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      sends.push((await request.json()).model);
+      if (reason === "body-state-http") return Response.json({ error: { code: "usage_limit_reached" } }, { status: 429 });
+      const frames = [ ...(reason === "foreign-control" ? [{ type: "codex.rate_limits", stream_id: "foreign", rate_limits: {} }] : []),
+        { type: "response.created", response: { id: "resp_this", status: "in_progress", output: [] } },
+        ...(reason === "output" ? [{ type: "response.output_text.delta", delta: "already visible" }] : []),
+        { type: "response.failed", response: { id: reason === "foreign" ? "resp_other" : "resp_this", status: "failed",
+          output: reason === "effect" ? [{ type: "function_call", name: "write" }] : [],
+          error: { code: reason === "ambiguous" ? "unknown_error" : "usage_limit_reached", message: "quota" } } } ];
+      return new Response(frames.map(frame => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+    }, { preconnect() {} }));
+    const release = acquireOwnedSpendHome();
+    try {
+      const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST", headers,
+        body: JSON.stringify({ model: "openai/gpt-6-luna", input: "ping", stream: true, client_metadata }) }), cfg, { model: "", provider: "" });
+      if (reason === "body-state-http") expect(response.status).toBe(429);
+      else expect(await response.text()).toContain("response.failed");
+      expect(sends).toEqual(["gpt-reserve"]);
     } finally { release(); }
   });
   test("concurrent real turns do not repeat an unknown Reserve trial or retry before its hold", async () => {
@@ -396,9 +480,11 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
       return Response.json({ id: "resp_next", object: "response", status: "completed", created_at: 1,
         model, output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } });
     }, { preconnect() {} }));
+    cfg.connectTimeoutMs = 500;
+    const trialHeaders = new Headers({ "session-id": "trial", "thread-id": "trial", "content-type": "application/json" });
     const abort = new AbortController();
     const send = (stream = false, signal?: AbortSignal) => handleResponses(new Request("http://localhost/v1/responses", { method: "POST", signal,
-      headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "openai/gpt-6-luna", input: "ping", stream }),
+      headers: trialHeaders, body: JSON.stringify({ model: "openai/gpt-6-luna", input: "ping", stream }),
     }), cfg, { model: "", provider: "" });
     const release = acquireOwnedSpendHome();
     try {
@@ -407,6 +493,7 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
       else if (ending === "cancel") await response.body?.cancel();
       else await response.text();
       expect(models).toEqual(["gpt-reserve"]);
+      expect(getThreadAffinity(codexPoolAffinityKey(trialHeaders)!, "reserve")).toBeUndefined();
       const interval = ending === "quota" ? 900_000 : 300_000;
       now += interval - 1;
       expect((await send()).status).toBe(200);
@@ -415,7 +502,7 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
       expect(models).toEqual(["gpt-reserve", "gpt-6-luna", "gpt-reserve"]);
     } finally { release(); }
   });
-  test("an unsent uploaded-file refusal releases its Reserve trial without host admission", async () => {
+  test("a file turn uses the recorded issuer without affinity and refuses when the issuer is unavailable", async () => {
     const cfg = config(); cfg.providers.openai = { ...base, codexAccountMode: "pool" };
     ordinary(A, 40); noReserve(B);
     const models: string[] = [];
@@ -434,12 +521,13 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     try {
       expect((await send()).status).toBe(200);
       setAccountQuotaFromParsed(B, { customWindows: [] });
-      const refusal = await send([{ role: "user", content: [{ type: "input_file", file_id: "file_a" }] }]);
-      expect(refusal.status).toBe(400);
-      expect(models).toEqual(["gpt-6-luna"]);
-      now += 300_000;
-      expect((await send()).status).toBe(200);
-      expect(models).toEqual(["gpt-6-luna", "gpt-reserve"]);
+      const file = [{ role: "user", content: [{ type: "input_file", file_id: "file_a" }] }];
+      const key = codexPoolAffinityKey(new Headers({ "session-id": "files", "thread-id": "files" }))!;
+      deleteThreadAffinity(key, "shared");
+      expect((await send(file)).status).toBe(200);
+      cfg.pausedCodexAccountIds = [A];
+      expect((await send(file)).status).toBeGreaterThanOrEqual(400);
+      expect(models).toEqual(["gpt-6-luna", "gpt-6-luna"]);
     } finally { release(); }
   });
   test("a stale included-owner binding does not suppress Reserve", () => {

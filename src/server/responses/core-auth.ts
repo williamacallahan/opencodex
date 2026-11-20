@@ -46,24 +46,10 @@ import { CODEX_POOL_REFRESH_INCOMPLETE_LOG_REASON } from "../../codex/pool-refre
 import { codexAuthContextLogLabel } from "../../codex/account-label";
 import { forceRefreshMainAccountToken, mainAccountTokenQuotaWriter } from "../../codex/main-account";
 import { rebindPoolCreditPolicy } from "../../codex/pool-credit-policy";
-import { safeCallerSessionId } from "../caller-session-identity";
 import { copyConfiguredClientHeaders, copyResponsesClientMetadata } from "../../adapters/openai-responses/transport";
 import { AgentAssertionUnsupportedError, agentAssertionUnsupportedResponse, authorizationCredential, carryAgentAssertionForCallerBearer, hasAgentAssertionAuthorization } from "../../lib/authorization-scheme";
 
-/** Normalize caller aliases only on native egress; preserve ingress and fallback identity. */
-export function withClaudeNativeSession(headers: Headers, provider: OcxProviderConfig, sessionId?: string): Headers {
-  // Empty values count as absent, matching materializeCodexUpstreamAuth, so first attempts and
-  // retries rebuilt from caller headers pick the same identity.
-  if (!isCanonicalOpenAiForwardProvider(provider) || headers.get("session_id")) return headers;
-  const alias = ["session-id", "thread-id"].find(name => headers.get(name));
-  const nativeSession = alias ? safeCallerSessionId(headers.get(alias)) : sessionId;
-  // A non-empty invalid alias suppresses weaker metadata identity.
-  if (!nativeSession) return headers;
-  const forwarded = new Headers(headers);
-  forwarded.set("session_id", nativeSession);
-  return forwarded;
-}
-
+export { withClaudeNativeSession } from "../../adapters/openai-responses/transport";
 
 export type ResponsesAuthResolution =
   | { ok: true; authCtx: CodexAuthContext; headers: Headers; callerAuthHeaders: Headers; substituteMainCredential: boolean }
@@ -71,7 +57,7 @@ export type ResponsesAuthResolution =
 
 
 export type CodexCredentialOwnershipOptions = Pick<HandleResponsesOptions,
-  "admission" | "callerDirectAuth" | "stripClaudeMainAuthForNoncanonicalForward" | "trustedClaudeMainAuth">;
+  "admission" | "callerDirectAuth" | "stripClaudeMainAuthForNoncanonicalForward" | "trustedClaudeMainAuth" | "claudeCodexWire">;
 
 /**
  * Restore the provider's permitted caller metadata onto a header set rebuilt from a credential

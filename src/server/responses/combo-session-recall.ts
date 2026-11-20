@@ -1,174 +1,97 @@
-/** Process-local recall of the last completed combo response on an explicit session lane. */
+import { createHash } from "node:crypto";
 import { getCombo, targetKey } from "../../combos/types";
+import { CODEX_THREAD_AFFINITY_IDLE_TTL_MS } from "../../codex/routing/thread-affinity";
 import { captureConfigGeneration, type GenerationContext } from "../../lib/state-store-sweeper";
 import type { OcxConfig, OcxComboTarget } from "../../types";
 
-interface ComboRecallEntry {
+const COMBO_PIN_LIMIT = 2048;
+type ComboPin = Pick<OcxComboTarget, "provider" | "model"> & {
+  lane: string;
   comboId: string;
-  target: Pick<OcxComboTarget, "provider" | "model">;
-  responseModel: string;
+  responseDigest: string;
   at: number;
-  /** UTF-8 size of `responseModel`, the only client-influenced field of unbounded length. */
-  bytes: number;
-}
-
-const RECALL_CAPACITY = 256;
-const RECALL_TTL_MS = 30 * 60 * 1000;
-/**
- * A model id is provider-reported and arrives on the response, so nothing upstream of here
- * bounds its length. Lane keys are already SHA-256 digests, so the model string is the only
- * field that can grow, and 256 lanes alone do not bound the bytes they hold.
- */
-const RECALL_MODEL_BYTES_MAX = 1024;
-const RECALL_TOTAL_BYTES_MAX = 64 * 1024;
-const recall = new Map<string, ComboRecallEntry>();
-let recallBytes = 0;
+};
+type Owners = Pick<GenerationContext, "comboIds" | "comboTargets" | "providerNames">;
+const pins = new Map<string, ComboPin>();
+// A bare compaction selector has no combo id. Only the lane's last completion can claim it.
+const latest = new Map<string, ComboPin>();
 let lastReconciledGeneration = 0;
-let liveOwners: Pick<GenerationContext, "comboIds" | "comboTargets" | "providerNames"> | undefined;
+let liveOwners: Owners | undefined;
 
-/** Every removal path goes through here so the byte counter can never drift from the map. */
-function deleteEntry(lane: string): boolean {
-  const entry = recall.get(lane);
-  if (!entry) return false;
-  recall.delete(lane);
-  recallBytes -= entry.bytes;
-  return true;
+function pinKey(lane: string, comboId: string): string {
+  return JSON.stringify([lane, comboId]);
 }
-
-/**
- * UTF-8 size of a remembered model id, or null when it is too large to retain.
- *
- * The code-unit test runs first and is the part that matters: a UTF-8 encoding is never smaller
- * than the code-unit count, so an oversized string is rejected without encoding it, and the
- * bound cannot be defeated by paying the allocation it exists to prevent.
- */
-function boundedModelBytes(responseModel: string): number | null {
-  if (responseModel.length > RECALL_MODEL_BYTES_MAX) return null;
-  const bytes = Buffer.byteLength(responseModel, "utf8");
-  return bytes > RECALL_MODEL_BYTES_MAX ? null : bytes;
+function remove(key: string, pin: ComboPin): void {
+  pins.delete(key);
+  if (latest.get(pin.lane) === pin) latest.delete(pin.lane);
 }
-
-function ownsEntry(context: Pick<GenerationContext, "comboIds" | "comboTargets" | "providerNames">, entry: ComboRecallEntry): boolean {
-  return context.comboIds.has(entry.comboId)
-    && context.providerNames.has(entry.target.provider)
-    && context.comboTargets.has(`${entry.comboId}::${targetKey(entry.target)}`);
+function ownsPin(context: Owners, pin: ComboPin): boolean {
+  return context.comboIds.has(pin.comboId) && context.providerNames.has(pin.provider)
+    && context.comboTargets.has(`${pin.comboId}::${targetKey(pin)}`);
+}
+function expired(pin: ComboPin, now: number): boolean {
+  return pin.at > now || now - pin.at > CODEX_THREAD_AFFINITY_IDLE_TTL_MS;
+}
+/** Store only a fixed-size digest of the provider-reported response model, never its bytes. */
+function modelDigest(model: string): string | undefined {
+  if (model.length > 1024 || Buffer.byteLength(model) > 1024 || !model.trim()) return undefined;
+  return createHash("sha256").update(model).digest("hex");
 }
 
 export function rememberComboForLane(
-  lane: string | undefined,
-  comboId: string,
-  target: Pick<OcxComboTarget, "provider" | "model">,
-  responseModel: string,
-  writerGeneration: number,
+  lane: string | undefined, comboId: string, target: Pick<OcxComboTarget, "provider" | "model">,
+  responseModel: string, writerGeneration: number,
 ): void {
-  if (!lane || !comboId || !responseModel.trim()) return;
-  // Reject even a same-named recreated owner: its previous in-flight turn is obsolete.
-  if (writerGeneration < Math.max(lastReconciledGeneration, captureConfigGeneration())) return;
-  // An unretainable model id DECLINES the write; it must not clear the lane. Every other
-  // rejection above returns the same way, and clearing here would let a late completion erase
-  // a newer selection that this function has no ordering information to compare against.
-  const bytes = boundedModelBytes(responseModel);
-  if (bytes === null) return;
-  const entry = {
-    comboId,
-    target: { provider: target.provider, model: target.model },
-    responseModel,
-    at: Date.now(),
-    bytes,
-  };
-  if (liveOwners && !ownsEntry(liveOwners, entry)) return;
-  deleteEntry(lane);
-  recall.set(lane, entry);
-  recallBytes += bytes;
-  // Insertion order is recency order, because every write re-inserts its lane at the back.
-  // Evicting from the front therefore drops the least recently written lane, never this one:
-  // a single entry is capped well below the aggregate budget, so it always fits.
-  while (recall.size > RECALL_CAPACITY || recallBytes > RECALL_TOTAL_BYTES_MAX) {
-    const oldest = recall.keys().next().value;
-    if (oldest === undefined || oldest === lane) break;
-    deleteEntry(oldest);
+  if (!lane || !comboId || writerGeneration < Math.max(lastReconciledGeneration, captureConfigGeneration())) return;
+  const responseDigest = modelDigest(responseModel);
+  if (!responseDigest) return;
+  const pin = { lane, comboId, provider: target.provider, model: target.model, responseDigest, at: Date.now() };
+  if (liveOwners && !ownsPin(liveOwners, pin)) return;
+  const key = pinKey(lane, comboId);
+  pins.delete(key);
+  pins.set(key, pin);
+  latest.set(lane, pin);
+  if (pins.size > COMBO_PIN_LIMIT) {
+    const oldest = pins.entries().next().value;
+    if (oldest) remove(...oldest);
   }
 }
 
-export function recallComboForLane(
-  config: OcxConfig,
-  lane: string | undefined,
-  model: string,
-): string | undefined {
+function livePin(config: OcxConfig, pin: ComboPin | undefined): ComboPin | undefined {
+  if (!pin) return undefined;
+  const provider = config.providers[pin.provider];
+  if (!expired(pin, Date.now()) && Object.hasOwn(config.providers, pin.provider) && provider && !provider.disabled
+    && getCombo(config, pin.comboId)?.targets.some(target => targetKey(target) === targetKey(pin))) return pin;
+  remove(pinKey(pin.lane, pin.comboId), pin);
+  return undefined;
+}
+export function recallComboForLane(config: OcxConfig, lane: string | undefined, model: string): string | undefined {
   if (!lane || !model || model.includes("/")) return undefined;
-  const entry = recall.get(lane);
-  if (!entry) return undefined;
-  const combo = getCombo(config, entry.comboId);
-  const provider = config.providers[entry.target.provider];
-  if (Date.now() - entry.at >= RECALL_TTL_MS
-    || !Object.hasOwn(config.providers, entry.target.provider)
-    || !provider || provider.disabled === true
-    || !combo?.targets.some(target => targetKey(target) === targetKey(entry.target))) {
-    deleteEntry(lane);
-    return undefined;
-  }
-  return entry.responseModel === model ? entry.comboId : undefined;
+  const pin = livePin(config, latest.get(lane));
+  return pin && pin.responseDigest === modelDigest(model) ? pin.comboId : undefined;
 }
-
-/**
- * The concrete target that completed the lane's last turn for `comboId`, under the same
- * freshness and ownership rules as `recallComboForLane`. A lane answered by another combo, or
- * whose target left the combo or was disabled, recalls nothing.
- */
-export function recallComboTargetForLane(
-  config: OcxConfig,
-  lane: string | undefined,
-  comboId: string,
-): Pick<OcxComboTarget, "provider" | "model"> | undefined {
+export function recallComboTargetForLane(config: OcxConfig, lane: string | undefined, comboId: string): Pick<OcxComboTarget, "provider" | "model"> | undefined {
   if (!lane || !comboId) return undefined;
-  const entry = recall.get(lane);
-  if (!entry || entry.comboId !== comboId) return undefined;
-  const combo = getCombo(config, entry.comboId);
-  const provider = config.providers[entry.target.provider];
-  if (Date.now() - entry.at >= RECALL_TTL_MS
-    || !Object.hasOwn(config.providers, entry.target.provider)
-    || !provider || provider.disabled === true
-    || !combo?.targets.some(target => targetKey(target) === targetKey(entry.target))) {
-    deleteEntry(lane);
-    return undefined;
-  }
-  return { provider: entry.target.provider, model: entry.target.model };
+  const pin = livePin(config, pins.get(pinKey(lane, comboId)));
+  return pin && { provider: pin.provider, model: pin.model };
 }
-
-/**
- * Periodic expiry. Without it a lane that is never read again and never touched by a config
- * reconciliation holds its entry for the life of the process: the existing TTL is only
- * evaluated on read or on generation change.
- */
 export function sweepExpiredComboRecall(now: number): number {
-  let removed = 0;
-  for (const [lane, entry] of recall) {
-    if (now - entry.at >= RECALL_TTL_MS && deleteEntry(lane)) removed += 1;
-  }
-  return removed;
+  const before = pins.size;
+  for (const [key, pin] of pins) if (expired(pin, now)) remove(key, pin);
+  return before - pins.size;
 }
-
 export function reconcileComboRecall(context: GenerationContext): number {
   if (context.generation <= lastReconciledGeneration) return 0;
   lastReconciledGeneration = context.generation;
-  liveOwners = {
-    comboIds: new Set(context.comboIds),
-    comboTargets: new Set(context.comboTargets),
-    providerNames: new Set(context.providerNames),
-  };
-  let removed = 0;
-  for (const [lane, entry] of recall) {
-    if (!ownsEntry(context, entry) || Date.now() - entry.at >= RECALL_TTL_MS) {
-      if (deleteEntry(lane)) removed += 1;
-    }
-  }
-  return removed;
+  liveOwners = context;
+  const before = pins.size;
+  const now = Date.now();
+  for (const [key, pin] of pins) if (!ownsPin(context, pin) || expired(pin, now)) remove(key, pin);
+  return before - pins.size;
 }
-
-/** Test-only reset, alongside the combo rotation/cooldown resets. */
 export function clearComboRecallForTests(): void {
-  recall.clear();
-  recallBytes = 0;
+  pins.clear();
+  latest.clear();
   lastReconciledGeneration = 0;
   liveOwners = undefined;
 }

@@ -632,7 +632,11 @@ test("subagent preview evaluates affinity separately for Reserve candidates", as
   const auth = await import("../../src/codex/auth-context");
   const { bindThreadAffinity } = await import("../../src/codex/routing/thread-affinity");
   const config = providerConfig({ codexDesktopAuthless: true, codexPool: { requestOwnedAffinity: true }, subagentModelFallback: ["gpt-reserve", "gpt-5.5"] });
-  const headers = codexHeaders("caller-account", { "session-id": "preview-session", "thread-id": "preview-thread" });
+  const { completeClaudeBridgePoolIdentity } = await import("../../src/server/claude-bridge-pool-session");
+  const admission = { kind: "loopback", source: "loopback" } as const;
+  const wireHeaders = codexHeaders("caller-account", { "session-id": "preview-session", "thread-id": "preview-thread" });
+  // Seed the same admitted conversation the HTTP request will preview, not a binding under raw wire IDs.
+  const headers = completeClaudeBridgePoolIdentity(wireHeaders, { admission });
   config.pausedCodexAccountIds = [MAIN_CODEX_ACCOUNT_ID];
   const authOptions = { requestScopedMainCredential: true, modelId: PREFERRED_MODEL, primeCodexPoolQuotas: async () => {} };
   const first = await auth.resolveCodexAuthContext(headers, config, "pool", authOptions);
@@ -656,7 +660,7 @@ test("subagent preview evaluates affinity separately for Reserve candidates", as
   globalThis.fetch = (async () => completedCanonicalSse()) as typeof fetch;
   try {
     const logCtx: RequestLogContext = { model: "", provider: "" };
-    const response = await postSpawn(config, { admission: { kind: "loopback", source: "loopback" } }, headers, readableInput(), PREFERRED_MODEL, logCtx);
+    const response = await postSpawn(config, { admission }, wireHeaders, readableInput(), PREFERRED_MODEL, logCtx);
     expect(response.status).toBe(200);
     expect(observed.some(row => row.model === "gpt-reserve" && row.key === null)).toBe(true);
     expect(observed.some(row => row.model === "gpt-5.5" && row.key === key && row.account === "pool-a")).toBe(true);

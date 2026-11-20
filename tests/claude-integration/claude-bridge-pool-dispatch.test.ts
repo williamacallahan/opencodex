@@ -5,13 +5,15 @@ import { join } from "node:path";
 import { MAIN_CODEX_ACCOUNT_ID } from "../../src/codex/main-account";
 import { clearMainAccountInfoCache } from "../../src/codex/auth-api";
 import { fakeChatGptJwt } from "../helpers/fake-chatgpt-jwt";
-import { clearCodexThreadLineageForTests, recordCodexThreadLineage, resolveCodexThreadLineage } from "../../src/codex/lineage";
+import { clearCodexThreadLineageForTests } from "../../src/codex/lineage";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { clearThreadAccountMap, clearCodexUpstreamHealth } from "../../src/codex/routing";
 import { codexPoolAffinityKey } from "../../src/codex/auth-context";
 import * as authContext from "../../src/codex/auth-context";
 import { clearConversationStateIssuerMap, peekConversationStateIssuer } from "../../src/codex/routing/thread-affinity";
 import { clearAccountQuota, updateAccountQuota } from "../../src/codex/auth-api";
+import { withCallerSessionIdentity } from "../../src/server/caller-session-identity";
+import { handleResponses } from "../../src/server/responses/core";
 import { handleClaudeMessages } from "../../src/server/claude-messages";
 import { resolveClaudeBridgePoolSession } from "../../src/server/claude-bridge-pool-session";
 import { tryAdmitTurn } from "../../src/server/lifecycle";
@@ -35,12 +37,12 @@ const poolKey = (identity: string) => codexPoolAffinityKey(new Headers({ "sessio
 const account = (wire: Headers | undefined) => wire?.get("chatgpt-account-id");
 /** The pool identity is selection-only: no attempt may carry a synthesized pair upstream. */
 function expectNoSynthesizedPair(wire: Headers) {
-  expect(wire.has("session-id")).toBe(false);
-  expect(wire.has("thread-id")).toBe(false);
+  // The public pair may travel; the private selection HMAC must not.
   for (const name of ["session_id", "session-id", "thread-id"]) expect(wire.get(name) ?? "").not.toMatch(/^[0-9a-f]{64}$/);
 }
 let home: string, previous: string | undefined, isolated: IsolatedCodexHome, release: () => void;
 let wires: Headers[];
+let cacheKeys: Array<string | undefined>;
 let cfg: OcxConfig;
 
 beforeEach(() => {
@@ -60,8 +62,11 @@ beforeEach(() => {
     providers: { openai: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward", codexAccountMode: "pool", upstreamWebsocket: false } },
   } as unknown as OcxConfig;
   wires = [];
+  cacheKeys = [];
   globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
     wires.push(new Headers(init?.headers));
+    const payload: { prompt_cache_key?: string } = JSON.parse(String(init?.body));
+    cacheKeys.push(payload.prompt_cache_key);
     return Response.json({ id: "resp_fixture", object: "response", status: "completed", output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } });
   }) as typeof fetch;
 });
@@ -94,25 +99,51 @@ test("pool binds multiple turns and separates sessions while preserving the nati
   for (const wire of wires) expectNoSynthesizedPair(wire);
 });
 
-test("a synthesized identity with a recorded parent follows the parent's account", async () => {
-  const child = bridgeIdentity(local, {}, metadataUuid);
-  // A complete caller pair keeps dev behavior, so this binds the root to the first round-robin pick.
-  await turn(undefined, local, { "session-id": "fixture-root", "thread-id": "fixture-root" });
-  const childHeaders = new Headers({ "session-id": child, "thread-id": child, "x-codex-parent-thread-id": "fixture-root" });
-  recordCodexThreadLineage(childHeaders);
-  const rootPair = new Headers({ "session-id": child, "thread-id": child });
-  expect(resolveCodexThreadLineage(rootPair)?.parentThreadId).toBe("fixture-root");
-  await turn("user_test_account__session_conversation-native");
-  await turn("user_test_account__session_conversation-native");
-  // Control: an unrelated cold session lands on the other account, so the child's placement
-  // above came from the recorded parent rather than from a cold pick.
-  await turn("user_test_account__session_unrelated");
-  const rootAccount = wires[0]!.get("chatgpt-account-id");
-  expect(rootAccount).toBeTruthy();
-  expect(wires[1]!.get("chatgpt-account-id")).toBe(rootAccount);
-  expect(wires[2]!.get("chatgpt-account-id")).toBe(rootAccount);
-  expect(wires[3]!.get("chatgpt-account-id")).not.toBe(rootAccount);
-  expect(resolveCodexThreadLineage(rootPair)?.parentThreadId).toBe("fixture-root");
+test.each(["session_id", "session-id", "x-session-id", "thread-id", "x-codex-parent-thread-id"])("Responses %s binds one round-robin account per principal", async name => {
+  for (const id of ["a", "a", "b", "b", "a"]) {
+    const admission = principal(id);
+    const lease = tryAdmitTurn();
+    expect(lease).not.toBeNull();
+    try {
+      const req = withCallerSessionIdentity(new Request("http://localhost/v1/responses", { method: "POST",
+        headers: { "content-type": "application/json", [name]: "repeat" },
+        body: JSON.stringify({ model: "openai/gpt-5.4", input: "ping", stream: false }),
+      }), admission);
+      const result = await handleResponses(req, cfg, { model: "", provider: "" }, { admission, turnAdmissionLease: lease!, inboundWire: "responses" });
+      expect(result.status, await result.text()).toBe(200);
+    } finally { lease?.release(); }
+  }
+  const [a, b, c, d, e] = wires.map(account);
+  expect(a).toBeTruthy(); expect(c).toBeTruthy(); expect(a).not.toBe(c);
+  expect([b, d, e]).toEqual([a, c, a]);
+});
+
+test("switching session aliases preserves the same physical native and relay identity", async () => {
+  cfg.providers.relay = { adapter: "openai-responses", authMode: "key", apiKey: "fixture-relay-key", baseUrl: "https://relay.example.test/backend-api/codex", models: ["m"] };
+  const admission = principal("alias-switch");
+  for (const model of ["openai/gpt-5.4", "relay/m"]) {
+    for (const name of ["x-session-id", "session-id", "session_id"]) {
+      const lease = tryAdmitTurn();
+      expect(lease).not.toBeNull();
+      try {
+        const request = withCallerSessionIdentity(new Request("http://localhost/v1/responses", {
+          method: "POST", headers: { "content-type": "application/json", [name]: "same-session" },
+          body: JSON.stringify({ model, input: "continue", stream: false }),
+        }), admission);
+        const response = await handleResponses(request, cfg, { model: "", provider: "" }, { admission, inboundWire: "responses", turnAdmissionLease: lease! });
+        expect(response.status, await response.text()).toBe(200);
+      } finally { lease?.release(); }
+    }
+  }
+  expect(wires).toHaveLength(6);
+  expect(account(wires[0])).toBeTruthy();
+  expect(wires[3]?.get("authorization")).toBe("Bearer fixture-relay-key");
+  const session = wires[0]?.get("session_id");
+  expect(session).toBeTruthy();
+  expect(session).not.toBe("same-session");
+  for (const wire of wires) {
+    expect([wire.get("session_id"), wire.get("session-id"), wire.get("thread-id")]).toEqual([session, session, session]);
+  }
 });
 
 test("remote principals with identical metadata pin separately and keep the dev wire", async () => {
@@ -121,8 +152,9 @@ test("remote principals with identical metadata pin separately and keep the dev 
   expect(account(wires[2])).not.toBe(account(wires[0]));
   expect(account(wires[3])).toBe(account(wires[2]));
   expect(account(wires[4])).toBe(account(wires[0]));
+  expect(wires[0]!.get("session_id")).not.toBe(wires[2]!.get("session_id"));
   for (const wire of wires) {
-    expect(wire.get("session_id")).toBe(metadataUuid);
+    expect(wire.get("session_id")).not.toBe(metadataUuid);
     expectNoSynthesizedPair(wire);
   }
 });
@@ -134,7 +166,7 @@ test("remote principals sending the same session alias do not share a pool bindi
   expect(account(wires[3])).toBe(account(wires[2]));
   expect(account(wires[4])).toBe(account(wires[0]));
   for (const wire of wires) {
-    expect(wire.get("session_id")).toBe("fixture-alias");
+    expect(wire.get("session_id")).not.toBe("fixture-alias");
     expectNoSynthesizedPair(wire);
   }
 });
@@ -163,22 +195,82 @@ test("a complete caller pair built from public inputs cannot address a synthesiz
   expect(peekConversationStateIssuer(poolKey(victim))).toBe(victimAccount);
 });
 
-test("caller session-id aliases and complete pairs reach the wire exactly as sent", async () => {
-  await turn(undefined, local, { "session-id": "fixture-hyphen" });
-  expect(wires[0]!.get("session-id")).toBe("fixture-hyphen");
-  expect(wires[0]!.get("session_id")).toBe("fixture-hyphen");
-  expect(wires[0]!.has("thread-id")).toBe(false);
-  await turn(undefined, principal("a"), { "session-id": "fixture-pair", "thread-id": "fixture-pair" });
-  expect(wires[1]!.get("session-id")).toBe("fixture-pair");
-  expect(wires[1]!.get("thread-id")).toBe("fixture-pair");
+test("translated session and thread aliases are names, not verified upstream tuples", async () => {
+  for (const admission of [local, principal("a")]) await turn(undefined, admission, { "session-id": "fixture-pair", "thread-id": "fixture-thread" });
+  expect(wires[0]!.get("session_id")).not.toBe(wires[1]!.get("session_id"));
+  for (const headers of wires) {
+    expect(headers.get("session-id")).toBe(headers.get("session_id"));
+    expect(headers.get("session-id")).not.toBe("fixture-pair");
+    expect(headers.get("thread-id")).not.toBe("fixture-thread");
+  }
 });
 
-test("spawn markers do not synthesize thread identity", async () => {
-  for (const marker of [{ "x-openai-subagent": "collab_spawn" }, { "x-codex-turn-metadata": '{"subagent_kind":"thread_spawn"}' }]) {
-    await turn("user_test_account__session_conversation-native", local, marker);
+test("conflicting Claude session aliases cannot fall back to metadata on a native or relay send", async () => {
+  cfg.providers.relay = { adapter: "openai-responses", authMode: "key", apiKey: "fixture-relay", baseUrl: "https://relay.example.test/backend-api/codex", models: ["m"] };
+  cfg.providers.other = { ...cfg.providers.relay, baseUrl: "https://other.example.test/v1" };
+  const aliases = { session_id: "session-one", "session-id": "session-two" };
+  for (const model of ["openai/gpt-5.4", "relay/m", "other/m"]) {
+    for (const caller of ["first", "second"]) await turn("shared-metadata-session", principal(caller), aliases, model);
   }
-  expect(wires).toHaveLength(2);
-  for (const wire of wires) expect(wire.has("thread-id")).toBe(false);
+  expect(wires).toHaveLength(6);
+  for (const wire of wires.slice(0, 4)) {
+    for (const name of ["session_id", "session-id", "thread-id", "x-codex-parent-thread-id", "x-session-id"]) expect(wire.has(name)).toBe(false);
+  }
+  expect(cacheKeys.slice(0, 4)).toEqual([undefined, undefined, undefined, undefined]);
+  expect(cacheKeys[4]).toBeTruthy();
+  expect(cacheKeys[5]).toBe(cacheKeys[4]);
+});
+
+test("translated spawns without a thread send no raw or synthesized identity to native or relay", async () => {
+  cfg.providers.relay = { adapter: "openai-responses", authMode: "key", apiKey: "fixture-relay", baseUrl: "https://relay.example.test/backend-api/codex", models: ["m"] };
+  for (const model of ["openai/gpt-5.4", "relay/m"]) {
+    for (const marker of [{ "x-openai-subagent": "collab_spawn" }, { "x-codex-turn-metadata": '{"subagent_kind":"thread_spawn"}' }]) {
+      for (const caller of ["first", "second"]) {
+        await turn(undefined, principal(caller), { ...marker, "session-id": "same-unscoped-session" }, model);
+        await turn(undefined, principal(caller), { ...marker, "x-codex-parent-thread-id": "parent-without-child" }, model);
+      }
+    }
+  }
+  expect(wires).toHaveLength(16);
+  for (const wire of wires) for (const name of ["session_id", "session-id", "x-session-id", "thread-id", "x-codex-parent-thread-id"]) {
+    expect(wire.has(name)).toBe(false);
+  }
+});
+
+test("the translated main loop and sibling carry identical identity and cache keys through native and relay auth", async () => {
+  cfg.providers.relay = { adapter: "openai-responses", authMode: "key", apiKey: "relay-fixture-key", baseUrl: "https://relay.example.test/backend-api/codex", models: ["m"] };
+  for (const agent of [undefined, "sibling"]) {
+    const headers: Record<string, string> = { "x-claude-code-session-id": "header-only-session" };
+    if (agent) headers["x-claude-code-agent-id"] = agent;
+    await turn(undefined, local, headers);
+    await turn(undefined, local, headers, "relay/m");
+    const native = wires.at(-2)!;
+    const relay = wires.at(-1)!;
+    for (const name of ["session_id", "session-id", "thread-id"]) {
+      expect(native.get(name)).toBeTruthy();
+      expect(relay.get(name)).toBe(native.get(name));
+    }
+    expect(cacheKeys.at(-2)).toBeTruthy();
+    expect(cacheKeys.at(-1)).toBe(cacheKeys.at(-2));
+    expect(relay.has("chatgpt-account-id")).toBe(false);
+    expect(relay.get("authorization")).toBe("Bearer relay-fixture-key");
+  }
+  expect(wires[0]!.get("session_id")).toBe(wires[2]!.get("session_id"));
+  expect(wires[0]!.get("thread-id")).not.toBe(wires[2]!.get("thread-id"));
+  expect(cacheKeys[0]).not.toBe(cacheKeys[2]);
+});
+
+test("a shared relay separates principals, sessions and actual agents despite a repeated explicit thread", async () => {
+  cfg.providers.relay = { adapter: "openai-responses", baseUrl: "https://relay.example.test/backend-api/codex", apiKey: "relay-key", models: ["m"] };
+  for (const [caller, session, agent] of [["a", "one", "sibling"], ["b", "one", "sibling"], ["a", "two", "sibling"], ["a", "one", "main"], ["a", "one", "sibling"]] as const) {
+    await turn(undefined, principal(caller), { "x-claude-code-session-id": session, "thread-id": "repeated", ...(agent === "main" ? {} : { "x-claude-code-agent-id": agent }) }, "relay/m");
+  }
+  const sessions = wires.map(h => h.get("session_id"));
+  const threads = wires.map(h => h.get("thread-id"));
+  expect(new Set(sessions.slice(0, 3)).size).toBe(3);
+  expect(new Set(threads.slice(0, 4)).size).toBe(4);
+  expect(new Set(cacheKeys.slice(0, 4)).size).toBe(4);
+  expect([sessions[4], threads[4], cacheKeys[4]]).toEqual([sessions[0], threads[0], cacheKeys[0]]);
 });
 
 test("API-key Responses routes do not receive pool identity", async () => {
@@ -216,8 +308,52 @@ for (const mode of ["stored", "main"] as const) for (const variant of ["local", 
   for (const name of ["session_id", "session-id", "thread-id"]) {
     expect(wires[1]!.get(name)).toBe(wires[0]!.get(name));
   }
-  expect(wires[0]!.get("session_id")).toBe(variant === "header" ? null : metadataUuid);
+  if (variant !== "local") expect(wires[0]!.get("session_id")).toBeTruthy();
+  else expect(wires[0]!.get("session_id")).toBe(metadataUuid);
   for (const wire of wires) expectNoSynthesizedPair(wire);
+});
+
+test("native quota retry retains the admitted wire identity and keeps identical callers apart", async () => {
+  cfg.codexAccounts?.push({ id: "fixture-c", label: "c" });
+  saveCodexAccountCredential("fixture-c", { accessToken: "test-access-c", refreshToken: "test-refresh-c", expiresAt: Date.now() + 3_600_000, chatgptAccountId: "account-c" });
+  updateAccountQuota("fixture-c", 10, 10);
+  const identities: (string | null)[][] = [];
+  globalThis.fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init);
+    if (!request.url.endsWith("/responses")) return Response.json({ rate_limit: { primary_window: { used_percent: 10 } } });
+    const body = await request.json();
+    wires.push(request.headers);
+    identities.push([request.headers.get("session_id"), request.headers.get("session-id"), request.headers.get("thread-id"), body.prompt_cache_key]);
+    return wires.length % 2 ? Response.json({ error: { message: "rate limited" } }, { status: 429 })
+      : Response.json({ id: "resp_alternate", object: "response", status: "completed", output: [] });
+  }, { preconnect() {} });
+  for (const caller of ["one", "two"]) {
+    const admission = principal(caller);
+    const lease = tryAdmitTurn();
+    expect(lease).not.toBeNull();
+    try {
+      const req = withCallerSessionIdentity(new Request("http://localhost/v1/responses", { method: "POST",
+        headers: { "content-type": "application/json", "x-session-id": "same-session", "thread-id": "same-thread" },
+        body: JSON.stringify({ model: "openai/gpt-5.4", input: "ping", stream: false, prompt_cache_key: "same-prefix" }),
+      }), admission);
+      const result = await handleResponses(req, cfg, { model: "", provider: "" }, { admission, inboundWire: "responses", turnAdmissionLease: lease! });
+      expect(result.status, await result.text()).toBe(200);
+    } finally { lease?.release(); }
+  }
+  expect(wires).toHaveLength(4);
+  for (const first of [0, 2]) {
+    expect(account(wires[first])).toBeTruthy();
+    expect(account(wires[first + 1])).toBeTruthy();
+    expect(account(wires[first + 1])).not.toBe(account(wires[first]));
+    expect(identities[first + 1]).toEqual(identities[first]);
+  }
+  for (const [i, raw] of ["same-session", "same-session", "same-thread", "same-prefix"].entries()) {
+    expect(identities[0]![i]).toBeTruthy();
+    expect(identities[2]![i]).toBeTruthy();
+    expect(identities[0]![i]).not.toBe(raw);
+    expect(identities[2]![i]).not.toBe(raw);
+    expect(identities[2]![i]).not.toBe(identities[0]![i]);
+  }
 });
 
 for (const variant of ["local-metadata", "remote-alias"] as const) test(`alternate-account failover binds ${variant} under the initial selection key`, async () => {

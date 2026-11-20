@@ -36,7 +36,7 @@ import {
 } from "../../src/codex/routing";
 import { scopedHealthFor } from "../../src/codex/routing/health-store";
 import { handleResponses, handleResponsesCompact } from "../../src/server/responses";
-import { clearCompactHandoffRoutesForTests } from "../../src/server/responses/compact";
+import { clearCompactHandoffRoutesForTests } from "../../src/server/responses/compact-handoff-route";
 import {
   REQUEST_PACING_MAX_QUEUE_DEPTH,
   resetProviderRequestPacingForTest,

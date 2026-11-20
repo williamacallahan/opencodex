@@ -24,6 +24,7 @@ import { clearKeyCooldowns } from "../../src/providers/key-failover";
 import { listWorkflowBudgetEvents, resetWorkflowBudgetsForTest, workflowBudgetSnapshot } from "../../src/lib/workflow-budget";
 import { clearComboSelectionState, clearComboTargetCooldowns } from "../../src/combos";
 import * as proxyEnv from "../../src/lib/proxy-env";
+import { clearComboRecallForTests } from "../../src/server/responses/combo-session-recall";
 import { consumeComboFailure } from "../../src/server/responses/core-combo-failure";
 import { workflowRefusalResponse } from "../../src/server/workflow-refusal";
 
@@ -70,7 +71,7 @@ afterEach(async () => {
   resetProviderRequestPacingForTest();
   clearKeyCooldowns();
   resetWorkflowBudgetsForTest();
-  clearComboSelectionState(); clearComboTargetCooldowns();
+  clearComboSelectionState(); clearComboTargetCooldowns(); clearComboRecallForTests();
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
   isolatedCodexHome?.restore();

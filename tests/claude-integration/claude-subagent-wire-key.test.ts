@@ -18,11 +18,10 @@ const originalFetch = globalThis.fetch;
 const userId = "user_abc123_account__session_11111111-2222-3333-4444-555555555555";
 // Independent SHA-256 vectors (python hashlib, not a production helper): the main loop's key is
 // sha256(user_id)[:32]; a subagent's is sha256(sha256(user_id) + ":agent:" + agentId)[:32]. The
-// session_id the upstream sees is that key laid out as a version-4 uuid.
+// session stays constant across the family; thread-id distinguishes the actual agent.
 const MAIN_KEY = "ded3519449f6b3132a5908b61cafe21f";
 const MAIN_SESSION_ID = "ded35194-49f6-4313-8a59-08b61cafe21f";
 const SUBAGENT_KEYS = { a1b2c3d4e5f60718: "40dfe2ab195caa9b78ba1a0f8412bf3c", f0e1d2c3b4a59687: "c297a4f3a042b973a147c1e60b1a153d" } as const;
-const SUBAGENT_SESSION_IDS = { a1b2c3d4e5f60718: "40dfe2ab-195c-4a9b-88ba-1a0f8412bf3c", f0e1d2c3b4a59687: "c297a4f3-a042-4973-8147-c1e60b1a153d" } as const;
 let home: string, previous: string | undefined, isolated: IsolatedCodexHome, release: () => void;
 let wires: Array<{ headers: Headers; key: unknown }>;
 
@@ -65,13 +64,17 @@ async function turn(agentId?: string): Promise<void> {
   } finally { lease?.release(); }
 }
 
-test("the upstream sees fixed per-agent prompt_cache_key and session_id values; the main loop keeps the session's", async () => {
+test("the upstream sees fixed per-agent cache keys and distinct threads under the same wire session", async () => {
   await turn();
   await turn("a1b2c3d4e5f60718");
   await turn("f0e1d2c3b4a59687");
   expect(wires.map(wire => [wire.key, wire.headers.get("session_id")])).toEqual([
     [MAIN_KEY, MAIN_SESSION_ID],
-    [SUBAGENT_KEYS.a1b2c3d4e5f60718, SUBAGENT_SESSION_IDS.a1b2c3d4e5f60718],
-    [SUBAGENT_KEYS.f0e1d2c3b4a59687, SUBAGENT_SESSION_IDS.f0e1d2c3b4a59687],
+    [SUBAGENT_KEYS.a1b2c3d4e5f60718, MAIN_SESSION_ID],
+    [SUBAGENT_KEYS.f0e1d2c3b4a59687, MAIN_SESSION_ID],
   ]);
+  const threads = wires.map(wire => wire.headers.get("thread-id"));
+  expect(threads[0]).toBe(MAIN_SESSION_ID);
+  expect(threads.every(Boolean)).toBe(true);
+  expect(new Set(threads).size).toBe(3);
 });

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { applyCompactionRoutingOverride } from "../../src/server/responses/compaction-routing";
 import { handleResponses, handleResponsesCompact } from "../../src/server/responses";
-import { clearCompactHandoffRoutesForTests } from "../../src/server/responses/compact";
+import { clearCompactHandoffRoutesForTests } from "../../src/server/responses/compact-handoff-route";
 import { decodeCompactionSummary, SUMMARY_PREFIX } from "../../src/responses/compaction";
 import { getDefaultConfig, validateConfigCandidate } from "../../src/config";
 import { routeCompactionModel } from "../../src/router";
@@ -9,7 +9,7 @@ import { configSchema } from "../../src/config/schema/config-schema";
 import { warnDegradedCompactionRouting } from "../../src/config/load-degrade";
 import { clearComboSelectionState, clearComboTargetCooldowns } from "../../src/combos";
 import { clearComboRecallForTests, recallComboForLane, rememberComboForLane } from "../../src/server/responses/combo-session-recall";
-import { sessionLaneIdFromRequest } from "../../src/server/request-log-conversation";
+import { admittedLane, loopbackAdmission } from "../helpers/combo-recall-admission";
 import { captureConfigGeneration } from "../../src/lib/state-store-sweeper";
 import { fakeChatGptJwt } from "../helpers/fake-chatgpt-jwt";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
@@ -607,7 +607,7 @@ describe("manual compaction reuses existing handlers", () => {
     };
     settings.compactionRouting = { model: "combo/compact", reasoningEffort: "low" };
     const req = request(body(version !== "v1"), "manual");
-    const lane = sessionLaneIdFromRequest(req.headers);
+    const lane = admittedLane(req.headers);
     rememberComboForLane(lane, "normal", { provider: "gateway", model: "normal" }, "normal", captureConfigGeneration());
     const calls: string[] = [];
     globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
@@ -619,8 +619,9 @@ describe("manual compaction reuses existing handlers", () => {
       } }, { status: 400 });
       return upstreamCompletion(JSON.parse(String(init?.body)));
     }) as typeof fetch;
-    const handler = version === "v1" ? handleResponsesCompact : handleResponses;
-    const response = await handler(req, settings, { model: "", provider: "" });
+    const log = { model: "", provider: "" };
+    const response = version === "v1" ? await handleResponsesCompact(req, settings, log, undefined, loopbackAdmission)
+      : await handleResponses(req, settings, log, { admission: loopbackAdmission });
     expect(response.status).toBe(200);
     await response.text();
     expect(calls).toEqual(["unavailable", "cheap"]);
@@ -636,7 +637,7 @@ describe("manual compaction reuses existing handlers", () => {
     settings.defaultProvider = "openai-apikey";
     settings.compactionRouting = { model: "openai-apikey/gpt-5.6-luna", reasoningEffort: "low" };
     const req = request({ ...body(false), model: "normal" }, "manual", "responses/compact");
-    const lane = sessionLaneIdFromRequest(req.headers);
+    const lane = admittedLane(req.headers);
     rememberComboForLane(lane, "fast", { provider: "gateway", model: "normal" }, "normal", captureConfigGeneration());
     const calls: string[] = [];
     globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
@@ -644,7 +645,7 @@ describe("manual compaction reuses existing handlers", () => {
       if (String(url).endsWith("/compact")) return Response.json({ output: [{ type: "compaction", encrypted_content: "native-ciphertext" }] });
       return upstreamCompletion(JSON.parse(String(init?.body)));
     }) as typeof fetch;
-    const response = await handleResponsesCompact(req, settings, { model: "", provider: "" });
+    const response = await handleResponsesCompact(req, settings, { model: "", provider: "" }, undefined, loopbackAdmission);
     expect(response.status).toBe(200);
     const text = await response.text();
     expect(text).not.toContain("native-ciphertext");

@@ -40,13 +40,13 @@ let relay: (request: Request, body: { model: string }) => Response | Promise<Res
 let native: (body: { model: string }) => Response | Promise<Response>;
 let metered: () => Response;
 
-function sse(model: string, frames: "ok" | "created-then-fail"): Response {
+function sse(model: string, frames: "ok" | "created-then-fail" | "created-then-quota"): Response {
   const created = { type: "response.created", response: { id: "resp_1", object: "response", status: "in_progress", model, output: [] } };
   const body = frames === "ok" ? [created,
     { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: "hi" },
     { type: "response.completed", response: { ...created.response, status: "completed", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
       output: [{ id: "msg_1", type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "hi", annotations: [] }] }] } }]
-    : [created, { type: "response.failed", response: { ...created.response, status: "failed", error: { code: "server_error", message: "boom" } } }];
+    : [created, { type: "response.failed", response: { ...created.response, status: "failed", error: frames === "created-then-quota" ? { code: "usage_limit_reached", message: "Limit reached" } : { code: "server_error", message: "boom" } } }];
   return new Response(body.map(frame => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
 }
 const reserveRefused = () => Response.json({ error: { code: "usage_limit_reached", message: "Limit reached" } }, { status: 429, headers: { "retry-after": "3600" } });
@@ -122,8 +122,8 @@ afterEach(async () => {
 });
 
 describe("combo Luna leg order: native Reserve, relay, native ordinary, metered", () => {
-  test("a Reserve refusal moves to the relay, and a relay pre-connect failure moves to native ordinary Luna", async () => {
-    seats(); native = body => body.model === "gpt-reserve" ? reserveRefused() : sse(body.model, "ok");
+  test.each([429, 402])("a Reserve %i moves to the relay, and a relay pre-connect failure moves to native ordinary Luna", async status => {
+    seats(); native = body => body.model === "gpt-reserve" ? Response.json({ error: { code: "usage_limit_reached" } }, { status }) : sse(body.model, "ok");
     relay = refusedConnect;
     const result = await post(config());
     expect(result.status).toBe(200);
@@ -161,6 +161,29 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     const result = await post(config());
     expect(result.status).toBe(200);
     expect(calls).toEqual(["relay:gpt-6-luna"]);
+  });
+  test("a verified zero-output native Reserve refusal reaches the relay", async () => {
+    seats(); native = body => sse(body.model, "created-then-quota");
+    const result = await post(config());
+    expect(calls).toEqual(["native:gpt-reserve", "relay:gpt-6-luna"]);
+    expect(result.text).toContain("response.completed");
+    expect(result.text).not.toContain("usage_limit_reached");
+  });
+  test("the client receives the native refusal stream if the relay hop is no longer authorized", async () => {
+    seats(); const cfg = config();
+    native = body => { cfg.fallback = { provider: false }; return sse(body.model, "created-then-quota"); };
+    const result = await post(cfg);
+    expect(calls).toEqual(["native:gpt-reserve"]);
+    expect(result.status).toBe(200);
+    expect(result.text).toContain("response.created");
+    expect(result.text).toContain("usage_limit_reached");
+  });
+  test("a credential rejection on a native Reserve 402 still cools the native target", async () => {
+    seats(); native = () => Response.json({ error: { code: "invalid_api_key", type: "authentication_error" } }, { status: 402 });
+    relay = refusedConnect;
+    await post(config());
+    expect(calls).not.toContain("native:gpt-6-luna");
+    expect(isComboTargetInCooldown("luna", { provider: "openai", model: "gpt-6-luna" })).toBe(true);
   });
   test("a relay success stops the ladder", async () => {
     seats(); native = body => body.model === "gpt-reserve" ? reserveRefused() : sse(body.model, "ok");
@@ -232,9 +255,16 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
       { role: "user", content: "again" },
     ] };
     expect((await post(config(), laterTurn, lane)).status).toBe(200);
-    expect(calls).toEqual(["relay:gpt-6-luna"]);
+    expect((await post(config(), { input: "portable follow-up" }, lane)).status).toBe(200);
+    expect(calls).toEqual(["relay:gpt-6-luna", "relay:gpt-6-luna"]);
   });
-  test("a conversation native ordinary Luna served keeps native ordinary Luna on its next turn", async () => {
+  test.each([
+    { name: "a portable turn asks the eligible relay before spending native included usage", input: "again", nativeReserve: false, expected: "relay:gpt-6-luna" },
+    { name: "a portable turn uses newly available native Reserve before the relay", input: "again", nativeReserve: true, expected: "native:gpt-reserve" },
+    { name: "a turn carrying native encrypted reasoning stays on native", nativeReserve: false, input: [
+      { type: "reasoning", id: "rs_native", summary: [], encrypted_content: "native-cipher" }, { role: "user", content: "again" },
+    ], expected: "native:gpt-6-luna" },
+  ])("after native ordinary Luna served, $name", async ({ input, nativeReserve, expected }) => {
     seats(false);
     const lane = { "thread-id": "native-conversation" };
     relay = refusedConnect;
@@ -242,9 +272,26 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(calls).toEqual(["relay:gpt-6-luna", "native:gpt-6-luna"]);
     calls.length = 0;
     relay = () => sse("gpt-6-luna", "ok");
-    const laterTurn = { input: [{ role: "user", content: "ping" }, { type: "message", role: "assistant", content: [{ type: "output_text", text: "pong" }] }, { role: "user", content: "again" }] };
-    expect((await post(config(), laterTurn, lane)).status).toBe(200);
-    expect(calls).toEqual(["native:gpt-6-luna"]);
+    clearComboTargetCooldowns("luna", ["relay/gpt-6-luna"]);
+    seats(nativeReserve);
+    expect((await post(config(), { input }, lane)).status).toBe(200);
+    expect(calls).toEqual([expected]);
+  });
+  test("a native pin later in the combo still asks the relay when an earlier target becomes eligible", async () => {
+    seats(false);
+    const cfg = config();
+    cfg.combos!.luna!.targets.unshift({ provider: "metered", model: "gpt-6-sol" });
+    cfg.providers.metered!.disabled = true;
+    const lane = { "thread-id": "native-after-primary" };
+    relay = refusedConnect;
+    expect((await post(cfg, {}, lane)).status).toBe(200);
+    expect(calls).toEqual(["relay:gpt-6-luna", "native:gpt-6-luna"]);
+    calls.length = 0;
+    cfg.providers.metered!.disabled = false;
+    relay = () => sse("gpt-6-luna", "ok");
+    clearComboTargetCooldowns("luna", ["relay/gpt-6-luna"]);
+    expect((await post(cfg, { input: "again" }, lane)).status).toBe(200);
+    expect(calls).toEqual(["relay:gpt-6-luna"]);
   });
   test("a session-only caller naming bare gpt-6-luna binds its seat and reuses it on the next turn", async () => {
     seats(false);

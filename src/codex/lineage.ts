@@ -246,7 +246,10 @@ export function codexConversationIdentity(
   now = Date.now(),
 ): CodexConversationIdentity | undefined {
   const threadId = boundedLineageComponent(headers.get("thread-id"));
-  const sessionId = boundedLineageComponent(headers.get("session-id"));
+  const hyphen = headers.get("session-id");
+  const underscore = headers.get("session_id");
+  if (hyphen && underscore && hyphen !== underscore) return undefined;
+  const sessionId = boundedLineageComponent(hyphen || underscore);
   const parentThreadId = boundedLineageComponent(headers.get("x-codex-parent-thread-id"));
 
   if (threadId === undefined) {

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { saveConfig } from "../../src/config";
+import { loadConfig, saveConfig } from "../../src/config";
 import { startServer } from "../../src/server";
 import { resetTurnStateHandlesForTests } from "../../src/server/turn-state-handles";
 import type { OcxConfig } from "../../src/types";
@@ -155,6 +155,36 @@ describe("a turn-state handle obtained from an upstream response is redeemed on 
       expect(sentFrames).toHaveLength(2);
       expect(forwardedTurnState(1)).toBe("upstream-turn-first");
     } finally { await server.stop(true); }
+  });
+
+  test("a native-issued handle reaches neither carrier on a keyed relay send", async () => {
+    const config = loadConfig();
+    const baseUrl = "https://relay.example.test/backend-api/codex";
+    config.providers.relay = { adapter: "openai-responses", authMode: "key", baseUrl, apiKey: "fixture-relay-key", models: ["m"], liveModels: false };
+    saveConfig(config);
+    const originalFetch = globalThis.fetch;
+    const sends: { stateHeader: string | null; stateInBody: boolean; session: string | null; thread: string | null }[] = [];
+    globalThis.fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input instanceof Request ? input.url : input) !== `${baseUrl}/v1/responses`) return originalFetch(input, init);
+      const request = new Request(input, init);
+      const body: { client_metadata?: { [name: string]: string } } = await request.json();
+      sends.push({ stateHeader: request.headers.get("x-codex-turn-state"), stateInBody: Object.hasOwn(body.client_metadata ?? {}, "x-codex-turn-state"),
+        session: request.headers.get("session_id"), thread: request.headers.get("thread-id") });
+      return Response.json({ id: "resp_relay", object: "response", model: "m", status: "completed", output: [] });
+    }, { preconnect() {} });
+    try {
+      const server = startServer(0);
+      try {
+        const handle = await httpTurn(server, "a", "native");
+        expect(handle).toMatch(/^ocx-ts-[0-9a-f]{32}$/);
+        const response = await fetch(new URL("/v1/responses", server.url), { method: "POST",
+          headers: { "content-type": "application/json", "x-opencodex-api-key": KEYS.a, "session-id": "session-a", "thread-id": "thread-a", "x-codex-turn-state": handle! },
+          body: JSON.stringify({ model: "relay/m", input: "next", stream: false, client_metadata: { "x-codex-turn-state": handle } }),
+        });
+        expect(response.status, await response.text()).toBe(200);
+        expect(sends).toEqual([{ stateHeader: null, stateInBody: false, session: "session-a", thread: "thread-a" }]);
+      } finally { await server.stop(true); }
+    } finally { globalThis.fetch = originalFetch; }
   });
 
   test("WebSocket: the handle in the relayed metadata frame maps back to the upstream token", async () => {

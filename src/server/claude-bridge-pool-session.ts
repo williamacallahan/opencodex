@@ -1,62 +1,76 @@
-/** Private pool identity for translated Claude turns; replay headers remain unchanged. */
+/** Selection identities are private to the admitted caller. The original wire headers never change. */
 import { createHmac, randomBytes } from "node:crypto";
-import { codexPoolAffinityKey } from "../codex/auth-context";
 import { contextPrincipalIdOf, type DataPlaneAdmission } from "./auth-cors";
-import { safeCallerSessionId } from "./caller-session-identity";
+import { callerSessionAlias, safeCallerSessionId } from "./caller-session-identity";
 import { isThreadSpawnRequest } from "./effort-policy";
 import type { RouteResult } from "../router";
 import type { HandleResponsesOptions } from "./responses/core-options";
 
-/**
- * Process-local, like the lineage key: a synthesized identity never leaves the process (replay and
- * upstream headers stay uncompleted), so no caller can name it, not even as a complete
- * session-id + thread-id pair, which reaches the pool unscoped.
- */
+/** This key separates internal selection identifiers from reproducible wire identifiers. */
 const BRIDGE_POOL_KEY = randomBytes(32);
 
 /** The admission scope a Claude session identity is bound to; undefined when a non-loopback caller has no principal. */
-export function claudeAdmissionScope(admission: DataPlaneAdmission): unknown {
+function claudeAdmissionScope(admission: DataPlaneAdmission): string | string[] | undefined {
   if (admission.kind === "loopback") return "loopback";
   const principal = contextPrincipalIdOf(admission);
   return principal ? ["principal", principal] : undefined;
 }
 
+export function scopedConversationKey(admission: DataPlaneAdmission | undefined, component: string): string | undefined {
+  if (!admission) return undefined;
+  const scope = claudeAdmissionScope(admission);
+  return scope === undefined ? undefined : createHmac("sha256", BRIDGE_POOL_KEY)
+    .update(JSON.stringify(["opencodex-claude-bridge-pool-v1", scope, component])).digest("hex");
+}
+
+/** Private transcript key for combo recall and account selection, never a wire or cache key. */
 export function resolveClaudeBridgePoolSession(args: {
   ingress: Headers; replay: Headers; metadataSessionId?: string; admission?: DataPlaneAdmission;
 }): string | undefined {
   const { ingress, replay, metadataSessionId, admission } = args;
-  if (!admission || isThreadSpawnRequest(ingress) || isThreadSpawnRequest(replay)) return undefined;
-  if (ingress.has("x-codex-parent-thread-id") || ingress.has("thread-id")) return undefined;
-  if (codexPoolAffinityKey(replay) !== undefined) return undefined;
-  let value: string | undefined;
-  if (ingress.has("session_id") || ingress.has("session-id")) {
-    const first = ingress.get("session_id");
-    const second = ingress.get("session-id");
-    if (first && second && first !== second) return undefined;
-    value = safeCallerSessionId(first || second);
-  } else {
-    value = safeCallerSessionId(metadataSessionId ?? ingress.get("x-claude-code-session-id"));
-  }
-  if (!value) return undefined;
-  // Every identity this bridge names, caller aliases included, is bound to its admission scope:
-  // a shared or guessed value must never select another principal's conversation key.
-  const scope = claudeAdmissionScope(admission);
-  if (scope === undefined) return undefined;
-  return createHmac("sha256", BRIDGE_POOL_KEY)
-    .update(JSON.stringify(["opencodex-claude-bridge-pool-v1", scope, value])).digest("hex");
+  if (!admission) return undefined;
+  const session = callerSessionAlias(ingress, admission);
+  if (session === null) return undefined;
+  const thread = safeCallerSessionId(ingress.get("thread-id"));
+  const parent = safeCallerSessionId(ingress.get("x-codex-parent-thread-id"));
+  if ((!thread && ingress.has("thread-id")) || (!parent && ingress.has("x-codex-parent-thread-id"))) return undefined;
+  if (!thread && !parent && (isThreadSpawnRequest(ingress) || (ingress !== replay && isThreadSpawnRequest(replay)))) return undefined;
+  if (!session && (ingress.has("session_id") || ingress.has("session-id") || ingress.has("x-session-id"))) return undefined;
+  const anchor = thread ?? session ?? parent ?? safeCallerSessionId(metadataSessionId ?? ingress.get("x-claude-code-session-id"));
+  if (!anchor) return undefined;
+  return scopedConversationKey(admission, anchor);
 }
 
-export function completeClaudeBridgePoolIdentity(headers: Headers, options: Pick<HandleResponsesOptions, "claudeBridgePoolSession">): Headers {
-  const session = options.claudeBridgePoolSession;
-  if (!session || headers.get("x-codex-parent-thread-id") || headers.get("thread-id")
-    || codexPoolAffinityKey(headers) !== undefined) return headers;
+const identityHeaders = ["session_id", "session-id", "x-session-id", "thread-id", "x-codex-parent-thread-id"] as const;
+
+type SelectionOptions = Pick<HandleResponsesOptions, "claudeBridgePoolSession" | "admission" | "inboundWire">;
+
+export function completeClaudeBridgePoolIdentity(headers: Headers, options: SelectionOptions): Headers {
+  const { admission } = options;
+  const transcript = "claudeBridgePoolSession" in options ? options.claudeBridgePoolSession
+    : resolveClaudeBridgePoolSession({ ingress: headers, replay: headers, admission });
+  if (!transcript && !admission) return headers;
+  const hasIdentity = identityHeaders.some(name => headers.has(name));
+  if (!transcript && !hasIdentity) return headers;
   const completed = new Headers(headers);
-  completed.set("session-id", session);
-  completed.set("thread-id", session);
+  for (const name of identityHeaders) completed.delete(name);
+  if (!transcript) return completed;
+  const parent = safeCallerSessionId(headers.get("x-codex-parent-thread-id"));
+  const thread = safeCallerSessionId(headers.get("thread-id"));
+  if (admission && (parent || thread) && options.inboundWire !== "anthropic") {
+    const session = callerSessionAlias(headers, admission);
+    if (session) completed.set("session-id", scopedConversationKey(admission, session)!);
+    if (parent) completed.set("x-codex-parent-thread-id", scopedConversationKey(admission, parent)!);
+    if (thread) completed.set("thread-id", transcript);
+    if (!session && !parent) completed.set("session-id", transcript);
+  } else {
+    completed.set("session-id", transcript);
+    completed.set("thread-id", transcript);
+  }
   return completed;
 }
 
 export function applyClaudeBridgePoolSession(headers: Headers, route: Pick<RouteResult, "codexAccountMode">,
-  options: Pick<HandleResponsesOptions, "claudeBridgePoolSession">): Headers {
+  options: SelectionOptions): Headers {
   return route.codexAccountMode !== undefined ? completeClaudeBridgePoolIdentity(headers, options) : headers;
 }

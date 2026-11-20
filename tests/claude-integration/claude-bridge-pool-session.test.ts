@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { recordCodexThreadLineage } from "../../src/codex/lineage";
 import { codexPoolAffinityKey } from "../../src/codex/auth-context";
 import { getDefaultConfig } from "../../src/config";
 import { routeConcreteModel } from "../../src/router";
@@ -18,10 +19,10 @@ test("admission, spawn and explicit lineage gate synthesis", () => {
     expect(resolve(marker, local, "metadata")).toBeUndefined();
     expect(resolve({}, local, "metadata", new Headers(marker))).toBeUndefined();
   }
-  for (const name of ["thread-id", "x-codex-parent-thread-id"]) for (const value of ["", "parent"]) {
-    expect(resolve({ [name]: value }, local, "metadata")).toBeUndefined();
+  for (const name of ["thread-id", "x-codex-parent-thread-id"]) {
+    expect(resolve({ [name]: "" }, local, "metadata")).toBeUndefined();
+    expect(resolve({ [name]: "parent" }, local, "metadata")).toBe(resolve({ session_id: "parent" }));
   }
-  expect(resolve({}, local, "metadata", new Headers({ "session-id": "existing", "thread-id": "existing" }))).toBeUndefined();
 });
 
 test("aliases take precedence and conflicts or invalid values block derivation", () => {
@@ -65,6 +66,23 @@ test("caller aliases are keyed to their principal and never computable from publ
   expect(resolve({ session_id: victim }, remote("a"))).not.toBe(victim);
 });
 
+test("admission preserves the parent cohort while siblings get distinct recall keys", () => {
+  const admission = remote("principal");
+  function identity(headers: Headers) {
+    const transcript = resolveClaudeBridgePoolSession({ ingress: headers, replay: headers, admission });
+    return { transcript, lineage: recordCodexThreadLineage(completeClaudeBridgePoolIdentity(headers, {
+      admission, inboundWire: "responses", claudeBridgePoolSession: transcript,
+    })) };
+  }
+  const root = identity(new Headers({ session_id: "cohort", "thread-id": "root-thread" }));
+  const child = identity(new Headers({ "thread-id": "child-thread", "x-codex-parent-thread-id": "root-thread" }));
+  const sibling = identity(new Headers({ "thread-id": "sibling", "x-codex-parent-thread-id": "root-thread" }));
+  expect(root.lineage?.conversationKey).toBeTruthy();
+  expect(child.lineage?.conversationKey).toBe(root.lineage?.conversationKey);
+  expect(sibling.lineage?.conversationKey).toBe(root.lineage?.conversationKey);
+  expect(child.transcript).not.toBe(sibling.transcript);
+});
+
 test("completion agrees with final credential-domain headers for both Codex routes", () => {
   const config = getDefaultConfig();
   const route = routeConcreteModel(config, "openai/gpt-5.4")!;
@@ -79,5 +97,5 @@ test("completion agrees with final credential-domain headers for both Codex rout
     const codexRoute = { ...route, codexAccountMode: mode };
     expect(codexPoolAffinityKey(codexRouteCredentialDomainHeaders(req, codexRoute, options, rewrite, config))).toBe(key);
   }
-  expect(completeClaudeBridgePoolIdentity(complete, options)).toBe(complete);
+  expect([...completeClaudeBridgePoolIdentity(complete, options)]).toEqual([...complete]);
 });

@@ -248,40 +248,22 @@ describe("state-store sweeper", () => {
       expect(recallComboForLane(config, "fresh", "x".repeat(4096))).toBeUndefined();
     });
 
-    test("the aggregate byte budget evicts the least recently written lane", () => {
-      // 64 KiB holds exactly 64 maximum-size entries, well inside the 256-lane cap, so this
-      // isolates the byte budget from the lane count.
-      for (let i = 0; i < 64; i += 1) remember(`lane-${i}`, fullModel(i));
-      expect(recallComboForLane(config, "lane-0", fullModel(0))).toBe("first");
-
-      remember("lane-64", fullModel(64));
+    test("the bounded pin set retains 2,048 completed targets and evicts the least recently written", () => {
+      for (let i = 0; i <= 2048; i++) remember(`lane-${i}`, fullModel(i));
       expect(recallComboForLane(config, "lane-0", fullModel(0))).toBeUndefined();
       expect(recallComboForLane(config, "lane-1", fullModel(1))).toBe("first");
-      expect(recallComboForLane(config, "lane-64", fullModel(64))).toBe("first");
+      expect(recallComboForLane(config, "lane-2048", fullModel(2048))).toBe("first");
     });
 
-    test("a rewritten lane is charged once, not once per write", () => {
-      // Replacing a lane must release the old entry's bytes. If it did not, 64 rewrites of one
-      // lane would exhaust the whole budget and start evicting unrelated lanes.
-      remember("stable", "stable-model");
-      for (let i = 0; i < 64; i += 1) remember("churn", fullModel(i));
-      expect(recallComboForLane(config, "stable", "stable-model")).toBe("first");
-      expect(recallComboForLane(config, "churn", fullModel(63))).toBe("first");
-    });
-
-    test("a periodic tick expires a lane that is never read again and releases its bytes", () => {
+    test("a periodic tick expires lanes that are never read again", () => {
       registerStateStore(STATE_STORE_REGISTRATIONS.find(row => row.name === "combo-session-recall")!);
       for (let i = 0; i < 64; i += 1) remember(`stale-${i}`, fullModel(i));
 
       // Before this the TTL was only evaluated on read or on a generation change, so a lane
       // nobody reads again held its entry for the life of the process.
-      expect(sweepExpired(Date.now() + 30 * 60 * 1_000)).toEqual({ storesVisited: 1, rowsRemoved: 64 });
+      expect(sweepExpired(Date.now() + 24 * 60 * 60_000 + 1)).toEqual({ storesVisited: 1, rowsRemoved: 64 });
       expect(recallComboForLane(config, "stale-0", fullModel(0))).toBeUndefined();
 
-      // The budget is genuinely free again: a full refill keeps its own oldest lane, which
-      // could not happen if the swept entries had left their bytes behind.
-      for (let i = 0; i < 64; i += 1) remember(`fresh-${i}`, fullModel(i));
-      expect(recallComboForLane(config, "fresh-0", fullModel(0))).toBe("first");
     });
   });
 

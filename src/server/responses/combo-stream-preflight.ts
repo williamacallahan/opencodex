@@ -23,7 +23,9 @@ import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
 import { REQUIRED_TOOL_CONTRACT_CODE } from "../../lib/errors";
 import { attachComboFailureEvidence, isPausedTurn } from "../../lib/client-error-body";
 import { requiredToolReasoningPrelude } from "./combo-required-tool-stream";
-import { ProtocolPreOutputEof } from "../../lib/upstream-retry";
+import { ProtocolPreOutputEof, isNonReplayableResponse } from "../../lib/upstream-retry";
+import { CodexWsMetadata } from "./codex-ws-metadata";
+import { codexWsFrameResponseIds, codexWsWrapperStatus, isCodexWsUpstreamResponse, markCodexWsPreOutputRefusal, type CodexWsPreOutputRefusalHold } from "./codex-ws-wire";
 import { NATIVE_RESERVE_MODEL } from "../../codex/catalog/native-models";
 
 const COMBO_STREAM_PREFLIGHT_MAX_BYTES = MAX_CLIENT_SSE_FRAME_BYTES;
@@ -485,6 +487,56 @@ function observedResponsesStage(state: {
   return "headers-only";
 }
 
+export function isReserveQuotaCode(code: unknown): boolean {
+  return code === "usage_limit_reached" || code === "usage_not_included" || code === "rate_limit_exceeded"
+    || code === "rate_limit_error" || code === "insufficient_quota";
+}
+
+/** Only a refusal for the response whose empty prelude we held can undo first placement. */
+export function reserveQuotaPrelude() {
+  let responseId: string | undefined;
+  return (frame: unknown, metadata = false): "hold" | 402 | 429 | undefined => {
+    if (!isRecord(frame) || frame.stream_id !== undefined
+      || (frame.sequence_number !== undefined && !(typeof frame.sequence_number === "number"
+        && Number.isSafeInteger(frame.sequence_number) && frame.sequence_number >= 0))) return undefined;
+    const ids = codexWsFrameResponseIds(frame);
+    if (metadata) {
+      // A control frame has no turn of its own. It cannot establish correlation or hide a foreign id or output.
+      if (!ids || ids.some(id => id !== responseId) || frame.response !== undefined || frame.replayUnsafe === true) return undefined;
+      const fields = frame.type === "codex.rate_limits" ? ["plan_type", "limit_name", "metered_limit_name", "credits", "rate_limits"] : ["headers"];
+      return recordWithOnly(frame, ["type", "sequence_number", "response_id", ...fields]) ? "hold" : undefined;
+    }
+    if (ids?.length !== 1 || !ids[0]?.trim() || (responseId !== undefined && ids[0] !== responseId)) return undefined;
+    const snapshot = isRecord(frame.response) ? frame.response : undefined;
+    if (isRecord(snapshot?.usage) && ((snapshot.usage.output_tokens ?? 0) !== 0 || (isRecord(snapshot.usage.output_tokens_details)
+      && (snapshot.usage.output_tokens_details.reasoning_tokens ?? 0) !== 0))) return undefined;
+    if (typeof frame.type === "string" && PRE_OUTPUT_CONTROL_EVENTS.has(frame.type)) {
+      if (!snapshot || comboStreamPayloadCommitsOutput(frame)) return undefined;
+      responseId = ids[0];
+      return "hold";
+    }
+    if (!responseId) return undefined;
+    const wrapped = frame.type === "error";
+    if (!wrapped && frame.type !== "response.failed") return undefined;
+    if (!recordWithOnly(frame, wrapped ? ["type", "response_id", "sequence_number", "status", "status_code", "error"]
+      : ["type", "response_id", "sequence_number", "response"])) return undefined;
+    if (!wrapped && (!isRecord(snapshot) || snapshot.status !== "failed" || !Array.isArray(snapshot.output)
+      || snapshot.output.length || snapshot.incomplete_details != null || snapshot.last_error != null
+      || (snapshot.background != null && snapshot.background !== false) || (snapshot.replayUnsafe !== undefined && snapshot.replayUnsafe !== false)
+      || !snapshotMetadataIsSafe(snapshot) || Object.keys(snapshot).some(key => !PRE_OUTPUT_SNAPSHOT_FIELDS.has(key)))) return undefined;
+    const error = wrapped ? frame.error : snapshot?.error;
+    if (!recordWithOnly(error, ["type", "code", "message", "param"]) || (error.message != null && typeof error.message !== "string")) return undefined;
+    const code = error.code ?? error.type;
+    if (error.type != null && error.type !== code && error.type !== "rate_limit_error" && error.type !== "insufficient_quota") return undefined;
+    if (!isReserveQuotaCode(code)) return undefined;
+    if (wrapped && (Object.hasOwn(frame, "status") || Object.hasOwn(frame, "status_code"))) {
+      const status = codexWsWrapperStatus(frame);
+      return status === 402 || status === 429 ? status : undefined;
+    }
+    return code === "usage_not_included" ? 402 : 429;
+  };
+}
+
 function replayBufferedResponse(
   response: Response,
   reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -589,6 +641,23 @@ function failedTerminalResponse(
   });
 }
 
+export function preflightReserveFirstResponse(
+  response: Response,
+  sameContext: boolean,
+  hold: CodexWsPreOutputRefusalHold | undefined,
+  logCtx: RequestLogContext,
+  signal: AbortSignal,
+  stream: boolean,
+): Promise<ComboStreamPreflightResult> | undefined {
+  if (sameContext && hold?.reserveFirstPlacement
+    && Date.now() < hold.until && !isCodexWsUpstreamResponse(response)
+    && !isNonReplayableResponse(response)) {
+    return preflightComboStreamResponse(response, { model: logCtx.model, provider: logCtx.provider },
+      undefined, { reserveQuotaHold: hold, replayReadErrors: true, signal, allowMissingContentType: stream });
+  }
+  return undefined;
+}
+
 export type ComboStreamPreflightResult =
   | { kind: "accepted"; response: Response }
   | { kind: "failed"; response: Response; codexModelRefusal?: CodexAccountModelRefusal }
@@ -619,6 +688,7 @@ export async function preflightComboStreamResponse(
     replayReadErrors?: boolean;
     replayCleanEof?: boolean;
     requiredToolPrelude?: boolean;
+    reserveQuotaHold?: CodexWsPreOutputRefusalHold;
     signal?: AbortSignal;
     onUpstreamActivity?: () => void;
   },
@@ -647,9 +717,18 @@ export async function preflightComboStreamResponse(
   let retryableTerminalPayload: Record<string, unknown> | undefined;
   let holdTimer: ReturnType<typeof setTimeout> | undefined;
   let holdDeadline: Promise<"hold-expired"> | undefined;
+  const reserveQuota = options?.reserveQuotaHold && reserveQuotaPrelude();
+  let quotaMetadata: CodexWsMetadata | undefined;
+  let quotaFrame = "";
+  let quotaStatus: 402 | 429 | undefined;
+  if (options?.reserveQuotaHold) {
+    const wait = Math.min(options.reserveQuotaHold.maxMs, options.reserveQuotaHold.until - Date.now());
+    holdDeadline = new Promise(resolve => { holdTimer = setTimeout(() => resolve("hold-expired"), Math.max(0, wait)); });
+  }
   const inspector = createSseInspector({
     logCtx,
     onFrame: frame => {
+      if (reserveQuota) quotaFrame = frame;
       if (terminalStatus === undefined && !outputCommitted && !retryableTerminalPayload
         && ambiguousSseFrame(frame)) outputCommitted = true;
     },
@@ -658,6 +737,19 @@ export async function preflightComboStreamResponse(
     onOpaquePayload: () => { outputCommitted = true; },
     onParsedPayload: payload => {
       if (terminalStatus !== undefined || outputCommitted || retryableTerminalPayload) return;
+      if (reserveQuota) {
+        let controlFrame = false;
+        if (isRecord(payload) && typeof payload.type === "string" && CODEX_METADATA_CONTROL_EVENTS.has(payload.type)) {
+          quotaMetadata ??= new CodexWsMetadata();
+          try { controlFrame = quotaMetadata.consume(payload, Buffer.byteLength(quotaFrame)) !== null; }
+          catch { outputCommitted = true; return; } // Outside the native metadata limits: relay the original SSE.
+        }
+        quotaFrame = "";
+        const verdict = reserveQuota(payload, controlFrame);
+        if (verdict === undefined) outputCommitted = true;
+        else if (verdict !== "hold" && isRecord(payload)) { quotaStatus = verdict; retryableTerminalPayload = payload; }
+        return;
+      }
       if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
         const type = (payload as { type?: unknown }).type;
         if (type === "response.created") responseCreated = true;
@@ -757,7 +849,9 @@ export async function preflightComboStreamResponse(
         || retryableTerminalPayload?.type === "error")
         && !outputCommitted && retryableTerminalPayload) {
         await reader.cancel("retrying zero-output combo stream terminal").catch(() => undefined);
+        if (quotaStatus !== undefined) logCtx.terminalHttpStatus = quotaStatus;
         const failed = failedTerminalResponse(response, retryableTerminalPayload, logCtx);
+        if (quotaStatus !== undefined) markCodexWsPreOutputRefusal(failed, () => replayBufferedResponse(response, reader, buffered));
         // The rebuilt envelope keeps only the record. When either the whole frame or that slim
         // envelope reads as a moderation verdict, the combo loop must judge the whole frame: a
         // verdict needs the evidence the envelope dropped (a root code, an innererror), and a veto

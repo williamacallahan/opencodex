@@ -1,6 +1,6 @@
 import { namespacedToolName, type AdapterEvent, type OcxParsedRequest, type OcxProviderConfig, type OcxUsage, type TierDecision } from "../../types";
 import { catalogModelSupportsReasoningSummaries } from "../../codex/catalog";
-import { OCX_REASONING_PREFIX } from "../../responses/reasoning-envelope";
+import { decodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../../responses/reasoning-envelope";
 import { configuredReasoningEfforts, mapReasoningEffort, modelRecordValue } from "../../reasoning-effort";
 import { isPlainObject } from "./internal";
 
@@ -143,6 +143,12 @@ export function sanitizeReasoningInputContent(
     changed = true;
     const next: Record<string, unknown> = { ...rec };
     if (missingSummary) next.summary = [];
+    if (hasOcxEnvelope && typeof rec.encrypted_content === "string" && (!Array.isArray(rec.summary) || rec.summary.length === 0)) {
+      const envelope = decodeReasoningEnvelope(rec.encrypted_content);
+      if (envelope?.txt && !envelope.sig && !envelope.red && !envelope.krc && !envelope.nat) {
+        next.summary = [{ type: "summary_text", text: envelope.txt }];
+      }
+    }
     if (dropNullContentChannel) delete next.content;
     if (stripOutputStatus) delete next.status;
     if (stripEncryptedContent) delete next.encrypted_content;

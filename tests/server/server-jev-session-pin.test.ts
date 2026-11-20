@@ -1,3 +1,4 @@
+import { admittedLane, loopbackAdmission } from "../helpers/combo-recall-admission";
 /**
  * #7525: an opt-in JEV session pin keeps one client session on the target JEV chose for it, so the
  * provider prompt cache stays warm, while default-off Combos keep deciding on every request.
@@ -105,7 +106,8 @@ async function turn(config: OcxConfig, options: {
   try {
     return await executeComboResponses(request, body, "auto", config, options.log ?? { model: "", provider: "" }, {
       translatorBudget: budget,
-      ...(options.admission ? { admission: options.admission } : {}),
+      admission: options.admission ?? loopbackAdmission,
+      claudeBridgePoolSession: admittedLane(request.headers, options.admission),
       ...(options.signal ? { abortSignal: options.signal } : {}),
     }, dispatchers((childBody, complete, childOptions) => {
       options.models?.push(String(childBody.model));

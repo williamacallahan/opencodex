@@ -1083,15 +1083,14 @@ export function resolveCodexAccountForThreadDetailed(
   //
   // Guarded on `entry === undefined`, which is strictly narrower than "has no usable binding":
   // a thread whose binding was just released above still holds its own history and re-decides
-  // through the ordinary path. Only a thread that has never bound takes a family hint. That
-  // also makes `preserveExistingModelScopedAffinity` unreachable here -- it is only ever set
-  // while reusing an existing model-detour entry -- so this binds through the ordinary lane.
-  if (threadId && entry === undefined && lineage) {
+  // through the ordinary path. Reserve may use the family hint without binding the child:
+  // only a completed Reserve serve establishes its owner.
+  if ((threadId || selectionOptions?.poolCapacity === "reserve") && entry === undefined && lineage) {
     const lineagePick = pickLineageServingAccount(
       config, lineage, now, quotaScope, selectionOptions, modelId,
     );
     if (lineagePick) {
-      bindThreadAffinity(threadId, lineagePick.accountId, now, quotaScope);
+      if (threadId) bindThreadAffinity(threadId, lineagePick.accountId, now, quotaScope);
       // Deliberately no promoteActiveCodexAccount: a family hint places THIS request, it does
       // not move the operator-visible shared cursor for unrelated new threads.
       return {
@@ -1329,9 +1328,10 @@ export function recordCodexUpstreamOutcome(
     }
     if (quotaScope && (!meta.poolReserve || meta.reserveServed)) {
       noteScopedCodexSuccess(accountId, quotaScope, now, meta.reserveServed ? meta.failureWindowCredentialGeneration : undefined);
-      if (meta.poolReserve && meta.reserveServed && meta.threadId && !meta.fixedAccount
-        && getThreadAffinity(meta.threadId, quotaScope)?.accountId !== accountId) {
-        bindThreadAffinity(meta.threadId, accountId, now, quotaScope);
+      if (meta.poolReserve && meta.reserveServed && meta.threadId && !meta.fixedAccount) {
+        const previous = getThreadAffinity(meta.threadId, quotaScope);
+        if (previous?.accountId === accountId && isThreadAffinityGenerationLive(previous)) previous.lastUsedAt = now;
+        else bindThreadAffinity(meta.threadId, accountId, now, quotaScope);
       }
     }
     const current = getAccountHealth(accountId);
@@ -1476,9 +1476,9 @@ export function recordCodexUpstreamOutcome(
             ...(prior?.lastProbeAt !== undefined ? { lastProbeAt: prior.lastProbeAt } : {}),
         }),
       });
-      // The shared native scope is the existing account-wide native behavior:
-      // threads must leave it and new requests should prefer an eligible account.
-      // Reserve remains isolated so a same-account Terra/Luna combo fallback can run.
+      if (meta.poolReserve && ownsLease && meta.threadId && getThreadAffinity(meta.threadId, quotaScope)?.accountId === accountId) {
+        deleteThreadAffinity(meta.threadId, quotaScope);
+      }
       if (quotaScope === "shared" && !meta.fixedAccount) {
         clearThreadAccountMapForAccount(accountId, "quota_refusal");
         notePoolRotationFailure(POOL_KEY_CODEX, accountId);

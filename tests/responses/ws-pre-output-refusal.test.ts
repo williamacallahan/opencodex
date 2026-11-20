@@ -95,11 +95,12 @@ function exchange(
   script: (ws: FakeWebSocket) => void,
   holdMs = HOLD_MS,
   until = Number.MAX_SAFE_INTEGER,
+  reserveFirstPlacement?: boolean,
 ): Promise<Response> {
   installFake(script);
   return codexWsUpstreamFetch(
     CODEX_URL, streamingInit(), noFallback, BOUNDED_WS_RUNTIME,
-    undefined, undefined, undefined, undefined, undefined, { maxMs: holdMs, until },
+    undefined, undefined, undefined, undefined, undefined, { maxMs: holdMs, until, reserveFirstPlacement },
   );
 }
 
@@ -144,6 +145,20 @@ function opened(...frames: unknown[]): (ws: FakeWebSocket) => void {
 }
 
 describe("an authoritative refusal before any output becomes a replayable gateway status (#6969)", () => {
+  test.each([
+    [true, [QUOTA(25), CREATED], "resp_1", 429],
+    [true, [{ ...QUOTA(25), stream_id: "foreign" }, CREATED], "resp_1", 200],
+    [false, [CREATED], "resp_1", 200],
+    [true, [CREATED], "resp_foreign", 200],
+    [true, [CREATED, OUTPUT_ITEM], "resp_1", 200],
+    [true, [CREATED, { type: "unknown" }], "resp_1", 200],
+  ] as const)("Reserve first placement %s with prelude %j and terminal %s yields %i", async (first, prelude, id, status) => {
+    const refusal = { type: "response.failed", response: { id, status: "failed", output: [], error: { code: "usage_limit_reached" } } };
+    const response = await exchange(opened(...prelude, refusal), HOLD_MS, Number.MAX_SAFE_INTEGER, first);
+    expect(response.status).toBe(status);
+    expect(isCodexWsPreOutputRefusal(response)).toBe(status === 429);
+    await restoreCodexWsPreOutputRefusal(response).text();
+  });
   test("after an empty created/in_progress preamble", async () => {
     const projection = await exchange(opened(CREATED, IN_PROGRESS, OVERLOADED));
     expect(projection.status).toBe(503);

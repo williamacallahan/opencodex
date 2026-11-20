@@ -66,15 +66,17 @@ describe("codex-lb thread headers for Claude Code requests", () => {
     finally { request.releaseBodyObservation?.(); budget.dispose(); }
   }
 
+  const wireSession = `${sessionKey.slice(0,8)}-${sessionKey.slice(8,12)}-4${sessionKey.slice(13,16)}-8${sessionKey.slice(17,20)}-${sessionKey.slice(20)}`;
+
   test("main loop, fresh subagent and fork each get their own thread-id under one session_id", () => {
     const main = sent(codexLb);
     const sub = sent(codexLb, "agent-sub");
     const fork = sent(codexLb, "agent-fork");
-    expect(main.headers.get("session_id")).toBe(sessionKey);
-    expect(main.headers.get("thread-id")).toBe(sessionKey);
-    expect(sub.headers.get("session_id")).toBe(sessionKey);
-    expect(sub.headers.get("thread-id")).toBe(agentServingThreadKey(sessionKey, "agent-sub"));
-    expect(fork.headers.get("thread-id")).toBe(agentServingThreadKey(sessionKey, "agent-fork"));
+    expect(main.headers.get("session_id")).toBe(wireSession);
+    expect(main.headers.get("thread-id")).toBe(wireSession);
+    expect(sub.headers.get("session_id")).toBe(wireSession);
+    expect(sub.headers.get("thread-id")).toBe(agentServingThreadKey(wireSession, "agent-sub"));
+    expect(fork.headers.get("thread-id")).toBe(agentServingThreadKey(wireSession, "agent-fork"));
     expect(new Set([main, sub, fork].map(r => r.headers.get("thread-id"))).size).toBe(3);
     // A fork shares its parent's body key; only the agent id differs, and the body is untouched.
     expect(sub.body.prompt_cache_key).toBe(main.body.prompt_cache_key);
@@ -88,13 +90,26 @@ describe("codex-lb thread headers for Claude Code requests", () => {
     expect(headers.has("thread-id")).toBe(false);
   });
 
-  test("inbound thread identity is preserved and nothing is added", () => {
-    for (const inbound of [{ "thread-id": "t-1" }, { session_id: "s-1" }, { "session-id": "s-1" }, { "x-codex-turn-state": "ts" }]) {
-      const { headers } = sent(codexLb, "agent-sub", inbound);
-      // The hub forwards no inbound thread header itself; the point is that it adds none of its own.
-      expect(headers.get("thread-id")).not.toBe(agentServingThreadKey(sessionKey, "agent-sub"));
-      expect(headers.get("session_id")).not.toBe(sessionKey);
+  test("only the recognized key-auth send URL receives continuity", () => {
+    const inbound = { "session-id": "s-1", "thread-id": "t-1", "x-codex-turn-state": "relay-token" };
+    for (const provider of [plain, { ...codexLb, responsesPath: "/other" }, { ...codexLb, authMode: "oauth" }, { ...codexLb, authMode: "local" }] satisfies OcxProviderConfig[]) {
+      const { headers } = sent(provider, "sub", inbound);
+      for (const key of ["session_id", "session-id", "thread-id", "x-codex-turn-state"]) expect(headers.has(key)).toBe(false);
     }
+    const { headers } = sent(codexLb, undefined, inbound, null);
+    expect([headers.get("session_id"), headers.get("session-id"), headers.get("thread-id")]).toEqual(["s-1", "s-1", "t-1"]);
+    expect(headers.has("x-codex-turn-state")).toBe(false);
+  });
+
+  test.each([undefined, "sibling"])("native and relay share the wire pair and body key for %s", agent => {
+    const relay = sent(codexLb, agent);
+    const native = sent(forwardProvider("https://chatgpt.com/backend-api/codex"), agent);
+    for (const name of ["session_id", "session-id", "thread-id"]) {
+      expect(native.headers.get(name)).toBeTruthy();
+      expect(native.headers.get(name)).toBe(relay.headers.get(name));
+    }
+    expect(native.body.prompt_cache_key).toBe("body-key");
+    expect(native.body.prompt_cache_key).toBe(relay.body.prompt_cache_key);
   });
 
   test("no session key means no headers", () => {
@@ -107,6 +122,6 @@ describe("codex-lb thread headers for Claude Code requests", () => {
     const headers: Record<string, string> = { Authorization: "Bearer k" };
     applyCodexLbThreadHeaders(codexLb, headers, new Headers(), { sessionScopedCacheKey: sessionKey });
     expect(headers.Authorization).toBe("Bearer k");
-    expect(Object.keys(headers).sort()).toEqual(["Authorization", "session_id", "thread-id"]);
+    expect(Object.keys(headers).sort()).toEqual(["Authorization", "session-id", "session_id", "thread-id"]);
   });
 });

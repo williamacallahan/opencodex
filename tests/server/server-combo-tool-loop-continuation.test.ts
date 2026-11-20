@@ -1,3 +1,5 @@
+import { loopbackAdmission } from "../helpers/combo-recall-admission";
+import type { DataPlaneAdmission } from "../../src/server/auth-cors";
 /**
  * #7298: a combo that re-picks its target in the middle of a tool loop handed DeepSeek a bare
  * `function_call` (issued by a GPT turn that left no reasoning item), and DeepSeek's thinking mode
@@ -21,7 +23,7 @@ import {
 } from "../../src/responses/state";
 import { handleResponses } from "../../src/server/responses";
 import { clearComboRecallForTests } from "../../src/server/responses/combo-session-recall";
-import { COMBO_CONVERSATION_PIN_REASON, isConversationContinuation, isToolLoopContinuation } from "../../src/server/responses/combo-conversation-pin";
+import { COMBO_CONVERSATION_PIN_REASON, isToolLoopContinuation } from "../../src/server/responses/combo-conversation-pin";
 import type { RequestLogContext } from "../../src/server/request-log";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
@@ -149,12 +151,12 @@ function combo(providers: OcxConfig["providers"], targets: Array<{ provider: str
   } as OcxConfig;
 }
 
-async function post(config: OcxConfig, input: unknown, headers: Record<string, string> = {}, logCtx: RequestLogContext = { model: "", provider: "" }): Promise<Response> {
+async function post(config: OcxConfig, input: unknown, headers: Record<string, string> = {}, logCtx: RequestLogContext = { model: "", provider: "" }, admission: DataPlaneAdmission = loopbackAdmission, selector = "combo/auto"): Promise<Response> {
   return handleResponses(new Request("http://localhost/v1/responses", {
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
-    body: JSON.stringify({ model: "combo/auto", input, tools, stream: false, store: false }),
-  }), config, logCtx);
+    body: JSON.stringify({ model: selector, input, tools, stream: false, store: false }),
+  }), config, logCtx, { admission });
 }
 
 describe("isToolLoopContinuation", () => {
@@ -166,18 +168,6 @@ describe("isToolLoopContinuation", () => {
     expect(isToolLoopContinuation({ messages: [{ role: "user", content: "x" }, { role: "tool", content: "y" }] })).toBe(true);
   });
 
-  test("any request carrying an earlier turn's output continues its conversation; a first turn does not", () => {
-    expect(isConversationContinuation({ input: [userMessage("hi")] })).toBe(false);
-    expect(isConversationContinuation({ input: "hello" })).toBe(false);
-    expect(isConversationContinuation({ input: [userMessage("hi"), answer("hello"), userMessage("more")] })).toBe(true);
-    expect(isConversationContinuation({ input: [...bareContinuation, answer("Rain today."), userMessage("thanks")] })).toBe(true);
-    expect(isConversationContinuation({ input: [userMessage("more")], previous_response_id: "resp_1" })).toBe(true);
-    // After a remote compaction the history is one compaction item between user messages.
-    expect(isConversationContinuation({ input: [userMessage("hi"), { type: "compaction", encrypted_content: "opaque" }, userMessage("next")] })).toBe(true);
-    expect(isConversationContinuation({ input: [{ type: "item_reference", id: "msg_1" }, userMessage("next")] })).toBe(true);
-    expect(isConversationContinuation({ messages: [{ role: "user", content: "x" }] })).toBe(false);
-    expect(isConversationContinuation({ messages: [{ role: "user", content: "x" }, { role: "assistant", content: "y" }, { role: "user", content: "z" }] })).toBe(true);
-  });
 });
 
 describe("combo tool-loop continuation safety (#7298)", () => {
@@ -257,6 +247,29 @@ describe("combo tool-loop continuation safety (#7298)", () => {
     const fresh = await post(config, [userMessage("hello")], { "thread-id": "thread-other" });
     expect(fresh.status).toBe(200);
     expect(deepseekHits).toBe(1);
+  });
+
+  test("delta-only turns keep independent targets for each principal and combo", async () => {
+    let available = false;
+    const primary = serve(() => available ? Response.json(responsesBody("primary", [answer("first target")])) : busy());
+    const backup = serve(() => Response.json(responsesBody("backup", [answer("second target")])));
+    const targets = [{ provider: "primary", model: "primary" }, { provider: "backup", model: "backup" }];
+    const config = combo({ primary: provider("openai-responses", baseUrl(primary)), backup: provider("openai-responses", baseUrl(backup)) }, targets);
+    config.combos!.other = { targets };
+    const lane = { "thread-id": "same-thread" };
+    const turn = async (principal: string, selector = "combo/auto") => {
+      const admission: DataPlaneAdmission = { kind: "configured", keyId: principal, contextPrincipalId: principal, source: "dedicated" };
+      const response = await post(config, "next message only", lane, undefined, admission, selector);
+      expect(response.status).toBe(200);
+      return response.text();
+    };
+    expect(await turn("alice")).toContain("second target");
+    available = true;
+    clearComboTargetCooldowns();
+    expect(await turn("bob")).toContain("first target");
+    expect(await turn("alice", "combo/other")).toContain("first target");
+    expect(await turn("alice")).toContain("second target");
+    expect(await turn("bob")).toContain("first target");
   });
 
   test("a translated Claude Code turn with no session header keeps its target through its bridge identity", async () => {

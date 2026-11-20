@@ -206,6 +206,7 @@ export const CODEX_WS_PRE_OUTPUT_REFUSAL_HOLD_MAX_MS = 10_000;
 export interface CodexWsPreOutputRefusalHold {
   maxMs: number;
   until: number;
+  reserveFirstPlacement?: boolean;
 }
 
 /**
@@ -542,6 +543,7 @@ export function codexWsFailureDetail(stage: CodexWsFailureStage): string {
 }
 
 export type ResponsesWsRelayEvent = {
+  ambiguousTerminal?: boolean;
   type: string;
   text: string;
   payload: Record<string, unknown>;
@@ -587,7 +589,8 @@ export function normalizeResponsesWsRelayEvent(text: string): ResponsesWsRelayEv
       ? { ...(response as Record<string, unknown>), status: "failed" }
       : { status: "failed" };
   }
-  return { type, text: JSON.stringify(normalizedRecord), payload: normalizedRecord };
+  return { type, text: JSON.stringify(normalizedRecord), payload: normalizedRecord,
+    ...(type === "response.failed" && status !== "failed" ? { ambiguousTerminal: true } : {}) };
 }
 
 /**

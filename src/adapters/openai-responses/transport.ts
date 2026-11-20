@@ -1,4 +1,8 @@
-import type { IncomingMeta } from "../base";
+import type { HandleResponsesOptions } from "../../server/responses/core-options";
+import type { CodexAuthContext } from "../../codex/auth-context";
+import type { DataPlaneAdmission } from "../../server/auth-cors";
+import { isPlainObject } from "../../lib/plain-data";
+import type { IncomingMeta, ProviderAdapter } from "../base";
 import type { OcxProviderConfig } from "../../types";
 import {
   FORWARD_HEADERS,
@@ -11,7 +15,9 @@ import { copyForwardedClientHeaders, forwardableClientHeaders } from "../../lib/
 import { AGENT_ASSERTION_HEADER } from "../../lib/authorization-scheme";
 import { openaiResponsesUrl } from "../openai-responses-url";
 import { isCodexLbProvider } from "../../providers/quota/codex-lb-url";
-import { agentServingThreadKey, oauthSessionKeyFromParts } from "../../oauth/session-affinity-key";
+import { isThreadSpawnRequest } from "../../server/effort-policy";
+import { callerSessionAlias, claudeTranscriptQualifier, safeCallerSessionId, scopedWireHash } from "../../server/caller-session-identity";
+import { agentServingThreadKey } from "../../oauth/session-affinity-key";
 
 export { FORWARD_HEADERS } from "../../codex/forward-transport-headers";
 
@@ -41,26 +47,140 @@ function stripTrailingSlashes(value: string): string {
   return end === value.length ? value : value.slice(0, end);
 }
 
-/**
- * Name a Claude Code agent's thread to codex-lb the way Codex CLI does: `session_id` is the root
- * session, `thread-id` the per-agent serving key (main loop, each subagent, each fork). Both are
- * the existing hashes, never the raw metadata.user_id or agent id. Leaves headers untouched for
- * other providers, for clients that already name a thread, and when no session key exists.
- */
+/** Normalize caller aliases only on native egress; preserve ingress and fallback identity. */
+export function withClaudeNativeSession(headers: Headers, provider: OcxProviderConfig, sessionId?: string): Headers {
+  // Empty values count as absent, matching materializeCodexUpstreamAuth, so first attempts and
+  // retries rebuilt from caller headers pick the same identity.
+  if (!isCanonicalOpenAiForwardProvider(provider) || headers.get("session_id")) return headers;
+  // A sanitized caller-header copy can still carry the original x-session-id. Do not turn
+  // its distinct thread into a contradictory session alias before an account retry reads it.
+  const alias = ["session-id", "x-session-id", "thread-id"].find(name => headers.get(name));
+  const nativeSession = alias ? safeCallerSessionId(headers.get(alias)) : sessionId;
+  // A non-empty invalid alias suppresses weaker metadata identity.
+  if (!nativeSession) return headers;
+  const forwarded = new Headers(headers);
+  forwarded.set("session_id", nativeSession);
+  return forwarded;
+}
+
+/** Format a 32-hex cache key as a uuid-shaped session id (version/variant nibbles forced). */
+export function claudeWireSessionId(hex32: string): string {
+  const h = (hex32 + "0".repeat(32)).slice(0, 32);
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
+function keyedResponsesUrl(provider: OcxProviderConfig): string {
+  return provider.responsesPath === undefined ? openaiResponsesUrl(provider.baseUrl)
+    : `${stripTrailingSlashes(provider.baseUrl)}${provider.responsesPath}`;
+}
+
+/** Only these two Responses endpoints serve Codex relay requests, not arbitrary paths on the same host. */
+export function isCodexRelaySend(provider: OcxProviderConfig, target?: string): boolean {
+  if (!provider.apiKey || (provider.authMode ?? "key") !== "key" || !isCodexLbProvider(provider)) return false;
+  const base = stripTrailingSlashes(provider.baseUrl);
+  const url = target ?? keyedResponsesUrl(provider);
+  return url === `${base}/responses` || url === `${base}/v1/responses`;
+}
+
+function withoutCallerContinuity(incoming: Headers): Headers {
+  const headers = new Headers(incoming);
+  for (const name of ["session_id", "session-id", "x-session-id", "thread-id", "x-codex-parent-thread-id"]) headers.delete(name);
+  return headers;
+}
+
+/** Project the admitted caller's identity at each build, without changing the parsed request
+ * or the selected account's credential headers. The retry must start with its scrubbed body. */
+export function bindSharedCodexWireIdentity(
+  adapter: ProviderAdapter, provider: OcxProviderConfig, callerHeaders: Headers,
+  admission: DataPlaneAdmission | undefined, accountKind: CodexAuthContext["kind"], claudeWire?: HandleResponsesOptions["claudeCodexWire"],
+): void {
+  if (claudeWire && (isCodexRelaySend(provider) || isCanonicalOpenAiForwardProvider(provider))) {
+    const session = accountKind === "main" && isCanonicalOpenAiForwardProvider(provider)
+      ? claudeWire.ownedDirectSessionId ?? claudeWire.sessionId : claudeWire.sessionId;
+    const build = adapter.buildRequest.bind(adapter);
+    adapter.buildRequest = (parsed, incoming) => {
+      const headers = withoutCallerContinuity(incoming.headers);
+      if (session !== null) {
+        const thread = safeCallerSessionId(incoming.headers.get("thread-id"));
+        for (const [name, id] of Object.entries(claudeWirePair(session, thread, parsed._claudeAgentId))) headers.set(name, id);
+      }
+      if (claudeWire.cacheKey === undefined) return build({ ...parsed, _sessionScopedCacheKey: undefined }, { ...incoming, headers });
+      // A rejected alias cannot fall back to the generic translator's metadata-derived key.
+      const key = claudeWire.cacheKey ?? undefined;
+      const raw = parsed._rawBody;
+      return build({ ...parsed, _sessionScopedCacheKey: undefined, _promptCacheKeyIsSharedCohort: false,
+        options: { ...parsed.options, promptCacheKey: key },
+        _rawBody: isPlainObject(raw) ? { ...raw, prompt_cache_key: key } : raw,
+      }, { ...incoming, headers });
+    };
+    return;
+  }
+  if (!admission || admission.kind === "loopback") return;
+  const shared = isCodexRelaySend(provider) || (isCanonicalOpenAiForwardProvider(provider)
+    && (accountKind !== "main" || admission.source === "bearer"));
+  if (!shared) return;
+  const principal = admission.contextPrincipalId;
+  const admittedAlias = callerSessionAlias(callerHeaders, admission);
+  const build = adapter.buildRequest.bind(adapter);
+  adapter.buildRequest = (requestParsed, incoming) => {
+    if (requestParsed._sessionScopedCacheKey) return build(requestParsed, incoming);
+    const original = incoming.headers;
+    const headers = withoutCallerContinuity(original);
+    if (principal && admittedAlias !== null) {
+      const thread = safeCallerSessionId(original.get("thread-id"));
+      const parent = safeCallerSessionId(original.get("x-codex-parent-thread-id"));
+      const session = admittedAlias ?? thread;
+      if (session) {
+        const wireSession = scopedWireHash(principal, session);
+        headers.set("session_id", wireSession);
+        headers.set("session-id", wireSession);
+        if (!thread && !parent) headers.set("thread-id", wireSession);
+      }
+      if (thread) headers.set("thread-id", scopedWireHash(principal, thread));
+      if (parent) headers.set("x-codex-parent-thread-id", scopedWireHash(principal, parent));
+    }
+    let wireParsed = requestParsed;
+    const raw = requestParsed._rawBody;
+    if (isPlainObject(raw) && typeof raw.prompt_cache_key === "string") {
+      const key = principal ? scopedWireHash(principal, raw.prompt_cache_key) : undefined;
+      wireParsed = { ...requestParsed, _rawBody: { ...raw, prompt_cache_key: key }, options: { ...requestParsed.options, promptCacheKey: key } };
+    }
+    return build(wireParsed, { ...incoming, headers });
+  };
+}
+
+function claudeWirePair(session: string, thread: string | undefined, agent: string | undefined) {
+  return { session_id: session, "session-id": session, "thread-id": agentServingThreadKey(session, claudeTranscriptQualifier(thread, agent)) };
+}
+
+/** Project stable conversation identity independently of per-turn state. */
 export function applyCodexLbThreadHeaders(
-  provider: OcxProviderConfig,
-  headers: Record<string, string>,
-  incoming: Headers,
+  provider: OcxProviderConfig, headers: Record<string, string>, incoming: Headers,
   identity: { sessionScopedCacheKey?: string; claudeAgentId?: string },
 ): void {
-  if (!isCodexLbProvider(provider)) return;
-  if (["thread-id", "session_id", "session-id", "x-codex-turn-state"].some(name => incoming.has(name))) return;
-  const sessionKey = oauthSessionKeyFromParts({ promptCacheKey: identity.sessionScopedCacheKey });
-  if (!sessionKey) return;
-  const present = new Set(Object.keys(headers).map(name => name.toLowerCase()));
-  if (["thread-id", "session_id", "session-id"].some(name => present.has(name))) return;
-  headers.session_id = sessionKey;
-  headers["thread-id"] = agentServingThreadKey(sessionKey, identity.claudeAgentId);
+  const relay = isCodexRelaySend(provider);
+  if (!relay && !isCanonicalOpenAiForwardProvider(provider)) return;
+  const root = identity.sessionScopedCacheKey;
+  const thread = safeCallerSessionId(incoming.get("thread-id"));
+  if (root) {
+    if (isThreadSpawnRequest(incoming) && !thread) return;
+    const session = claudeWireSessionId(root);
+    // A translated caller did not authenticate the upstream tuple. Replace, don't adopt it.
+    for (const name of Object.keys(headers)) {
+      if (["session_id", "session-id", "thread-id", "x-codex-parent-thread-id"].includes(name.toLowerCase())) delete headers[name];
+    }
+    Object.assign(headers, claudeWirePair(session, thread, identity.claudeAgentId));
+    return;
+  }
+  if (!relay) return;
+  const alias = callerSessionAlias(incoming);
+  const parent = safeCallerSessionId(incoming.get("x-codex-parent-thread-id"));
+  if (alias === null || (!thread && incoming.has("thread-id")) || (!parent && incoming.has("x-codex-parent-thread-id"))) return;
+  const session = alias ?? thread ?? parent;
+  if (!session) return;
+  if (parent) headers["x-codex-parent-thread-id"] = parent;
+  headers.session_id = headers["session-id"] = session;
+  headers["thread-id"] = thread ?? session;
 }
 
 /** Shared Responses URL/auth/header construction; capabilities never grant auth authority. */
@@ -114,9 +234,7 @@ export function buildResponsesTransport(provider: OcxProviderConfig, incoming: P
       if (assertion) headers[AGENT_ASSERTION_HEADER] = assertion;
     }
   } else {
-    url = provider.responsesPath === undefined
-      ? openaiResponsesUrl(provider.baseUrl)
-      : `${provider.baseUrl.replace(/\/$/, "")}${provider.responsesPath}`;
+    url = keyedResponsesUrl(provider);
     if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
     if (provider.headers) Object.assign(headers, provider.headers);
   }

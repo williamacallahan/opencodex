@@ -141,7 +141,6 @@ import {
 } from "../../codex/upstream-host-health";
 import {
   ForwardAdmissionCredentialError,
-  contextPrincipalIdOf,
   hasForwardableCodexBearer,
   resolveContextPrincipal,
   validateForwardAdmissionCredential,
@@ -242,98 +241,16 @@ import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel, 
 import { requestPacingOverloadResponse } from "./pacing-overload";
 import { codexQuotaOutcomeMeta, shouldRetryCodexPoolAccountQuota, shouldRetryCodexPoolAccountTransient } from "./core-codex-account";
 import { mapCodexAuthContextErrorToResponse, nativeMainRefreshFailureResponse } from "./codex-auth-error";
-import { linkRequestSessionLane, sessionLaneIdFromRequest, reasoningReplayConversationIdFromResponsesRequest, sessionIdHeaderFromRequest } from "../request-log-conversation";
+import { linkRequestSessionLane, reasoningReplayConversationIdFromResponsesRequest, sessionIdHeaderFromRequest } from "../request-log-conversation";
+import { completeClaudeBridgePoolIdentity, resolveClaudeBridgePoolSession } from "../claude-bridge-pool-session";
 import { recallComboForLane } from "./combo-session-recall";
 import { redactHostedImageDisplayPaths } from "../responses-hosted-image-display";
 import { warnEagerCodexToolCatalog } from "./codex-tool-catalog";
 
+import { compactHandoffRoute, forgetCompactHandoffRoute, rememberCompactHandoffRoute } from "./compact-handoff-route";
+export { clearCompactHandoffRoutesForTests } from "./compact-handoff-route";
+
 export const COMPACT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
-
-const COMPACT_HANDOFF_ROUTE_TTL_MS = 24 * 60 * 60_000;
-const COMPACT_HANDOFF_ROUTE_MAX_ENTRIES = 2_048;
-const COMPACT_HANDOFF_MODEL_MAX_LENGTH = 512;
-
-interface CompactHandoffRoute {
-  model: string;
-  lastUsedAt: number;
-}
-
-/**
- * The Codex client does not send its newly selected model on an automatic
- * previous-model compact request. Keep the last route that demonstrably compacted
- * this same thread so a quota-blocked previous model has one safe fallback target.
- */
-const compactHandoffRoutes = new Map<string, CompactHandoffRoute>();
-
-export function clearCompactHandoffRoutesForTests(): void {
-  compactHandoffRoutes.clear();
-}
-
-function pruneCompactHandoffRoutes(now: number): void {
-  for (const [key, entry] of compactHandoffRoutes) {
-    if (now - entry.lastUsedAt > COMPACT_HANDOFF_ROUTE_TTL_MS) compactHandoffRoutes.delete(key);
-  }
-  while (compactHandoffRoutes.size > COMPACT_HANDOFF_ROUTE_MAX_ENTRIES) {
-    const oldest = compactHandoffRoutes.keys().next().value;
-    if (typeof oldest !== "string") return;
-    compactHandoffRoutes.delete(oldest);
-  }
-}
-
-/**
- * The handoff map is process-global, so a caller-controlled lane header alone
- * cannot be the key: two authenticated clients sending the same lane header
- * would share one fallback route. Namespace the lane by the admitted principal.
- * A loopback or missing admission has no authenticated identity to bind this
- * cross-request state to, so it is ineligible rather than trusted.
- */
-function compactHandoffRouteKey(req: Request, admission: DataPlaneAdmission | undefined): string | null {
-  const lane = sessionLaneIdFromRequest(req.headers);
-  if (!lane || !admission || admission.kind === "loopback") return null;
-  // Fail closed rather than substituting a weaker identity. `keyId` survives a
-  // rotation and every identity-less environment admission would collapse into
-  // one bucket, which is the collision this key exists to prevent. Production
-  // admission always mints `contextPrincipalId` for configured and environment
-  // holders, so no real authenticated caller loses the route.
-  const principal = contextPrincipalIdOf(admission);
-  if (!principal) return null;
-  return `${principal}\u0000${lane}`;
-}
-
-function rememberCompactHandoffRoute(
-  req: Request,
-  admission: DataPlaneAdmission | undefined,
-  model: string,
-  now = Date.now(),
-): void {
-  const key = compactHandoffRouteKey(req, admission);
-  if (!key || model.length > COMPACT_HANDOFF_MODEL_MAX_LENGTH) return;
-  pruneCompactHandoffRoutes(now);
-  compactHandoffRoutes.delete(key);
-  compactHandoffRoutes.set(key, { model, lastUsedAt: now });
-  pruneCompactHandoffRoutes(now);
-}
-
-function forgetCompactHandoffRoute(req: Request, admission?: DataPlaneAdmission): void {
-  const key = compactHandoffRouteKey(req, admission);
-  if (key) compactHandoffRoutes.delete(key);
-}
-
-function compactHandoffRoute(
-  req: Request,
-  admission: DataPlaneAdmission | undefined,
-  previousModel: string,
-  now = Date.now(),
-): string | null {
-  const key = compactHandoffRouteKey(req, admission);
-  if (!key) return null;
-  pruneCompactHandoffRoutes(now);
-  const entry = compactHandoffRoutes.get(key);
-  if (!entry || entry.model === previousModel) return null;
-  compactHandoffRoutes.delete(key);
-  compactHandoffRoutes.set(key, { ...entry, lastUsedAt: now });
-  return entry.model;
-}
 
 export interface HandleResponsesCompactOptions {
   clientModelLabel?: ClientFacingModelLabel;
@@ -552,6 +469,7 @@ async function refreshPoolCompactContext(args: {
  */
 async function resolveAlternateCompactContext(args: {
   req: Request;
+  selectionHeaders: Headers;
   config: OcxConfig;
   route: { provider: OcxProviderConfig; codexAccountMode?: CodexAccountMode };
   selectedModelId: string | undefined;
@@ -564,7 +482,7 @@ async function resolveAlternateCompactContext(args: {
   if (!route.codexAccountMode || !excludeAccountId) return null;
   let authCtx: CodexAuthContext | undefined;
   try {
-    authCtx = await resolveCodexAuthContext(req.headers, config, route.codexAccountMode, {
+    authCtx = await resolveCodexAuthContext(args.selectionHeaders, config, route.codexAccountMode, {
       admission: args.admission,
       ...(selectedModelId ? { modelId: selectedModelId } : {}),
       excludeAccountId,
@@ -710,8 +628,9 @@ export async function handleResponsesCompact(
   warnEagerCodexToolCatalog(body, req.headers, { surface: "compact", logicalRequest: logCtx });
   // Compaction forwards client history upstream too; keep local artifact paths out of it.
   redactHostedImageDisplayPaths(body);
+  const claudeBridgePoolSession = resolveClaudeBridgePoolSession({ ingress: req.headers, replay: req.headers, admission });
   if (!options.compactionRoutingOverride) {
-    options = { ...options, compactionRoutingOverride: applyCompactionRoutingOverride(body, req.headers, config, { endpoint: "compact" }) };
+    options = { ...options, compactionRoutingOverride: applyCompactionRoutingOverride(body, req.headers, config, { endpoint: "compact", claudeBridgePoolSession }) };
   }
   const raw = body as { model?: unknown; input?: unknown };
   if (typeof raw.model !== "string" || raw.model.length === 0) {
@@ -738,7 +657,7 @@ export async function handleResponsesCompact(
   // Configured selectors take precedence over this implicit session hint.
   if (!options.compactionRoutingOverride && typeof compactModel === "string" && !compactModel.includes("/") && !compactFastRow
     && !resolveComboId(config, compactModel)) {
-    const recalledComboId = recallComboForLane(config, sessionLaneIdFromRequest(req.headers), compactModel);
+    const recalledComboId = recallComboForLane(config, claudeBridgePoolSession, compactModel);
     if (recalledComboId) {
       (raw as Record<string, unknown>).model = `combo/${recalledComboId}`;
       // Keep the routed identity in sync: the bare model can 404 outright (no
@@ -912,11 +831,12 @@ export async function handleResponsesCompact(
     // Resolve the SAME pool/thread auth context as /v1/responses — forwarding the caller's raw
     // headers would run compaction on the wrong account (or 401) whenever a pool account is
     // active for this thread while normal turns succeed.
+    const selectionHeaders = completeClaudeBridgePoolIdentity(req.headers, { admission, claudeBridgePoolSession });
     let compactProvider = route.provider;
     let headers = new Headers({ "content-type": "application/json" });
     try {
       if (route.codexAccountMode || customReserveForward) {
-        if (route.codexAccountMode) authCtx = await resolveCodexAuthContext(req.headers, config, route.codexAccountMode, {
+        if (route.codexAccountMode) authCtx = await resolveCodexAuthContext(selectionHeaders, config, route.codexAccountMode, {
           admission,
           accountId: route.codexAccountId,
           modelId: selectedModelId,
@@ -1014,7 +934,7 @@ export async function handleResponsesCompact(
       })),
     ) as typeof compactBodyRaw;
     {
-      const binding = conversationStateBindingFromAuth(authCtx, codexPoolAffinityKey(req.headers));
+      const binding = conversationStateBindingFromAuth(authCtx, codexPoolAffinityKey(selectionHeaders));
       if (binding) {
         // Refused rather than scrubbed: an uploaded file is content the caller attached, not
         // continuation state the turn can do without.
@@ -1032,12 +952,18 @@ export async function handleResponsesCompact(
           headers,
           bindingKey: binding.bindingKey,
           servingAccountId: binding.accountId,
+          sameUploadedFileAccount: (first, second) =>
+            (!isRequestOwnedAffinityKey(binding.bindingKey) || callerMatchesObservedMain(req.headers))
+            && sameCodexUploadedFileAccount(config, first, second),
           logCtx,
         });
         applyAccountChangeConversationStateScrub({
           body: compactBody,
           bindingKey: binding.bindingKey,
           servingAccountId: binding.accountId,
+          sameUploadedFileAccount: (first, second) =>
+            (!isRequestOwnedAffinityKey(binding.bindingKey) || callerMatchesObservedMain(req.headers))
+            && sameCodexUploadedFileAccount(config, first, second),
           logCtx,
         });
       }
@@ -1050,7 +976,7 @@ export async function handleResponsesCompact(
       : undefined;
     if (gatewayTransport) {
       headers = new Headers(gatewayTransport.headers);
-      const binding = conversationStateBindingFromAuth(authCtx, codexPoolAffinityKey(req.headers));
+      const binding = conversationStateBindingFromAuth(authCtx, codexPoolAffinityKey(selectionHeaders));
       if (binding) applyAccountChangeConversationStateScrub({ body: compactBody, headers, bindingKey: binding.bindingKey, servingAccountId: binding.accountId, logCtx });
     }
     // Native v1 bypasses the adapter serializer. Bind the same replay provenance as ordinary
@@ -1225,20 +1151,33 @@ export async function handleResponsesCompact(
         });
         const requireSendPlaintextReasoning = !isOpenAiOperatedResponsesDestination(sendProvider)
           && requiresPlaintextReasoningReplay(sendProvider);
-        // #8042: `ocx1:`/`ocx2:` are OpenCodex's own transparent envelopes, which no upstream can
-        // decode, so canonical and official sends must lower them like ordinary turns do. `false`
-        // leaves native blobs to the account-change scrub that already owns them on this path.
+        const compactScrub: Pick<OcxParsedRequest, "previousResponseId" | "_stripReasoningEncryptedContent" | "_stripNativeCompactionEncryptedContent" | "_dropForeignReasoningItemIds"> = {};
+        const sendAffinity = compactAlternateAffinityKey(authCtx, () => codexPoolAffinityKey(selectionHeaders)) ?? codexPoolAffinityKey(selectionHeaders);
+        const sendBinding = conversationStateBindingFromAuth(sendAuthCtx, sendAffinity)
+          ?? (sendAuthCtx.kind === "main" && sendAffinity && conversationStateAccountId(authCtx)
+            ? { bindingKey: sendAffinity, accountId: MAIN_CODEX_ACCOUNT_ID } : null);
+        if (sendBinding) applyAccountChangeConversationStateScrub({
+          body: compactBody, parsed: compactScrub, bindingKey: sendBinding.bindingKey,
+          servingAccountId: sendBinding.accountId, priorAccountId: conversationStateAccountId(authCtx),
+          sameUploadedFileAccount: (first, second) =>
+            (!isRequestOwnedAffinityKey(sendBinding.bindingKey) || callerMatchesObservedMain(req.headers))
+            && sameCodexUploadedFileAccount(config, first, second),
+        });
+        // Local compaction envelopes must be lowered before any upstream send.
         let replayBody = gatewayReplayParsed ? sanitizeReasoningInputContent(scrubOcxCompactionItems(
           compactBody, destinationDecodesNativeCompactionBlob(sendProvider),
-          gatewayReplayParsed._stripReasoningEncryptedContent === true,
+          gatewayReplayParsed._stripNativeCompactionEncryptedContent === true || compactScrub._stripNativeCompactionEncryptedContent === true,
         ), {
           preserveRawReasoningContent: !isOpenAiOperatedResponsesDestination(sendProvider)
             && sendProvider.preserveResponsesReasoningContent === true,
           dropNullContentChannel: !isOpenAiOperatedResponsesDestination(sendProvider),
-          stripEncryptedContent: gatewayReplayParsed._stripReasoningEncryptedContent === true || requireSendPlaintextReasoning,
-          dropForeignItemId: gatewayReplayParsed._dropForeignReasoningItemIds === true,
+          stripEncryptedContent: gatewayReplayParsed._stripReasoningEncryptedContent === true || compactScrub._stripReasoningEncryptedContent === true || requireSendPlaintextReasoning,
+          dropForeignItemId: gatewayReplayParsed._dropForeignReasoningItemIds === true || compactScrub._dropForeignReasoningItemIds === true,
           requirePlaintextReasoning: requireSendPlaintextReasoning,
-        }) : scrubOcxCompactionItems(compactBody, destinationDecodesNativeCompactionBlob(sendProvider), false) as typeof compactBody;
+        }) : sanitizeReasoningInputContent(scrubOcxCompactionItems(compactBody, destinationDecodesNativeCompactionBlob(sendProvider), compactScrub._stripNativeCompactionEncryptedContent === true), {
+          stripEncryptedContent: compactScrub._stripReasoningEncryptedContent,
+          dropForeignItemId: compactScrub._dropForeignReasoningItemIds,
+        }) as typeof compactBody;
         if (!isOpenAiOperatedResponsesDestination(sendProvider) && sendProvider.dropResponsesReasoningItems === true) {
           replayBody = dropResponsesReasoningInputItems(replayBody) as typeof replayBody;
         }
@@ -1476,7 +1415,7 @@ export async function handleResponsesCompact(
       outcomeCtx = replay.authCtx;
       compactProvider = replay.provider;
       headers = replay.headers;
-      const replayBinding = conversationStateBindingFromAuth(replay.authCtx, codexPoolAffinityKey(req.headers));
+      const replayBinding = conversationStateBindingFromAuth(replay.authCtx, codexPoolAffinityKey(selectionHeaders));
       if (replayBinding) applyAccountChangeConversationStateScrub({ body: compactBody, headers, bindingKey: replayBinding.bindingKey, servingAccountId: replayBinding.accountId, logCtx });
       logCtx.accountLogLabel = codexAuthContextLogLabel(replay.authCtx, config);
       try {
@@ -1532,8 +1471,8 @@ export async function handleResponsesCompact(
       return formatErrorResponse(502, "upstream_error", "Failed to connect to compact upstream");
     };
     const scrubCompactStateForAlternate = (alternateAuthCtx: CodexAuthContext, alternateHeaders: Headers): void => {
-      const affinityKey = compactAlternateAffinityKey(authCtx, () => codexPoolAffinityKey(req.headers))
-        ?? codexPoolAffinityKey(req.headers);
+      const affinityKey = compactAlternateAffinityKey(authCtx, () => codexPoolAffinityKey(selectionHeaders))
+        ?? codexPoolAffinityKey(selectionHeaders);
       const priorAccountId = conversationStateAccountId(authCtx);
       // An unkeyed caller-owned main alternate has no binding of its own, but moving off the issuing
       // account still makes the carried state foreign. Scrub for this request only; nothing persists.
@@ -1582,7 +1521,7 @@ export async function handleResponsesCompact(
       const alternate = conversationCarriesUploadedFiles(raw)
         ? undefined
         : await resolveAlternateCompactContext({
-          req,
+          req, selectionHeaders,
           admission,
           config,
           route,
@@ -1686,7 +1625,7 @@ export async function handleResponsesCompact(
         upstream.headers.get("x-codex-tertiary-reset-at"),
       ].filter(Boolean);
       const alternate = await resolveAlternateCompactContext({
-        req,
+        req, selectionHeaders,
         admission,
         config,
         route,
@@ -1796,7 +1735,7 @@ export async function handleResponsesCompact(
       if (gatewayReplayParsed && validCompact) commitReasoningReplayServingIdentity(gatewayReplayParsed._reasoningReplayScope);
       inspectResponseLogJson(logCtx, compactText);
       if (!options.compactionRoutingOverride) forgetCompactHandoffRoute(req, admission);
-      rememberServingConversationStateIssuer(outcomeCtx, codexPoolAffinityKey(req.headers));
+      rememberServingConversationStateIssuer(outcomeCtx, codexPoolAffinityKey(selectionHeaders));
     } else if (!options.compactionRoutingOverride && quotaFailure && (!storedPool401ReplayAttempted || wasAccountAutoPaused(upstream))) {
       const fallbackModel = compactHandoffRoute(req, admission, raw.model);
       if (fallbackModel && !req.signal.aborted) {

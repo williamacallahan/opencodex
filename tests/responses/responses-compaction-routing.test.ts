@@ -1,6 +1,6 @@
 import { getAccountQuotaHistory } from "../../src/codex/quota";
 import { clearComboSelectionState, clearComboTargetCooldowns } from "../../src/combos";
-import { sessionLaneIdFromRequest } from "../../src/server/request-log-conversation";
+import { admittedLane, loopbackAdmission } from "../helpers/combo-recall-admission";
 /**
  * Issue #422: a Responses-shaped wire does not imply support for Codex's private
  * `compaction_trigger` item. Only the canonical ChatGPT backend speaks that
@@ -39,11 +39,17 @@ import { supportsNativeResponsesCompactEndpoint } from "../../src/providers/open
 import type { RequestLogContext } from "../../src/server/request-log";
 import { acquireNativeMainProfileDrain, tryAdmitTurn } from "../../src/server/lifecycle";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
-import { clearComboRecallForTests, recallComboForLane, rememberComboForLane } from "../../src/server/responses/combo-session-recall";
-import { captureConfigGeneration } from "../../src/lib/state-store-sweeper";
+import { clearComboRecallForTests, recallComboForLane } from "../../src/server/responses/combo-session-recall";
 import { baseCompactionBody, compactionRequest, completedPayload, drainCompactionResponseState, installCompactionRoutingAclFixture, jsonResponse, keyProviderConfig, nativePoolConfig, removeCompactionFixture, sseResponse, twoAccountPoolConfig } from "../helpers/compaction-routing-fixtures";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { SERVER_BUDGET_MS } from "../helpers/test-budget";
+
+function admittedResponses(req: Request, config: OcxConfig, log: RequestLogContext) {
+  return handleResponses(req, config, log, { admission: loopbackAdmission });
+}
+function admittedCompact(req: Request, config: OcxConfig, log: RequestLogContext) {
+  return handleResponsesCompact(req, config, log, undefined, loopbackAdmission);
+}
 
 const originalFetch = globalThis.fetch;
 installCompactionRoutingAclFixture();
@@ -941,7 +947,7 @@ describe("compact alternate-account attempt (#913)", () => {
           const completed = new Promise<void>(resolve => { complete = resolve; });
           const seedWork = (async () => {
             const seed = await handleResponses(compactionRequest({ model: "combo/native", stream: true, input: "hello" }, client.signal, headers),
-              config, { model: "", provider: "" }, { onResponseComplete: complete, abortSignal: client.signal });
+              config, { model: "", provider: "" }, { admission: loopbackAdmission, onResponseComplete: complete, abortSignal: client.signal });
             expect(seed.status).toBe(200);
             await seed.text();
             await completed;
@@ -954,9 +960,9 @@ describe("compact alternate-account attempt (#913)", () => {
           ]);
           clearTimeout(completionTimer);
           completionTimer = undefined;
-          expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "account-recall" })), "gpt-5.5")).toBe("native");
+          expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "account-recall" })), "gpt-5.5")).toBe("native");
           config.activeCodexAccountId = "pool-b";
-          const compact = version === "v1" ? handleResponsesCompact : handleResponses;
+          const compact = version === "v1" ? admittedCompact : admittedResponses;
           const log: RequestLogContext = { model: "", provider: "" };
           const response = await compact(compactionRequest(baseCompactionBody({ model: "gpt-5.5", stream: true }), client.signal, headers), config, log);
           expect(response.status).toBe(200);
@@ -1742,7 +1748,7 @@ describe("compaction combo recall after combo switch (#3891)", () => {
     const laneHeaders = { "session_id": "lane-combo-recall" };
 
     // Step 1: an ordinary combo turn succeeds, populating the recall map.
-    const comboRes = await handleResponses(
+    const comboRes = await admittedResponses(
       compactionRequest({ model: "combo/terra", stream: false, input: "hello" }, undefined, laneHeaders),
       config,
       { model: "", provider: "" },
@@ -1751,7 +1757,7 @@ describe("compaction combo recall after combo switch (#3891)", () => {
 
     // Step 2: compaction arrives with the bare native model on the same lane.
     const logCtx: RequestLogContext = { model: "", provider: "" };
-    const res = await handleResponses(
+    const res = await admittedResponses(
       compactionRequest(baseCompactionBody({ model: "gpt-5.6-terra" }), undefined, laneHeaders),
       config,
       logCtx,
@@ -1777,7 +1783,7 @@ describe("compaction combo recall after combo switch (#3891)", () => {
     const config = comboTestConfig();
     const laneHeaders = { "session_id": "lane-compact-recall" };
 
-    const comboRes = await handleResponses(
+    const comboRes = await admittedResponses(
       compactionRequest({ model: "combo/terra", stream: false, input: "hello" }, undefined, laneHeaders),
       config,
       { model: "", provider: "" },
@@ -1785,7 +1791,7 @@ describe("compaction combo recall after combo switch (#3891)", () => {
     expect(comboRes.status).toBe(200);
 
     const logCtx: RequestLogContext = { model: "", provider: "" };
-    const compactRes = await handleResponsesCompact(
+    const compactRes = await admittedCompact(
       compactionRequest(baseCompactionBody({ model: "gpt-5.6-terra" }), undefined, laneHeaders),
       config,
       logCtx,
@@ -1801,7 +1807,7 @@ describe("compaction combo recall after combo switch (#3891)", () => {
     const config = comboTestConfig();
 
     // Populate recall on lane A.
-    await handleResponses(
+    await admittedResponses(
       compactionRequest({ model: "combo/terra", stream: false, input: "hello" }, undefined, { "session_id": "lane-A" }),
       config,
       { model: "", provider: "" },
@@ -1810,7 +1816,7 @@ describe("compaction combo recall after combo switch (#3891)", () => {
     // Compaction on lane B: the bare model should NOT be rewritten to the combo.
     // It falls through to the compaction default-provider fallback (#2901) and lands on gw.
     const logCtx: RequestLogContext = { model: "", provider: "" };
-    const res = await handleResponses(
+    const res = await admittedResponses(
       compactionRequest(baseCompactionBody({ model: "gpt-5.6-terra" }), undefined, { "session_id": "lane-B" }),
       config,
       logCtx,
@@ -1827,7 +1833,7 @@ describe("compaction combo recall after combo switch (#3891)", () => {
     const config = comboTestConfig();
     const laneHeaders = { "session_id": "lane-no-match" };
 
-    await handleResponses(
+    await admittedResponses(
       compactionRequest({ model: "combo/terra", stream: false, input: "hello" }, undefined, laneHeaders),
       config,
       { model: "", provider: "" },
@@ -1835,7 +1841,7 @@ describe("compaction combo recall after combo switch (#3891)", () => {
 
     // Bare model "gpt-5.6-luna" does not match terra combo target "gpt-5.6-terra".
     const logCtx: RequestLogContext = { model: "", provider: "" };
-    const res = await handleResponses(
+    const res = await admittedResponses(
       compactionRequest(baseCompactionBody({ model: "gpt-5.6-luna" }), undefined, laneHeaders),
       config,
       logCtx,
@@ -1876,7 +1882,7 @@ describe("compaction combo recall after combo switch (#3891)", () => {
     }) as typeof fetch;
 
     const laneHeaders = { "session_id": "lane-recall-404" };
-    const comboRes = await handleResponses(
+    const comboRes = await admittedResponses(
       compactionRequest({ model: "combo/terra", stream: false, input: "hello" }, undefined, laneHeaders),
       config,
       { model: "", provider: "" },
@@ -1884,7 +1890,7 @@ describe("compaction combo recall after combo switch (#3891)", () => {
     expect(comboRes.status).toBe(200);
 
     const logCtx: RequestLogContext = { model: "", provider: "" };
-    const res = await handleResponsesCompact(
+    const res = await admittedCompact(
       compactionRequest(baseCompactionBody({ model: "gpt-5.6-terra" }), undefined, laneHeaders),
       config,
       logCtx,
@@ -1930,7 +1936,7 @@ describe("compaction combo recall after combo switch (#3891)", () => {
     }) as typeof fetch;
 
     const laneHeaders = { "session_id": "lane-recall-native" };
-    const comboRes = await handleResponses(
+    const comboRes = await admittedResponses(
       compactionRequest({ model: "combo/terra", stream: false, input: "hello" }, undefined, laneHeaders),
       config,
       { model: "", provider: "" },
@@ -1938,7 +1944,7 @@ describe("compaction combo recall after combo switch (#3891)", () => {
     expect(comboRes.status).toBe(200);
 
     const logCtx: RequestLogContext = { model: "", provider: "" };
-    const res = await handleResponsesCompact(
+    const res = await admittedCompact(
       compactionRequest(baseCompactionBody({ model: "gpt-5.6-terra" }), undefined, laneHeaders),
       config,
       logCtx,
@@ -1965,7 +1971,7 @@ describe("compaction combo recall after combo switch (#3891)", () => {
   }
 
   async function seedRecall(config: OcxConfig, lane: string | undefined = "recall-lane"): Promise<void> {
-    const response = await handleResponses(compactionRequest(
+    const response = await admittedResponses(compactionRequest(
       { model: "combo/terra", stream: false, input: "hello" }, undefined,
       lane ? { session_id: lane } : {},
     ), config, { model: "", provider: "" });
@@ -1974,7 +1980,7 @@ describe("compaction combo recall after combo switch (#3891)", () => {
   }
 
   for (const version of ["v1", "v2"] as const) {
-    const compact = version === "v1" ? handleResponsesCompact : handleResponses;
+    const compact = version === "v1" ? admittedCompact : admittedResponses;
     const dispatch = async (config: OcxConfig, model: string, lane: string | undefined = "recall-lane") => {
       const log: RequestLogContext = { model: "", provider: "" };
       const response = await compact(compactionRequest(baseCompactionBody({ model }), undefined,
@@ -1992,7 +1998,7 @@ describe("compaction combo recall after combo switch (#3891)", () => {
         targets: [{ provider: "alt", model: "gpt-5.6-luna" }],
       };
       await seedRecall(config);
-      expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "recall-lane" })), "gpt-5.6-terra")).toBe("terra");
+      expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "recall-lane" })), "gpt-5.6-terra")).toBe("terra");
       const log = await dispatch(config, "gpt-5.6-terra");
       expect(log.comboId).toBe("explicit");
       expect(log.resolvedModel).toBe("gpt-5.6-luna");
@@ -2037,27 +2043,16 @@ describe("compaction combo recall after combo switch (#3891)", () => {
       expect((await dispatch(config, "gpt-5.6-terra")).comboId).toBeUndefined();
     });
 
-    test(`${version} recall expires at thirty minutes and evicts the oldest of 257 lanes`, async () => {
+    test(`${version} bare compaction recall lasts for the pool affinity window`, async () => {
       installRecallChatFixture();
       const config = comboTestConfig();
-      let now = 100_000;
-      const clock = spyOn(Date, "now").mockImplementation(() => now);
+      await seedRecall(config);
+      const clock = spyOn(Date, "now").mockReturnValue(Date.now() + 23 * 60 * 60_000);
       try {
-        await seedRecall(config);
-        now += 30 * 60 * 1000 - 1;
-        expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "recall-lane" })), "gpt-5.6-terra")).toBe("terra");
-        now += 1;
+        expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "recall-lane" })), "gpt-5.6-terra")).toBe("terra");
+        clock.mockReturnValue(Date.now() + 2 * 60 * 60_000);
         expect((await dispatch(config, "gpt-5.6-terra")).comboId).toBeUndefined();
-        const target = { provider: "gw", model: "gpt-5.6-terra" };
-        for (let index = 0; index < 257; index += 1) {
-          rememberComboForLane(sessionLaneIdFromRequest(new Headers({ session_id: `lane-${index}` })), "terra", target, "gpt-5.6-terra", captureConfigGeneration());
-        }
-        expect((await dispatch(config, "gpt-5.6-terra", "lane-0")).comboId).toBeUndefined();
-        expect((await dispatch(config, "gpt-5.6-terra", "lane-1")).comboId).toBe("terra");
-        expect((await dispatch(config, "gpt-5.6-terra", "lane-256")).comboId).toBe("terra");
-      } finally {
-        clock.mockRestore();
-      }
+      } finally { clock.mockRestore(); }
     });
 
     test(`${version} virtual Pro target recalls the emitted base model`, async () => {
@@ -2076,7 +2071,7 @@ describe("compaction combo recall after combo switch (#3891)", () => {
       }) as typeof fetch;
       await seedRecall(config);
       expect(calls[0]!.body).toMatchObject({ model: "gpt-5.6-terra", reasoning: { mode: "pro" } });
-      expect(recallComboForLane(config, sessionLaneIdFromRequest(new Headers({ session_id: "recall-lane" })), "gpt-5.6-terra-pro")).toBeUndefined();
+      expect(recallComboForLane(config, admittedLane(new Headers({ session_id: "recall-lane" })), "gpt-5.6-terra-pro")).toBeUndefined();
       expect((await dispatch(config, "gpt-5.6-terra")).comboId).toBe("terra");
       expect(calls.every(call => call.url.endsWith("/responses"))).toBe(true);
     });

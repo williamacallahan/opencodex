@@ -6,6 +6,7 @@ import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readF
 import { join } from "node:path";
 import { getConfigDir } from "../config";
 import type { CodexAffinityMove, CodexAffinityReason } from "../codex/routing";
+import { CODEX_AFFINITY_REASONS } from "../codex/routing/thread-affinity";
 import { enforceAppOwnedMemoryBudget } from "../lib/app-owned-memory";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
 import { redactSecretString, sanitizeLogMetadataString } from "../lib/redact";
@@ -150,6 +151,7 @@ export interface PersistedUsageAttempt {
   /** Absent on historic attempts and routes whose subscription attribution is unknown. */
   credentialSource?: UsageCredentialSource;
   model: string;
+  wireModel?: string;
   adapter: string;
   status: number;
   durationMs: number;
@@ -541,11 +543,6 @@ export function isKnownTerminalSource(value: unknown): value is NonNullable<Pers
 const KNOWN_AFFINITY_MOVES = new Set<NonNullable<PersistedUsageEntry["affinity"]>>([
   "reused", "held", "detour", "rebound", "new_bind", "cleared", "unbound",
 ]);
-const KNOWN_AFFINITY_REASONS = new Set<NonNullable<PersistedUsageEntry["affinityReason"]>>([
-  "healthy", "no_conversation", "request_owned", "quota_headroom", "quota_refusal", "transient", "transient_hold_expired",
-  "unusable", "paused", "plan_excluded", "credits_off", "cooldown", "quota_avoided", "generation",
-  "expired", "model_lane",
-]);
 const KNOWN_CONVERSATION_STATE_SCRUBS = new Set<NonNullable<PersistedUsageEntry["conversationStateScrub"]>>([
   "account-change",
 ]);
@@ -555,7 +552,7 @@ export function isKnownAffinityMove(value: unknown): value is NonNullable<Persis
 }
 
 export function isKnownAffinityReason(value: unknown): value is NonNullable<PersistedUsageEntry["affinityReason"]> {
-  return typeof value === "string" && KNOWN_AFFINITY_REASONS.has(value as NonNullable<PersistedUsageEntry["affinityReason"]>);
+  return typeof value === "string" && Object.hasOwn(CODEX_AFFINITY_REASONS, value);
 }
 
 export function usageLogPath(configDir?: string): string {
@@ -791,6 +788,7 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
       ? { credentialSource: attempt.credentialSource }
       : {}),
     model: attempt.model,
+    ...(typeof attempt.wireModel === "string" && attempt.wireModel ? { wireModel: attempt.wireModel } : {}),
     adapter: attempt.adapter,
     status: attempt.status,
     durationMs: attempt.durationMs,

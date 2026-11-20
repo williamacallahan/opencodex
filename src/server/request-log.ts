@@ -1773,13 +1773,29 @@ export function recordKeyAttemptUsage(logCtx: RequestLogContext, usage: OcxUsage
 
 /** A stable active object lets combo/stream callbacks keep pointing at the final attempt.
  * Earlier key segments are immutable, flat snapshots inserted before that active object. */
+export function createDeferredPoolSendRecorder(
+  isPool: () => boolean,
+  noteRoute: (recovery?: AttemptRecoveryKind) => void,
+  notePool: (recovery?: AttemptRecoveryKind) => void,
+  sendHandler: (next?: () => void) => (body?: BodyInit | null) => void,
+) {
+  let pending: { recovery?: AttemptRecoveryKind } | undefined;
+  return {
+    noteAttemptSend: (recovery?: AttemptRecoveryKind) => { if (isPool()) pending = { recovery }; else noteRoute(recovery); },
+    recordPhysicalSend: (next?: () => void) => sendHandler(() => {
+      next?.();
+      if (pending) { notePool(pending.recovery); pending = undefined; }
+    }),
+  };
+}
+
 export function noteProviderAttemptSend(
   logCtx: RequestLogContext,
   providerName: string,
   provider: OcxProviderConfig,
   inputTokenEstimate: number | undefined,
   recovery?: AttemptRecoveryKind,
-  resolved?: { model: string; adapter: string },
+  resolved?: { model?: string; adapter?: string; wireModel?: string },
 ): void {
   const attempt = logCtx.activeAttempt;
   const previous = attempt?.accountLogLabel;
@@ -1790,7 +1806,9 @@ export function noteProviderAttemptSend(
   const next = logCtx.accountLogLabel;
   if (attempt && usesApiKeyAccount(provider)) keyUsageOwners.add(attempt);
   if (attempt && attempt.sendCount > 0 && (attemptAccountChanged(previous, next, attempt.provider, logCtx.provider)
-    || resolved && (attempt.model !== resolved.model || attempt.adapter !== resolved.adapter))) {
+    || (resolved?.model !== undefined && attempt.model !== resolved.model)
+    || (resolved?.adapter !== undefined && attempt.adapter !== resolved.adapter)
+    || (resolved?.wireModel !== undefined && attempt.wireModel !== resolved.wireModel))) {
     // An input estimate is not evidence that a failed send used that many tokens.
     delete attempt.inputTokenEstimate;
     // An account-scoped recovery kind names the status the sealed account answered.
@@ -1822,7 +1840,9 @@ export function noteProviderAttemptSend(
     logCtx.activeAttemptStartedAt = Date.now();
   }
   if (attempt) {
-    if (resolved) { attempt.model = resolved.model; attempt.adapter = resolved.adapter; }
+    if (resolved?.model !== undefined) attempt.model = resolved.model;
+    if (resolved?.adapter !== undefined) attempt.adapter = resolved.adapter;
+    if (resolved?.wireModel !== undefined) attempt.wireModel = resolved.wireModel;
     sealRequestAttemptIdentity(attempt, logCtx.provider, attempt.adapter, next);
     recordAttemptCredentialSource(attempt, providerName, provider, attempt.adapter);
   }

@@ -1,3 +1,6 @@
+import { admittedLane } from "../helpers/combo-recall-admission";
+import { rememberComboForLane } from "../../src/server/responses/combo-session-recall";
+import { captureConfigGeneration } from "../../src/lib/state-store-sweeper";
 import { createPoolRetryHarness, POOL_RETRY_MODEL } from "../helpers/codex-pool-retry";
 import { waitForNativeMainStartupGate } from "../../src/codex/native-profile-startup";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
@@ -3204,10 +3207,14 @@ describe("server local API auth", () => {
     }
   }, { timeout: SERVER_BUDGET_MS });
 
-  test("combo reset deferral preserves the first account when its account retry also fails", async () => {
+  test.each([false, true])("a reset-derived refusal leaves the account available for the untried model (pinned second target: %s)", async pinnedSecond => {
+    const headers = { "thread-id": "deferral-fixture" };
+    const targets = [{ provider: "openai", model: POOL_RETRY_MODEL }, { provider: "openai", model: `${POOL_RETRY_MODEL}-fallback` }];
+    const models: string[] = [];
     const harness = await startPoolRetryHarness(
       async (accountId, request) => {
-        const body = await request.json() as { model?: string };
+        const body = await request.json();
+        models.push(body.model);
         if (body.model === `${POOL_RETRY_MODEL}-fallback`) {
           return Response.json({ id: "combo-later-model-success", status: "completed", output: [] });
         }
@@ -3229,19 +3236,18 @@ describe("server local API auth", () => {
         combos: {
           quota: {
             strategy: "failover",
-            targets: [
-              { provider: "openai", model: POOL_RETRY_MODEL },
-              { provider: "openai", model: `${POOL_RETRY_MODEL}-fallback` },
-            ],
+            targets: pinnedSecond ? [...targets].reverse() : targets,
           },
         },
       },
     );
     try {
-      const response = await harness.request({ model: "combo/quota" });
+      if (pinnedSecond) rememberComboForLane(admittedLane(new Headers(headers)), "quota", targets[0]!, POOL_RETRY_MODEL, captureConfigGeneration());
+      const response = await harness.request({ model: "combo/quota", headers });
       expect(response.status).toBe(200);
       expect((await response.json() as { id: string }).id).toBe("combo-later-model-success");
       expect(harness.dispatches).toEqual(["acct-pool-a", "acct-pool-b", "acct-pool-a"]);
+      expect(models).toEqual([POOL_RETRY_MODEL, POOL_RETRY_MODEL, `${POOL_RETRY_MODEL}-fallback`]);
       expect(getCodexQuotaHealthSnapshot("pool-a", "shared")).toBeNull();
     } finally {
       await stopPoolRetryHarness(harness);

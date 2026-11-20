@@ -12,13 +12,12 @@ import { nextQuotaQueryDelay } from "./quota-query-backoff";
 import { noteMainAccountActivity } from "./main-account-external-usage";
 import { codexAccountPriorityFailbackEnabled } from "./account-priority";
 import type { PoolQuotaWriter } from "./quota-types";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { callerIsCooledPoolAccount } from "./caller-cooled-pool-account";
 import {
   CodexCredentialGenerationConflictError,
   CodexCredentialRefreshLockTimeoutError,
   CodexCredentialRefreshBusyError,
   CodexCredentialRefreshStaleError,
-  getCodexAccountCredential,
   getValidCodexToken,
   capturePoolQuotaWriter,
   isCodexAccountGenerationLive,
@@ -84,7 +83,7 @@ import type { CodexAccountMode, OcxConfig, OcxProviderConfig } from "../types";
 import { FORWARD_HEADERS } from "../adapters/openai-responses";
 import { isolateCodexPoolAccountHeaders } from "./forward-transport-headers";
 import { captureConfigGeneration } from "../lib/state-store-sweeper";
-import { extractAccountId, extractEmail } from "../oauth/chatgpt";
+import { extractAccountId } from "../oauth/chatgpt";
 import {
   resolveMainAccountHardLockThresholds,
   getMainAccountHardLockStatus,
@@ -103,7 +102,7 @@ import {
 } from "./main-account-cache";
 import { CODEX_RESERVE_HELPER_UNSUPPORTED_MESSAGE, isCodexReserveHelperUnsupported, isCodexReserveRequestEligible } from "./loopback-target";
 import type { DataPlaneAdmission } from "../server/auth-cors";
-import { getMainReserveAuthorization, isMainReserveAuthorizationLive, nativeUserIdClaims, type MainReserveAuthorization } from "./reserve-availability";
+import { getMainReserveAuthorization, isMainReserveAuthorizationLive, type MainReserveAuthorization } from "./reserve-availability";
 import { UpstreamRetryEvidenceError } from "../lib/upstream-retry";
 import { CODEX_MAIN_DUPLICATE_ACTION } from "./collision-identity";
 import { AgentAssertionUnsupportedError, authorizationCredential, hasAgentAssertionAuthorization } from "../lib/authorization-scheme";
@@ -241,6 +240,7 @@ export type CodexAuthContext =
       generation: number;
       poolQuotaWriter?: PoolQuotaWriter;
       poolReserve?: true;
+      bindIncludedAlternateOnCompletion?: true;
       accessToken: string;
       chatgptAccountId: string;
       /** Bypass Pool selection and suppress quota/transient failover for an exact selector. */
@@ -276,6 +276,7 @@ export type CodexAuthContext =
       /** Immutable credential proof captured while materializing this physical attempt's headers. */
       mainQuotaDispatch?: MainQuotaDispatch;
       reserveAuthorization?: MainReserveAuthorization;
+      bindIncludedAlternateOnCompletion?: true;
       accessToken: string;
       chatgptAccountId: string;
       /** Bypass Pool selection and suppress quota/transient failover for an exact selector. */
@@ -780,54 +781,6 @@ function assertMainAccountPolicy(
   // Only an admitted request is opencodex's own use of the main account. Counting a refused one
   // would hide outside usage from the warning exactly while the lock is holding.
   noteMainAccountActivity();
-}
-
-/** Constant-time digest comparison so bearer bytes never drive branch timing. */
-function sameCredentialMaterial(a: string, b: string): boolean {
-  return timingSafeEqual(createHash("sha256").update(a).digest(), createHash("sha256").update(b).digest());
-}
-
-/**
- * The early-cooldown caller-main fallback must not resurrect the subscription that is cooling
- * down. Fail closed on ambiguity: an unreadable caller identity cannot be distinguished from the
- * cooled account. A distinct workspace account id is always safe; an exact materialized
- * bearer + account tuple marks the same subscription. Beyond that, the stable native user id is
- * the strongest available evidence: it survives an email change and a token rotation, and it
- * separates members who share one workspace account id even when neither credential carries an
- * email. Email remains the fallback when no comparable user id exists on both sides. Coexisting
- * personal/business registrations with the same email and account id over-deny during the
- * cooldown — the safe direction.
- */
-function callerIsCooledPoolAccount(headers: Headers, config: OcxConfig, accountId: string): boolean {
-  const bearer = authorizationCredential(headers);
-  if (!bearer) return true;
-  const callerAccountId = headers.get("chatgpt-account-id") ?? extractAccountId(undefined, bearer);
-  if (callerAccountId === undefined) return true;
-  if (accountId === MAIN_CODEX_ACCOUNT_ID) {
-    // No physical-main read to identify the caller: the observed-main equality tag suffices.
-    return callerMatchesObservedMain(headers);
-  }
-  const stored = getCodexAccountCredential(accountId);
-  const entry = config.codexAccounts?.find(account => account.id === accountId);
-  const cooledAccountId = stored?.chatgptAccountId || entry?.chatgptAccountId;
-  if (!cooledAccountId) return true;
-  if (cooledAccountId !== callerAccountId) return false;
-  if (stored?.accessToken && sameCredentialMaterial(bearer, stored.accessToken)) return true;
-  // Same namespace on both sides, never `sub`: this is the ChatGPT per-user identity the reserve
-  // path already trusts. A credential whose own two encodings of it disagree cannot identify
-  // anyone, so it fails closed even when the disagreement is on the stored side.
-  const callerUser = nativeUserIdClaims(bearer);
-  const cooledUser = stored?.accessToken
-    ? nativeUserIdClaims(stored.accessToken)
-    : { userId: undefined, conflict: false };
-  if (callerUser.conflict || cooledUser.conflict) return true;
-  if (callerUser.userId !== undefined && cooledUser.userId !== undefined) {
-    return callerUser.userId === cooledUser.userId;
-  }
-  const callerEmail = extractEmail(undefined, bearer)?.trim().toLowerCase() || undefined;
-  const cooledEmail = entry?.email?.trim().toLowerCase() || undefined;
-  if (callerEmail !== undefined && cooledEmail !== undefined) return callerEmail === cooledEmail;
-  return true;
 }
 
 /**
@@ -1427,6 +1380,8 @@ async function resolveCodexAuthContextUnannotated(
     // the resolver's own union is what lets the reads below stay total.
     const resolution: CodexThreadResolution = fixedAccountId !== undefined
       ? { status: "selected" as const, accountId: fixedAccountId }
+      : poolSelection.servingAccountId !== undefined
+      ? { status: "selected", accountId: poolSelection.servingAccountId, affinity: { move: "reused", reason: "healthy" } }
       : options.excludeAccountId
       ? (() => {
           const selected = pickAlternateCodexAccount(
@@ -1441,7 +1396,7 @@ async function resolveCodexAuthContextUnannotated(
             : { status: "none" as const };
         })()
       : resolveCodexAccountForThreadDetailed(
-          affinityKey ?? null,
+          poolReserve ? null : affinityKey ?? null,
           config,
           Date.now(),
           quotaScope,
@@ -1692,6 +1647,7 @@ async function resolveCodexAuthContextUnannotated(
     else if (probeLeaseId) releaseCodexQuotaProbeLease(accountId, probeLeaseId);
   };
   const selectedBindings = () => ({
+    ...(!poolReserve && options.verifiedPoolReserveOnly && options.excludeAccountId ? { bindIncludedAlternateOnCompletion: true as const } : {}),
     ...(fixedAccountId !== undefined ? { fixedAccount: true } : {}),
     ...(affinityKey ? { affinityKey } : {}),
     ...(conversationStateKey ? { conversationStateKey } : {}),

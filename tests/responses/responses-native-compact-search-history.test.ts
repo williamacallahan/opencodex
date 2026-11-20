@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleResponsesCompact } from "../../src/server/responses";
-import { clearCompactHandoffRoutesForTests } from "../../src/server/responses/compact";
+import { clearCompactHandoffRoutesForTests } from "../../src/server/responses/compact-handoff-route";
 import { getDefaultConfig } from "../../src/config";
 import { bridgeSearchReplayScope, clearBridgeSearchReplayCacheForTests, rememberBridgeSearchReplay } from "../../src/responses/bridge-search-replay-cache";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";

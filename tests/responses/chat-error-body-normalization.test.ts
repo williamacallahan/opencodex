@@ -1,3 +1,4 @@
+import { admittedLane, loopbackAdmission } from "../helpers/combo-recall-admission";
 import { afterAll, expect, test } from "bun:test";
 import { nativeChatSse } from "../../src/server/chat-native-sse";
 import { handleChatCompletions } from "../../src/server/chat-completions";
@@ -1038,13 +1039,12 @@ for (const stream of [false, true]) for (const endpoint of ["responses", "compac
     if (endpoint === "compact-recall") {
       delete config.compactionRouting;
       const { rememberComboForLane, clearComboRecallForTests } = await import("../../src/server/responses/combo-session-recall");
-      const { sessionLaneIdFromRequest } = await import("../../src/server/request-log-conversation");
       const { captureConfigGeneration } = await import("../../src/lib/state-store-sweeper");
       clearComboRecallForTests();
-      rememberComboForLane(sessionLaneIdFromRequest(new Headers({ session_id: requestId })), KEY, { provider: "fixture", model: "model" }, "client-model", captureConfigGeneration());
+      rememberComboForLane(admittedLane(new Headers({ session_id: requestId })), KEY, { provider: "fixture", model: "model" }, "client-model", captureConfigGeneration());
     }
     const req = new Request(`http://localhost/v1/responses${endpoint !== "responses" ? "/compact" : ""}`, { method: "POST", headers: { "content-type": "application/json", session_id: requestId, ...(endpoint === "compact-recall" ? {} : { "x-codex-turn-metadata": JSON.stringify({ request_kind: "compaction", compaction: { trigger: "manual" } }) }) }, body: JSON.stringify({ model: "client-model", stream, input: [{ type: "compaction_trigger" }] }) });
-    const response = endpoint !== "responses" ? await handleResponsesCompact(req, config, ctx) : await handleResponses(req, config, ctx);
+    const response = endpoint !== "responses" ? await handleResponsesCompact(req, config, ctx, undefined, loopbackAdmission) : await handleResponses(req, config, ctx);
     expect(response.status).toBe(endpoint !== "responses" ? 502 : stream ? 200 : 413);
     const text = await responseWithDeferredRequestLog(response, requestId, Date.now(), ctx).text();
     const payload = stream && endpoint === "responses" ? text.split("\n").filter(line => line.startsWith("data: {")).map(line => JSON.parse(line.slice(6))).find(value => value.type === "response.failed")?.response : JSON.parse(text);
