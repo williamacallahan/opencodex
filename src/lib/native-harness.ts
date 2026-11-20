@@ -35,6 +35,20 @@ export class NativeHarnessRefusal extends Error {
   }
 }
 
+/** The only client a provider's subscription accounts serve while the switch is on. */
+export type NativeHarness = "agy" | "claude-code";
+
+/**
+ * Which client a provider is reserved to, or undefined when it is not (switch off, or not a
+ * subscription row). `googleMode` is the caller's resolved Google mode, so this module stays free of
+ * the provider registry that the adapters importing it also load.
+ */
+export function nativeHarnessFor(provider: { adapter?: string; authMode?: string }, googleMode: string | null | undefined): NativeHarness | undefined {
+  if (!nativeHarnessOnly() || provider.authMode !== "oauth") return undefined;
+  if (googleMode === "cloud-code-assist") return "agy";
+  return provider.adapter === "anthropic" ? "claude-code" : undefined;
+}
+
 /** Refuse a hub-built send that would present `vendor`'s harness identity on a subscription account. */
 export function assertNativeHarnessSend(vendor: NativeHarnessVendor): void {
   if (nativeHarnessOnly()) throw new NativeHarnessRefusal(vendor);

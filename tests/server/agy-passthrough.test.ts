@@ -5,7 +5,7 @@
  * `Accept` header unless told to, so header preservation is observable end to end.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -94,7 +94,10 @@ describe("agy pass-through public HTTP lane", () => {
         { id: "agy", name: "fixture-agy", key: hubKey, createdAt: "2026-01-01T00:00:00.000Z", ...(options.allowedProviders ? { allowedProviders: options.allowedProviders } : {}) },
         { id: "other", name: "fixture-other", key: otherKey, createdAt: "2026-01-01T00:00:00.000Z", allowedProviders: ["anthropic"] },
       ],
-      providers: { "google-antigravity": { adapter: "google", authMode: "oauth", baseUrl: upstream!.url.origin, allowPrivateNetwork: true, googleMode: "cloud-code-assist", models: ["gemini-3.8-flash"], liveModels: false } },
+      providers: {
+        "google-antigravity": { adapter: "google", authMode: "oauth", baseUrl: upstream!.url.origin, allowPrivateNetwork: true, googleMode: "cloud-code-assist", models: ["gemini-3.8-flash"], liveModels: false },
+        anthropic: { adapter: "anthropic", authMode: "oauth", baseUrl: "https://api.anthropic.com", models: ["claude-sonnet-4-5"], liveModels: false },
+      },
       clientIntegrations: { codex: false }, checkForUpdates: false, syncResumeHistory: false,
     } as OcxConfig;
     saveConfig(config);
@@ -216,8 +219,22 @@ describe("agy pass-through public HTTP lane", () => {
       headers: { "content-type": "application/json", "x-opencodex-api-key": hubKey },
       body: JSON.stringify({ model: "google-antigravity/gemini-3.8-flash", input: "synthetic", stream: false }),
     });
-    expect(response.status).toBeGreaterThanOrEqual(400);
-    await response.text();
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toContain("only the agy harness");
     expect(calls).toHaveLength(0);
   });
+
+  for (const nativeHarnessOnly of [true, false]) {
+    test(`the provider list names the one client each subscription provider serves (switch ${nativeHarnessOnly ? "on" : "off"})`, async () => {
+      await launch({ nativeHarnessOnly });
+      const admin = readFileSync(join(home, "admin-api-token"), "utf8").trim();
+      const response = await fetch(new URL("/api/providers", `http://127.0.0.1:${proxy!.port}`), { headers: { "x-opencodex-api-key": admin } });
+      expect(response.status).toBe(200);
+      const rows = await response.json() as Array<{ name: string; nativeHarness?: string }>;
+      const harness = Object.fromEntries(rows.map(row => [row.name, row.nativeHarness]));
+      expect(harness).toEqual(nativeHarnessOnly
+        ? { "google-antigravity": "agy", anthropic: "claude-code" }
+        : { "google-antigravity": undefined, anthropic: undefined });
+    });
+  }
 });

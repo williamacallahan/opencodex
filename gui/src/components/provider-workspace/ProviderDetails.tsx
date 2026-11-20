@@ -9,7 +9,7 @@ import { formatProviderDisplayName } from "../../provider-icons";
 import { isAccountProvider, isFreeProvider } from "../../provider-workspace/catalog";
 import { isLocalProvider } from "../../provider-workspace/kind";
 import { oauthAccountDisplayLabel, providerAuthSurface } from "../../provider-workspace/auth";
-import { ProviderIcon } from "./ProviderRail";
+import { NativeHarnessBadge, ProviderIcon } from "./ProviderRail";
 import { Switch } from "../../ui";
 import { IconChevron, IconTrash } from "../../icons";
 import ProviderOverview from "./ProviderOverview";
@@ -336,6 +336,7 @@ export default function ProviderDetails({
             {displayName !== item.name && <code className="pws-detail-id">{item.name}</code>}
             {local && <span className="pwi-rail-badge pwi-rail-badge--local">{t("modal.badge.local")}</span>}
             {!local && free && <span className="pwi-rail-badge pwi-rail-badge--free">{t("modal.badge.free")}</span>}
+            <NativeHarnessBadge harness={item.nativeHarness} t={t} />
           </h2>
         </div>
         <div className="pws-detail-actions">

@@ -769,7 +769,9 @@ translated Messages turns, combos, the web-search and vision sidecars, Antigravi
 generation, the `claude-cli` provider and Compatibility Lab probes. OpenCodex also stops sending
 Google any request of its own that presents an Antigravity client identity (model discovery, quota
 probes, project discovery); only the standard OAuth token refresh remains. Anthropic account reads
-(usage, profile, model list) are unchanged. Default: off. A malformed value counts as on. Claude Code
+(usage, profile, model list) are unchanged. The Providers page marks the Antigravity provider
+"agy only" and an Anthropic subscription provider "Claude Code only" (`nativeHarness` in
+`GET /api/providers`). Default: off. A malformed value counts as on. Claude Code
 must reach a subscription account through `/strict` or `/hybrid` (or with `claudeCode.strictPassthrough`
 set); the ordinary `/v1/messages` translation, which `ocx claude` uses by default, is refused.
 
