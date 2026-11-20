@@ -214,6 +214,7 @@ export function providerCompatFieldConfigError(provider: Record<string, unknown>
 const PROVIDER_PATCH_FIELDS: ReadonlySet<string> = new Set([
   "disabled", "adapter", "baseUrl", "defaultModel", "authMode", "apiKeyTransport", "note", "allowPrivateNetwork",
   "liveModels", "annotateEmptyToolOutputs", "fastEnabled", "xaiResponsesOptIn", "requestPacing",
+  "project", "location", "modelDiscovery", "thinkingDisplay", "modelThinkingDisplay",
   "upstreamHttpVersion", "upstreamWebsocket", "contextWindow", "modelCapabilities", "modelContextTiers",
   "modelContextWindows", "modelSamplingDefaults", "pinnedReasoningEffort", "modelPinnedReasoningEfforts", "autoReviewModel",
   "autoReviewModelOverrides", "modelAutoCompactTokenLimits", "modelSupportsServiceTier", "modelSuppressSyntheticMax",

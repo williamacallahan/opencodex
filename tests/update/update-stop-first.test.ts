@@ -196,7 +196,7 @@ function recoveryInstrumentationPrelude(directory: string): string {
   // Reuse exactly the projector exercised by the in-process redaction tests.
   return `
 import { spawn as fixtureSpawn, spawnSync } from "node:child_process";
-const probeSpawnSync = spawnSync;
+const probeSpawnSync = (bin, args, options) => Array.isArray(args) && args.includes("__update-home-probe") ? { status: 0, stdout: '{"schemaVersion":1,"kind":"absent"}\\n', stderr: "", pid: 0, output: [], signal: null } : spawnSync(bin, args, options);
 const probeSpawn = spawn;
 import { openSync as fixtureOpen, closeSync as fixtureClose, appendFileSync as fixtureAppend } from "node:fs";
 const fixtureDiagnosticDir = ${JSON.stringify(directory)};

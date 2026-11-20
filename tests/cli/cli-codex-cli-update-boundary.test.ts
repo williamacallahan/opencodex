@@ -16,6 +16,7 @@ import {
   NODE_LAUNCH_CONTEXT_MAX_CHARS,
 } from "../../src/update/codex-cli-update-launch-policy.mjs";
 import { inspectCodexCliInstall } from "../../src/codex/cli-install-provenance";
+import { fixtureNodeToolchain } from "../helpers/codex-cli-apply-fixture";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -125,8 +126,7 @@ describe("Codex CLI selection inspection boundary", () => {
   // (a fake npm first on the bound PATH); the install itself is real npm's work.
   // Packing, installing, and inspecting this fixture can exceed Bun's default 5s.
   test.skipIf(process.platform === "win32")("plan identity binds the bytes a real npm-global install placed", () => {
-    const node = Bun.which("node");
-    const npm = Bun.which("npm");
+    const { node, npm } = fixtureNodeToolchain();
     // The suite runs under Bun, so its own executable is always a usable fallback.
     const bun = Bun.which("bun") ?? process.execPath;
     expect(node).not.toBeNull();

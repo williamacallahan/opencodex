@@ -313,7 +313,7 @@ describe("collectOAuthHealthEntries", () => {
     const generation = credentialGeneration(getAccountSet("kimi")!.accounts
       .find(a => a.id === accountId)!.credential);
     expect(await markAccountNeedsReauthIfGeneration("kimi", accountId, generation, undefined, "verify_account"))
-      .toBe(true);
+      .toBe("marked");
     await mergeAccountCredential("kimi", accountId, {
       access: "kimi-access-2",
       refresh: "kimi-refresh",
