@@ -65,7 +65,7 @@ function config(extraProviders: OcxConfig["providers"] = {}, targets?: NonNullab
     activeCodexAccountId: A, creditCodexAccountIds: [],
     codexAccounts: [A, B].map(id => ({ id, email: `${id}@example.test`, isMain: false, plan: "pro" as const })),
     providers: {
-      openai: { adapter: "openai-responses", authMode: "forward", baseUrl: "https://chatgpt.com/backend-api/codex", codexAccountMode: "pool" },
+      openai: { adapter: "openai-responses", authMode: "forward", baseUrl: "https://chatgpt.com/backend-api/codex", codexAccountMode: "pool", upstreamWebsocket: false },
       relay: { adapter: "openai-responses", authMode: "key", apiKey: "relay-key", baseUrl: "https://relay.example.test/backend-api/codex" },
       metered: { adapter: "openai-responses", authMode: "key", apiKey: "metered-key", baseUrl: "https://metered.example.test/v1" },
       ...extraProviders,
