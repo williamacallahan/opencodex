@@ -13,6 +13,7 @@ import {
   type ComboFailureCooldownScope,
 } from "./failover";
 import { quotaResetRemainingMs } from "./reset-window";
+import { releaseRecoveredPoolQuotaCooldowns } from "./pool-cooldown-release";
 import { getCombo, resolveComboId, targetKey } from "./types";
 import type { NormalizedComboConfig, NormalizedComboTarget } from "./types";
 import {
@@ -372,6 +373,7 @@ export function pickComboTarget(
   if (!combo) throw new UnknownComboError(comboId);
   const excluded = new Set(options.exclude ?? []);
   const now = options.now ?? Date.now();
+  releaseRecoveredPoolQuotaCooldowns(config, comboId, combo, now);
   const cooldownReprobeTargets = new Map(options.cooldownReprobeTargets);
   if (options.allowCooldownReprobe !== false && !options.preview && excluded.size === 0) {
     for (const [key, revision] of reserveAllCooledTargets(config, comboId, now, options.eligible) ?? []) {

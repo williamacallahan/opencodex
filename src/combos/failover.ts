@@ -202,6 +202,20 @@ export function comboTargetCooldownRevision(
     ? targetCooldowns.get(cooldownMapKey(comboId, target))?.revision : undefined;
 }
 
+/**
+ * The revision of a live cooldown recorded for a 429, else undefined. A 402 is left out: it can
+ * carry a credential rejection that capacity elsewhere in a pool does not answer.
+ */
+export function comboTargetRateLimitCooldownRevision(
+  comboId: string,
+  target: Pick<OcxComboTarget, "provider" | "model">,
+  now = Date.now(),
+): number | undefined {
+  if (!isComboTargetInCooldown(comboId, target, now)) return undefined;
+  const entry = targetCooldowns.get(cooldownMapKey(comboId, target));
+  return entry?.status === 429 ? entry.revision : undefined;
+}
+
 /** Lift only the reserved write; a replacement with even the same expiry survives. */
 export function clearComboTargetCooldownIfUnchanged(
   comboId: string,
