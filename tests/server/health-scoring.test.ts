@@ -314,7 +314,7 @@ describe("health-aware scoring (RI-06)", () => {
     expect(evidence.failures).toBeUndefined();
   });
 
-  test("execution path applies live codex pool cooldown to openai candidates once every account cools", async () => {
+  test("execution path applies live codex account cooldown to openai candidates", async () => {
     const { clearCodexUpstreamHealth, recordCodexUpstreamOutcome } = await import("../../src/codex/routing");
     clearCodexUpstreamHealth();
     const now = Date.now();
@@ -324,6 +324,7 @@ describe("health-aware scoring (RI-06)", () => {
         openai: { adapter: "openai-responses", authMode: "forward", baseUrl: "https://chatgpt.com/backend-api/codex" },
       },
       codexAccounts: [{ id: "pool-a", email: "pool-a@example.test", isMain: false }],
+      activeCodexAccountId: "pool-a",
       routingProfiles: {
         mixed: {
           candidates: [
@@ -333,45 +334,12 @@ describe("health-aware scoring (RI-06)", () => {
         },
       },
     });
-    // The forward `openai` provider makes the main login a live pool account too.
     recordCodexUpstreamOutcome(cfg, "pool-a", 429, { retryAfter: "3600", now });
-    recordCodexUpstreamOutcome(cfg, "__main__", 429, { retryAfter: "3600", now });
     const route = routeModel(cfg, "policy/mixed");
     expect(route.routeDecision!.candidates[0]!.health?.cooldownUntilMs).toBeDefined();
     expect(route.routeDecision!.candidates[0]!.exclusions.some(exclusion => exclusion.code === "cooldown")).toBe(true);
     expect(route.providerName).toBe("b");
     expect(route.modelId).toBe("m2");
-  });
-
-  test("the routing cursor's cooled account does not cool the pool while another account can serve", async () => {
-    const { clearCodexUpstreamHealth, recordCodexUpstreamOutcome } = await import("../../src/codex/routing");
-    const { rememberActiveCodexAccount } = await import("../../src/codex/routing/active-account");
-    clearCodexUpstreamHealth();
-    const now = Date.now();
-    const cfg = config({
-      providers: {
-        ...config().providers,
-        openai: { adapter: "openai-responses", authMode: "forward", baseUrl: "https://chatgpt.com/backend-api/codex" },
-      },
-      codexAccounts: [
-        { id: "pool-exhausted", email: "pool-exhausted@example.test", isMain: false },
-        { id: "pool-free", email: "pool-free@example.test", isMain: false },
-      ],
-      routingProfiles: {
-        mixed: {
-          candidates: [
-            { provider: "openai", model: "gpt-5.6" },
-            { provider: "b", model: "m2" },
-          ],
-        },
-      },
-    });
-    // A Reserve trial or a stale pick leaves the automatic cursor on an exhausted seat.
-    rememberActiveCodexAccount(cfg, "pool-exhausted");
-    recordCodexUpstreamOutcome(cfg, "pool-exhausted", 429, { retryAfter: "3600", now });
-    const route = routeModel(cfg, "policy/mixed");
-    expect(route.routeDecision!.candidates[0]!.exclusions.some(exclusion => exclusion.code === "cooldown")).toBe(false);
-    expect(route.providerName).toBe("openai");
   });
 
   test("mixed pool cooldown/soft-avoid states degrade to soft-avoid", async () => {

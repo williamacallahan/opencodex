@@ -23,6 +23,8 @@ import { OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import {
   getCodexAccountCooldownUntil,
   getCodexAccountSoftAvoidUntil,
+  getEffectiveActiveCodexAccountId,
+  isCodexAccountInCooldown,
   listLiveCodexAccountIds,
 } from "../codex/routing";
 import type { RouteHealthEvidence } from "./trace";
@@ -79,6 +81,8 @@ export interface HealthEvidenceInput {
   provider: string;
   model: string;
   accountRef?: string;
+  /** Live codex account id for cooldown/soft-avoid state (provider "openai"). */
+  codexAccountId?: string;
   now?: number;
 }
 
@@ -154,15 +158,25 @@ function attemptSamplesFor(
 /**
  * Live Codex pool account state for an `openai` policy candidate.
  *
- * The target cools only when every live pool account is cooling or
- * soft-avoided. Account selection (`src/codex/routing/selection.ts`) skips a
- * cooling account, the active one included, so one account's cooldown never
- * makes the pool unusable while another account can serve.
+ * When a deterministic active account exists (manual selection or
+ * `config.activeCodexAccountId`) its cooldown/soft-avoid state is
+ * authoritative. Otherwise the target is conservatively cooled only when
+ * every live pool account is cooling or soft-avoided; account selection
+ * inside `src/codex/routing.ts` stays authoritative when any account is
+ * usable, so policy scoring never invents account choices.
  */
 export function codexPoolHealthEvidence(
-  config: OcxConfig,
+  config: Parameters<typeof getEffectiveActiveCodexAccountId>[0],
   now = Date.now(),
 ): Pick<RouteHealthEvidence, "cooldownUntilMs" | "softAvoidUntilMs"> | undefined {
+  const activeId = getEffectiveActiveCodexAccountId(config);
+  if (activeId) {
+    const until = getCodexAccountCooldownUntil(activeId, now);
+    if (until !== null) return { cooldownUntilMs: until };
+    const softUntil = getCodexAccountSoftAvoidUntil(activeId, now);
+    if (softUntil !== null && softUntil > now) return { softAvoidUntilMs: softUntil };
+    return undefined;
+  }
   const live = [...listLiveCodexAccountIds(config)];
   if (live.length === 0) return undefined;
   const cooldowns: number[] = [];
@@ -190,13 +204,21 @@ export function codexPoolHealthEvidence(
  * surfaces cannot drift apart.
  */
 export function policyCandidateHealthEvidence(
-  config: OcxConfig,
+  config: Parameters<typeof getEffectiveActiveCodexAccountId>[0],
   candidate: { provider: string; model: string },
   now = Date.now(),
 ): RouteHealthEvidence {
   return {
-    ...healthEvidenceForCandidate({ provider: candidate.provider, model: candidate.model, now }),
-    // Live pool state stays authoritative for `openai` targets.
+    ...healthEvidenceForCandidate({
+      provider: candidate.provider,
+      model: candidate.model,
+      codexAccountId: candidate.provider === OPENAI_CODEX_PROVIDER_ID
+        ? getEffectiveActiveCodexAccountId(config)
+        : undefined,
+      now,
+    }),
+    // Live pool state stays authoritative for `openai` targets even when no
+    // account reference exists in the candidate evidence.
     ...(candidate.provider === OPENAI_CODEX_PROVIDER_ID
       ? (codexPoolHealthEvidence(config, now) ?? {})
       : {}),
@@ -334,6 +356,18 @@ function computeHistoricalHealthEvidence(
 export function healthEvidenceForCandidate(input: HealthEvidenceInput): RouteHealthEvidence {
   const now = input.now ?? Date.now();
   const evidence: RouteHealthEvidence = {};
+
+  // Live authoritative state: hard cooldown and soft-avoid for Codex pool
+  // accounts. Cooldown stays authoritative over any historical score. Always
+  // read fresh - never cached.
+  if (input.codexAccountId && input.provider === "openai") {
+    if (isCodexAccountInCooldown(input.codexAccountId, now)) {
+      const until = getCodexAccountCooldownUntil(input.codexAccountId, now);
+      if (until !== null) evidence.cooldownUntilMs = until;
+    }
+    const softAvoidUntil = getCodexAccountSoftAvoidUntil(input.codexAccountId, now);
+    if (softAvoidUntil !== null && softAvoidUntil > now) evidence.softAvoidUntilMs = softAvoidUntil;
+  }
 
   const cacheKey = healthHistoryCacheKey(input);
   const cached = healthHistoryCache.get(cacheKey);

@@ -547,13 +547,12 @@ describe("routing profiles (RI-04)", () => {
         openai: { adapter: "openai-responses", authMode: "forward", baseUrl: "https://chatgpt.com/backend-api/codex" },
       },
       codexAccounts: [{ id: "pool-a", email: "pool-a@example.test", isMain: false }],
+      activeCodexAccountId: "pool-a",
       routingProfiles: {
         only: { candidates: [{ provider: "openai", model: "gpt-5.6" }] },
       },
     });
-    // The forward `openai` provider makes the main login a live pool account too.
     recordCodexUpstreamOutcome(config, "pool-a", 429, { retryAfter: "3600", now });
-    recordCodexUpstreamOutcome(config, "__main__", 429, { retryAfter: "3600", now });
     const req = new ManagementRequest("http://localhost/api/routing-profiles/dry-run", {
       method: "POST",
       headers: { "content-type": "application/json" },
