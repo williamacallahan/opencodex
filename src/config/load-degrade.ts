@@ -68,7 +68,7 @@ export function hardenExistingSecret(path: string): void {
       // chmod changes ctime even when the mode is already 0600, and the local-credentials watcher
       // answers each attribute event with a durable generation rewrite: about three fsyncs a second
       // on the request thread on the hub (2026-11-20). Only a wrong mode needs the write.
-      try { if ((statSync(path).mode & 0o777) !== 0o600) chmodSync(path, 0o600); } catch { /* best-effort */ }
+      try { if ((statSync(path).mode & 0o7777) !== 0o600) chmodSync(path, 0o600); } catch { /* best-effort */ }
     }
   }
 }
