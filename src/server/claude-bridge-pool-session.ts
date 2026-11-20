@@ -1,13 +1,10 @@
 /** Selection identities are private to the admitted caller. The original wire headers never change. */
-import { createHmac, randomBytes } from "node:crypto";
+import { affinityDigest } from "../codex/routing/thread-affinity-store";
 import { contextPrincipalIdOf, type DataPlaneAdmission } from "./auth-cors";
 import { callerSessionAlias, safeCallerSessionId } from "./caller-session-identity";
 import { isThreadSpawnRequest } from "./effort-policy";
 import type { RouteResult } from "../router";
 import type { HandleResponsesOptions } from "./responses/core-options";
-
-/** This key separates internal selection identifiers from reproducible wire identifiers. */
-const BRIDGE_POOL_KEY = randomBytes(32);
 
 /** The admission scope a Claude session identity is bound to; undefined when a non-loopback caller has no principal. */
 function claudeAdmissionScope(admission: DataPlaneAdmission): string | string[] | undefined {
@@ -19,8 +16,7 @@ function claudeAdmissionScope(admission: DataPlaneAdmission): string | string[] 
 export function scopedConversationKey(admission: DataPlaneAdmission | undefined, component: string): string | undefined {
   if (!admission) return undefined;
   const scope = claudeAdmissionScope(admission);
-  return scope === undefined ? undefined : createHmac("sha256", BRIDGE_POOL_KEY)
-    .update(JSON.stringify(["opencodex-claude-bridge-pool-v1", scope, component])).digest("hex");
+  return scope === undefined ? undefined : affinityDigest("transcript", JSON.stringify([scope, component]));
 }
 
 /** Private transcript key for combo recall and account selection, never a wire or cache key. */

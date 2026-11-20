@@ -1,3 +1,4 @@
+import type { TurnStateOwner } from "../turn-state-handles";
 import { markProxyError } from "../../lib/client-error-body";
 import { applyClaudeBridgePoolSession } from "../claude-bridge-pool-session";
 import type { OcxProviderConfig, OcxConfig } from "../../types";
@@ -229,6 +230,7 @@ export async function resolveResponsesCodexAuth(
   options: HandleResponsesOptions,
   credentialDomainWasRewritten = false,
   retainAccountForUploadedFiles = false,
+  owner?: TurnStateOwner,
 ): Promise<ResponsesAuthResolution> {
   let authCtx: CodexAuthContext | undefined;
   // Ingress already refuses assertion_only; a later internal hop must not reach a pool or
@@ -309,9 +311,10 @@ export async function resolveResponsesCodexAuth(
         signal: options.abortSignal,
         nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
         retainAccountForUploadedFiles,
+        turnStateOwner: owner,
         poolCapacityIntent: options.poolCapacityIntent,
       });
-      options.onCodexAuthContextResolved?.(authCtx);
+      if (!owner) options.onCodexAuthContextResolved?.(authCtx);
     } else {
       // A custom-named canonical-forward provider has no Codex account mode, but an
       // admission bearer still substitutes the stored main credential below. Claim the
@@ -353,6 +356,10 @@ export async function resolveResponsesCodexAuth(
         ok: false,
         response: markProxyError(formatErrorResponse(401, "authentication_error", "Selected Codex account needs reauthentication")),
       };
+    }
+    if (owner) {
+      owner.assertHeaders(headers);
+      options.onCodexAuthContextResolved?.(authCtx);
     }
     if (stripAuthorization) {
       headers.delete("authorization");

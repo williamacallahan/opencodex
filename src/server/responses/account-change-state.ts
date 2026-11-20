@@ -162,7 +162,7 @@ export function conversationCarriesUploadedFiles(body: unknown): boolean {
  * Drop account-bound continuation from a request body in place. Readable user
  * messages and plaintext survive; ciphertext and continuation ids do not.
  */
-export function scrubUnportableConversationStateInPlace(body: unknown): boolean {
+export function scrubUnportableConversationStateInPlace(body: unknown, verifiedTurnStateHandles?: ReadonlySet<string>): boolean {
   if (!body || typeof body !== "object" || Array.isArray(body)) return false;
   const record = body as Record<string, unknown>;
   let changed = false;
@@ -176,7 +176,8 @@ export function scrubUnportableConversationStateInPlace(body: unknown): boolean 
   }
   if (record.client_metadata && typeof record.client_metadata === "object" && !Array.isArray(record.client_metadata)) {
     const cm = record.client_metadata as Record<string, unknown>;
-    if ("x-codex-turn-state" in cm) {
+    const token = cm["x-codex-turn-state"];
+    if ("x-codex-turn-state" in cm && !(typeof token === "string" && verifiedTurnStateHandles?.has(token))) {
       delete cm["x-codex-turn-state"];
       changed = true;
     }
@@ -220,6 +221,7 @@ export function rememberServingConversationStateIssuer(
 export interface ApplyAccountChangeConversationStateScrubArgs {
   body: unknown;
   headers?: Headers;
+  verifiedTurnStateHandles?: ReadonlySet<string>;
   bindingKey: string;
   servingAccountId: string;
   /** Account this request body was prepared for, when this is an in-request move. */
@@ -251,11 +253,12 @@ export function applyAccountChangeConversationStateScrub(
   // make its reasoning item id resolvable in the new account's store.
   if (parsed) parsed._dropForeignReasoningItemIds = true;
   let headerScrubbed = false;
-  if (args.headers?.has("x-codex-turn-state")) {
-    args.headers.delete("x-codex-turn-state");
+  const turnState = args.headers?.get("x-codex-turn-state");
+  if (turnState != null && !args.verifiedTurnStateHandles?.has(turnState)) {
+    args.headers?.delete("x-codex-turn-state");
     headerScrubbed = true;
   }
-  const scrubbed = scrubUnportableConversationStateInPlace(body);
+  const scrubbed = scrubUnportableConversationStateInPlace(body, args.verifiedTurnStateHandles);
   if (!scrubbed && !headerScrubbed && !collectConversationStateCarriers(body).encryptedReasoning) return false;
   if (parsed) {
     delete parsed.previousResponseId;

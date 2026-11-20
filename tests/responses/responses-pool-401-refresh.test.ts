@@ -61,6 +61,8 @@ import {
   encryptedInput,
   recoverySse,
 } from "../helpers/agent-task-recovery";
+import { fakeChatGptJwt } from "../helpers/fake-chatgpt-jwt";
+import { issueTurnStateHandle, turnStateBinding, TURN_STATE_HEADER } from "../../src/server/turn-state-handles";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
@@ -188,7 +190,7 @@ type Harness = {
  */
 function installHarness(options: {
   refresh?: () => Response;
-  responseForSend?: (authorization: string, sendNumber: number, url: URL) => Response | undefined;
+  responseForSend?: (authorization: string, sendNumber: number, url: URL, headers: Headers) => Response | undefined;
   recovery?: (authorization: string, init?: RequestInit) => Response | Promise<Response>;
 } = {}): Harness {
   const sends: string[] = [];
@@ -200,7 +202,8 @@ function installHarness(options: {
   const mockFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     const body = typeof init?.body === "string" ? init.body : "";
-    const authorization = new Headers(init?.headers).get("authorization") ?? "";
+    const headers = new Headers(init?.headers);
+    const authorization = headers.get("authorization") ?? "";
     if (url.hostname === "auth.openai.com") {
       refreshes.push((JSON.parse(String(init?.body)) as { refresh_token?: string }).refresh_token ?? "");
       if (options.refresh) return options.refresh();
@@ -234,7 +237,7 @@ function installHarness(options: {
       canonicalAliasSends += 1;
     }
     sends.push(authorization);
-    const customResponse = options.responseForSend?.(authorization, sends.length, url);
+    const customResponse = options.responseForSend?.(authorization, sends.length, url, headers);
     if (customResponse) return customResponse;
     if (authorization === "Bearer rejected-access") {
       return Response.json({ error: { message: "expired bearer" } }, { status: 401 });
@@ -665,6 +668,38 @@ describe("ordinary pool 401 refresh and replay (#2887)", () => {
     expect(peekConversationStateIssuer(affinityKey!)).toBeUndefined();
   });
 
+  test.each(["same member", "different member", "different workspace", "unproven member"])("a turn-state 401 replay checks the final credential: %s", async replacement => {
+    const workspace = "acc-work";
+    const token = (workspaceId: string, member: string, revision: number) => fakeChatGptJwt({
+      "https://api.openai.com/auth": { chatgpt_account_id: workspaceId, chatgpt_user_id: member }, jti: revision,
+    });
+    const original = replacement === "unproven member" ? "fixture-original" : token(workspace, "member-a", 1);
+    const nextWorkspace = replacement === "different workspace" ? "acc-other" : workspace;
+    const next = replacement === "unproven member" ? "fixture-replacement"
+      : token(nextWorkspace, replacement === "different member" ? "member-b" : "member-a", 2);
+    const write = (accessToken: string, chatgptAccountId: string, generation: number) => writeStoredAccount({ [ACCOUNT_ID]:
+      storedRecord({ accessToken, chatgptAccountId, generation, refreshToken: `fixture-grant-${generation}` }) });
+    write(original, workspace, 3);
+    const handle = issueTurnStateHandle("fixture-state", turnStateBinding("openai", new Headers({
+      authorization: `Bearer ${original}`, "chatgpt-account-id": workspace,
+    })));
+    const carriedState: boolean[] = [];
+    const harness = installHarness({ responseForSend(_authorization, number, _url, headers) {
+      carriedState.push(headers.get(TURN_STATE_HEADER) === "fixture-state");
+      if (number === 1) {
+        write(next, nextWorkspace, 4);
+        return Response.json({ error: { message: "expired bearer" } }, { status: 401 });
+      }
+    } });
+    const response = await handleResponses(request("/v1/responses", { headers: { [TURN_STATE_HEADER]: handle } }), config(), { model: "", provider: "" });
+    await response.text();
+    const same = replacement === "same member";
+    expect(response.status).toBe(same ? 200 : 409);
+    expect(carriedState).toEqual(same ? [true, true] : [true]);
+    expect(harness.sends.map(auth => auth === `Bearer ${original}` ? "original" : auth === `Bearer ${next}` ? "replacement" : "other"))
+      .toEqual(same ? ["original", "replacement"] : ["original"]);
+    expect(isAccountNeedsReauth(ACCOUNT_ID)).toBe(false);
+  });
   test("Responses refreshes a time-valid stored credential once and replays the same account", async () => {
     const harness = installHarness();
     const response = await handleResponses(
@@ -1216,11 +1251,6 @@ describe("ordinary pool 401 refresh and replay (#2887)", () => {
   });
 
   test("a credential replaced before the request never reaches the 401 path at all", async () => {
-    // Establishes the boundary for the lineage rule: once the replacement is stored, it is
-    // picked up at selection time, so no rejected bearer is ever sent and no rotation is
-    // spent. The interesting case — a replacement landing WHILE the forced refresh runs — is
-    // covered at the store level, where the handoff's `selfRefreshed` gate is observable
-    // without racing the endpoint.
     const { saveCodexAccountCredential } = await import("../../src/codex/account-store");
     const harness = installHarness({
       refresh: () => {

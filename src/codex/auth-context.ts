@@ -6,6 +6,7 @@ import type { OcxRuntimeProviderConfig } from "./auth-context-provider";
 export type { OcxRuntimeProviderConfig } from "./auth-context-provider";
 export { stripCodexRuntimeProviderFields } from "./auth-context-provider";
 import { bindPoolCreditPolicy, poolCreditHoldResetAt, poolContextCreditHoldResetAt, poolCreditRecoveryNeeded, poolContextCreditRecoveryNeeded, poolCreditRecoveryRetryAt, poolUnavailableUntilKnownHorizon } from "./pool-credit-policy";
+import { TURN_STATE_OWNER, CodexTurnStateOwnerUnavailableError, type TurnStateConstrained, type TurnStateOwner } from "../server/turn-state-handles";
 import { hasFreshPoolReserve, hasVerifiedPoolReserve, poolLunaReserveSelection, modelHasPoolReserve, POOL_RESERVE_UNAVAILABLE_MESSAGE, type PoolCapacityIntent } from "./pool-reserve";
 import { adoptLegacyLineageAffinity } from "./routing/thread-affinity";
 import { nextQuotaQueryDelay } from "./quota-query-backoff";
@@ -22,7 +23,10 @@ import {
   capturePoolQuotaWriter,
   isCodexAccountGenerationLive,
   readCodexAccountRecord,
+  codexAccountRecordFromSnapshot,
+  loadCodexAccountRecordSnapshot,
 } from "./account-store";
+import { isCodexAccountSelectable } from "./routing/selection";
 import { isAccountNeedsReauth, markAccountNeedsReauth } from "./account-runtime-state";
 import { ConfigMutationLockError } from "../config";
 import { NativeProfileError } from "./native-profile-types";
@@ -227,7 +231,7 @@ export function previewCodexPoolLineage(
     : undefined;
 }
 
-export type CodexAuthContext =
+export type CodexAuthContext = TurnStateConstrained & (
   | {
       kind: "main"; accountId: null; reserveAuthorization?: MainReserveAuthorization; affinityKey?: string; conversationStateKey?: string; affinityDecision?: CodexAffinityDecision; affinityBindingSnapshot?: RequestOwnedBindingSnapshot;
       /** Captured for the observed main credential actually selected for upstream. */
@@ -289,7 +293,7 @@ export type CodexAuthContext =
       /** See `pool.transientProbe`. */
       transientProbe?: TransientProbeGrant;
       affinityDecision?: CodexAffinityDecision;
-    };
+    });
 
 /** Probe lease carried by this context, when it holds one. */
 export function codexProbeLeaseId(ctx: CodexAuthContext | undefined): string | undefined {
@@ -945,6 +949,8 @@ export interface ResolveCodexAuthContextOptions {
   verifiedPoolReserveOnly?: boolean;
   /** Set per combo leg: `reserve-only` refuses before any send when no seat can serve Reserve. */
   poolCapacityIntent?: PoolCapacityIntent;
+  /** Account-bound state narrows the ordinary roster; it never confers an explicit selector's privileges. */
+  turnStateOwner?: TurnStateOwner;
   /** Resolve exactly this account without consulting or mutating Pool selection. */
   accountId?: string;
   /** Final native model selected for this request, used to select its quota group. */
@@ -1045,7 +1051,9 @@ export async function resolveCodexAuthContext(
   // Filled by the inner resolver with the request's own fenced model evidence, so the hint obeys it.
   const eligibility: RecoveryHintEligibility = {};
   try {
-    return await resolveCodexAuthContextUnannotated(headers, config, mode, options, eligibility);
+    const ctx = await resolveCodexAuthContextUnannotated(headers, config, mode, options, eligibility);
+    if (options.turnStateOwner) ctx[TURN_STATE_OWNER] = options.turnStateOwner;
+    return ctx;
   } catch (error) {
     if (error instanceof CodexMainAccountHardLockError && mode === "pool" && options.accountId === undefined
       && options.excludeAccountId !== MAIN_CODEX_ACCOUNT_ID
@@ -1210,7 +1218,8 @@ async function resolveCodexAuthContextUnannotated(
   // is the one exception where that exclusion is selection evidence in the opposite direction.
   // Validate the caller's own gated-model roster before using it, and fall through to a Pool model
   // detour when it lacks the grant. This branch performs no physical-main credential read.
-  if (!poolOnlyApplies && preserveRequestOwnedMainPin()) {
+  const callerToken = () => ({ ...selectedCodexToken(headers), chatgptAccountId: callerCodexWorkspaceAccountId(headers) ?? "" });
+  if (!poolOnlyApplies && preserveRequestOwnedMainPin() && (!options.turnStateOwner || options.turnStateOwner.matchesCredential(callerToken()))) {
     const callerEntitled = !options.modelId
       || !ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(options.modelId)
       || await (
@@ -1323,9 +1332,24 @@ async function resolveCodexAuthContextUnannotated(
     const entitledAccountIds = entitlementSnapshot
       ? entitledCodexAccountIdsForModel(entitlementSnapshot, options.modelId)
       : undefined;
-    const modelEligibleAccountIds = entitledAccountIds
+    let modelEligibleAccountIds = entitledAccountIds
       ? new Set([...entitledAccountIds].filter(candidate => !excludeAccountIds?.has(candidate)))
       : undefined;
+    if (options.turnStateOwner) {
+      const owners = new Set<string>();
+      const records = loadCodexAccountRecordSnapshot();
+      for (const { id } of config.codexAccounts ?? []) {
+        const row = codexAccountRecordFromSnapshot(records, id);
+        if (row?.credential && row.deletedAt == null && options.turnStateOwner.matchesCredential(row.credential)) owners.add(id);
+      }
+      const main = requestScopedMainCredential ? callerToken()
+        : !nativeMainReadsForbidden && !poolOnlyApplies && (!fixedAccountId || fixedAccountId === MAIN_CODEX_ACCOUNT_ID)
+          ? getMainAccountToken() : undefined;
+      if (main && options.turnStateOwner.matchesCredential(main)) owners.add(MAIN_CODEX_ACCOUNT_ID);
+      if (modelEligibleAccountIds) for (const id of owners) if (!modelEligibleAccountIds.has(id)) owners.delete(id);
+      if (!owners.size) throw new CodexTurnStateOwnerUnavailableError();
+      modelEligibleAccountIds = owners;
+    }
     eligibility.modelEligibleAccountIds = modelEligibleAccountIds;
     // #4768: the flagships stay visible and never fail closed, so this is evidence routing may
     // ORDER by, not refuse on. Read synchronously from rosters discovery already gathered, so no
@@ -1416,6 +1440,10 @@ async function resolveCodexAuthContextUnannotated(
     const selected = resolution.status === "selected" ? resolution.accountId : null;
     affinityDecision = selected ? honestAffinityDecision(resolution.affinity, affinityKey, selected, quotaScope, options.modelId, requestScopedMainCredential && config.codexPool?.requestOwnedAffinity !== true) : resolution.affinity;
     transientProbe = resolution.status === "selected" ? resolution.transientProbe : undefined;
+    // A legacy selector may return a held account to explain a refusal. That sentinel cannot serve a handle.
+    if (options.turnStateOwner && (!selected || !isCodexAccountSelectable(config, selected, Date.now(), quotaScope, selectionOptions))) {
+      throw new CodexTurnStateOwnerUnavailableError();
+    }
     // Every selector that can still name main (sentinels, preserved actives) ends here.
     if (selected === MAIN_CODEX_ACCOUNT_ID && poolOnlyApplies) {
       releaseTransientProbeGrant();
@@ -1751,11 +1779,12 @@ export function applyCodexAuthContextToProvider(
   ctx: CodexAuthContext,
   mode: CodexAccountMode | undefined,
 ): OcxRuntimeProviderConfig {
-  if (mode !== "pool" || (ctx.kind !== "pool" && ctx.kind !== "main-pool") || provider.authMode !== "forward") return provider;
+  const scoped: OcxRuntimeProviderConfig = ctx[TURN_STATE_OWNER] ? { ...provider, [TURN_STATE_OWNER]: ctx[TURN_STATE_OWNER] } : provider;
+  if (mode !== "pool" || (ctx.kind !== "pool" && ctx.kind !== "main-pool") || provider.authMode !== "forward") return scoped;
   assertCodexAccountValidationReady(ctx.accountId);
   if (ctx.kind === "pool") assertPoolAccountCredits(ctx.accountId, poolContextCreditHoldResetAt(ctx), poolContextCreditRecoveryNeeded(ctx), ctx.quotaScope);
   return {
-    ...provider,
+    ...scoped,
     _codexAccountOverride: {
       accessToken: ctx.accessToken,
       chatgptAccountId: ctx.chatgptAccountId,

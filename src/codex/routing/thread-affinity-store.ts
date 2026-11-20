@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   chmodSync,
   lstatSync,
@@ -37,6 +37,28 @@ export type StoredThreadRow = {
 };
 export const CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER =
   "__unknown_codex_conversation_state_issuer__";
+export const COMBO_PIN_LIMIT = 2048;
+export type StoredComboPin = {
+  lane: string; comboId: string; provider: string; model: string; at: number;
+  /** Only the last completion on a lane may resolve a bare compaction selector. */
+  responseDigest: string | null;
+};
+type ComboSnapshot = {
+  restore(rows: Iterable<StoredComboPin>): void;
+  rows(): Iterable<StoredComboPin>;
+};
+let comboSnapshot: ComboSnapshot | undefined;
+/** Admission belongs to the serving lease, not the SQLite handle that may close and reopen under it. */
+let servingIdentity: { home: string; durableKey?: Uint8Array; unclaimedComboPins?: StoredComboPin[] } | undefined;
+
+export function registerComboPinSnapshot(snapshot: ComboSnapshot): void {
+  comboSnapshot = snapshot;
+  if (servingIdentity?.unclaimedComboPins) {
+    snapshot.restore(servingIdentity.unclaimedComboPins);
+    servingIdentity.unclaimedComboPins = undefined;
+  }
+}
+
 type LiveReader = {
   thread(
     key: string,
@@ -65,10 +87,12 @@ type Scope = {
   home: string;
   generation: number;
   token: SpendLedgerStorage;
+  comboToken: SpendLedgerStorage;
   db?: Database;
   /** The database file the handle was opened on; every write transaction re-checks the path against it. */
   file?: FileIdentity;
   secret?: Uint8Array;
+  snapshotGeneration?: string;
   disabled: boolean;
   poisoned: boolean;
   failures: number;
@@ -96,6 +120,15 @@ const BASE_SCOPES_EXHAUSTIVE: Exclude<
   : never = true;
 void BASE_SCOPES_EXHAUSTIVE;
 let current: Scope | undefined;
+const ephemeralSecret = randomBytes(32);
+
+/** Admission never opens SQLite. Without an owned store, identities remain private to this process and home. */
+export function affinityDigest(domain: "principal" | "transcript" | "combo-lane", components: string): string {
+  const secret = servingIdentity?.durableKey;
+  const mac = createHmac("sha256", secret ?? ephemeralSecret);
+  if (!secret) mac.update(servingIdentity?.home ?? getConfigDir()).update("\0");
+  return mac.update(`opencodex/codex-affinity/${domain}/v1\0`).update(components).digest("hex");
+}
 let observedHome: string | undefined;
 /** The home whose database the most recent scope in this process actually opened. */
 let persistedHome: string | undefined;
@@ -149,30 +182,59 @@ function checkFile(path: string) {
     throw new Error("unsafe file");
   return stat;
 }
+function prepareAffinityFile(home: string, token: SpendLedgerStorage): FileIdentity {
+  const path = spendLedgerStoragePath(token);
+  assertNotRealHomeUnderTest(home);
+  // Register before creating anything; pre-manifest homes cannot register files or uninstall them.
+  for (const suffix of ["", "-journal", "-wal", "-shm"])
+    if (!recordOwnedConfigPath(home, path + suffix) && initializeConfigOwnership(home)) throw new Error("ownership");
+  preparePrivateSqliteDatabase(path);
+  const before = checkFile(path);
+  if (before.size > 8n * 1024n * 1024n) throw new Error("oversized");
+  if (process.platform !== "win32") chmodSync(path, 0o600);
+  if (!hardenSecretPath(path, { required: true }).ok) throw new Error("acl");
+  assertStorageOwned(token);
+  assertWritableFile(token, before);
+  return before;
+}
+
+const comboSchema = "CREATE TABLE combo_pins(generation TEXT, lane TEXT, comboId TEXT, provider TEXT, model TEXT, at INTEGER, responseDigest TEXT)";
+
+/** v1 rejects extra tables in the native database. The companion has the same lease and file protections. */
+function withComboTable<T>(s: Scope, create: boolean, work: (db: Database) => T): T | undefined {
+  const path = spendLedgerStoragePath(s.comboToken);
+  let db: Database | undefined;
+  try {
+    if (!create && !assertPrivateSqliteEntryOrMissing(path)) return;
+    const before = prepareAffinityFile(s.home, s.comboToken);
+    db = new Database(path);
+    assertWritableFile(s.comboToken, before);
+    db.exec("PRAGMA busy_timeout=0; PRAGMA secure_delete=ON; BEGIN IMMEDIATE");
+    const schema = db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master LIMIT 2").all();
+    if (!schema.length) db.exec(comboSchema);
+    else if (schema.length !== 1 || schema[0]?.sql !== comboSchema) throw new Error("shape");
+    limitDatabaseSize(db);
+    const result = work(db);
+    db.exec("COMMIT");
+    return result;
+  } catch {
+    console.warn("Combo snapshot unavailable; native affinity is unaffected.");
+  } finally {
+    // SQLite rolls back an unfinished transaction on close. A companion failure must never disable the native store.
+    try { db?.close(); } catch { console.warn("Combo snapshot could not close."); }
+  }
+}
+
+function limitDatabaseSize(db: Database): void {
+  const { page_size } = db.query<{ page_size: number }, []>("PRAGMA page_size").get()!;
+  db.exec(`PRAGMA max_page_count = ${Math.floor(8 * 1024 * 1024 / page_size)}`);
+}
+
 function open(s: Scope): void {
   const path = spendLedgerStoragePath(s.token);
   let db: Database | undefined;
   try {
-    assertNotRealHomeUnderTest(s.home);
-    // An owned home must list these files before they exist, so uninstall removes them. A home with
-    // no ownership manifest (one that predates ownership tracking) cannot record anything, and
-    // uninstall refuses to remove anything from it; like the spend-ledger owner database, the store
-    // still works there rather than silently losing persistence.
-    for (const suffix of ["", "-journal", "-wal", "-shm"])
-      if (!recordOwnedConfigPath(s.home, path + suffix) && initializeConfigOwnership(s.home))
-        throw new Error("ownership");
-    // Refuses a link or reparse point at the database or a sidecar before anything is created:
-    // Windows creates a new file through a link at its name.
-    preparePrivateSqliteDatabase(path);
-    const before = checkFile(path);
-    if (before.size > 8n * 1024n * 1024n) throw new Error("oversized");
-    if (process.platform !== "win32") chmodSync(path, 0o600);
-    if (!hardenSecretPath(path, { required: true }).ok) throw new Error("acl");
-    checkFile(path);
-    assertStorageOwned(s.token);
-    // SQLite creates sidecars in the private, hardened config directory, as with
-    // spend-ledger-owner.sqlite and config-mutation.sqlite.
-    assertPrivateSqliteSidecars(path);
+    const before = prepareAffinityFile(s.home, s.token);
     db = new Database(path);
     db.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE");
     const version = (
@@ -182,6 +244,7 @@ function open(s: Scope): void {
       .query("SELECT type, name FROM sqlite_master ORDER BY name")
       .all() as { type: string; name: string }[];
     const tables = objects.filter((o) => o.type === "table");
+    let snapshotGeneration: string | undefined;
     if (version === 0 && objects.length === 0) {
       db.exec(
         "CREATE TABLE meta(name TEXT PRIMARY KEY, value BLOB); CREATE TABLE threads(row_key TEXT, scope TEXT, account_id TEXT, fence TEXT, created_at INTEGER, last_used_at INTEGER, PRIMARY KEY(row_key, scope)); CREATE TABLE issuers(row_key TEXT PRIMARY KEY, account_id TEXT, fence TEXT, last_used_at INTEGER); PRAGMA user_version = 1",
@@ -190,11 +253,7 @@ function open(s: Scope): void {
         randomBytes(32),
       );
     } else {
-      if (
-        version !== 1 ||
-        tables.map((t) => t.name).join(",") !== "issuers,meta,threads"
-      )
-        throw new Error("version");
+      if (version !== 1 || tables.map(t => t.name).join(",") !== "issuers,meta,threads") throw new Error("version");
       const expected: Record<string, string> = {
         meta: "name:TEXT:1,value:BLOB:0",
         threads:
@@ -223,8 +282,7 @@ function open(s: Scope): void {
         .join(",");
       if (
         objects.length !== 6 ||
-        indexes !==
-          "sqlite_autoindex_issuers_1,sqlite_autoindex_meta_1,sqlite_autoindex_threads_1"
+        indexes !== "sqlite_autoindex_issuers_1,sqlite_autoindex_meta_1,sqlite_autoindex_threads_1"
       )
         throw new Error("shape");
       const rows = db.query("SELECT name, value FROM meta").all() as {
@@ -243,11 +301,13 @@ function open(s: Scope): void {
       db.exec("PRAGMA secure_delete = ON");
       // Only a completed final flush permits the next owner to restore rows.
       if (clean !== 1) db.exec("DELETE FROM threads; DELETE FROM issuers");
+      else snapshotGeneration = db.query<{ generation: string }, []>(
+        "SELECT CAST(rowid AS TEXT) AS generation FROM meta WHERE name='clean' AND typeof(value)='real'",
+      ).get()?.generation;
       db.exec("UPDATE meta SET value=0 WHERE name='clean'");
     }
     db.exec("PRAGMA secure_delete = ON");
-    const pageSize = (db.query("PRAGMA page_size").get() as { page_size: number }).page_size;
-    db.exec(`PRAGMA max_page_count = ${Math.floor(8 * 1024 * 1024 / pageSize)}`);
+    limitDatabaseSize(db);
     prune(db, Date.now());
     const secret = (
       db.query("SELECT value FROM meta WHERE name='secret'").get() as {
@@ -260,6 +320,7 @@ function open(s: Scope): void {
     s.db = db;
     s.file = after;
     s.secret = secret;
+    s.snapshotGeneration = snapshotGeneration;
     s.pruneTimer = setInterval(() => {
       if (current === s) {
         if (s.poisoned || isPassiveRead()) pruneOnly(s);
@@ -287,12 +348,12 @@ function open(s: Scope): void {
  * no sidecar name holds a link: the rollback journal is created per transaction, and a link added
  * to the database since open would expose every later write.
  */
-function assertWritable(s: Scope): void {
-  const path = spendLedgerStoragePath(s.token);
+function assertWritableFile(token: SpendLedgerStorage, file: FileIdentity | undefined): void {
+  const path = spendLedgerStoragePath(token);
   assertPrivateSqliteSidecars(path);
   if (!assertPrivateSqliteEntryOrMissing(path)) throw new Error("missing");
   const now = checkFile(path);
-  if (!s.file || !sameFileIdentity(now, s.file)) throw new Error("replaced");
+  if (!file || !sameFileIdentity(now, file)) throw new Error("replaced");
 }
 function resolvedHome(acquiredHome?: string): string {
   let home = resolve(acquiredHome ?? getConfigDir());
@@ -338,6 +399,7 @@ function scope(acquiredHome?: string): Scope | undefined {
     home,
     generation,
     token,
+    comboToken: mintSpendLedgerStorage("codex-combo-affinity.sqlite"),
     disabled: false,
     poisoned: false,
     failures: 0,
@@ -488,7 +550,7 @@ function pruneOnly(s: Scope): boolean {
   if (!s.db || s.disabled) return false;
   try {
     assertStorageOwned(s.token);
-    assertWritable(s);
+    assertWritableFile(s.token, s.file);
     s.db.exec("BEGIN IMMEDIATE");
     // Pending touches first, so a pin used since its last persisted timestamp is not evicted as idle.
     if (!s.poisoned) applyTouches(s, s.db);
@@ -533,7 +595,7 @@ function flush(s: Scope, clean: boolean): boolean {
   const db = s.db;
   for (let attempt = 0; attempt < 2; attempt++) try {
     assertStorageOwned(s.token);
-    assertWritable(s);
+    assertWritableFile(s.token, s.file);
     db.exec("BEGIN IMMEDIATE");
     // Touches go before the log as well as after it, so the pruning between chunks sees the live
     // last-used times and cannot evict a pin that is in use but persisted with an old timestamp.
@@ -551,8 +613,22 @@ function flush(s: Scope, clean: boolean): boolean {
     // Again after the log: rows the log just inserted take their live last-used time.
     applyTouches(s, db);
     prune(db, Date.now());
-    if (clean) db.exec("UPDATE meta SET value=1 WHERE name='clean'");
+    // Both 1.0 and 1 read as the number 1 in v1. Its final UPDATE writes INTEGER 1;
+    // only a snapshot-aware shutdown writes REAL 1 and a fresh negative rowid (the secret uses a positive rowid).
+    // Read the 64-bit generation as text so it never rounds through a JavaScript number.
+    const shutdown = clean ? db.query<{ generation: string }, []>(
+      "UPDATE meta SET value=1.0, rowid=-1-abs(random()) WHERE name='clean' RETURNING CAST(rowid AS TEXT) AS generation",
+    ).get() : null;
     db.exec("COMMIT");
+    if (shutdown && servingIdentity?.durableKey && s.secret && timingSafeEqual(servingIdentity.durableKey, s.secret)) {
+      const now = Date.now();
+      const pins = Array.from(comboSnapshot?.rows() ?? servingIdentity.unclaimedComboPins ?? []).filter(pin => pin.at <= now && pin.at >= now - TTL);
+      if (pins.length) withComboTable(s, true, table => {
+        table.exec("DELETE FROM combo_pins");
+        const insert = table.query("INSERT INTO combo_pins VALUES (?,?,?,?,?,?,?)");
+        for (const pin of pins) insert.run(shutdown.generation, pin.lane, pin.comboId, pin.provider, pin.model, pin.at, pin.responseDigest);
+      });
+    }
     s.log = [];
     s.threads.clear();
     s.issuers.clear();
@@ -574,7 +650,21 @@ function flush(s: Scope, clean: boolean): boolean {
   return false;
 }
 // Open eagerly so the startup prune runs without traffic; a passive read never opens the store.
-onSpendLedgerOwnerAcquired((home) => { if (!isPassiveRead()) scope(home); });
+onSpendLedgerOwnerAcquired(home => {
+  const s = isPassiveRead() ? undefined : scope(home);
+  servingIdentity = { home, durableKey: s?.secret };
+  // Hydrate once before serving. Reopening SQLite must not replace this owner's live pins.
+  const pins = s?.db ? withComboTable(s, false, table => {
+    const now = Date.now();
+    const rows = s.snapshotGeneration === undefined ? [] : table.query<StoredComboPin, [string, number, number]>(
+      `SELECT lane, comboId, provider, model, at, responseDigest FROM combo_pins WHERE generation=? AND at BETWEEN ? AND ? ORDER BY rowid DESC LIMIT ${COMBO_PIN_LIMIT}`,
+    ).all(s.snapshotGeneration, now - TTL, now).reverse();
+    table.exec("DELETE FROM combo_pins");
+    return rows;
+  }) ?? [] : [];
+  if (comboSnapshot) comboSnapshot.restore(pins);
+  else servingIdentity.unclaimedComboPins = pins;
+});
 // Commit clean before closing; a later close failure cannot undo that commit.
 onSpendLedgerOwnerReleasing(() => {
   const s = current;
@@ -583,7 +673,10 @@ onSpendLedgerOwnerReleasing(() => {
     retire();
   }
 });
-onSpendLedgerOwnerReleased(() => retire());
+onSpendLedgerOwnerReleased(() => {
+  retire();
+  servingIdentity = undefined;
+});
 function pending(s: Scope, row: string, issuer: boolean): boolean {
   return s.log.some(
     (op) =>

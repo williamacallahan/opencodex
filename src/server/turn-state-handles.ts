@@ -1,5 +1,6 @@
+import { decodeJwtPayload } from "../oauth/chatgpt-shared";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 /**
  * Proxy-owned handles for the Codex turn-state token.
@@ -16,6 +17,12 @@ import { createHash } from "node:crypto";
 export const TURN_STATE_HEADER = "x-codex-turn-state";
 /** Where the provider fetch attaches a send's binding on the RequestInit it hands the WebSocket upstream. */
 export const TURN_STATE_BINDING_INIT: unique symbol = Symbol("opencodex.turn-state-binding");
+export const TURN_STATE_OWNER: unique symbol = Symbol("opencodex.required-turn-state-owner");
+export type TurnStateOwner = NonNullable<ReturnType<typeof requiredTurnStateOwner>>;
+export interface TurnStateConstrained { [TURN_STATE_OWNER]?: TurnStateOwner }
+export class CodexTurnStateOwnerUnavailableError extends Error {
+  constructor() { super("The credential for this send does not own a usable turn state; nothing was sent to it."); }
+}
 const HANDLE_PREFIX = "ocx-ts-";
 const HANDLE = /^ocx-ts-[0-9a-f]{32}$/;
 const MAX_HANDLES = 4096;
@@ -34,24 +41,65 @@ export function runTurnStateCallerScope<T>(run: () => T): T {
   return callerScope.run({}, run);
 }
 
-/** Record the admitted caller for the current request: a configured key id, an environment principal, or loopback. */
+/** The matched secret identifies the caller. A configured key id is shared across a pending rotation. */
 export function noteTurnStateCaller(admission: { kind: string; keyId?: string; contextPrincipalId?: string }): void {
   const scope = callerScope.getStore();
   if (!scope) return;
-  scope.caller = admission.kind === "configured" ? `configured:${admission.keyId ?? ""}`
-    : admission.kind === "environment" ? `environment:${admission.contextPrincipalId ?? ""}` : admission.kind;
+  scope.caller = admission.kind === "loopback" ? "loopback" : `${admission.kind}:${admission.contextPrincipalId || randomUUID()}`;
 }
 
 /**
  * The binding of an outbound send: a digest of the admitted caller, the provider name and the account
- * the send goes out as (the ChatGPT account id, or the outbound credential when there is none).
+ * the send goes out as. A workspace alone is not an owner: its members can use different seats.
  */
 export function turnStateBinding(providerName: string, headers: Headers): string {
-  const account = headers.get("chatgpt-account-id")?.trim() ?? "";
-  const credential = account ? "" : headers.get("authorization") ?? "";
+  return headerBinding(callerScope.getStore()?.caller ?? "unadmitted", providerName, headers);
+}
+
+function headerBinding(caller: string, providerName: string, headers: Headers): string {
+  return accountBinding(caller, providerName, headers.get("chatgpt-account-id")?.trim() ?? "", headers.get("authorization") ?? "");
+}
+
+/** Only a consistent workspace/member pair on the same bearer can survive credential refresh.
+ * A missing, malformed or conflicting claim restricts continuity to that exact credential. */
+function verifiedMember(account: string, authorization: string): string | undefined {
+  if (!account || authorization.length > 32_768 || !/^Bearer [^\s]+$/i.test(authorization)) return undefined;
+  const payload = decodeJwtPayload(authorization.slice(7));
+  const claims = payload?.["https://api.openai.com/auth"];
+  if (!record(claims) || !payload) return undefined;
+  const workspace = claims.chatgpt_account_id ?? payload.chatgpt_account_id;
+  const member = claims.chatgpt_user_id ?? claims.user_id;
+  if (workspace !== account || typeof member !== "string" || !member.trim()
+    || (Object.hasOwn(payload, "chatgpt_account_id") && payload.chatgpt_account_id !== workspace)
+    || (Object.hasOwn(claims, "chatgpt_account_id") && claims.chatgpt_account_id !== workspace)
+    || (Object.hasOwn(claims, "chatgpt_user_id") && claims.chatgpt_user_id !== member)
+    || (Object.hasOwn(claims, "user_id") && claims.user_id !== member)) return undefined;
+  return member;
+}
+
+function accountBinding(caller: string, providerName: string, account: string, authorization: string): string {
+  const member = verifiedMember(account, authorization);
   return createHash("sha256")
-    .update(JSON.stringify([callerScope.getStore()?.caller ?? "unadmitted", providerName, account, credential]))
+    .update(JSON.stringify([caller, providerName, account, member, member ? null : authorization]))
     .digest("hex");
+}
+
+/** A native Pool turn must satisfy every handle it carries, even without conversation affinity. */
+export function requiredTurnStateOwner(providerName: string, headers: Headers, body: unknown) {
+  const metadata = record(body) && record(body.client_metadata) ? body.client_metadata : undefined;
+  const handles = [headers.get(TURN_STATE_HEADER), metadata?.[TURN_STATE_HEADER]]
+    .filter((token): token is string => typeof token === "string" && token.startsWith(HANDLE_PREFIX));
+  if (!handles.length) return undefined;
+  const caller = callerScope.getStore()?.caller ?? "unadmitted";
+  const matches = (binding: string) => handles.every(handle => live(handle, Date.now())?.binding === binding);
+  return {
+    matchesCredential: (credential: { chatgptAccountId: string; accessToken: string }) =>
+      matches(accountBinding(caller, providerName, credential.chatgptAccountId, `Bearer ${credential.accessToken}`)),
+    assertHeaders(selected: Headers): void {
+      if (!matches(headerBinding(caller, providerName, selected))) throw new CodexTurnStateOwnerUnavailableError();
+    },
+    handles: new Set(handles),
+  };
 }
 
 function randomHandle(): string {
@@ -132,13 +180,15 @@ function record(value: unknown): value is Record<string, unknown> {
  * and `client_metadata["x-codex-turn-state"]` in a JSON body. The init is returned unchanged when it
  * carries no handle, so ordinary sends keep their exact headers and body bytes.
  */
-export function redeemOutboundTurnState(init: RequestInit | undefined, binding: string): RequestInit | undefined {
+export function redeemOutboundTurnState(init: RequestInit | undefined, binding: string | (() => string)): RequestInit | undefined {
   if (!init) return init;
+  let resolved: string | undefined;
+  const sendBinding = () => resolved ??= typeof binding === "string" ? binding : binding();
   let next: RequestInit = init;
   const headers = new Headers(init.headers);
   const header = headers.get(TURN_STATE_HEADER);
   if (header !== null && header.startsWith(HANDLE_PREFIX)) {
-    const value = redeem(header, binding);
+    const value = redeem(header, sendBinding());
     if (value === undefined) headers.delete(TURN_STATE_HEADER); else headers.set(TURN_STATE_HEADER, value);
     next = { ...next, headers };
   }
@@ -148,7 +198,7 @@ export function redeemOutboundTurnState(init: RequestInit | undefined, binding: 
     const metadata = record(body) ? body.client_metadata : undefined;
     const handle = record(metadata) ? metadata[TURN_STATE_HEADER] : undefined;
     if (record(body) && record(metadata) && typeof handle === "string" && handle.startsWith(HANDLE_PREFIX)) {
-      const value = redeem(handle, binding);
+      const value = redeem(handle, sendBinding());
       const nextMetadata = { ...metadata };
       if (value === undefined) delete nextMetadata[TURN_STATE_HEADER]; else nextMetadata[TURN_STATE_HEADER] = value;
       next = { ...next, body: JSON.stringify({ ...body, client_metadata: nextMetadata }) };

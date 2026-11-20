@@ -34,6 +34,25 @@ test("pool binding and issuer survive a clean restart", () => {
   } finally { removeTreeWithRetry(home); }
 });
 
+function expectComboTurns(home: string, phase: string, targets: string): void {
+  const child = Bun.spawnSync([process.execPath, helperPath("combo-pin-restart-worker.ts"), phase], {
+    env: { ...process.env, HOME: home, OPENCODEX_HOME: home, CODEX_HOME: home, OPENCODEX_API_AUTH_TOKEN: "" },
+    stdout: "pipe", stderr: "pipe", timeout: 20_000,
+  });
+  expect(child.exitCode, child.stderr.toString()).toBe(phase === "unclean" ? 17 : 0);
+  expect(child.stdout.toString().split("\n").find(line => line.startsWith("served="))).toBe(`served=${targets}`);
+}
+
+test("real admission restores a completed combo target only for the same credential and thread", () => {
+  const home = mkdtempSync(join(tmpdir(), "ocx-combo-restart-"));
+  try {
+    for (const [phase, targets] of [["first", "original,original"], ["restart", "original,fresh,fresh"],
+      ["unclean", "original,fresh,fresh"], ["after-crash", "fresh,fresh,fresh"]] as const) {
+      expectComboTurns(home, phase, targets);
+    }
+  } finally { removeTreeWithRetry(home); }
+}, 45_000);
+
 test("an unclean owner discards persisted affinity", () => {
   const home = mkdtempSync(join(tmpdir(), "ocx-affinity-crash-"));
   try {
@@ -91,6 +110,48 @@ function withSeededHome(body: (home: string) => void) {
     body(home);
   } finally { removeTreeWithRetry(home); }
 }
+
+test("a v1 rollback keeps native bindings and issuers but invalidates the preceding combo snapshot", () => {
+  const home = mkdtempSync(join(tmpdir(), "ocx-affinity-rollback-"));
+  try {
+    expectComboTurns(home, "first", "original,original");
+    const seeded = run(home, "write");
+    expect(seeded.exit, seeded.stderr).toBe(0);
+    const db = new Database(join(home, "codex-affinity.sqlite"));
+    try {
+      expect(db.query("PRAGMA user_version").get()).toEqual({ user_version: 1 });
+      expect(db.query("SELECT name FROM sqlite_master ORDER BY name").values().flat()).toEqual([
+        "issuers", "meta", "sqlite_autoindex_issuers_1", "sqlite_autoindex_meta_1", "sqlite_autoindex_threads_1", "threads",
+      ]);
+      expect(db.query("SELECT value FROM meta WHERE name='clean'").get()).toEqual({ value: 1 });
+      expect(db.query("SELECT account_id FROM threads LIMIT 1").get()).toEqual({ account_id: "a" });
+      expect(db.query("SELECT account_id FROM issuers LIMIT 1").get()).toEqual({ account_id: "a" });
+      const snapshot = new Database(join(home, "codex-combo-affinity.sqlite"), { readonly: true });
+      try {
+        const generation = db.query<{ generation: string }, []>("SELECT CAST(rowid AS TEXT) AS generation FROM meta WHERE name='clean'").get()!.generation;
+        expect(snapshot.query("SELECT model, generation FROM combo_pins").all()).toEqual([{ model: "original", generation }]);
+      } finally { snapshot.close(); }
+      // The v1 owner opens dirty and releases clean, without knowing the combo table exists.
+      db.exec("BEGIN IMMEDIATE; UPDATE meta SET value=0 WHERE name='clean'; COMMIT");
+      db.exec("BEGIN IMMEDIATE; UPDATE meta SET value=1 WHERE name='clean'; COMMIT");
+    } finally { db.close(); }
+    expectComboTurns(home, "after-rollback", "fresh,fresh,fresh");
+    const restored = run(home, "read");
+    expect(restored.exit, restored.stderr).toBe(0);
+    expect(JSON.parse(restored.stdout)).toMatchObject({ account: "a", issuer: "a" });
+  } finally { removeTreeWithRetry(home); }
+}, 45_000);
+
+test("a clean native shutdown does not authorize combo pins from a different generation", () => {
+  const home = mkdtempSync(join(tmpdir(), "ocx-combo-generation-"));
+  try {
+    expectComboTurns(home, "first", "original,original");
+    const snapshot = new Database(join(home, "codex-combo-affinity.sqlite"));
+    try { expect(snapshot.query("UPDATE combo_pins SET generation='stale'").run().changes).toBe(1); }
+    finally { snapshot.close(); }
+    expectComboTurns(home, "restart", "fresh,fresh,fresh");
+  } finally { removeTreeWithRetry(home); }
+}, 45_000);
 
 test("a copied seed home keeps its ownership and restores like a seeded one", () => {
   const homeA = mkdtempSync(join(tmpdir(), "ocx-affinity-copy-"));

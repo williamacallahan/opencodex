@@ -21,7 +21,7 @@ import { resolveProxyRoute, socks5ProxyFromEnv } from "../../lib/proxy-env";
 import type { CodexWsQuotaObserver } from "./codex-ws-metadata";
 import { CODEX_RESPONSES_HTTP_URL, CODEX_RESPONSES_WS_URL, CODEX_WS_FRAME_HEADERS, prepareCodexHttpInit, prepareCodexWsRequest } from "./codex-ws-request";
 import { codexWsExchange } from "./codex-ws-exchange";
-import { TURN_STATE_BINDING_INIT } from "../turn-state-handles";
+import { CodexTurnStateOwnerUnavailableError, TURN_STATE_OWNER, TURN_STATE_BINDING_INIT, type TurnStateConstrained } from "../turn-state-handles";
 import { CodexWsSession } from "./codex-ws-session";
 import { codexWsPool, codexWsReuseIdentity } from "./codex-ws-pool";
 import { codexWsCreateFrameExceedsLimit, type CodexWsPreOutputRefusalHold } from "./codex-ws-wire";
@@ -156,7 +156,7 @@ export function shouldUseCodexWsUpstream(
 /** Select the bounded WS lane or HTTP fallback, forwarding receipts at physical dispatch. */
 export async function codexWsUpstreamFetch(
   url: string,
-  init: RequestInit,
+  init: RequestInit & TurnStateConstrained & { [TURN_STATE_BINDING_INIT]?: (headers: Headers) => string },
   sseFallback: typeof globalThis.fetch,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
   onQuota?: CodexWsQuotaObserver,
@@ -218,6 +218,7 @@ export async function codexWsUpstreamFetch(
     return Promise.reject(error);
   }
   let session: CodexWsSession;
+  let dialHeaders: Headers;
   try {
     // Steering keeps a private physical connection across successor responses; it
     // must never enter the idle-socket pool or move to a different credential.
@@ -226,6 +227,8 @@ export async function codexWsUpstreamFetch(
     // reused for a different destination or with stale plugin headers.
     const dial = planCodexWsDial(wsUrl, headers, proxy);
     if (!dial) return sseFallback(url, init);
+    dialHeaders = new Headers(dial.headers);
+    init[TURN_STATE_OWNER]?.assertHeaders(dialHeaders);
     // The final dial headers, after plugin rewrites, are what the WebSocket upstream receives; the
     // per-turn headers planning drops from the upgrade still reach it inside the frame metadata.
     outboundCredentials().remember(headers);
@@ -245,22 +248,21 @@ export async function codexWsUpstreamFetch(
       session.dispose();
       return sseFallback(url, init);
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof CodexTurnStateOwnerUnavailableError) throw error;
     return sseFallback(url, init);
   }
+  const owner = init[TURN_STATE_OWNER];
   return codexWsExchange({
-    session, url, init, prepared, sseFallback, onQuota, beforeDispatch,
+    session, url, init, prepared, sseFallback, onQuota, beforeDispatch: owner ? headers => {
+      owner.assertHeaders(dialHeaders);
+      beforeDispatch?.(headers);
+    } : beforeDispatch,
     nativeControl: control,
     beforeContinuation, onPhysicalDispatch: () => onPhysicalDispatch?.(frameText), onContinuationDispatch,
     preOutputRefusalHold,
     bunVersion: typeof runtime === "string" ? runtime : runtime.version,
-    metadataContext: codexWsMetadataContext(init, prepared.model),
+    metadataContext: { turnStateBinding: init[TURN_STATE_BINDING_INIT]?.(dialHeaders),
+      knownModels: prepared.model ? [prepared.model] : [], provider: "openai-codex" },
   });
-}
-
-/** The binding the provider fetch attached to this send, and the requested model, for relayed metadata. */
-function codexWsMetadataContext(init: RequestInit, model: string | undefined): { turnStateBinding?: string; knownModels: string[]; provider: string } {
-  const binding = (init as Record<symbol, unknown>)[TURN_STATE_BINDING_INIT];
-  // This upstream is the ChatGPT Codex backend, so its bundled model catalog also counts as known.
-  return { ...(typeof binding === "string" ? { turnStateBinding: binding } : {}), knownModels: model ? [model] : [], provider: "openai-codex" };
 }

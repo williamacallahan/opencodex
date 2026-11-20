@@ -2,21 +2,34 @@ import { createHash } from "node:crypto";
 import { getCombo, targetKey } from "../../combos/types";
 import { CODEX_THREAD_AFFINITY_IDLE_TTL_MS } from "../../codex/routing/thread-affinity";
 import { captureConfigGeneration, type GenerationContext } from "../../lib/state-store-sweeper";
+import { affinityDigest, COMBO_PIN_LIMIT, registerComboPinSnapshot, type StoredComboPin as ComboPin } from "../../codex/routing/thread-affinity-store";
 import type { OcxConfig, OcxComboTarget } from "../../types";
 
-const COMBO_PIN_LIMIT = 2048;
-type ComboPin = Pick<OcxComboTarget, "provider" | "model"> & {
-  lane: string;
-  comboId: string;
-  responseDigest: string;
-  at: number;
-};
 type Owners = Pick<GenerationContext, "comboIds" | "comboTargets" | "providerNames">;
 const pins = new Map<string, ComboPin>();
 // A bare compaction selector has no combo id. Only the lane's last completion can claim it.
 const latest = new Map<string, ComboPin>();
 let lastReconciledGeneration = 0;
 let liveOwners: Owners | undefined;
+
+registerComboPinSnapshot({
+  restore(rows) {
+    pins.clear();
+    latest.clear();
+    for (const pin of rows) {
+      if (typeof pin.lane !== "string" || !/^[0-9a-f]{64}$/.test(pin.lane) || !Number.isSafeInteger(pin.at)
+        || typeof pin.comboId !== "string" || typeof pin.provider !== "string" || typeof pin.model !== "string"
+        || (pin.responseDigest !== null && !/^[0-9a-f]{64}$/.test(pin.responseDigest))) continue;
+      pins.set(pinKey(pin.lane, pin.comboId), pin);
+      if (pin.responseDigest !== null) latest.set(pin.lane, pin);
+    }
+  },
+  *rows() {
+    for (const pin of pins.values()) {
+      yield latest.get(pin.lane) === pin ? pin : { ...pin, responseDigest: null };
+    }
+  },
+});
 
 function pinKey(lane: string, comboId: string): string {
   return JSON.stringify([lane, comboId]);
@@ -45,6 +58,7 @@ export function rememberComboForLane(
   if (!lane || !comboId || writerGeneration < Math.max(lastReconciledGeneration, captureConfigGeneration())) return;
   const responseDigest = modelDigest(responseModel);
   if (!responseDigest) return;
+  lane = affinityDigest("combo-lane", lane);
   const pin = { lane, comboId, provider: target.provider, model: target.model, responseDigest, at: Date.now() };
   if (liveOwners && !ownsPin(liveOwners, pin)) return;
   const key = pinKey(lane, comboId);
@@ -67,12 +81,12 @@ function livePin(config: OcxConfig, pin: ComboPin | undefined): ComboPin | undef
 }
 export function recallComboForLane(config: OcxConfig, lane: string | undefined, model: string): string | undefined {
   if (!lane || !model || model.includes("/")) return undefined;
-  const pin = livePin(config, latest.get(lane));
+  const pin = livePin(config, latest.get(affinityDigest("combo-lane", lane)));
   return pin && pin.responseDigest === modelDigest(model) ? pin.comboId : undefined;
 }
 export function recallComboTargetForLane(config: OcxConfig, lane: string | undefined, comboId: string): Pick<OcxComboTarget, "provider" | "model"> | undefined {
   if (!lane || !comboId) return undefined;
-  const pin = livePin(config, pins.get(pinKey(lane, comboId)));
+  const pin = livePin(config, pins.get(pinKey(affinityDigest("combo-lane", lane), comboId)));
   return pin && { provider: pin.provider, model: pin.model };
 }
 export function sweepExpiredComboRecall(now: number): number {

@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmdirSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { codexPoolAffinityKey } from "../../src/codex/auth-context";
+import { resolveResponsesApiAuth, contextPrincipalIdOf } from "../../src/server/auth-cors";
+import { resolveClaudeBridgePoolSession } from "../../src/server/claude-bridge-pool-session";
+import { recallComboTargetForLane } from "../../src/server/responses/combo-session-recall";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveConfig } from "../../src/config";
@@ -44,7 +49,7 @@ class FakeCodexSocket {
     queueMicrotask(() => {
       this.emit("message", { data: JSON.stringify({ type: "codex.response.metadata", headers: { "x-codex-turn-state": tokenFor(frame) } }) });
       this.emit("message", { data: JSON.stringify({ type: "response.created", response: { id, object: "response", status: "in_progress", output: [] } }) });
-      this.emit("message", { data: JSON.stringify({ type: "response.completed", response: { id, object: "response", status: "completed", output: [] } }) });
+      this.emit("message", { data: JSON.stringify({ type: "response.completed", response: { id, object: "response", model: frame.model, status: "completed", output: [] } }) });
     });
   }
   close() { this.readyState = 3; }
@@ -98,18 +103,19 @@ afterEach(() => {
 });
 
 /** One HTTP turn; returns the turn-state value the client received. */
-async function httpTurn(server: { url: URL }, caller: keyof typeof KEYS, input: string, turnState?: string): Promise<string | null> {
+async function httpTurn(server: { url: URL }, caller: keyof typeof KEYS, input: string, turnState?: string,
+  { expectedStatus = 200, threadId, model = "gpt-5.5" }: { expectedStatus?: number; threadId?: string; model?: string } = {}): Promise<string | null> {
   const response = await fetch(new URL("/v1/responses", server.url), {
     method: "POST",
     headers: {
       "content-type": "application/json", authorization: bearer, "x-opencodex-api-key": KEYS[caller],
-      ...(turnState ? { "x-codex-turn-state": turnState } : {}),
+      ...(turnState ? { "x-codex-turn-state": turnState } : {}), ...(threadId ? { "thread-id": threadId, "session-id": threadId } : {}),
     },
-    body: JSON.stringify({ model: "gpt-5.5", input, stream: true }),
+    body: JSON.stringify({ model, input, stream: true }),
   });
   const text = await response.text();
-  expect(response.status).toBe(200);
-  expect(text).toContain("response.completed");
+  expect(response.status).toBe(expectedStatus);
+  if (expectedStatus === 200) expect(text).toContain("response.completed");
   return response.headers.get("x-codex-turn-state");
 }
 
@@ -157,6 +163,47 @@ describe("a turn-state handle obtained from an upstream response is redeemed on 
     } finally { await server.stop(true); }
   });
 
+  test.each([true, false])("reopening affinity keeps the serving identity and its handles (store available at startup: %s)", async durable => {
+    saveFixtureConfig("0.0.0.0");
+    const config = loadConfig();
+    config.combos = { pair: { targets: [{ provider: "openai", model: "gpt-5.5" }] } };
+    saveConfig(config);
+    const path = join(home, "codex-affinity.sqlite");
+    if (!durable) mkdirSync(path);
+    const server = startServer(0);
+    const threadId = "fixture-thread";
+    const headers = new Headers({ "x-opencodex-api-key": KEYS.a, "thread-id": threadId, "session-id": threadId });
+    const req = new Request(new URL("/v1/responses", server.url), { headers });
+    const identity = () => {
+      const admission = resolveResponsesApiAuth(req, config)!;
+      const principal = contextPrincipalIdOf(admission);
+      const transcript = resolveClaudeBridgePoolSession({ ingress: headers, replay: headers, admission });
+      expect(!!principal && !!transcript).toBe(true);
+      return { principal, transcript };
+    };
+    try {
+      const before = identity();
+      await httpTurn(server, "a", "pin", undefined, { threadId, model: "combo/pair" });
+      if (!durable) rmdirSync(path);
+      const missingHome = spyOn(realpathSync, "native").mockImplementation(() => { throw new Error("fixture home unavailable"); });
+      try { codexPoolAffinityKey(headers); } finally { missingHome.mockRestore(); }
+      const gap = identity();
+      // Admission happens before this turn's affinity lookup reopens the store.
+      const handle = await httpTurn(server, "a", "gap", undefined, { threadId });
+      expect(handle).toMatch(/^ocx-ts-[0-9a-f]{32}$/);
+      await httpTurn(server, "a", "redeem", handle!, { threadId });
+      expect(forwardedTurnState(2)).toBe("upstream-turn-gap");
+      const reopened = identity();
+      expect(gap.principal === before.principal && reopened.principal === before.principal).toBe(true);
+      expect(gap.transcript === before.transcript && reopened.transcript === before.transcript).toBe(true);
+      expect(recallComboTargetForLane(config, reopened.transcript, "pair")).toEqual({ provider: "openai", model: "gpt-5.5" });
+    } finally { await server.stop(true); }
+    const native = new Database(path, { readonly: true });
+    try { expect(native.query("SELECT value FROM meta WHERE name='clean'").get()).toEqual({ value: 1 }); }
+    finally { native.close(); }
+    expect(existsSync(join(home, "codex-combo-affinity.sqlite"))).toBe(durable);
+  });
+
   test("a native-issued handle reaches neither carrier on a keyed relay send", async () => {
     const config = loadConfig();
     const baseUrl = "https://relay.example.test/backend-api/codex";
@@ -199,11 +246,20 @@ describe("a turn-state handle obtained from an upstream response is redeemed on 
     } finally { await server.stop(true); }
   });
 
-  test("two concurrent callers each redeem only their own handle", async () => {
+  test.each(["separate keys", "same key id", "same key id in direct mode"])("two principals redeem only their own handles: %s", async setup => {
     // API keys admit as distinct callers only where admission is required, which a public bind makes it.
     saveFixtureConfig("0.0.0.0");
+    const direct = setup === "same key id in direct mode";
+    if (setup !== "separate keys") {
+      const config = loadConfig();
+      if (direct) config.providers.openai!.codexAccountMode = "direct";
+      const current = config.apiKeys![0]!;
+      config.apiKeys = [{ ...current, pendingRotation: { id: "fixture-pending", key: KEYS.b,
+        createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() } }];
+      saveConfig(config);
+    }
     const server = startServer(0);
-    const warn = spyOn(console, "warn");
+
     try {
       const [handleA, handleB] = await Promise.all([httpTurn(server, "a", "turn-a"), httpTurn(server, "b", "turn-b")]);
       expect(sentFrames).toHaveLength(2);
@@ -214,17 +270,15 @@ describe("a turn-state handle obtained from an upstream response is redeemed on 
       await Promise.all([
         httpTurn(server, "a", "next-a", handleA!),
         httpTurn(server, "b", "next-b", handleB!),
-        httpTurn(server, "b", "stolen-by-b", handleA!),
+        httpTurn(server, "b", "foreign-handle", handleA!, { expectedStatus: direct ? 200 : 409 }),
       ]);
-      expect(sentFrames).toHaveLength(5);
+      expect(sentFrames).toHaveLength(direct ? 5 : 4);
       const byInput = new Map(sentFrames.map(frame => [String(frame.input), (frame.client_metadata as Record<string, unknown> | undefined)?.["x-codex-turn-state"]]));
       expect(byInput.get("next-a")).toBe("upstream-turn-turn-a");
       expect(byInput.get("next-b")).toBe("upstream-turn-turn-b");
-      expect(byInput.get("stolen-by-b")).toBeUndefined();
-      expect(warn.mock.calls.map(call => String(call[0])).some(text => text.includes("turn_state_binding_mismatch"))).toBe(true);
-      expect(warn.mock.calls.flat().map(String).join("\n")).not.toContain("upstream-turn");
+      expect(byInput.has("foreign-handle")).toBe(direct);
+      expect(byInput.get("foreign-handle")).toBeUndefined();
     } finally {
-      warn.mockRestore();
       await server.stop(true);
     }
   });

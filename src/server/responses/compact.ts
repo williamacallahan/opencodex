@@ -148,6 +148,7 @@ import {
 import type { DataPlaneAdmission } from "../auth-cors";
 import { listOpenAiForwardSidecarCandidates, resolveFirstUsableOpenAiSidecar, type ResolvedOpenAiForwardSidecar } from "../../providers/openai-sidecar";
 import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider, supportsNativeResponsesCompactEndpoint } from "../../providers/openai-tiers";
+import { requiredTurnStateOwner } from "../turn-state-handles";
 import { buildResponsesTransport, copyResponsesClientMetadata } from "../../adapters/openai-responses/transport";
 import { scrubOcxCompactionItems, stripCanonicalOnlyInputItems, stripCanonicalOnlyTopLevelFields, stripInternalChatMessageMetadataPassthrough } from "../../adapters/openai-responses/request-strips";
 import { dropResponsesReasoningInputItems } from "../../adapters/openai-responses/reasoning";
@@ -832,6 +833,8 @@ export async function handleResponsesCompact(
     // headers would run compaction on the wrong account (or 401) whenever a pool account is
     // active for this thread while normal turns succeed.
     const selectionHeaders = completeClaudeBridgePoolIdentity(req.headers, { admission, claudeBridgePoolSession });
+    const owner = route.codexAccountMode === "pool" && isCanonicalOpenAiForwardProvider(route.provider)
+      ? requiredTurnStateOwner(route.providerName, req.headers, raw) : undefined;
     let compactProvider = route.provider;
     let headers = new Headers({ "content-type": "application/json" });
     try {
@@ -853,6 +856,7 @@ export async function handleResponsesCompact(
           // the same object and the same predicate the guard below uses, so the two can never
           // disagree about which conversations are in scope.
           retainAccountForUploadedFiles: conversationCarriesUploadedFiles(raw),
+          turnStateOwner: owner,
         });
         logCtx.accountLogLabel = codexAuthContextLogLabel(authCtx, config);
         const selected = await materializeCodexUpstreamAuthAsync(req.headers, authCtx, {
@@ -950,6 +954,7 @@ export async function handleResponsesCompact(
         applyAccountChangeConversationStateScrub({
           body: raw,
           headers,
+          verifiedTurnStateHandles: owner?.handles,
           bindingKey: binding.bindingKey,
           servingAccountId: binding.accountId,
           sameUploadedFileAccount: (first, second) =>
@@ -959,6 +964,7 @@ export async function handleResponsesCompact(
         });
         applyAccountChangeConversationStateScrub({
           body: compactBody,
+          verifiedTurnStateHandles: owner?.handles,
           bindingKey: binding.bindingKey,
           servingAccountId: binding.accountId,
           sameUploadedFileAccount: (first, second) =>
@@ -1144,6 +1150,7 @@ export async function handleResponsesCompact(
       let wireHeaders = gatewayTransport ? new Headers(gatewayTransport.headers) : sendHeaders;
       if (gatewayTransport && !sendHeaders.has("x-codex-turn-state")) wireHeaders.delete("x-codex-turn-state");
       sendHeaders = wireHeaders;
+      owner?.assertHeaders(wireHeaders);
       const buildCompactSendBody = () => {
         if (gatewayReplayParsed) bindRouteReasoningReplayScope({
           parsed: gatewayReplayParsed, providerName: route.providerName, provider: sendProvider,
@@ -1157,7 +1164,7 @@ export async function handleResponsesCompact(
           ?? (sendAuthCtx.kind === "main" && sendAffinity && conversationStateAccountId(authCtx)
             ? { bindingKey: sendAffinity, accountId: MAIN_CODEX_ACCOUNT_ID } : null);
         if (sendBinding) applyAccountChangeConversationStateScrub({
-          body: compactBody, parsed: compactScrub, bindingKey: sendBinding.bindingKey,
+          body: compactBody, parsed: compactScrub, verifiedTurnStateHandles: owner?.handles, bindingKey: sendBinding.bindingKey,
           servingAccountId: sendBinding.accountId, priorAccountId: conversationStateAccountId(authCtx),
           sameUploadedFileAccount: (first, second) =>
             (!isRequestOwnedAffinityKey(sendBinding.bindingKey) || callerMatchesObservedMain(req.headers))
@@ -1416,7 +1423,7 @@ export async function handleResponsesCompact(
       compactProvider = replay.provider;
       headers = replay.headers;
       const replayBinding = conversationStateBindingFromAuth(replay.authCtx, codexPoolAffinityKey(selectionHeaders));
-      if (replayBinding) applyAccountChangeConversationStateScrub({ body: compactBody, headers, bindingKey: replayBinding.bindingKey, servingAccountId: replayBinding.accountId, logCtx });
+      if (replayBinding) applyAccountChangeConversationStateScrub({ body: compactBody, headers, verifiedTurnStateHandles: owner?.handles, bindingKey: replayBinding.bindingKey, servingAccountId: replayBinding.accountId, logCtx });
       logCtx.accountLogLabel = codexAuthContextLogLabel(replay.authCtx, config);
       try {
         upstream = await sendCompactAttempt(compactProvider, headers, "single", authCtx);
@@ -1506,7 +1513,7 @@ export async function handleResponsesCompact(
       && (!storedPool401ReplayAttempted || wasAccountAutoPaused(upstream))
       && !gatewayTransport
       && usesCodexForwardPoolAuth(authCtx, route.provider)
-      && !authCtx.fixedAccount
+      && !authCtx.fixedAccount && !owner
       && route.codexAccountMode
       && !req.signal.aborted
     ) {
@@ -1610,7 +1617,7 @@ export async function handleResponsesCompact(
       && (!storedPool401ReplayAttempted || wasAccountAutoPaused(upstream))
       && !gatewayTransport
       && usesCodexForwardPoolAuth(authCtx, route.provider)
-      && !authCtx.fixedAccount
+      && !authCtx.fixedAccount && !owner
       && route.codexAccountMode
       && outcomeCtx === authCtx
       && !req.signal.aborted

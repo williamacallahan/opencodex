@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../../src/types";
@@ -30,7 +30,11 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { rebindPoolCreditPolicy } from "../../src/codex/pool-credit-policy";
 import { addFinalRequestLog, type RequestLogContext } from "../../src/server/request-log";
 import { readUsageEntries } from "../../src/usage/log";
-import { issueTurnStateHandle, turnStateBinding, TURN_STATE_HEADER } from "../../src/server/turn-state-handles";
+import { fakeChatGptJwt } from "../helpers/fake-chatgpt-jwt";
+import { codexAccountUnusableReason } from "../../src/codex/account-usability";
+import { reconcileMainCodexAccountRuntimeState, resetMainCodexAccountIdentityTrackingForTests } from "../../src/codex/account-lifecycle";
+import { resolveDataPlaneAdmissionSecret } from "../../src/server/auth-cors";
+import { issueTurnStateHandle, noteTurnStateCaller, runTurnStateCallerScope, turnStateBinding, TURN_STATE_HEADER } from "../../src/server/turn-state-handles";
 import { handleResponses } from "../../src/server/responses/core";
 import { handleResponsesCompact } from "../../src/server/responses/compact";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
@@ -389,7 +393,7 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     const withState = reason.startsWith("body-state");
     if (!withState) { headers.set("thread-id", "sse-boundary"); headers.set("session-id", "sse-boundary"); }
     const client_metadata = withState ? { [TURN_STATE_HEADER]: issueTurnStateHandle("fixture-state",
-      turnStateBinding("openai", new Headers({ "chatgpt-account-id": `fixture-workspace-${B}` }))) } : undefined;
+      turnStateBinding("openai", new Headers({ "chatgpt-account-id": `fixture-workspace-${B}`, authorization: `Bearer fixture-access-${B}` }))) } : undefined;
     if (reason === "bound") bindThreadAffinity(codexPoolAffinityKey(headers)!, B, now, "reserve");
     const sends: string[] = [];
     spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -500,6 +504,96 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
       now += 1;
       expect((await send()).status).toBe(200);
       expect(models).toEqual(["gpt-reserve", "gpt-6-luna", "gpt-reserve"]);
+    } finally { release(); }
+  });
+  test.each(["header", "body", "compact body", "native main with a stored duplicate", "same key id"])("a turn-state owner still serves the %s follow-up when B gains Reserve", async carrier => {
+    const cfg = config(); cfg.providers.openai = { ...base, codexAccountMode: "pool", upstreamWebsocket: false };
+    ordinary(A, 40); noReserve(B);
+    const main = carrier === "native main with a stored duplicate";
+    const rotating = carrier === "same key id";
+    if (rotating) cfg.apiKeys = [{ id: "client", name: "client", key: "fixture-current", createdAt: new Date(now).toISOString(),
+      pendingRotation: { id: "rotation", key: "fixture-pending", createdAt: new Date(now).toISOString(), expiresAt: new Date(now + 60_000).toISOString() } }];
+    if (main) {
+      const token = fakeChatGptJwt({ chatgpt_account_id: `fixture-workspace-${A}`, exp: Math.floor(now / 1000) + 3600 });
+      writeFileSync(join(home, "auth.json"), JSON.stringify({ tokens: { access_token: token, account_id: `fixture-workspace-${A}`, refresh_token: "fixture-refresh-main" } }));
+      cfg.activeCodexAccountId = "__main__"; ordinary("__main__", 40);
+      reconcileMainCodexAccountRuntimeState();
+      expect(codexAccountUnusableReason(cfg, A)).toBe("duplicate_main");
+    }
+    const sends: { account: string | null; state: string | null; model: string }[] = [];
+    spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const body = await request.json();
+      sends.push({ account: request.headers.get("chatgpt-account-id"), state: request.headers.get(TURN_STATE_HEADER) ?? body.client_metadata?.[TURN_STATE_HEADER] ?? null, model: body.model });
+      if (main) expect(request.headers.get("authorization")).not.toBe(`Bearer fixture-access-${A}`);
+      return Response.json({ id: "resp_handle", object: "response", model: body.model, status: "completed", output: [], created_at: 1 },
+        { headers: { [TURN_STATE_HEADER]: issueTurnStateHandle("fixture-turn", turnStateBinding("openai", request.headers)) } });
+    }, { preconnect() {} }));
+    const send = (handle?: string, key = "fixture-current") => runTurnStateCallerScope(() => {
+      const admission = rotating ? resolveDataPlaneAdmissionSecret(key, cfg)! : undefined;
+      if (admission) noteTurnStateCaller(admission);
+      const compact = handle && carrier === "compact body";
+      const req = new Request(compact ? "http://localhost/v1/responses/compact" : "http://localhost/v1/responses", { method: "POST",
+      headers: { "content-type": "application/json", ...(handle && !carrier.endsWith("body") ? { [TURN_STATE_HEADER]: handle } : {}) },
+      body: JSON.stringify({ model: "openai/gpt-6-luna", input: "ping", stream: false,
+        ...(handle && carrier.endsWith("body") ? { client_metadata: { [TURN_STATE_HEADER]: handle } } : {}) }),
+      });
+      const log = { model: "", provider: "" };
+      return compact ? handleResponsesCompact(req, cfg, log) : handleResponses(req, cfg, log, { admission });
+    });
+    const release = acquireOwnedSpendHome();
+    try {
+      const first = await send(); await first.text();
+      const handle = first.headers.get(TURN_STATE_HEADER);
+      expect(handle).toMatch(/^ocx-ts-/);
+      if (main) cfg.activeCodexAccountId = A;
+      reserve(B);
+      if (rotating) {
+        const foreign = await send(handle!, "fixture-pending"); await foreign.text();
+        expect(foreign.status).toBe(409);
+        expect(sends).toHaveLength(1);
+      }
+      const second = await send(handle!); await second.text();
+      expect(second.status).toBe(200);
+      const account = `fixture-workspace-${A}`;
+      expect(sends).toEqual([{ account, state: null, model: "gpt-6-luna" }, { account, state: "fixture-turn", model: "gpt-6-luna" }]);
+      cfg.pausedCodexAccountIds = [main ? "__main__" : A];
+      const refused = await send(handle!); await refused.text();
+      expect(refused.status).toBeGreaterThanOrEqual(400);
+      expect(sends).toHaveLength(2);
+    } finally { release(); if (main) resetMainCodexAccountIdentityTrackingForTests(); }
+  });
+  test("a shared workspace cannot move a turn-state handle to the other member's Reserve", async () => {
+    const cfg = config(); cfg.providers.openai = { ...base, codexAccountMode: "pool", upstreamWebsocket: false };
+    const workspace = "team-workspace";
+    const token = (member: string, revision: number) => fakeChatGptJwt({ "https://api.openai.com/auth": {
+      chatgpt_account_id: workspace, chatgpt_user_id: member }, jti: revision });
+    const save = (id: string, revision: number) => saveCodexAccountCredential(id, {
+      accessToken: token(id, revision), chatgptAccountId: workspace, refreshToken: `fixture-${id}`, expiresAt: now + 3_600_000,
+    });
+    save(A, 1); save(B, 1); ordinary(A, 40); noReserve(B);
+    const sends: { member: string; model: string; state: string | null }[] = [];
+    spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const req = input instanceof Request ? input : new Request(input, init);
+      const member = req.headers.get("authorization") === `Bearer ${token(B, 1)}` ? B : A;
+      sends.push({ member, model: (await req.json()).model, state: req.headers.get(TURN_STATE_HEADER) });
+      return Response.json({ id: "resp_member", object: "response", status: "completed", output: [] },
+        { headers: { [TURN_STATE_HEADER]: issueTurnStateHandle("fixture-team-turn", turnStateBinding("openai", req.headers)) } });
+    }, { preconnect() {} }));
+    const send = (handle?: string) => handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
+      headers: { "content-type": "application/json", ...(handle ? { [TURN_STATE_HEADER]: handle } : {}) },
+      body: JSON.stringify({ model: "openai/gpt-6-luna", input: "ping", stream: false }),
+    }), cfg, { model: "", provider: "" });
+    const release = acquireOwnedSpendHome();
+    try {
+      const first = await send(); await first.text();
+      const handle = first.headers.get(TURN_STATE_HEADER)!; expect(handle).toMatch(/^ocx-ts-/);
+      save(A, 2); ordinary(A, 40); reserve(B);
+      const next = await send(handle); await next.text(); expect(next.status).toBe(200);
+      expect(sends).toEqual([{ member: A, model: "gpt-6-luna", state: null }, { member: A, model: "gpt-6-luna", state: "fixture-team-turn" }]);
+      cfg.pausedCodexAccountIds = [A];
+      const refused = await send(handle); await refused.text(); expect(refused.status).toBe(409);
+      expect(sends).toHaveLength(2);
     } finally { release(); }
   });
   test("a file turn uses the recorded issuer without affinity and refuses when the issuer is unavailable", async () => {

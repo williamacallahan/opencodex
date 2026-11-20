@@ -594,6 +594,7 @@ describe("server combo failover 030 activation matrix", () => {
             beta: { targets: [{ provider: "b", model: "m2" }] },
           };
           const headers = { session_id: "first-terminal-recall" };
+          takeSpendHome(); // Production acquires the affinity store before admitting the first turn.
           const lane = admittedLane(new Headers(headers));
           await (await post(config, { model: "combo/alpha" }, {}, headers)).text();
           expect(recallComboForLane(config, lane, "m1")).toBe("alpha");

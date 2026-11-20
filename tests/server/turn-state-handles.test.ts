@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { saveConfig } from "../../src/config";
 import { startServer } from "../../src/server";
 import {
-  issueTurnStateHandle, noteTurnStateCaller, redeemOutboundTurnState, resetTurnStateHandlesForTests,
+  CodexTurnStateOwnerUnavailableError, issueTurnStateHandle, noteTurnStateCaller, redeemOutboundTurnState, requiredTurnStateOwner,
+  resetTurnStateHandlesForTests, TURN_STATE_HEADER, TURN_STATE_OWNER,
   resolveTurnStateHandle, runTurnStateCallerScope, TURN_STATE_MISMATCH_NOTICE, turnStateBinding,
 } from "../../src/server/turn-state-handles";
 import type { OcxConfig } from "../../src/types";
@@ -65,6 +66,39 @@ describe("turn-state handles", () => {
     expect(base).not.toContain("account-a");
   });
 
+  test.each(["same member", "another member", "conflicting workspace", "conflicting member", "missing member"])("handle redemption after a bearer change: %s", scenario => {
+    const headers = (member: string, revision: number) => new Headers({ "chatgpt-account-id": "team", authorization: `Bearer ${fakeChatGptJwt({
+      chatgpt_account_id: scenario === "conflicting workspace" ? "other" : "team",
+      "https://api.openai.com/auth": { chatgpt_account_id: "team", ...(scenario === "missing member" ? {} : { chatgpt_user_id: member }),
+        ...(scenario === "conflicting member" ? { user_id: "different" } : {}) }, jti: revision,
+    })}` });
+    const initial = turnStateBinding("openai", headers("alice", 1));
+    const handle = issueTurnStateHandle(UPSTREAM_TOKEN, initial);
+    expect(resolveTurnStateHandle(handle, initial)).toEqual({ value: UPSTREAM_TOKEN });
+    const next = turnStateBinding("openai", headers(scenario === "another member" ? "bob" : "alice", 2));
+    expect(resolveTurnStateHandle(handle, next)).toEqual(scenario === "same member" ? { value: UPSTREAM_TOKEN } : { dropped: "mismatch" });
+  });
+
+  test("a rebuild that changes credentials after handle redemption cannot enter the HTTP executor", async () => {
+    const { providerFetch } = await import("../../src/server/responses/fetch-helpers");
+    const selected = new Headers({ "chatgpt-account-id": "team", authorization: "Bearer fixture-a" });
+    selected.set(TURN_STATE_HEADER, issueTurnStateHandle(UPSTREAM_TOKEN, turnStateBinding("openai", selected)));
+    const owner = requiredTurnStateOwner("openai", selected, {})!;
+    const run = providerFetch({ adapter: "openai-responses", authMode: "forward", baseUrl: "https://example.test", [TURN_STATE_OWNER]: owner }, undefined, {
+      providerName: "openai", httpOnly: true, dispatchOverride: (input, init, execute) => {
+        const rebuilt = new Headers(init.headers);
+        expect(rebuilt.get(TURN_STATE_HEADER)).toBe(UPSTREAM_TOKEN);
+        rebuilt.set("authorization", "Bearer fixture-b");
+        return execute(input, { ...init, headers: rebuilt });
+      },
+    });
+    const upstream = spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected physical send"));
+    try {
+      await expect(run("https://example.test/responses", { method: "POST", headers: selected, body: "{}" })).rejects.toBeInstanceOf(CodexTurnStateOwnerUnavailableError);
+      expect(upstream).not.toHaveBeenCalled();
+    } finally { upstream.mockRestore(); }
+  });
+
   test("an outbound send is translated only for a handle with the same binding", () => {
     const handle = issueTurnStateHandle(UPSTREAM_TOKEN, "send-a");
     const init = { headers: { "x-codex-turn-state": handle }, body: JSON.stringify({ client_metadata: { "x-codex-turn-state": handle, keep: "1" } }) };
@@ -97,8 +131,8 @@ describe("the server redeems a handle only for the same caller, provider and acc
     forwarded = [];
     saveConfig({
       port: 0, defaultProvider: "openai", websockets: true,
-      // HTTP/SSE upstream, so the fixture never opens a real WebSocket.
-      providers: { openai: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward", upstreamWebsocket: false } },
+      // Direct tests exercise physical redemption without asking Pool to select a handle owner.
+      providers: { openai: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward", codexAccountMode: "direct", upstreamWebsocket: false } },
     } as unknown as OcxConfig);
   });
   afterEach(() => {

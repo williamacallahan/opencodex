@@ -1,6 +1,7 @@
 import { providerRelativeSendPathConfigError } from "../config/provider-relative-send-path";
 import { contextTierRecordConfigError, modelCapabilitiesConfigError, providerInputModalitiesConfigError } from "../config/provider-validation";
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
+import { affinityDigest } from "../codex/routing/thread-affinity-store";
 import { initialModelSelection } from "../providers/initial-model-selection";
 import { extractAccountId } from "../oauth/chatgpt";
 import { formatErrorResponse } from "../bridge";
@@ -475,7 +476,7 @@ function secretEquals(actual: string, expected: string | undefined): boolean {
 export type DataPlaneAdmissionSource = "loopback" | "dedicated" | "bearer" | "x-api-key";
 
 /**
- * Process-local, salted identity of the admission secret that was actually matched.
+ * Home-scoped, keyed identity of the admission secret that was actually matched.
  *
  * Context-relay ownership is partitioned by this value, so two operators holding different
  * keys cannot reach each other's sessions even when both resolve to the same upstream
@@ -486,12 +487,8 @@ export type DataPlaneAdmissionSource = "loopback" | "dedicated" | "bearer" | "x-
  * identity and mints nothing, so the relay refuses it rather than treating every local process
  * as one user.
  */
-const CONTEXT_PRINCIPAL_SALT = randomBytes(32);
-
 function mintContextPrincipal(kind: string, keyId: string, credential: string): string {
-  return createHmac("sha256", CONTEXT_PRINCIPAL_SALT)
-    .update(kind).update("\0").update(keyId).update("\0").update(credential)
-    .digest("hex");
+  return affinityDigest("principal", JSON.stringify([kind, keyId, credential]));
 }
 
 export type DataPlaneAdmission = (

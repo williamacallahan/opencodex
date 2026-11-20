@@ -4,9 +4,9 @@
 only with explicit embedding-shell `OPENCODEX_RESPONSE_TURN_SIGNING_KEY` material,
 an admitted request, a separately verified dedicated local API credential and an
 explicit own `thread-id` header. Parent-thread and session/cache cohorts do not qualify.
-`src/server/auth-cors.ts` derives the structural principal with the signing key;
-its existing process-local context principal and provider-opaque state ownership
-remain unchanged. A different credential or signing key starts a different scope.
+`src/server/auth-cors.ts` derives the structural principal with the signing key,
+independently of the affinity store's admission principal. A different credential
+or signing key starts a different structural replay scope.
 
 `src/responses/turn-membership.ts` verifies versioned item IDs bound to that caller,
 thread, turn nonce, item kind and ordinal. IDs prove structural grouping only:

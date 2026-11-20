@@ -1,3 +1,5 @@
+import { requiredTurnStateOwner } from "../turn-state-handles";
+import { markResponseNonReplayable } from "../../lib/upstream-retry";
 import { projectLocalModelRefusalLog } from "../request-log-failure-detail";
 import { inputAdmissionRefusalMessage } from "./input-admission";
 import { clientFacingModelLabel, clientFacingModelText } from "../../lib/error-destination";
@@ -1648,6 +1650,8 @@ export async function prepareResponsesRequest(
 
   let substituteMainCredential = false;
   let callerAuthHeaders: Headers;
+  const owner = route.codexAccountMode === "pool" && isCanonicalOpenAiForwardProvider(route.provider)
+    ? requiredTurnStateOwner(route.providerName, req.headers, parsed._rawBody) : undefined;
   {
     // #4778: uploaded files are scoped to the account that issued them, so a conversation
     // carrying live references must retain its binding across a voluntary quota move. Answered
@@ -1660,8 +1664,12 @@ export async function prepareResponsesRequest(
       options,
       credentialDomainWasRewritten,
       conversationCarriesUploadedFiles(parsed._rawBody),
+      owner,
     );
-    if (!finalAuth.ok) return finalAuth.response;
+    if (!finalAuth.ok) {
+      if (owner) markResponseNonReplayable(finalAuth.response);
+      return finalAuth.response;
+    }
     admissionState.authCtx = finalAuth.authCtx;
     selectedForwardHeaders = withClaudeNativeSession(finalAuth.headers, route.provider, options.claudeNativeSessionId);
     callerAuthHeaders = withClaudeNativeSession(finalAuth.callerAuthHeaders, route.provider, options.claudeNativeSessionId);
@@ -1710,6 +1718,7 @@ export async function prepareResponsesRequest(
       applyAccountChangeConversationStateScrub({
         body: parsed._rawBody,
         headers: selectedForwardHeaders,
+        verifiedTurnStateHandles: owner?.handles,
         parsed,
         preserveReasoningEncryptedContent: isCanonicalOpenAiForwardProvider(route.provider)
           && parsed._nativeReasoningRetention?.accountSwitch === true,

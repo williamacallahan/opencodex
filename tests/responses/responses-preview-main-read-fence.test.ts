@@ -70,6 +70,7 @@ const originalFetch = globalThis.fetch;
 const originalNow = Date.now;
 
 let testDir = "";
+let releaseSpendHome: (() => void) | undefined;
 let previousOpenCodexHome: string | undefined;
 let previousCodexHome: string | undefined;
 let authJsonReads = 0;
@@ -207,22 +208,15 @@ async function postSpawn(
   const requestHeaders = new Headers(headers);
   requestHeaders.set("content-type", "application/json");
   requestHeaders.set("x-openai-subagent", "collab_spawn");
-  // Acquire on this case's installed home so direct dispatch can open the shared spend journal.
-  const releaseSpendHome = acquireOwnedSpendHome();
-  try {
-    const response = await handleResponses(new Request("http://localhost/v1/responses", {
-      method: "POST",
-      headers: requestHeaders,
-      body: JSON.stringify({ model, input, stream: false }),
-    }), config, logCtx, options);
-    // handleResponses owns its translator budget through the returned body lifecycle. Draining the
-    // body also lets completed Responses schedule their state write before afterEach cancels it.
-    await response.arrayBuffer();
-    return response;
-  } finally {
-    // Release before afterEach removes this home to prevent Windows removal failures.
-    releaseSpendHome();
-  }
+  const response = await handleResponses(new Request("http://localhost/v1/responses", {
+    method: "POST",
+    headers: requestHeaders,
+    body: JSON.stringify({ model, input, stream: false }),
+  }), config, logCtx, options);
+  // handleResponses owns its translator budget through the returned body lifecycle. Draining the
+  // body also lets completed Responses schedule their state write before afterEach cancels it.
+  await response.arrayBuffer();
+  return response;
 }
 
 beforeEach(() => {
@@ -231,6 +225,8 @@ beforeEach(() => {
   previousCodexHome = process.env.CODEX_HOME;
   process.env.OPENCODEX_HOME = testDir;
   process.env.CODEX_HOME = testDir;
+  // A running server owns one state directory while seeding and consulting affinity.
+  releaseSpendHome = acquireOwnedSpendHome();
   Date.now = () => NOW;
   clearAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
   clearThreadAccountMap();
@@ -279,6 +275,8 @@ afterEach(() => {
   resetSubagentModelFallbackStateForTests();
   resetCodexModelEntitlementCacheForTests();
   resetAgentTaskRecoveryState();
+  releaseSpendHome?.();
+  releaseSpendHome = undefined;
   if (previousOpenCodexHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousOpenCodexHome;
   if (previousCodexHome === undefined) delete process.env.CODEX_HOME;

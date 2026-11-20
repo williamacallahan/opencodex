@@ -1381,9 +1381,9 @@ test("a keyed caller's bridged search is restored on its next turn", async () =>
   const baseUrl = serveBridgedUpstream(seen);
   const config = bridgedReplayConfig(baseUrl, false);
   saveConfig(config);
-  seedBridgedSearch(baseUrl, bridgeCallerPrincipal(config));
   const server = startTrackedServer();
   try {
+    seedBridgedSearch(baseUrl, bridgeCallerPrincipal(config));
     const response = await fetch(new URL("/v1/responses", server.url), bridgedReplayRequest(BRIDGE_CALLER_KEY));
     expect(response.status).toBe(200);
     await response.text();
@@ -1402,10 +1402,10 @@ test("a keyless loopback caller neither restores nor shares a bridged search", a
   const baseUrl = serveBridgedUpstream(seen);
   const config = bridgedReplayConfig(baseUrl, false);
   saveConfig(config);
-  seedBridgedSearch(baseUrl, bridgeCallerPrincipal(config));
-  seedBridgedSearch(baseUrl, "loopback");
   const server = startTrackedServer();
   try {
+    seedBridgedSearch(baseUrl, bridgeCallerPrincipal(config));
+    seedBridgedSearch(baseUrl, "loopback");
     const response = await fetch(new URL("/v1/responses", server.url), bridgedReplayRequest(undefined));
     expect(response.status).toBe(200);
     await response.text();
@@ -1441,13 +1441,11 @@ test("a dispatch-time key switch rebuilds the bridged-search restore under the n
   const config = bridgedReplayConfig(baseUrl, true);
   saveConfig(config);
 
-  // Seed the memo under the identity the FIRST key binds: the same caller principal and thread
-  // the request below carries, but the credential whose selection is about to lapse.
-  seedBridgedSearch(baseUrl, bridgeCallerPrincipal(config));
-
   const server = startTrackedServer();
   const abort = new AbortController();
   try {
+    // The same admitted caller and thread, but the upstream key whose selection is about to lapse.
+    seedBridgedSearch(baseUrl, bridgeCallerPrincipal(config));
     await waitForProviderRequestSlot("pooled", config.providers.pooled);
     const pending = fetch(new URL("/v1/responses", server.url), bridgedReplayRequest(BRIDGE_CALLER_KEY, abort.signal));
     await queued.promise;

@@ -1,3 +1,5 @@
+import { CodexTurnStateOwnerUnavailableError } from "../turn-state-handles";
+import { markResponseNonReplayable } from "../../lib/upstream-retry";
 import { markProxyError } from "../../lib/client-error-body";
 import { CodexInstallationIdUnavailableError } from "../../codex/installation-id";
 import { formatErrorResponse } from "../../bridge";
@@ -95,6 +97,11 @@ export function mapCodexAuthContextErrorToResponse(
   }
   if (error instanceof CodexMainProfileDrainingError) {
     return markProxyError(codexMainProfileDrainingResponse());
+  }
+  if (error instanceof CodexTurnStateOwnerUnavailableError) {
+    const refusal = markProxyError(formatErrorResponse(409, "invalid_request_error", error.message));
+    markResponseNonReplayable(refusal);
+    return refusal;
   }
   if (error instanceof CodexThreadAffinityExpiredError) {
     return markProxyError(formatErrorResponse(

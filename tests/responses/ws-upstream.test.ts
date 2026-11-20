@@ -759,7 +759,7 @@ describe("codexWsUpstreamFetch", () => {
       ws.emit("message", { data: JSON.stringify({ type: "response.created", response: { id: "r1" } }) });
       ws.emit("message", { data: JSON.stringify({ type: "response.completed", response: { id: "r1", status: "completed" } }) });
     });
-    const response = await codexWsUpstreamFetch(CODEX_URL, { ...streamingInit(), [TURN_STATE_BINDING_INIT]: "send-a" } as RequestInit, (() => {
+    const response = await codexWsUpstreamFetch(CODEX_URL, { ...streamingInit(), [TURN_STATE_BINDING_INIT]: () => "send-a" }, (() => {
       throw new Error("fallback must not run");
     }) as unknown as typeof fetch);
     expect(response.headers.get("x-codex-primary-used-percent")).toBe("31");

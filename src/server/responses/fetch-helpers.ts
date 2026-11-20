@@ -33,7 +33,7 @@ import {
 import { redactSecretString } from "../../lib/redact";
 import { outboundCredentials } from "../../lib/outbound-credential-registry";
 import { compressUpstreamRequestBody, isCanonicalCodexResponsesUrl } from "./request-compression";
-import { redeemOutboundTurnState, TURN_STATE_BINDING_INIT, turnStateBinding } from "../turn-state-handles";
+import { redeemOutboundTurnState, TURN_STATE_BINDING_INIT, TURN_STATE_OWNER, type TurnStateConstrained, turnStateBinding } from "../turn-state-handles";
 
 export { withUpstreamHttpVersion };
 
@@ -198,7 +198,7 @@ export type ProviderFetch = typeof globalThis.fetch & PaceAwareFetch;
 export function sendWithConnectionPolicy(
   physicalFetch: typeof globalThis.fetch,
   rawInput: Parameters<typeof globalThis.fetch>[0],
-  init?: RequestInit,
+  init?: RequestInit & TurnStateConstrained,
   egress?: ProviderEgressBinding,
   deferDispatchReceipt = false,
 ): Promise<Response> {
@@ -264,6 +264,7 @@ export function sendWithConnectionPolicy(
     ...(decide || redirectedToLoopback ? { [EGRESS_DECIDED]: true } : {}),
     ...{ [UPSTREAM_REWRITTEN]: true },
   };
+  init?.[TURN_STATE_OWNER]?.assertHeaders(headers);
   (init as Record<symbol, ((destination: string, headers: Headers) => void) | undefined> | undefined)?.[PHYSICAL_SEND_GUARD]?.(target, headers);
   (init as Record<symbol, ((url: string, init: RequestInit) => void) | undefined> | undefined)?.[PHYSICAL_SEND_INTEGRITY]?.(target, physicalInit);
   // A strict override returning to providerFetch's executor still has its final check ahead.
@@ -327,7 +328,7 @@ export interface ProviderFetchOptions {
 
 /** Compose provider pacing and transport admission; receipts run only at executor entry. */
 export function providerFetch(
-  provider: OcxProviderConfig,
+  provider: OcxProviderConfig & TurnStateConstrained,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
   options: ProviderFetchOptions = {},
 ): ProviderFetch {
@@ -410,12 +411,17 @@ export function providerFetch(
   // ChatGPT Codex backend: streaming turns ride the responses_websockets
   // transport (measured ~3s faster TTFT than the SSE POST queue); everything
   // else keeps the provider's HTTP fetch. See ws-upstream.ts for the details.
-  const unobserved = async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit,
+  const unobserved = async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit & TurnStateConstrained,
     reacquirePacing?: (provider: OcxProviderConfig, modelId?: string) => Promise<void>) => {
     // Turn-state handles are redeemed here, at the send, where the admitted caller, the provider and
     // the outbound account are all settled; a handle bound to anything else is not forwarded.
     const sendHeaders = (sent?: RequestInit) => new Headers(sent?.headers ?? (input instanceof Request ? input.headers : undefined));
-    init = redeemOutboundTurnState(init, turnStateBinding(providerName, sendHeaders(init)));
+    const owner = provider[TURN_STATE_OWNER];
+    if (owner) {
+      owner.assertHeaders(sendHeaders(init));
+      init = { ...init, [TURN_STATE_OWNER]: owner };
+    }
+    init = redeemOutboundTurnState(init, () => turnStateBinding(providerName, sendHeaders(init)));
     const upstreamWebsocket = provider.upstreamWebsocket;
     if (!options.httpOnly && typeof input === "string" && init
       && shouldUseCodexWsUpstream(input, init, runtime, upstreamWebsocket)) {
@@ -447,7 +453,7 @@ export function providerFetch(
       const fallback = ((url: Parameters<typeof globalThis.fetch>[0], fallbackInit?: RequestInit) =>
         httpFetch(url, { ...fallbackInit, [WS_FALLBACK_RECEIPT]: notifyOnce } as RequestInit, reacquirePacing, null)) as typeof globalThis.fetch;
       const wsSend = codexWsExecutor((url: Parameters<typeof globalThis.fetch>[0], wsInit?: RequestInit) => codexWsUpstreamFetch(String(url),
-        { ...(wsInit ?? init), [TURN_STATE_BINDING_INIT]: turnStateBinding(providerName, sendHeaders(wsInit ?? init)) } as RequestInit,
+        { ...(wsInit ?? init), [TURN_STATE_BINDING_INIT]: dialHeaders => turnStateBinding(providerName, dialHeaders) },
         fallback, runtime, options.onCodexWsQuota, options.beforeDispatch, options.nativeControl,
         async () => { (await waitForPacing(init.signal ?? undefined))?.release(); }, notifyOnce, options.preOutputRefusalHold, options.onContinuationDispatch),
         { provider, http: markEgressTransparentExecutor(fallback) });
