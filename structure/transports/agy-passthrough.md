@@ -20,9 +20,10 @@ prefix on the public listener only, through one dynamic-import line in
 - **One send.** No retry, no translation, no failover to another account inside a request. A 429
   cools the account in the generic OAuth pool (`rotateGenericOAuthAccountOn429`) for later
   project-less calls. Local refusals use Google's error shape with an `opencodex:` message prefix.
-- **No provider row.** The pool is the `google-antigravity` OAuth store. The lane needs no
-  `config.providers["google-antigravity"]` row, so nothing translated can route to the pool unless an
-  operator adds one.
+- **Provider row optional.** The pool is the `google-antigravity` OAuth store; the lane needs no
+  `config.providers["google-antigravity"]` row. With the switch on, a row (a Google login adds one)
+  is listed by `GET /api/providers` with `nativeHarness: "agy"`, the catalog lists none of its
+  models, and any translated route to it refuses with a 400 naming the agy harness.
 
 ## Account choice
 
@@ -50,12 +51,14 @@ prefix on the public listener only, through one dynamic-import line in
   (`src/adapters/google.ts`), Cloud Code image generation (`src/server/images.ts`), Cloud Code model
   discovery for the catalog (`src/codex/catalog/gather-capture.ts`), quota probes
   (`src/providers/quota/antigravity.ts`) and login/refresh project discovery
-  (`src/oauth/google-antigravity.ts`) refuse or skip before any send. A Google login does not add a
-  `google-antigravity` provider row (`upsertOAuthProvider`), and account import admits a credential
+  (`src/oauth/google-antigravity.ts`) refuse or skip before any send. Account import admits a credential
   with no project, because the lane learns it from agy's own traffic.
   The Gemini web-search sidecar, sibling model discovery (`src/codex/catalog/antigravity-discovery.ts`,
   `mayResolveModelsOAuth`), the provider connectivity test and Lab live probes skip Antigravity too.
 - Token refresh at Google's standard OAuth endpoint and the import identity read remain.
+- `nativeHarnessFor` names the one client a row is reserved to (`agy` for a Cloud Code OAuth row,
+  `claude-code` for an Anthropic OAuth row); `GET /api/providers` returns it as `nativeHarness`, and the
+  dashboard's provider rail and details header show it as an "agy only" / "Claude Code only" badge.
 - Anthropic subscription (OAuth) accounts serve inference only through the strict lane
   (`src/server/messages-native-integrity.ts`), which then also requires a `claude-cli/` User-Agent.
   The translated adapter (`createAnthropicAdapter().buildRequest`), the non-strict managed native

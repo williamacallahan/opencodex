@@ -47,7 +47,7 @@ import { replaceProviderAccountSet } from "../../oauth/store";
 import { captureModelsOAuthTarget, mayResolveModelsOAuth, modelsOAuthTargetMatches } from "../../oauth/model-discovery-auth";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
 import { providerProxyForDisplay } from "../../lib/provider-egress";
-import { nativeHarnessOnly } from "../../lib/native-harness";
+import { nativeHarnessFor, nativeHarnessOnly } from "../../lib/native-harness";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
 import { ProviderOutboundPolicyError, providerOutboundGet, providerOutboundPost, providerRedirectError } from "../../lib/provider-outbound";
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
@@ -942,6 +942,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       apiKeyTransport: p.apiKeyTransport,
       disabled: p.disabled === true,
       codexAccountMode: providerCodexAccountMode(name, p),
+      // Undefined when the row is not reserved to one client; JSON omits it.
+      nativeHarness: nativeHarnessFor(p, effectiveGoogleMode(name, p)),
       ...(name === "xai" ? { xaiResponsesOptInState: xaiResponsesOptInState(p) } : {}),
       // Only opt-in Fast lanes (Anthropic fast mode bills usage credits) get a dashboard switch.
       ...(getProviderRegistryEntry(name)?.fastOptIn === true ? { fastOptIn: { enabled: p.fastEnabled === true } } : {}),

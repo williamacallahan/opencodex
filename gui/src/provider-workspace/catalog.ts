@@ -68,6 +68,8 @@ export interface WorkspaceProvider {
   };
   /** Codex account routing mode for the canonical `openai` forward provider. */
   codexAccountMode?: "direct" | "pool";
+  /** Set by the hub only when `nativeHarnessOnly` reserves this provider for its vendor's own client. */
+  nativeHarness?: "agy" | "claude-code";
   /** Derived state of the two xAI Grok Responses model-adapter entries. */
   xaiResponsesOptInState?: boolean | "mixed";
   initialModelSelection?: { status: "pending" | "ready" | "all-off"; modelCount?: number };

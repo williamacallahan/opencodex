@@ -110,6 +110,17 @@ function ProviderFallbackMark({ name, label }: { name: string; label: string }) 
   );
 }
 
+/** The one client a provider's subscription accounts are reserved to, as a small badge; nothing when unreserved. */
+export function NativeHarnessBadge({ harness, t }: { harness: WorkspaceItem["nativeHarness"]; t: TFn }) {
+  if (!harness) return null;
+  const agy = harness === "agy";
+  return (
+    <span className="pwi-rail-badge" title={t(agy ? "pws.nativeHarness.agyTitle" : "pws.nativeHarness.claudeCodeTitle")}>
+      {t(agy ? "pws.nativeHarness.agy" : "pws.nativeHarness.claudeCode")}
+    </span>
+  );
+}
+
 export function RailRow({ item, selected, tabbable, modelCount, isDefault, showConfigId, onClick, onFocus }: {
   item: WorkspaceItem;
   selected: boolean;
@@ -159,6 +170,7 @@ export function RailRow({ item, selected, tabbable, modelCount, isDefault, showC
           ) : free ? (
             <span className="pwi-rail-badge pwi-rail-badge--free" title={t("pws.freeTitle")}>{t("modal.badge.free")}</span>
           ) : null}
+          <NativeHarnessBadge harness={item.nativeHarness} t={t} />
         </span>
         <span className="providers-workspace-rail-secondary" title={secondaryLabel || undefined}>
           {secondaryLabel || "\u00a0"}
