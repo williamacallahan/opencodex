@@ -1,3 +1,4 @@
+import { carryProxyError } from "../../lib/client-error-body";
 import { clientFacingModelText } from "../../lib/error-destination";
 import { createAnthropicThinkingRecovery } from "./anthropic-thinking-recovery";
 import { rotateAnthropicAccountOnResponseForInstance } from "../../oauth/anthropic-account-refusal";
@@ -656,7 +657,7 @@ export async function executeResponsesSidecars(
       });
       // The wrapper is a new object; a verified plan refusal keeps its provenance across it.
       if (isVerifiedModelNotInPlanResponse(imgResponse)) markVerifiedModelNotInPlanResponse(tracked);
-      return tracked;
+      return carryProxyError(imgResponse, tracked);
     }
     releaseSearchProbeLease();
     return imgResponse;
@@ -800,7 +801,7 @@ export async function executeResponsesSidecars(
         headers: wsResponse.headers,
       });
       if (isVerifiedModelNotInPlanResponse(wsResponse)) markVerifiedModelNotInPlanResponse(tracked);
-      return tracked;
+      return carryProxyError(wsResponse, tracked);
     }
     releaseSearchProbeLease();
     return wsResponse;

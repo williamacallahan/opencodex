@@ -13,6 +13,7 @@
  * management write that changes the field takes effect without a restart.
  */
 import type { OcxConfig } from "../types";
+import { markProxyError } from "./client-error-body";
 
 let bound: Pick<OcxConfig, "nativeHarnessOnly"> | null = null;
 
@@ -32,6 +33,8 @@ export class NativeHarnessRefusal extends Error {
       ? "Antigravity accounts serve only the agy harness through /agy (nativeHarnessOnly is on)"
       : "Anthropic subscription accounts serve only Claude Code through the strict Messages lane (nativeHarnessOnly is on)");
     this.name = "NativeHarnessRefusal";
+    // The sentence is the proxy's own, so every client protocol may show it verbatim.
+    markProxyError(this);
   }
 }
 

@@ -1,6 +1,7 @@
 import { publicOAuthErrorPresentation } from "../../oauth";
 import { observeProviderFailureEvent, projectLocalModelRefusalLog } from "../request-log-failure-detail";
 import { markProxyError } from "../../lib/client-error-body";
+import { NativeHarnessRefusal, nativeHarnessOnly } from "../../lib/native-harness";
 import { formatClientRetryAfter } from "../../lib/client-retry-after";
 import { SendBudgetExhaustedError, errorDestinationText, providerErrorDestinationLabel } from "../../lib/upstream-retry";
 import { appendLoadedToolDefinitions, toolLoadingModelMatches } from "../../claude/inbound-tool-loading";
@@ -1262,6 +1263,8 @@ export async function prepareResponsesTransport(
         // Project identity belongs to the admitted account on EVERY request, including
         // the request after a pool transition made that account the persisted active one.
         if (route.provider.googleMode === "cloud-code-assist") {
+          // An agy-reserved account may not have its project yet; the reservation is the answer.
+          if (nativeHarnessOnly()) return markProxyError(formatErrorResponse(400, "invalid_request_error", new NativeHarnessRefusal("antigravity").message));
           if (!resolved.projectId) return markProxyError(formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(new Error("Cloud Code Assist account project is unavailable"))));
           route.provider = { ...route.provider, project: resolved.projectId };
         }

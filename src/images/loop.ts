@@ -1,3 +1,5 @@
+import { NativeHarnessRefusal } from "../lib/native-harness";
+import { carryProxyError } from "../lib/client-error-body";
 import type { createAnthropicThinkingRecovery } from "../server/responses/anthropic-thinking-recovery";
 import { markSidecarContextOverflow, sidecarLoopTerminalEvent, upstreamErrorCode, type SidecarLoopFailure } from "../server/responses/context-overflow";
 import { markVerifiedModelNotInPlanResponse, MODEL_NOT_IN_PLAN_CODE, verifiedPlanRefusalMessage } from "../lib/errors";
@@ -827,6 +829,8 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
         } finally { headerDeadline.clear(); deps.onIterationEnd?.(); }
       } };
     } catch (error) {
+      if (error instanceof NativeHarnessRefusal) throw carryProxyError(error, new LoopError(400, error.message,
+        { type: "error", status: 400, errorType: "invalid_request_error", message: error.message, retryable: false }));
       if (isTranslatorBudgetExceededError(error)) throw error;
       if (error instanceof SendBudgetExhaustedError) throw new LoopError(429, error.message,
         { type: "error", status: 429, errorType: "rate_limit_error", code: error.code, message: error.message, retryable: false });
@@ -933,7 +937,7 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
       if (abortSignal) abortSignal.removeEventListener("abort", linkAbort);
       if (e instanceof LoopError) {
         const failure = loopFailure(e);
-        const failed = markSidecarContextOverflow(jsonError(e.status, e.message, e.event), failure);
+        const failed = carryProxyError(e, markSidecarContextOverflow(jsonError(e.status, e.message, e.event), failure));
         if (failure.verifiedPlanRefusal) markVerifiedModelNotInPlanResponse(failed);
         return failed;
       }
