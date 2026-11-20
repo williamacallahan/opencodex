@@ -3,6 +3,7 @@ import { clientFacingModelText } from "../../lib/error-destination";
 import { responsesSpendTarget } from "./request-spend-target";
 import { projectLocalModelRefusalLog } from "../request-log-failure-detail";
 import { markProxyError, carryProxyError, isProxyError } from "../../lib/client-error-body";
+import { NativeHarnessRefusal } from "../../lib/native-harness";
 import { codexAdapterBuildRefusal } from "./passthrough-build-error";
 import { createAutoPauseRefreshErrorMapper, recoverAutoPausedAccount } from "./account-auto-pause-recovery";
 import { wasAccountAutoPaused, wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
@@ -365,7 +366,10 @@ export async function prepareAdapterExchange(
     const authRefusal = codexAdapterBuildRefusal(err, admissionState.authCtx, route.codexAccountNamespace);
     if (authRefusal) return authRefusal;
     const msg = err instanceof Error ? err.message : String(err);
-    return formatErrorResponse(400, "invalid_request_error", redactSecretString(msg));
+    const refusal = formatErrorResponse(400, "invalid_request_error", redactSecretString(msg));
+    // The proxy wrote this sentence, so a Chat client may read it instead of the
+    // generic "provider rejected" text an unmarked 400 becomes.
+    return err instanceof NativeHarnessRefusal ? markProxyError(refusal) : refusal;
   }
   // The catch path above always returns, so the request is definitely assigned here.
   // Capture it in a const so the fetch callbacks read a narrowed, immutable value

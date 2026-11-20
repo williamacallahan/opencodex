@@ -37,6 +37,7 @@
   "messages-sse-error-lifecycle.test.ts": "server",
   "messages-sse-error-presentation.test.ts": "lib",
   "messages-sse-delivery.test.ts": "claude-integration",
+  "harness-only-client-refusal.test.ts": "server",
   "harness-only-gates.test.ts": "server",
   "messages-sse-baseline-contract.test.ts": "claude-integration",
   "messages-sse-control-fields.test.ts": "claude-integration",
