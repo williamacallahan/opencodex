@@ -9,7 +9,8 @@ import { bindNativeHarnessConfig, NativeHarnessRefusal } from "../../src/lib/nat
 import { runAnthropicWebSearch } from "../../src/web-search/anthropic-executor";
 import { runGeminiWebSearch } from "../../src/web-search/gemini-executor";
 import { describeImageAnthropic } from "../../src/vision/anthropic-describe";
-import type { OcxParsedRequest, OcxProviderConfig } from "../../src/types";
+import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../../src/types";
+import { captureGatherFlight } from "../../src/codex/catalog/gather-capture";
 
 const originalFetch = globalThis.fetch;
 let fetchCalls = 0;
@@ -92,6 +93,19 @@ describe("nativeHarnessOnly send gates", () => {
     bindNativeHarnessConfig({ nativeHarnessOnly: true });
     const outcome = await runGeminiWebSearch("query", "google-antigravity", oauthProvider, sidecarSettings);
     expect(outcome.error).toContain("nativeHarnessOnly");
+    expect(fetchCalls).toBe(0);
+  });
+
+  test("the catalog gather leaves a Cloud Code row out instead of failing every provider", () => {
+    bindNativeHarnessConfig({ nativeHarnessOnly: true });
+    const config = {
+      providers: {
+        "google-antigravity": { adapter: "google", authMode: "oauth", baseUrl: "https://daily-cloudcode-pa.googleapis.com", googleMode: "cloud-code-assist" },
+        "fixture-chat": { adapter: "openai-chat", authMode: "key", apiKey: "fixture-key", baseUrl: "https://fixture.invalid/v1" },
+      },
+    } as unknown as OcxConfig;
+    const capture = captureGatherFlight(config, () => ({ kind: "refreshing" }));
+    expect(capture.providers.map(provider => provider.name)).toEqual(["fixture-chat"]);
     expect(fetchCalls).toBe(0);
   });
 });

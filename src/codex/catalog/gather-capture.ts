@@ -47,7 +47,7 @@ import {
 } from "../../providers/service-tier";
 import type { FastPolicyAuthority } from "../../providers/fastwire";
 import { effectiveGoogleMode, getProviderRegistryEntry, providerMatchesRegistryTransport, registryEntryForProviderDestination } from "../../providers/registry";
-import { assertNativeHarnessSend } from "../../lib/native-harness";
+import { assertNativeHarnessSend, nativeHarnessOnly } from "../../lib/native-harness";
 import { parseAntigravityAvailableModels, registerAntigravityDiscoveredWireModels } from "../../providers/antigravity-models";
 import { applyProviderContextCap, providerContextCap, resolveUnknownRoutedContextWindow } from "../../providers/context-cap";
 import { clampAutoCompactTokenLimit } from "../../providers/auto-compact-budget";
@@ -467,6 +467,8 @@ export function captureGatherFlight(
     // A decision service (canonical TypeSafe or a self-hosted `jev-decision` row) owns no model
     // transport: never probe its endpoint for /models and never publish its model id as routable.
     .filter(([, provider]) => provider.disabled !== true && provider.adapter !== "jev-decision")
+    // Under nativeHarnessOnly a Cloud Code row lists nothing: its discovery would present agy's identity.
+    .filter(([name, provider]) => !(nativeHarnessOnly() && effectiveGoogleMode(name, provider) === "cloud-code-assist"))
     .map(([name, provider]) => captureProviderGather(
       name,
       provider,

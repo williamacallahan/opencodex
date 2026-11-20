@@ -35,8 +35,11 @@ prefix on the public listener only, through one dynamic-import line in
   used, keyed by a SHA-256 of the caller's own bearer, unless that account is cooling down; otherwise it
   takes the next eligible account in rotation. agy calls `loadCodeAssist` at least once per turn, so a
   cooled account loses new turns at that boundary and the project agy caches then matches.
-- Both maps are process-local and bounded; a restart forgets them and the next `loadCodeAssist`
-  rebuilds them.
+- Learned projects are written back to the stored credential. The caller map is process-local and
+  bounded; a restart, or agy refreshing its own token (about hourly), starts a new caller, whose next
+  `loadCodeAssist` may land on another account.
+- The catalog gather leaves a Cloud Code row out while the switch is on (`captureGatherFlight`), so an
+  operator row left from before the switch neither lists models nor breaks other providers' listing.
 
 ## `nativeHarnessOnly`
 

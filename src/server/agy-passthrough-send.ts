@@ -40,6 +40,7 @@ function webBody(message: IncomingMessage): ReadableStream<Uint8Array> {
       });
       message.on("end", () => controller.close());
       message.on("error", error => controller.error(error));
+      message.on("close", () => { if (!message.complete) controller.error(new Error("Cloud Code response closed before it completed")); });
     },
     pull() { message.resume(); },
     cancel() { message.destroy(); },

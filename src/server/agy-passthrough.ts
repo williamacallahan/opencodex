@@ -17,7 +17,7 @@ import { createHash } from "node:crypto";
 import { brotliDecompressSync, gunzipSync, inflateSync, zstdDecompressSync } from "node:zlib";
 import { admissionFields, resolveDataPlaneAdmissionSecret, type DataPlaneAdmission } from "./auth-cors";
 import { readBoundedRequestBytes } from "./index/bounded-request";
-import { tryAdmitTurn } from "./lifecycle";
+import { isDraining, tryAdmitTurn } from "./lifecycle";
 import { messagesEndToEndHeaders } from "./messages-native-integrity";
 import { disableResponsesRequestTimeout } from "./responses/fetch-helpers";
 import { addFinalRequestLog, nextRequestLogId, type RequestLogContext } from "./request-log";
@@ -89,12 +89,14 @@ function splitAgyPath(pathname: string): { key: string; method: string } | undef
 /** Decode a copy for reading only; null when the coding is one this lane does not read. */
 function decoded(bytes: Uint8Array, contentEncoding: string | null): Uint8Array | null {
   const coding = contentEncoding?.trim().toLowerCase();
+  // Bounded: a small compressed body must not inflate past the lane's own request limit.
+  const bound = { maxOutputLength: MAX_AGY_REQUEST_BYTES };
   try {
     if (!coding || coding === "identity") return bytes;
-    if (coding === "gzip" || coding === "x-gzip") return gunzipSync(bytes);
-    if (coding === "deflate") return inflateSync(bytes);
-    if (coding === "br") return brotliDecompressSync(bytes);
-    if (coding === "zstd") return zstdDecompressSync(bytes);
+    if (coding === "gzip" || coding === "x-gzip") return gunzipSync(bytes, bound);
+    if (coding === "deflate") return inflateSync(bytes, bound);
+    if (coding === "br") return brotliDecompressSync(bytes, bound);
+    if (coding === "zstd") return zstdDecompressSync(bytes, bound);
   } catch {
     return null;
   }
@@ -160,7 +162,8 @@ async function observeLoadCodeAssist(copy: ReadableStream<Uint8Array>, contentEn
 }
 
 /** The client's branch of the answer; it settles the request log and the turn lease exactly once. */
-function settledBody(source: ReadableStream<Uint8Array>, settle: (status: number | "complete") => void, abort: () => void): ReadableStream<Uint8Array> {
+function settledBody(source: ReadableStream<Uint8Array>, settle: (status: number | "complete") => void, abort: () => void,
+  cancelled: () => boolean): ReadableStream<Uint8Array> {
   const reader = source.getReader();
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
@@ -169,7 +172,7 @@ function settledBody(source: ReadableStream<Uint8Array>, settle: (status: number
         if (done) { settle("complete"); controller.close(); return; }
         controller.enqueue(value);
       } catch (error) {
-        settle(502);
+        settle(cancelled() ? 499 : 502);
         controller.error(error);
       }
     },
@@ -264,6 +267,7 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
   } catch {
     const cancelled = req.signal.aborted || controller.signal.aborted;
     settle(cancelled ? 499 : 502);
+    if (isDraining()) return refuse(503, "hub is restarting");
     return cancelled ? refuse(499, "request cancelled") : refuse(503, "could not reach Google Cloud Code");
   }
   upstreamStatus = upstream.status;
@@ -281,7 +285,7 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
     clientBody = forClient;
     void observeLoadCodeAssist(forObserver, upstream.headers.get("content-encoding"), choice.accountId);
   }
-  return new Response(settledBody(clientBody, settle, () => controller.abort()), {
+  return new Response(settledBody(clientBody, settle, () => controller.abort(), () => req.signal.aborted), {
     status: upstream.status, statusText: upstream.statusText, headers: messagesEndToEndHeaders(upstream.headers),
   });
 }
