@@ -23,11 +23,16 @@ import { tryReserveCodexWebSocket } from "../../src/codex/websocket-registry";
 import { buildResponsesWsData, type WsData } from "../../src/server/ws-bridge";
 import type { DataPlaneAdmission } from "../../src/server/auth-cors";
 import type { RequestLogContext } from "../../src/server/request-log";
+import { clearRequestLogsForTests, getRequestLogEntries } from "../../src/server/request-log";
+import { readUsageEntries } from "../../src/usage/log";
+import { saveConfig } from "../../src/config";
+import { startServer } from "../../src/server";
 import { createProtocolEnvelope } from "../../src/protocols/envelope";
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
 
 const A = "luna-order-a";
 const B = "luna-order-b";
+const clientFetch = globalThis.fetch;
 const local: DataPlaneAdmission = { kind: "loopback", source: "loopback" };
 let home = "";
 let previousHome: string | undefined;
@@ -155,6 +160,30 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     relay = refusedConnect;
     await post(config());
     expect(isComboTargetInCooldown("luna", { provider: "openai", model: "gpt-6-luna" })).toBe(true);
+  });
+  test("a discovery Reserve HTTP 400 returns and logs its error envelope without throwing", async () => {
+    updateAccountQuota(A, 40, now + 86_400_000);
+    updateAccountQuota(B, 100, now + 86_400_000);
+    native = () => Response.json({ error: { type: "invalid_request_error", message: "payload rejected" } }, { status: 400 });
+    const targets = [{ provider: "openai", model: "gpt-6-luna" }];
+    saveConfig(config({}, targets));
+    clearRequestLogsForTests();
+    release?.();
+    release = undefined;
+    const server = startServer(0);
+    try {
+      const response = await clientFetch(new URL("/v1/responses", server.url), { method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "combo/luna", input: "Reply with the single word: ok", stream: true,
+          max_output_tokens: 64, reasoning: { effort: "low" } }) });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { type: "invalid_request_error", code: "invalid_request_error" } });
+      const requestId = response.headers.get("x-opencodex-request-id");
+      expect(requestId).toMatch(/^ocx-/);
+      expect(getRequestLogEntries().filter(entry => entry.requestId === requestId)).toHaveLength(1);
+      expect(readUsageEntries().filter(entry => entry.requestId === requestId)).toHaveLength(1);
+      expect(calls).toEqual(["native:gpt-reserve"]);
+    } finally { await server.stop(true); }
   });
   test("with no eligible Reserve seat the native leg sends nothing and the relay serves the turn", async () => {
     seats(false);
