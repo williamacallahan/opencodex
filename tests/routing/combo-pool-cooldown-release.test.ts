@@ -75,6 +75,23 @@ test("the pool target returns as soon as one pool account's window resets", () =
   expect(isComboTargetInCooldown("sol", POOL)).toBe(false);
 });
 
+test("a Luna pool quota cooldown releases when a spent account can try Reserve", () => {
+  const pool = { ...POOL, model: "gpt-6-luna" };
+  const cfg = config();
+  cfg.providers.relay = { ...cfg.providers.relay!, models: [pool.model] };
+  cfg.combos = { luna: { strategy: "failover", targets: [pool, { ...RELAY, model: pool.model }] } };
+  const now = Date.now();
+  spendWholePool();
+  coolComboTarget("luna", pool, { retryAfter: "86400", status: 429 });
+  for (const id of ACCOUNTS) {
+    setAccountQuotaFromParsed(id, { customWindows: [{ label: "Luna Reserve", percent: 100, resetAt: weekAhead(), observedAt: now }] });
+  }
+  expect(pickComboTarget(cfg, "luna")?.target.provider).toBe("relay");
+
+  setAccountQuotaFromParsed("pool-reset", { customWindows: [] });
+  expect(pickComboTarget(cfg, "luna")?.target.provider).toBe("openai");
+});
+
 test("a server-error cooldown on the pool target is not lifted by pool capacity", () => {
   coolComboTarget("sol", POOL, { status: 502 });
   expect(pickComboTarget(config(), "sol")?.target.provider).toBe("relay");

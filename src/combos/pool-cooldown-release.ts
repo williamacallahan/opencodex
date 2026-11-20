@@ -1,4 +1,5 @@
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "../codex/catalog/native-models";
+import { modelHasPoolReserve, poolLunaReserveSelection } from "../codex/pool-reserve";
 import { codexQuotaScopeForModel } from "../codex/routing";
 import { getEligiblePoolAccounts } from "../codex/routing/selection";
 import { OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
@@ -38,7 +39,11 @@ export function releaseRecoveredPoolQuotaCooldowns(
     const revision = comboTargetRateLimitCooldownRevision(comboId, target, now);
     if (revision === undefined) continue;
     const scope = codexQuotaScopeForModel(target.model);
-    if (getEligiblePoolAccounts(config, undefined, now, scope, undefined, true).length > 0) {
+    const reserve = modelHasPoolReserve(target.model)
+      ? poolLunaReserveSelection(config, target.model, scope, {}, undefined, undefined, now)
+      : undefined;
+    if ((reserve?.reserve && getEligiblePoolAccounts(config, undefined, now, reserve.quotaScope, reserve.options, true).length > 0)
+      || getEligiblePoolAccounts(config, undefined, now, scope, undefined, true).length > 0) {
       clearComboTargetCooldownIfUnchanged(comboId, target, revision);
     }
   }
