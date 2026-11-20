@@ -188,7 +188,7 @@ describe("Direct explicit-account credit renewal", () => {
 
   test("renewal joining a pending startup prime is retried by the next sweep", async () => {
     config.providers.openai!.codexAccountMode = "pool";
-    clock.mockReturnValue(now + 360_000);
+    clock.mockReturnValue(now + 900_000);
     // Startup has only B to refresh: A's usage is fresh but its credit evidence is not.
     updateAccountQuota("stored-a", 100);
     const entered = deferred<void>(), release = deferred<void>();
