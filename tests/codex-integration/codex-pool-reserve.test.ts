@@ -271,6 +271,22 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     expect(retry.ctx.accountId).toBe(A);
     expect(JSON.parse(retry.request.body).model).toBe("gpt-6-luna");
   });
+  // ChatGPT never discloses Reserve and its refusals come and go per seat; a refusal's reset names the
+  // seat's spent plan window. Honoring it kept all ten pool seats off Reserve for hours (2026-11-20).
+  test("a Reserve refusal that announces a far plan reset asks that seat for Reserve again after the probe interval", async () => {
+    ordinary(A, 40);
+    const cfg = config();
+    const first = await build(cfg);
+    if (first.ctx.kind !== "pool" || !first.ctx.probeLeaseId) throw new Error("expected a discovery lease");
+    expect(first.ctx.accountId).toBe(B);
+    recordCodexUpstreamOutcome(cfg, B, 429, { ...codexFailureWindowOutcomeMeta(first.ctx), modelId: "gpt-6-luna", now,
+      probeQuotaScope: "reserve", probeLeaseId: first.ctx.probeLeaseId, resetAt: Math.floor(now / 1000) + 604_800 });
+    expect((await build(cfg)).ctx.accountId).toBe(A);
+    now += 5 * 60_000 + 1;
+    const again = await build(cfg);
+    expect(again.ctx.accountId).toBe(B);
+    expect(JSON.parse(again.request.body).model).toBe("gpt-reserve");
+  });
   test("an aged unreported Reserve serve retains its seat ahead of a fresh grant", async () => {
     noReserve(B);
     const headers = new Headers({ "session-id": "aged", "thread-id": "aged" });

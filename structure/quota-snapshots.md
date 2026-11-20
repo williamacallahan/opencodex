@@ -34,6 +34,10 @@ served by Reserve keeps that seat. A genuine completion on an alternate establis
 without changing shared affinity. An operator pin requires a fresh reported grant both at selection
 and at dispatch, because a pinned request cannot move after a refusal.
 A Reserve refusal cools only the seat's `reserve` health scope and leaves its shared quota untouched.
+That cool ignores the refusal's announced reset, which names the seat's spent plan window rather than
+Reserve: ChatGPT never discloses Reserve capacity and its refusals come and go per seat, so only an
+explicit Retry-After holds the scope past the default minute, and the seat is asked again once the
+5-minute probe interval passes (`src/codex/routing.ts`).
 The request's single safe account move (`maxAlternateTargetSends: 1`) prefers another verified Reserve
 seat, then included Luna. It never tries an unknown Reserve seat on that retry.
 A combo leg can set a request-local `PoolCapacityIntent` (`HandleResponsesOptions.poolCapacityIntent`; never config or env). `reserve-only` makes `resolveCodexAuthContext` throw `CodexReserveUnavailableError` (a 429 that sent nothing) unless a seat can serve Reserve, and its bounded alternate takes only a verified Reserve seat; `ordinary-only` never consults Reserve. Without an intent nothing above changes. Coverage: `tests/codex-integration/codex-pool-reserve.test.ts`.

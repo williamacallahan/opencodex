@@ -1448,13 +1448,14 @@ export function recordCodexUpstreamOutcome(
   }
 
   if (outcomeClass === "quota") {
-    const { until, source } = computeQuotaCooldown(meta);
-    // A reset timestamp is an advisory quota-window announcement. When the
-    // selected native model belongs to a confirmed independent group, preserve
-    // it there so a different group (Reserve versus the shared native quota) can
-    // still reach upstream. Explicit Retry-After/default 429s remain account-wide, except an
-    // automatic pool Reserve attempt: its refusal speaks only for Reserve, and the seat's shared
-    // scope is what the fallback to included Luna depends on.
+    // A pool Reserve refusal's reset names the seat's spent plan window, not Reserve: ChatGPT never
+    // discloses Reserve and it comes and goes per seat, so only Retry-After holds it past the default
+    // (honoring that reset kept every seat off Reserve for hours after one refusal each, 2026-11-20).
+    const { until, source } = computeQuotaCooldown(meta.poolReserve ? { ...meta, resetAt: undefined } : meta);
+    // Otherwise a reset is an advisory quota-window announcement kept on a confirmed independent
+    // group (Reserve versus the shared native quota) so the other group still reaches upstream.
+    // Explicit Retry-After/default 429s remain account-wide, except an automatic pool Reserve
+    // attempt: its refusal speaks only for Reserve, and included Luna depends on the shared scope.
     if (quotaScope && (source === "reset-derived" || meta.poolReserve)) {
       const prior = scopedHealthFor(accountId, quotaScope);
       const cooldownGeneration = (prior?.cooldownGeneration ?? 0) + 1;
@@ -1464,7 +1465,7 @@ export function recordCodexUpstreamOutcome(
         lastFailureStatus,
         lastFailureAt: now,
         cooldownUntil: until,
-        quotaAvoidUntil: quotaAvoidUntilFor(meta, now, until),
+        quotaAvoidUntil: meta.poolReserve ? until : quotaAvoidUntilFor(meta, now, until),
         cooldownSince: now,
         cooldownSource: source,
         cooldownGeneration,
