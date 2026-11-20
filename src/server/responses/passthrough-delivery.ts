@@ -33,7 +33,7 @@ import {
   relayWithAbort,
 } from "../relay";
 import { isUsageDebugEnabled } from "../../usage/debug";
-import { isNonReplayableResponse, isReplayRefusalResponse } from "../../lib/upstream-retry";
+import { isNonReplayableResponse, isReplayRefusalResponse, markResponseNonReplayable } from "../../lib/upstream-retry";
 import { sanitizeNonReplayableUpstreamError } from "./non-replayable-error";
 import { teeWithBoundedInspection } from "../inspection-tee";
 import {
@@ -183,6 +183,7 @@ import {
   type BufferedResponsesSseResult,
 } from "./buffered-sse-json";
 import { bufferedResetSelectionStartedAt } from "./passthrough-completion";
+import { preflightBufferedComboChild } from "./buffered-combo-preflight";
 
 const PLAINTEXT_V2_SSE_PREFIX_LIMIT = 4096;
 
@@ -991,6 +992,8 @@ export async function deliverPassthroughResponse(
           config.stallTimeoutSec,
           { localUpstream: nativeExchange.localUpstream },
         ), BUFFERED_RESPONSES_TOTAL_TIMEOUT_MS, bufferedResetSelectionStartedAt(nativeExchange.upstreamResponse) ?? Date.now());
+        // True once the combo preflight judged this child's SSE committed (output seen) or terminal.
+        let comboPreflightAccepted = false;
         const failBufferedTurn = (
           message: string,
           failure?: BufferedResponsesSseFailure,
@@ -1044,7 +1047,7 @@ export async function deliverPassthroughResponse(
             failureHeaders.delete("content-encoding");
             if (upstreamRefusalCode !== undefined) failureHeaders.delete("retry-after");
             const error = presentation!.error;
-            return formatPassthroughUpstreamError(
+            const bareErrorResponse = formatPassthroughUpstreamError(
               failureStatus,
               JSON.stringify({ error, ...(upstreamRefusalCode === undefined ? {} : { retryable: false }) }),
               {
@@ -1052,14 +1055,38 @@ export async function deliverPassthroughResponse(
                 suppressRetryAfter: upstreamRefusalCode !== undefined,
               },
             );
+            // A refusal after the child produced output may follow a turn that already ran; its
+            // status must never grant a later combo leg (ordinary Luna, metered) another send.
+            if (comboPreflightAccepted) markResponseNonReplayable(bareErrorResponse);
+            return bareErrorResponse;
           }
           return formatErrorResponse(502, "upstream_error", message);
         };
-        let raw: BufferedResponsesSseResult | undefined = await collectBufferedResponsesSse(
-          passthroughSseBody,
-          upstream,
-          { signal, terminalBoundary: codexSafetyBufferingOptions, read: bufferedRead, retainTranscript: true },
-        );
+        // A combo parent reads a folded JSON answer as a bare 200, so judge the SSE with the streaming
+        // failover rules first. Strict Reserve keeps its own refusal handoff.
+        const comboPreflight = options.comboAttempt && options.onConsumedComboFailure
+          && options.poolCapacityIntent !== "reserve-only"
+          ? await preflightBufferedComboChild(passthroughSseBody, headers, logCtx, { signal, read: bufferedRead, maskCredential })
+          : undefined;
+        if (comboPreflight?.kind === "failed") {
+          upstream.abort(new Error("retrying zero-output combo stream terminal"));
+          if (recordTerminalOutcomes) terminalRecorder?.("failed", comboPreflight.response.status);
+          const failure = await consumeComboFailure(comboPreflight.response, signal, undefined, logCtx);
+          options.onConsumedComboFailure?.({
+            ...failure,
+            origin: "sse-preflight",
+            ...(comboPreflight.codexModelRefusal === undefined ? {} : { codexModelRefusal: comboPreflight.codexModelRefusal }),
+          });
+          return failure.response;
+        }
+        comboPreflightAccepted = comboPreflight?.kind === "accepted";
+        let raw: BufferedResponsesSseResult | undefined = comboPreflight?.kind === "failure"
+          ? comboPreflight.failure
+          : await collectBufferedResponsesSse(
+            comboPreflight?.body ?? passthroughSseBody,
+            upstream,
+            { signal, terminalBoundary: codexSafetyBufferingOptions, read: bufferedRead, retainTranscript: true },
+          );
         if (!raw.ok) {
           if (raw.kind === "aborted" || signal.aborted) {
             responseEffects.responseCompletionCancelled = true;

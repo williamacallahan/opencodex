@@ -91,6 +91,7 @@ export const RESPONSES_CORE_MODULES = [
   // Reached from passthrough-delivery.ts: streaming combo children enforce the caller's required tool (#7456).
   "combo-required-tool-stream.ts",
   "combo-required-tool-fulfillments.ts",
+  "buffered-combo-preflight.ts",
   "buffered-sse-json.ts",
   "terminal-error-redaction.ts",
   "non-replayable-error.ts",

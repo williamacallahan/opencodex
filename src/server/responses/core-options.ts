@@ -66,6 +66,12 @@ export interface ConsumedComboFailure {
    * marker, so the combo loop reads it here and stops instead of sending the turn to a later target.
    */
   nonReplayable?: boolean;
+  /**
+   * Set when the child proved a zero-output failure from SSE frames it was folding into JSON. The
+   * combo loop treats it as a failed streaming preflight, never as the provider's original HTTP
+   * refusal, so a numeric 429 here grants no replay on ordinary capacity.
+   */
+  origin?: "sse-preflight";
   /** The failed attempt was an adapter-normalized plan refusal; only this grants its combo hop. */
   verifiedPlanRefusal?: boolean;
 }

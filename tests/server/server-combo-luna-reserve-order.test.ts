@@ -45,15 +45,23 @@ let relay: (request: Request, body: { model: string }) => Response | Promise<Res
 let native: (body: { model: string }) => Response | Promise<Response>;
 let metered: () => Response;
 
-function sse(model: string, frames: "ok" | "created-then-fail" | "created-then-quota"): Response {
+function sse(model: string, frames: "ok" | "created-then-fail" | "created-then-quota" | "delta-then-bare-quota"): Response {
   const created = { type: "response.created", response: { id: "resp_1", object: "response", status: "in_progress", model, output: [] } };
   const body = frames === "ok" ? [created,
     { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: "hi" },
     { type: "response.completed", response: { ...created.response, status: "completed", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
       output: [{ id: "msg_1", type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "hi", annotations: [] }] }] } }]
+    : frames === "delta-then-bare-quota" ? [created,
+      { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: "partial" },
+      { type: "error", code: "usage_limit_reached", message: "Limit reached" }]
     : [created, { type: "response.failed", response: { ...created.response, status: "failed", error: frames === "created-then-quota" ? { code: "usage_limit_reached", message: "Limit reached" } : { code: "server_error", message: "boom" } } }];
   return new Response(body.map(frame => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
 }
+const streamOnlyRelay = (): OcxConfig => config({ relay: { adapter: "openai-responses", authMode: "key", apiKey: "relay-key",
+  baseUrl: "https://relay.example.test/backend-api/codex", responsesStreamOnly: true } });
+const meteredJson = () => Response.json({ id: "resp_metered", object: "response", status: "completed", model: "gpt-6-luna",
+  output: [{ id: "msg_m", type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "metered answer", annotations: [] }] }],
+  usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } });
 const reserveRefused = () => Response.json({ error: { code: "usage_limit_reached", message: "Limit reached" } }, { status: 429, headers: { "retry-after": "3600" } });
 const refusedConnect = () => { throw Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) }); };
 
@@ -229,6 +237,29 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     seats(false); relay = () => sse("gpt-6-luna", "created-then-fail");
     await post(config());
     expect(calls).not.toContain("native:gpt-6-luna");
+  });
+  describe("a non-streaming client on a stream-only relay (SSE folded into JSON)", () => {
+    test("a zero-output relay failure is not a win: the next policy-eligible leg answers", async () => {
+      seats(false); relay = () => sse("gpt-6-luna", "created-then-fail"); metered = meteredJson;
+      const result = await post(streamOnlyRelay(), { stream: false });
+      expect(calls).toEqual(["relay:gpt-6-luna", "metered:gpt-6-luna"]);
+      expect(result.status).toBe(200);
+      expect(result.text).toContain("metered answer");
+    });
+    test("a quota refusal after relay output returns the error and sends nothing else", async () => {
+      seats(false); relay = () => sse("gpt-6-luna", "delta-then-bare-quota"); metered = meteredJson;
+      const result = await post(streamOnlyRelay(), { stream: false });
+      expect(calls).toEqual(["relay:gpt-6-luna"]);
+      expect(result.status).toBe(429);
+      expect(result.text).toContain("usage_limit_reached");
+    });
+    test("a genuine relay HTTP 429 still reaches native ordinary Luna", async () => {
+      seats(); native = body => body.model === "gpt-reserve" ? reserveRefused() : sse(body.model, "ok");
+      relay = reserveRefused;
+      const result = await post(streamOnlyRelay(), { stream: false });
+      expect(result.status).toBe(200);
+      expect(calls).toEqual(["native:gpt-reserve", "relay:gpt-6-luna", "native:gpt-6-luna"]);
+    });
   });
   test("a relay 200 JSON failure is the client's answer, never silently replayed", async () => {
     seats(false);

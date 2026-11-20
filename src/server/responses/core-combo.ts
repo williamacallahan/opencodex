@@ -1383,6 +1383,8 @@ export async function executeComboResponses(
       return clientCancelledResponse();
     }
 
+    // A zero-output failure the child proved from its SSE is a preflight verdict, not an HTTP refusal.
+    if (consumedChildFailure?.origin === "sse-preflight") failedInPreflight = true;
     if (legIntent === "reserve-only" && consumedChildFailure && response.ok) {
       // A bounded native preflight already correlated the quota terminal. Do not infer it again
       // from the sanitized stream, whose created event otherwise (correctly) counts as acceptance.
