@@ -9,6 +9,7 @@
  * Never throws — returns {error} so the caller injects a graceful tool result.
  */
 import type { OcxProviderConfig } from "../types";
+import { nativeHarnessOnly } from "../lib/native-harness";
 import { getValidAccessTokenSnapshot, publicOAuthAuthenticationErrorMessage } from "../oauth";
 import { applyUpstreamRecoveryInit, fetchWithResetRetry } from "../lib/upstream-retry";
 import { cancelBodyOnAbort, signalWithTimeout } from "../lib/abort";
@@ -34,6 +35,9 @@ export async function runGeminiWebSearch(
   settings: SidecarSettings,
   abortSignal?: AbortSignal,
 ): Promise<SidecarOutcome> {
+  if (nativeHarnessOnly()) {
+    return { text: "", sources: [], error: "gemini sidecar disabled: Antigravity accounts serve only agy (nativeHarnessOnly)" };
+  }
   let token: string;
   let project: string | undefined;
   try {

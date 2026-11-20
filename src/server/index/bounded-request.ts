@@ -37,8 +37,14 @@ export const REMOTE_WORKSPACE_PAIRING_BODY_LIMIT = 32 * 1024;
  * accepted and only a genuinely over-limit body is rejected.
  */
 export async function readBoundedRequestText(req: Request, limit: number): Promise<string | null> {
+  const bytes = await readBoundedRequestBytes(req, limit);
+  return bytes === null ? null : new TextDecoder().decode(bytes);
+}
+
+/** The same bounded read, returning the exact received bytes for callers that forward them unchanged. */
+export async function readBoundedRequestBytes(req: Request, limit: number): Promise<Uint8Array<ArrayBuffer> | null> {
   const body = req.body;
-  if (!body) return "";
+  if (!body) return new Uint8Array(0);
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -62,7 +68,7 @@ export async function readBoundedRequestText(req: Request, limit: number): Promi
     joined.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder().decode(joined);
+  return joined;
 }
 
 /**

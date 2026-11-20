@@ -15,6 +15,7 @@ import {
   UnsupportedOAuthProviderError,
 } from "../oauth";
 import type { OcxConfig } from "../types";
+import { nativeHarnessOnly } from "./native-harness";
 import { configuredAnthropicInstance, isAnthropicOAuthInstance } from "../providers/anthropic-instance";
 import { createCredentialLease } from "../lab/live/credential-lease";
 import {
@@ -71,6 +72,10 @@ export async function buildLabProviderAuthHeaders(
     if (isAnthropicOAuthInstance(routeContext.providerId)
       && configuredAnthropicInstance(config, routeContext.providerId) !== routeContext.providerId) {
       throw new TransportError("auth_blocked", "anthropic instance unavailable");
+    }
+    // Subscription accounts serve only their vendor's own harness; a Lab probe would be hub-built.
+    if (nativeHarnessOnly() && (routeContext.providerId === "google-antigravity" || provider.adapter === "anthropic")) {
+      throw new TransportError("auth_blocked", "native harness only: subscription accounts are not probed");
     }
     // The DSH account token is sent only by its own adapter to its pinned endpoint; the generic
     // probe transport would use another endpoint and auth scheme.

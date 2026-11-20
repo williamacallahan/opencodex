@@ -6,6 +6,7 @@ import { isRegistryModelDiscoveryUrl, readBoundedDiscoveryJson } from "../../pro
 import { parseAntigravityAvailableModels, type AntigravityAvailableModel } from "../../providers/antigravity-models";
 import { captureAntigravityModelObservation, recordAntigravityAccountRoster } from "../../providers/antigravity-account-roster";
 import type { OcxProviderConfig } from "../../types";
+import { nativeHarnessOnly } from "../../lib/native-harness";
 import { materializeCapturedHeaders, type CapturedModelsRequest } from "./gather-capture";
 
 /** True while the active account still holds the exact usable credential discovery sent. */
@@ -23,7 +24,7 @@ export async function discoverAntigravitySiblings(
   request: CapturedModelsRequest, maxBytes: number, maxModels: number,
   root: string, authorityCurrent: () => boolean,
 ): Promise<() => AntigravityAvailableModel[]> {
-  if (root !== getConfigDir() || !authorityCurrent()) return () => [];
+  if (nativeHarnessOnly() || root !== getConfigDir() || !authorityCurrent()) return () => [];
   const results: Array<{
     snapshot: OAuthAccessSnapshot; models: AntigravityAvailableModel[];
     observation: ReturnType<typeof captureAntigravityModelObservation>;

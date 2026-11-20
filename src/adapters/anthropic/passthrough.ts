@@ -33,6 +33,7 @@ import { shouldPreserveNativeClientPreamble } from "./native-client-preamble";
 import { allowlistAnthropicBetas } from "./beta-allowlist";
 import { pairAnthropicBetaBody } from "./beta-body-pairs";
 import { applyAnthropicNativeCacheTtlDefault, resolveAnthropicCacheRetention } from "./cache-retention";
+import { assertNativeHarnessSend } from "../../lib/native-harness";
 export { contextManagementForWire } from "./beta-body-pairs";
 
 /**
@@ -288,6 +289,7 @@ export function buildAnthropicMessagesPassthroughRequest(
   options: AnthropicMessagesPassthroughOptions = {},
 ): AnthropicMessagesPassthroughRequest {
   const oauth = provider.authMode === "oauth";
+  if (oauth) assertNativeHarnessSend("anthropic");
   if (provider.authMode !== undefined && provider.authMode !== "key" && !oauth) {
     throw new Error("managed native Messages requires a key-auth or OAuth anthropic provider");
   }

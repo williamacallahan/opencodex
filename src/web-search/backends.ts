@@ -20,6 +20,7 @@ import type { OcxConfig } from "../types";
 import { AUTH_SLOT_MODELS, type SidecarAuthState } from "../sidecar/auth";
 import type { SidecarCandidate } from "../sidecar/candidates";
 import { getAccountSet } from "../oauth/store";
+import { nativeHarnessOnly } from "../lib/native-harness";
 import type { WebSearchBackendId } from "./index";
 
 export interface WebSearchBackendDescriptor {
@@ -71,7 +72,7 @@ export const WEB_SEARCH_BACKENDS: readonly WebSearchBackendDescriptor[] = [
     // Probe = usable Antigravity OAuth + discovered projectId (findGeminiSidecarProvider's predicate).
     isActive: (_auth, config) => {
       const provider = config.providers["google-antigravity"];
-      if (!provider || provider.disabled === true || provider.authMode !== "oauth") return false;
+      if (nativeHarnessOnly() || !provider || provider.disabled === true || provider.authMode !== "oauth") return false;
       const set = getAccountSet("google-antigravity");
       const active = set?.accounts.find(account => account.id === set.activeAccountId);
       if (!active || active.needsReauth === true || active.paused === true) return false;

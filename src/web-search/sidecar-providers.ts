@@ -7,6 +7,7 @@
 import type { OcxConfig, OcxProviderConfig, OcxWebSearchSidecarConfig } from "../types";
 import { resolveSidecarAuth, resolveAnthropicHelperInstance } from "../sidecar/auth";
 import { getAccountSet } from "../oauth/store";
+import { nativeHarnessOnly } from "../lib/native-harness";
 import type { XaiSearchOptions } from "./xai-executor";
 
 /** Every backend id the config union admits. New ids are explicit-only and inert until their executor ships. */
@@ -77,7 +78,7 @@ export function findXaiSidecarProvider(config: OcxConfig): { providerName: strin
  */
 export function findGeminiSidecarProvider(config: OcxConfig): { providerName: string; provider: OcxProviderConfig } | undefined {
   const provider = config.providers["google-antigravity"];
-  if (!provider || provider.disabled === true || provider.authMode !== "oauth") return undefined;
+  if (nativeHarnessOnly() || !provider || provider.disabled === true || provider.authMode !== "oauth") return undefined;
   const set = getAccountSet("google-antigravity");
   const active = set?.accounts.find(account => account.id === set.activeAccountId);
   if (!active || active.needsReauth === true || active.paused === true) return undefined;

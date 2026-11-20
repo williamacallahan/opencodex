@@ -4,6 +4,7 @@ import type { AnthropicMessagesPassthroughRequest } from "../adapters/anthropic/
 import { socks5ProxyFromEnv } from "../lib/proxy-env";
 import type { OcxProviderConfig } from "../types";
 import { physicalSendIntegrityInit } from "./responses/fetch-helpers";
+import { nativeHarnessOnly } from "../lib/native-harness";
 
 const HOP_HEADERS = ["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"];
 
@@ -15,8 +16,9 @@ export function messagesEndToEndHeaders(source: Headers, stripIngress = false): 
   headers.delete("host");
   headers.delete("content-length");
   if (stripIngress) for (const name of [...headers.keys()]) {
-    if (name === "forwarded" || name === "x-real-ip" || name.startsWith("x-forwarded-")
-      || name.startsWith("tailscale-user-") || name === "tailscale-headers-info") headers.delete(name);
+    // The hub's own ingress proxies add these (Traefik forwarding, Envoy's request id and x-envoy-*); clients do not.
+    if (name === "forwarded" || name === "x-real-ip" || name.startsWith("x-forwarded-") || name === "x-request-id"
+      || name.startsWith("x-envoy-") || name.startsWith("tailscale-user-") || name === "tailscale-headers-info") headers.delete(name);
   }
   return headers;
 }
@@ -61,7 +63,8 @@ export class NativeMessagesIntegrity {
 
   private target(provider: OcxProviderConfig, model: string, body: Record<string, unknown>) {
     if (model !== this.#model || model !== body.model || !provider.apiKey
-      || provider.tlsProfile || "fetch" in provider || Object.keys(provider.headers ?? {}).length > 0) {
+      || provider.tlsProfile || "fetch" in provider || Object.keys(provider.headers ?? {}).length > 0
+      || (provider.authMode === "oauth" && nativeHarnessOnly() && !/^claude-cli\//.test(this.#headers.get("user-agent") ?? ""))) {
       throw new MessagesIntegrityError();
     }
     const headers = Object.fromEntries(this.#headers);
