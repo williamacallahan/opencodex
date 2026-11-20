@@ -1967,6 +1967,7 @@ export const vi: Record<TKey, string> = {
   "pws.quotaUnavailable": "Không có dữ liệu hạn mức cho provider này.",
   "pws.accountQuotaUnavailable": "Dữ liệu giới hạn tốc độ tạm thời không khả dụng; đang hiển thị các giá trị cuối cùng được biết đến (nếu có).",
   "pws.quotaFailure.account_unavailable": "Không có thông tin tài khoản cho lần kiểm tra hạn ngạch này.",
+  "pws.quotaFailure.native_harness_only": "Không kiểm tra hạn ngạch: với nativeHarnessOnly, chỉ agy giao tiếp với Google cho các tài khoản này.",
   "pws.quotaFailure.access_denied": "Nhà cung cấp đã từ chối quyền truy cập dữ liệu hạn ngạch.",
   "pws.quotaFailure.rate_limited": "Nhà cung cấp đã giới hạn tốc độ kiểm tra hạn ngạch.",
   "pws.quotaFailure.upstream_error": "Nhà cung cấp không thể hoàn tất kiểm tra hạn ngạch.",

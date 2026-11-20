@@ -301,7 +301,7 @@ function antigravityUnavailableFailure(
 }
 
 export async function probeAntigravityUsageQuota(accessToken: string, projectId: string, signal?: AbortSignal): Promise<AntigravityQuotaProbeResult> {
-  if (nativeHarnessOnly()) return unavailableAntigravityQuota("account_unavailable");
+  if (nativeHarnessOnly()) return unavailableAntigravityQuota("native_harness_only");
   // An optional caller signal (account import) cancels every request of this probe, including the
   // 403 retry and the models fallback, alongside the per-request deadline.
   const requestSignal = () => signal ? AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS);

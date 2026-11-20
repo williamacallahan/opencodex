@@ -3206,6 +3206,7 @@ export const ko: Record<TKey, string> = {
   "pws.quotaUnavailable": "이 프로바이더의 쿼터 데이터가 없습니다.",
   "pws.accountQuotaUnavailable": "요금 한도 데이터를 일시적으로 가져올 수 없습니다. 이전 값이 있으면 그대로 표시합니다.",
   "pws.quotaFailure.account_unavailable": "쿼터 조회에 필요한 계정 정보를 사용할 수 없습니다.",
+  "pws.quotaFailure.native_harness_only": "쿼터를 조회하지 않습니다. nativeHarnessOnly에서는 이 계정으로 agy만 Google과 통신합니다.",
   "pws.quotaFailure.access_denied": "제공자가 쿼터 데이터 접근을 거부했습니다.",
   "pws.quotaFailure.rate_limited": "제공자의 쿼터 조회 요청 한도에 도달했습니다.",
   "pws.quotaFailure.upstream_error": "제공자가 쿼터 조회를 처리하지 못했습니다.",

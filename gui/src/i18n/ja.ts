@@ -1863,6 +1863,7 @@ export const ja: Record<TKey, string> = {
   "pws.quotaUnavailable": "このプロバイダーのクォータデータがありません。",
   "pws.accountQuotaUnavailable": "レート制限データを一時的に取得できません。前回の値がある場合はそれを表示します。",
   "pws.quotaFailure.account_unavailable": "割り当て確認に必要なアカウント情報を利用できません。",
+  "pws.quotaFailure.native_harness_only": "割り当ては確認しません。nativeHarnessOnly では、これらのアカウントで Google と通信するのは agy だけです。",
   "pws.quotaFailure.access_denied": "プロバイダーが割り当てデータへのアクセスを拒否しました。",
   "pws.quotaFailure.rate_limited": "割り当て確認のレート制限に達しました。",
   "pws.quotaFailure.upstream_error": "プロバイダーが割り当て確認を完了できませんでした。",

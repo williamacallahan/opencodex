@@ -1980,6 +1980,7 @@ export const pt: Record<TKey, string> = {
   "pws.quotaUnavailable": "Sem dados de cota para este provedor.",
   "pws.accountQuotaUnavailable": "Dados de limite de taxa temporariamente indisponíveis; exibindo os últimos valores conhecidos, quando houver.",
   "pws.quotaFailure.account_unavailable": "Os detalhes da conta estão indisponíveis para esta verificação de cota.",
+  "pws.quotaFailure.native_harness_only": "Cota não consultada: com nativeHarnessOnly, só o agy fala com o Google por estas contas.",
   "pws.quotaFailure.access_denied": "O provedor negou acesso aos dados de cota.",
   "pws.quotaFailure.rate_limited": "O provedor limitou a taxa da verificação de cota.",
   "pws.quotaFailure.upstream_error": "O provedor não conseguiu concluir a verificação de cota.",

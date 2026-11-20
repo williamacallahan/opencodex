@@ -1969,6 +1969,7 @@ export const fr: Record<TKey, string> = {
   "pws.quotaUnavailable": "Aucune donnée de quota pour ce fournisseur.",
   "pws.accountQuotaUnavailable": "Données de limite de débit temporairement indisponibles ; affichage des dernières valeurs connues, le cas échéant.",
   "pws.quotaFailure.account_unavailable": "Les données du compte sont indisponibles pour cette vérification.",
+  "pws.quotaFailure.native_harness_only": "Quota non interrogé : avec nativeHarnessOnly, seul agy contacte Google pour ces comptes.",
   "pws.quotaFailure.access_denied": "Le fournisseur a refusé l’accès aux données de quota.",
   "pws.quotaFailure.rate_limited": "Le fournisseur a limité la fréquence des vérifications de quota.",
   "pws.quotaFailure.upstream_error": "Le fournisseur n’a pas pu vérifier le quota.",

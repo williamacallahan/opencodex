@@ -1982,6 +1982,7 @@ export const tr: Record<TKey, string> = {
   "pws.quotaUnavailable": "Bu sağlayıcı için kota verisi yok.",
   "pws.accountQuotaUnavailable": "Oran limiti verisi geçici olarak kullanılamıyor.",
   "pws.quotaFailure.account_unavailable": "Kota denetimi için hesap bilgileri kullanılamıyor.",
+  "pws.quotaFailure.native_harness_only": "Kota sorgulanmaz: nativeHarnessOnly açıkken bu hesaplar için Google ile yalnızca agy konuşur.",
   "pws.quotaFailure.access_denied": "Sağlayıcı kota verilerine erişimi reddetti.",
   "pws.quotaFailure.rate_limited": "Kota denetimi istek sınırına ulaştı.",
   "pws.quotaFailure.upstream_error": "Sağlayıcı kota denetimini tamamlayamadı.",

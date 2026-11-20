@@ -1955,6 +1955,7 @@ export const ru: Record<TKey, string> = {
   "pws.quotaUnavailable": "Нет данных о квоте для этого провайдера.",
   "pws.accountQuotaUnavailable": "Данные о лимитах временно недоступны; при наличии показываются последние известные значения.",
   "pws.quotaFailure.account_unavailable": "Данные аккаунта для проверки квоты недоступны.",
+  "pws.quotaFailure.native_harness_only": "Квота не запрашивается: при nativeHarnessOnly с Google для этих аккаунтов работает только agy.",
   "pws.quotaFailure.access_denied": "Провайдер запретил доступ к данным квоты.",
   "pws.quotaFailure.rate_limited": "Превышен лимит запросов квоты.",
   "pws.quotaFailure.upstream_error": "Провайдер не смог проверить квоту.",

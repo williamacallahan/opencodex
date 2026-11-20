@@ -12,6 +12,7 @@ import { describeImageAnthropic } from "../../src/vision/anthropic-describe";
 import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../../src/types";
 import { captureGatherFlight } from "../../src/codex/catalog/gather-capture";
 import { routeModel } from "../../src/router";
+import { probeAntigravityUsageQuota } from "../../src/providers/quota/antigravity";
 
 const originalFetch = globalThis.fetch;
 let fetchCalls = 0;
@@ -120,6 +121,12 @@ describe("nativeHarnessOnly send gates", () => {
     } as unknown as OcxConfig;
     bindNativeHarnessConfig({ nativeHarnessOnly: true });
     expect(routeModel(config, "gemini-3.8-flash").providerName).toBe("google");
+    expect(fetchCalls).toBe(0);
+  });
+
+  test("an agy-reserved account's quota says why it is not probed, without a network call", async () => {
+    bindNativeHarnessConfig({ nativeHarnessOnly: true });
+    expect(await probeAntigravityUsageQuota("fixture-token", "fixture-project")).toMatchObject({ kind: "unavailable", failure: "native_harness_only" });
     expect(fetchCalls).toBe(0);
   });
 });

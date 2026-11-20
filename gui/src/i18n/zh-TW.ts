@@ -1659,6 +1659,7 @@ export const zhTW: Record<TKey, string> = {
   "pws.quotaUnavailable": "此供應商暫無配額資料。",
   "pws.accountQuotaUnavailable": "速率限制資料暫時不可用；若有上次已知值則繼續顯示。",
   "pws.quotaFailure.account_unavailable": "無法取得配額查詢所需的帳號資訊。",
+  "pws.quotaFailure.native_harness_only": "不查詢配額：啟用 nativeHarnessOnly 時，只有 agy 會用這些帳號與 Google 通訊。",
   "pws.quotaFailure.access_denied": "供應商拒絕存取配額資料。",
   "pws.quotaFailure.rate_limited": "配額查詢觸發了請求頻率限制。",
   "pws.quotaFailure.upstream_error": "供應商未能完成配額查詢。",

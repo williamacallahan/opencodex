@@ -1997,6 +1997,7 @@ export const en = {
   "pws.quotaUnavailable": "No quota data for this provider.",
   "pws.accountQuotaUnavailable": "Rate-limit data temporarily unavailable; showing last known values when present.",
   "pws.quotaFailure.account_unavailable": "Account details are unavailable for this quota check.",
+  "pws.quotaFailure.native_harness_only": "Quota is not probed: under nativeHarnessOnly only agy talks to Google for these accounts.",
   "pws.quotaFailure.access_denied": "The provider denied access to quota data.",
   "pws.quotaFailure.rate_limited": "The provider rate-limited the quota check.",
   "pws.quotaFailure.upstream_error": "The provider could not complete the quota check.",

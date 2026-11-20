@@ -3179,6 +3179,7 @@ export const zh: Record<TKey, string> = {
   "pws.quotaUnavailable": "此提供商暂无配额数据。",
   "pws.accountQuotaUnavailable": "速率限制数据暂时不可用；若有上次已知值则继续显示。",
   "pws.quotaFailure.account_unavailable": "无法获取配额查询所需的账号信息。",
+  "pws.quotaFailure.native_harness_only": "不查询配额：启用 nativeHarnessOnly 时，只有 agy 会用这些账号与 Google 通信。",
   "pws.quotaFailure.access_denied": "提供商拒绝访问配额数据。",
   "pws.quotaFailure.rate_limited": "配额查询触发了请求频率限制。",
   "pws.quotaFailure.upstream_error": "提供商未能完成配额查询。",

@@ -3159,6 +3159,7 @@ export const de: Record<TKey, string> = {
   "pws.quotaUnavailable": "Keine Kontingentdaten für diesen Provider.",
   "pws.accountQuotaUnavailable": "Ratenlimit-Daten vorübergehend nicht verfügbar; falls vorhanden, werden zuletzt bekannte Werte angezeigt.",
   "pws.quotaFailure.account_unavailable": "Kontodaten für die Kontingentprüfung sind nicht verfügbar.",
+  "pws.quotaFailure.native_harness_only": "Kein Kontingentabruf: Mit nativeHarnessOnly spricht nur agy für diese Konten mit Google.",
   "pws.quotaFailure.access_denied": "Der Anbieter verweigert den Zugriff auf Kontingentdaten.",
   "pws.quotaFailure.rate_limited": "Die Kontingentprüfung wurde durch ein Anfragelimit begrenzt.",
   "pws.quotaFailure.upstream_error": "Der Anbieter konnte die Kontingentprüfung nicht abschließen.",
