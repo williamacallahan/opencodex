@@ -21,6 +21,7 @@
 import { pickComboTarget, targetKey, type ComboPick } from "../../combos";
 import type { NormalizedComboTarget } from "../../combos/types";
 import type { OcxConfig } from "../../types";
+import { routeConcreteModel } from "../../router";
 import { recallComboTargetForLane } from "./combo-session-recall";
 
 export const COMBO_CONVERSATION_PIN_REASON = "combo-conversation-pin";
@@ -67,6 +68,7 @@ export function conversationPinnedPick(args: {
   if (!previous) return undefined;
   const previousKey = targetKey(previous);
   const pick = pickComboTarget(args.config, args.comboId, {
+    routeConcreteModel,
     eligible: target => targetKey(target) === previousKey && args.eligible(target),
     now: args.now,
     preview: true,

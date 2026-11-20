@@ -4,7 +4,7 @@ import { codexQuotaScopeForModel } from "../codex/routing";
 import { getEligiblePoolAccounts } from "../codex/routing/selection";
 import { OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers-destination";
-import { routeConcreteModel } from "../router";
+import type { routeConcreteModel } from "../router";
 import type { OcxComboTarget, OcxConfig } from "../types";
 import { comboTargetRateLimitCooldownRevision } from "./failover";
 
@@ -14,13 +14,14 @@ export function poolQuotaCooldownRevision(
   comboId: string,
   target: OcxComboTarget,
   now: number,
+  lookup?: typeof routeConcreteModel,
 ): number | undefined {
-  if (target.provider !== OPENAI_CODEX_PROVIDER_ID) return undefined;
+  if (!lookup || target.provider !== OPENAI_CODEX_PROVIDER_ID) return undefined;
   const revision = comboTargetRateLimitCooldownRevision(comboId, target, now);
   if (revision === undefined) return undefined;
   let route: ReturnType<typeof routeConcreteModel>;
   try {
-    route = routeConcreteModel(config, `${target.provider}/${target.model}`);
+    route = lookup(config, `${target.provider}/${target.model}`);
   } catch {
     // A concrete route that cannot resolve supplies no capacity evidence for early dispatch.
     return undefined;

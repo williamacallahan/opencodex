@@ -526,7 +526,7 @@ function routeModelInternal(
   }
 
   if (!bypassCombos && !preservesPhysicalComboProvider(config)) {
-    const combo = tryPickComboModel(config, modelId, preview);
+    const combo = tryPickComboModel(config, modelId, preview, routeConcreteModel);
     if (combo) {
       const concrete = `${combo.target.provider}/${combo.target.model}`;
       // The selected target is already a concrete provider/model reference. Resolve it without

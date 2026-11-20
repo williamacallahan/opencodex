@@ -14,6 +14,7 @@ import {
 } from "./failover";
 import { quotaResetRemainingMs } from "./reset-window";
 import { poolQuotaCooldownRevision } from "./pool-cooldown-release";
+import type { routeConcreteModel } from "../router";
 import { getCombo, resolveComboId, targetKey } from "./types";
 import type { NormalizedComboConfig, NormalizedComboTarget } from "./types";
 import {
@@ -322,6 +323,7 @@ function resetWindowIndex(
 function reserveAllCooledTargets(
   config: OcxConfig, comboId: string, now: number,
   eligible?: (target: NormalizedComboTarget) => boolean,
+  lookup?: typeof routeConcreteModel,
 ): Map<string, number> | undefined {
   const combo = getCombo(config, comboId);
   if (!combo?.cooldownReprobe?.enabled) return;
@@ -335,7 +337,7 @@ function reserveAllCooledTargets(
   // Ordinary selection skips cooled targets without evaluating their request predicate.
   // Preserve that behavior when a sibling is already available.
   if (combo.targets.some(target => (!isComboTargetInCooldown(comboId, target, now)
-    || poolQuotaCooldownRevision(config, comboId, target, now) !== undefined) && reprobeEligible(target))) return;
+    || poolQuotaCooldownRevision(config, comboId, target, now, lookup) !== undefined) && reprobeEligible(target))) return;
   const usable = combo.targets.filter(reprobeEligible);
   if (usable.length === 0) return;
   // Each reserved key is bound to the cooldown entry observed here. A replacement entry —
@@ -361,6 +363,7 @@ export function pickComboTarget(
   options: {
     exclude?: Iterable<string>;
     eligible?: (target: NormalizedComboTarget) => boolean;
+    routeConcreteModel?: typeof routeConcreteModel;
     /** Disable recovery for picks without request context or picks already in flight. */
     allowCooldownReprobe?: boolean;
     /** Request-scoped cooldown bypasses, each bound to the write it was reserved against. */
@@ -377,7 +380,7 @@ export function pickComboTarget(
   const now = options.now ?? Date.now();
   const cooldownReprobeTargets = new Map(options.cooldownReprobeTargets);
   if (options.allowCooldownReprobe !== false && !options.preview && excluded.size === 0) {
-    for (const [key, revision] of reserveAllCooledTargets(config, comboId, now, options.eligible) ?? []) {
+    for (const [key, revision] of reserveAllCooledTargets(config, comboId, now, options.eligible, options.routeConcreteModel) ?? []) {
       cooldownReprobeTargets.set(key, revision);
     }
   }
@@ -390,7 +393,7 @@ export function pickComboTarget(
     const key = targetKey(target);
     if (excluded.has(key) || !targetProviderIsUsable(config, target, now)) return false;
     if (!reprobeBypass(target) && isComboTargetInCooldown(comboId, target, now)) {
-      if (!poolCooldowns.has(key)) poolCooldowns.set(key, poolQuotaCooldownRevision(config, comboId, target, now));
+      if (!poolCooldowns.has(key)) poolCooldowns.set(key, poolQuotaCooldownRevision(config, comboId, target, now, options.routeConcreteModel));
       if (poolCooldowns.get(key) === undefined) return false;
     }
     return options.eligible?.(target) ?? true;
@@ -536,6 +539,7 @@ export function advanceComboAfterFailure(
     now?: number;
     cooldownMs?: number;
     eligible?: (target: NormalizedComboTarget) => boolean;
+    routeConcreteModel?: typeof routeConcreteModel;
     cooldownScope?: ComboFailureCooldownScope;
     onCooldownRecorded?: (target: Pick<OcxComboTarget, "provider" | "model">) => void;
     status?: number;
@@ -585,6 +589,7 @@ export function advanceComboAfterFailure(
   const defersLastResort = combo?.cooldownWaitPolicy === "before-last-resort"
     && combo.targets.some(target => !target.lastResort);
   return pickComboTarget(config, pick.comboId, {
+    routeConcreteModel: options.routeConcreteModel,
     exclude: pick.attempted,
     now: options.now,
     cooldownReprobeTargets: pick.cooldownReprobeTargets
@@ -601,6 +606,7 @@ export async function pickComboTargetWithWait(
   options: {
     exclude?: Iterable<string>;
     eligible?: (target: NormalizedComboTarget) => boolean;
+    routeConcreteModel?: typeof routeConcreteModel;
     waitForCooldownMs: number;
     abortSignal?: AbortSignal;
     /** Disable recovery when retrying a target after its normal cooldown. */
@@ -616,7 +622,7 @@ export async function pickComboTargetWithWait(
   const customEligible = options.eligible;
   const cooldownReprobeTargets = new Map(options.cooldownReprobeTargets);
   if (options.allowCooldownReprobe !== false && excluded.size === 0 && !options.abortSignal?.aborted) {
-    for (const [key, revision] of reserveAllCooledTargets(config, comboId, now, customEligible) ?? []) {
+    for (const [key, revision] of reserveAllCooledTargets(config, comboId, now, customEligible, options.routeConcreteModel) ?? []) {
       cooldownReprobeTargets.set(key, revision);
     }
   }
@@ -640,6 +646,7 @@ export async function pickComboTargetWithWait(
     const normalOnly = (target: NormalizedComboTarget): boolean =>
       !target.lastResort && (customEligible?.(target) ?? true);
     const normalPick = pickComboTarget(config, comboId, {
+      routeConcreteModel: options.routeConcreteModel,
       allowCooldownReprobe: false,
       cooldownReprobeTargets,
       exclude: excluded,
@@ -672,6 +679,7 @@ export async function pickComboTargetWithWait(
       // The combo can be deleted or renamed while this request sleeps.
       if (!getCombo(config, comboId)) return null;
       const waited = pickComboTarget(config, comboId, {
+        routeConcreteModel: options.routeConcreteModel,
         allowCooldownReprobe: false,
         cooldownReprobeTargets,
         exclude: excluded,
@@ -689,6 +697,7 @@ export async function pickComboTargetWithWait(
   const remainingWaitMs = options.waitForCooldownMs - spentWaitMs;
 
   const pick = pickComboTarget(config, comboId, {
+    routeConcreteModel: options.routeConcreteModel,
     allowCooldownReprobe: false,
     cooldownReprobeTargets,
     exclude: excluded,
@@ -724,6 +733,7 @@ export async function pickComboTargetWithWait(
   // Management updates can delete or rename the combo while this request sleeps.
   if (!getCombo(config, comboId)) return null;
   return pickComboTarget(config, comboId, {
+    routeConcreteModel: options.routeConcreteModel,
     exclude: excluded,
     allowCooldownReprobe: false,
     cooldownReprobeTargets,
@@ -772,11 +782,11 @@ export function clearComboSelectionState(comboId?: string): void {
   selectionState.delete(comboId);
 }
 
-export function tryPickComboModel(config: OcxConfig, modelId: string, preview = false): ComboPick | null {
+export function tryPickComboModel(config: OcxConfig, modelId: string, preview = false, lookup?: typeof routeConcreteModel): ComboPick | null {
   const comboId = resolveComboId(config, modelId);
   if (!comboId) return null;
   if (!getCombo(config, comboId)) throw new UnknownComboError(comboId);
-  const picked = pickComboTarget(config, comboId, { preview, allowCooldownReprobe: false });
+  const picked = pickComboTarget(config, comboId, { preview, allowCooldownReprobe: false, routeConcreteModel: lookup });
   if (!picked) throw new NoAvailableComboTargetsError(comboId, comboExclusionReasons(config, comboId));
   return picked;
 }

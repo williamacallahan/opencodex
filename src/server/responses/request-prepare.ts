@@ -747,6 +747,7 @@ export async function prepareResponsesRequest(
       config, options.admission, config.combos?.[candidate.combo.comboId],
     )) {
       const pick = pickComboTarget(config, candidate.combo.comboId, {
+        routeConcreteModel,
         eligible: target => !target.metered,
         allowCooldownReprobe: false,
       });

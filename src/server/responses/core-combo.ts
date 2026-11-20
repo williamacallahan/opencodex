@@ -371,7 +371,7 @@ function eligibleJevComboChoices(
   const reserved = cooldownReprobeTargets ? Object.entries(cooldownReprobeTargets) : undefined;
   while (excluded.size < combo.targets.length) {
     const pick = pickComboTarget(config, comboId, {
-      exclude: excluded, eligible, now, allowCooldownReprobe: false, cooldownReprobeTargets: reserved,
+      exclude: excluded, eligible, now, allowCooldownReprobe: false, cooldownReprobeTargets: reserved, routeConcreteModel,
     });
     if (!pick) break;
     const key = targetKey(pick.target);
@@ -759,6 +759,7 @@ export async function executeComboResponses(
     now?: number;
   }) => pickComboTargetWithWait(config, comboId, {
     ...pickOptions,
+    routeConcreteModel,
     // Every pick, including the recovery picks that skip `targetEligible`, keeps metered
     // targets away from callers that may not spend on them.
     eligible: target => (meteredAllowed || !target.metered) && (pickOptions.eligible?.(target) ?? true),
@@ -1663,6 +1664,7 @@ export async function executeComboResponses(
     );
     const codexLocalRefusal = isCodexAccountCooldownResponse(failure.response);
     const nextPick = advanceComboAfterFailure(config, pick, {
+      routeConcreteModel,
       retryAfter: poolLocalRefusal || codexLocalRefusal ? undefined : failure.retryAfter,
       resetAt: codexLocalRefusal ? undefined : failure.resetAt,
       cooldownMs: combo.cooldownMs,
