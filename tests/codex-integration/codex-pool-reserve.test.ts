@@ -480,7 +480,7 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
     }
   });
   test.each(["cancel", "abort", "quota", "incomplete JSON"])("a Reserve trial settles on %s without proving success", async ending => {
-    const cfg = config(); cfg.providers.openai = { ...base, codexAccountMode: "pool" };
+    const cfg = config(); cfg.providers.openai = { ...base, codexAccountMode: "pool", upstreamWebsocket: false };
     ordinary(A, 40);
     const models: string[] = [];
     spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
