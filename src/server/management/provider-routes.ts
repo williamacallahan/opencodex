@@ -47,6 +47,7 @@ import { replaceProviderAccountSet } from "../../oauth/store";
 import { captureModelsOAuthTarget, mayResolveModelsOAuth, modelsOAuthTargetMatches } from "../../oauth/model-discovery-auth";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
 import { providerProxyForDisplay } from "../../lib/provider-egress";
+import { nativeHarnessOnly } from "../../lib/native-harness";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
 import { ProviderOutboundPolicyError, providerOutboundGet, providerOutboundPost, providerRedirectError } from "../../lib/provider-outbound";
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
@@ -1655,8 +1656,12 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       // credential resolution/network access for providers such as Antigravity.
       return jsonResponse({ applicable: false, reason: "static_catalog", latencyMs: 0 });
     }
-    const { buildModelsRequest, getModelsOAuthAccessSnapshot, resolveModelsAuthToken } = await import("../../oauth");
     const antigravity = effectiveGoogleMode(name, prov) === "cloud-code-assist";
+    if (antigravity && nativeHarnessOnly()) {
+      // Cloud Code discovery would present an Antigravity identity; agy owns that traffic.
+      return jsonResponse({ applicable: false, reason: "native_harness_only", latencyMs: 0 });
+    }
+    const { buildModelsRequest, getModelsOAuthAccessSnapshot, resolveModelsAuthToken } = await import("../../oauth");
     const snapshot = prov.authMode === "oauth" && mayResolveModelsOAuth(name, config.providers[name])
       ? await getModelsOAuthAccessSnapshot(name, prov).catch(() => undefined)
       : undefined;

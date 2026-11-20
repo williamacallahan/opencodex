@@ -31,6 +31,7 @@ import { summarizeGoogleWireShape } from "./google-wire-shape";
 import { compileGoogleWireBody } from "./google-wire-compiler";
 import type { GoogleToolSchemaLossReport, GoogleToolSchemaProfile } from "./google-tool-schema";
 import { identifyRoutedModel } from "./identity";
+import { assertNativeHarnessSend } from "../lib/native-harness";
 import {
   antigravityUsesReplayCache,
   applyAntigravityReplay,
@@ -1013,6 +1014,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
 
     /** Compile an admitted request into the selected Gemini endpoint, body and authentication. */
     async buildRequest(parsed: OcxParsedRequest, incoming?: IncomingMeta) {
+      if (provider.googleMode === "cloud-code-assist") assertNativeHarnessSend("antigravity");
       // Structured-output admission runs FIRST, before messagesToGeminiFormat writes
       // lastInjectedCallIds/lastReasoningReplayScope: a refused request must not leave
       // adapter-scoped replay state pointing at call ids that never went out. These

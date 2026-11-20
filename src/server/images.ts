@@ -58,6 +58,7 @@ import {
 } from "../images/artifacts";
 import { findXaiProvider, resolveXaiImageAuthToken } from "../images/plan";
 import { callXaiImages } from "../images/xai-client";
+import { nativeHarnessOnly } from "../lib/native-harness";
 import type { AdmissionLease } from "../lib/admission";
 import { codexAccountSelectionForTurn } from "./lifecycle";
 import { codexModelAvailabilityErrorResponse } from "./responses/codex-auth-error";
@@ -241,7 +242,7 @@ async function tryCcaImageGeneration(
 ): Promise<Response | undefined> {
   if (endpoint !== "generations") return undefined;
   const provider = config.providers?.["google-antigravity"];
-  if (!provider || provider.disabled) return undefined;
+  if (!provider || provider.disabled || nativeHarnessOnly()) return undefined;
 
   // The destination is decided here, not by the caller: this branch always
   // bills Antigravity for CCA_IMAGE_MODEL whatever the body named. That is the

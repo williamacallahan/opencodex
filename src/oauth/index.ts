@@ -1552,6 +1552,7 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
   if (provider === "chatgpt") return;
   const def = OAUTH_PROVIDERS[provider];
   if (!def) return;
+  if (provider === GOOGLE_ANTIGRAVITY_PROVIDER && config.nativeHarnessOnly === true) return; // pool serves only /agy
   if (provider === GOOGLE_ANTIGRAVITY_PROVIDER) migrateLegacyAntigravityStaticCatalog(config);
   const namespaceCollision = codexAccountNamespaceProviderCollisionError(config.codexAccountNamespaces, provider);
   if (namespaceCollision) throw new OAuthProviderNamespaceCollisionError(namespaceCollision);

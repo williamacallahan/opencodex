@@ -2,6 +2,7 @@ import { validateAntigravityImportCredential } from "../google-antigravity";
 import { upsertCredentialByIdentity } from "../store";
 import type { OAuthCredentials } from "../types";
 import { probeAntigravityUsageQuota } from "../../providers/quota/antigravity";
+import { nativeHarnessOnly } from "../../lib/native-harness";
 import {
   ACCOUNT_IMPORT_FORMAT,
   ACCOUNT_IMPORT_MAX_EMAIL_LENGTH,
@@ -89,7 +90,8 @@ export function createAntigravityAccountImportAdapter(
         throwIfAccountImportAborted(signal);
         if (admitted) projectId = record.projectId;
       }
-      if (!projectId) return { status: "failed", code: "missing_project" };
+      // Under nativeHarnessOnly the hub never asks Google for a project itself; the /agy lane learns it from agy's own traffic.
+      if (!projectId && !nativeHarnessOnly()) return { status: "failed", code: "missing_project" };
 
       throwIfAccountImportAborted(signal);
       try {

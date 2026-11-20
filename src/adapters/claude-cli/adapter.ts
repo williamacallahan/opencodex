@@ -17,6 +17,7 @@ import {
 import { CLAUDE_CLI_PROFILES, type ClaudeCliProfile } from "./profiles";
 import { checkClaudeUsageAdmission, containsClaudeResetClock, recordClaudeUsageRefusal, type ClaudeAdmission } from "./usage-admission";
 import { buildStableClaudeConversationInput, CLAUDE_REPLAY_SYSTEM_PROMPT, stableClaudeToolBridge } from "./stable-replay";
+import { NativeHarnessRefusal, nativeHarnessOnly } from "../../lib/native-harness";
 
 // The coding-agent bridge is protocol-level infrastructure shared with CodeBuddy. Its MCP server
 // advertises the request's tools but never executes them; Codex (or Pi) owns execution and approval.
@@ -192,6 +193,11 @@ export function createClaudeCliAdapter(provider: OcxProviderConfig, deps: Claude
     },
 
     async runTurn(parsed, incoming, emit): Promise<void> {
+      // Driving Claude Code on behalf of another client's conversation is Claude used by something else.
+      if (nativeHarnessOnly()) {
+        emit({ type: "error", message: new NativeHarnessRefusal("anthropic").message, status: 403, errorType: "permission_error", code: "native_harness_only", retryable: false });
+        return;
+      }
       const admission = await (deps.usageAdmission ?? checkClaudeUsageAdmission)(parsed.modelId);
       if (admission.state === "exhausted") {
         emit({ type: "error", message: admission.message ?? "Claude subscription usage is exhausted; launches are paused until the reset.", status: 429, errorType: "rate_limit_error", code: "claude_subscription_cooldown", retryable: false });

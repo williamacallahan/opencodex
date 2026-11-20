@@ -1,3 +1,4 @@
+import { NativeHarnessRefusal, nativeHarnessOnly } from "../lib/native-harness";
 import { resolveAnthropicHelperSnapshot, fetchAnthropicHelper, anthropicHelperMessagesUrl } from "../sidecar/anthropic-binding";
 import { isAnthropicInstanceId } from "../providers/anthropic-instance-id";
 import type { OAuthAccessSnapshot } from "../oauth";
@@ -159,6 +160,7 @@ export async function describeImageAnthropic(
   abortSignal?: AbortSignal,
   config?: OcxConfig,
 ): Promise<DescribeOutcome> {
+  if (nativeHarnessOnly()) return { text: "", error: new NativeHarnessRefusal("anthropic").message };
   const image = buildImageBlock(imageUrl);
   if (!image.block) return { text: "", error: image.error ?? "invalid image" };
 

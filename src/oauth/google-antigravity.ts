@@ -14,6 +14,7 @@ import { generatePKCE } from "./pkce";
 import { normalizeOAuthPlan } from "./plan";
 import type { OAuthController, OAuthCredentials } from "./types";
 import { antigravityUserAgent, ANTIGRAVITY_IDE_VERSION } from "../adapters/client-fingerprint";
+import { nativeHarnessOnly } from "../lib/native-harness";
 import { AntigravityProjectDiscoveryError } from "./antigravity-discovery-diagnostics";
 
 const CLIENT_ID = process.env.GOOGLE_ANTIGRAVITY_CLIENT_ID
@@ -90,7 +91,7 @@ async function postToken(body: Record<string, string>, signal?: AbortSignal): Pr
 }
 
 /** Pull a Cloud Code Assist project id out of a loadCodeAssist/onboardUser response shape. */
-function extractProjectId(data: Record<string, unknown> | undefined): string | undefined {
+export function extractProjectId(data: Record<string, unknown> | undefined): string | undefined {
   if (!data) return undefined;
   for (const key of ["cloudaicompanionProject", "projectId", "project"]) {
     const value = data[key];
@@ -182,6 +183,7 @@ export async function discoverAntigravityProject(accessToken: string, signal?: A
 }
 
 async function discoverAntigravityAccount(accessToken: string, signal?: AbortSignal, diagnostics?: AntigravityProjectDiscoveryError): Promise<{ projectId?: string; plan?: string | null }> {
+  if (nativeHarnessOnly()) return {};
   const account = await loadCodeAssistProject(accessToken, signal, diagnostics);
   // Once loadCodeAssist answered, an onboarding failure must not discard its tier observation;
   // a missing project still fails login, and cancellation still propagates.
@@ -259,6 +261,7 @@ class AntigravityOAuthFlow extends OAuthCallbackFlow {
       code_verifier: this.#verifier,
     }, this.ctrl.signal);
     const creds = credentialsFromPayload(payload);
+    if (nativeHarnessOnly()) return creds; // agy owns Cloud Code; the hub keeps no project
     this.ctrl.onProgress?.("Discovering Cloud Code Assist project");
     const diagnostics = new AntigravityProjectDiscoveryError();
     const { projectId, plan } = await discoverAntigravityAccount(creds.access, this.ctrl.signal, diagnostics);
