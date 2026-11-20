@@ -31,9 +31,13 @@ function replaceOnce(source: string, needle: string, replacement: string): strin
     if (path === "src/server/claude-messages.ts") source = replaceOnce(source,
       "message = await collectAnthropicMessage(anthropicSse,",
       "if (globalThis.__messagesCollectorStream) await anthropicSse.cancel();\n      message = await collectAnthropicMessage(globalThis.__messagesCollectorStream ?? anthropicSse,");
-    if (path === "src/server/claude-messages.ts") source = replaceOnce(source,
-      "body = await readAnthropicBody(req, translatorBudget, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));",
-      "if (globalThis.__messagesReadFailure) throw globalThis.__messagesReadFailure.value;\n    body = await readAnthropicBody(req, translatorBudget, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));") + "\nexport { desktopMappingUnavailableResponse as __messagesSweepDesktop, translationFailure as __messagesSweepTranslation, claudeInboundDisabled as __messagesSweepDisabled };\n";
+    if (path === "src/server/claude-messages.ts") {
+      const bodyReadAnchor = base
+        ? "body = await readAnthropicBody(req, translatorBudget, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));"
+        : "body = ingress.parsedBody ?? await readAnthropicBody(req, translatorBudget, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));";
+      source = replaceOnce(source, bodyReadAnchor,
+        `if (globalThis.__messagesReadFailure) throw globalThis.__messagesReadFailure.value;\n    ${bodyReadAnchor}`) + "\nexport { desktopMappingUnavailableResponse as __messagesSweepDesktop, translationFailure as __messagesSweepTranslation, claudeInboundDisabled as __messagesSweepDisabled };\n";
+    }
     if (path === "src/claude/outbound.ts") {
       source = replaceOnce(source, "  const text = overflow ? claudePromptTooLongMessage(message) : message;",
         '  globalThis.__messagesOverflowRecord("writer", overflow);\n  const text = overflow ? claudePromptTooLongMessage(message) : message;');
