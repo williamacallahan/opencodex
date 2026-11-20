@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmdirSync } from "node:fs";
 import { Database } from "bun:sqlite";
 import { codexPoolAffinityKey } from "../../src/codex/auth-context";
+import { isPlainObject } from "../../src/lib/plain-data";
 import { resolveResponsesApiAuth, contextPrincipalIdOf } from "../../src/server/auth-cors";
 import { resolveClaudeBridgePoolSession } from "../../src/server/claude-bridge-pool-session";
 import { recallComboTargetForLane } from "../../src/server/responses/combo-session-recall";
@@ -27,8 +28,13 @@ const inspectNativeCodexOwnership = ownedServiceHomeInspection("turn-state handl
 type Listener = (event: unknown) => void;
 const sentFrames: Array<Record<string, unknown>> = [];
 
-/** The token the mock upstream issues for a request is derived from its input, so each turn differs. */
-const tokenFor = (frame: Record<string, unknown>) => `upstream-turn-${String(frame.input)}`;
+/** The Codex backend receives input as a message list, even when the client sends a string. */
+function turnInputText(frame: Record<string, unknown>): string | undefined {
+  const message: unknown = Array.isArray(frame.input) ? frame.input[0] : undefined;
+  if (!isPlainObject(message) || message.type !== "message" || message.role !== "user" || !Array.isArray(message.content)) return;
+  const block: unknown = message.content[0];
+  if (isPlainObject(block) && block.type === "input_text" && typeof block.text === "string") return block.text;
+}
 
 class FakeCodexSocket {
   readyState = 0;
@@ -50,7 +56,10 @@ class FakeCodexSocket {
     sentFrames.push(frame);
     const id = `resp_${sentFrames.length}`;
     queueMicrotask(() => {
-      this.emit("message", { data: JSON.stringify({ type: "codex.response.metadata", headers: { "x-codex-turn-state": tokenFor(frame) } }) });
+      const text = turnInputText(frame);
+      this.emit("message", { data: JSON.stringify({ type: "codex.response.metadata",
+        headers: text === undefined ? {} : { "x-codex-turn-state": `upstream-turn-${text}` },
+      }) });
       this.emit("message", { data: JSON.stringify({ type: "response.created", response: { id, object: "response", status: "in_progress", output: [] } }) });
       this.emit("message", { data: JSON.stringify({ type: "response.completed", response: { id, object: "response", model: frame.model, status: "completed", output: [] } }) });
     });
@@ -276,7 +285,7 @@ describe("a turn-state handle obtained from an upstream response is redeemed on 
         httpTurn(server, "b", "foreign-handle", handleA!, { expectedStatus: direct ? 200 : 409 }),
       ]);
       expect(sentFrames).toHaveLength(direct ? 5 : 4);
-      const byInput = new Map(sentFrames.map(frame => [String(frame.input), (frame.client_metadata as Record<string, unknown> | undefined)?.["x-codex-turn-state"]]));
+      const byInput = new Map(sentFrames.map(frame => [turnInputText(frame), (frame.client_metadata as Record<string, unknown> | undefined)?.["x-codex-turn-state"]]));
       expect(byInput.get("next-a")).toBe("upstream-turn-turn-a");
       expect(byInput.get("next-b")).toBe("upstream-turn-turn-b");
       expect(byInput.has("foreign-handle")).toBe(direct);

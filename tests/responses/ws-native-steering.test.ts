@@ -581,7 +581,9 @@ test("warmup leaves no steering owner and the next ordinary turn gets a fresh ch
   await waitFor(() => Socket.all.length === 1 && sent.filter(frame => frame.type === "response.created").length === 2);
   expect(ws.data.nativeControl?.attached).toBe(true);
   const socket = Socket.all[0];
-  expect(socket.frames[0].input).toBe("real turn");
+  expect(socket.frames[0].input).toEqual([
+    { type: "message", role: "user", content: [{ type: "input_text", text: "real turn" }] },
+  ]);
   complete(socket, socket.root);
   await waitFor(() => !ws.data.nativeControl);
 });
@@ -604,7 +606,9 @@ test("admission refusal leaves no steering owner and a later admitted turn is in
     await waitFor(() => sent.some(frame => frame.type === "response.created"));
     expect(Socket.all).toHaveLength(1);
     const socket = Socket.all[0];
-    expect(socket.frames[0].input).toBe("after admission");
+    expect(socket.frames[0].input).toEqual([
+      { type: "message", role: "user", content: [{ type: "input_text", text: "after admission" }] },
+    ]);
     expect(ws.data.nativeControl?.attached).toBe(true);
     complete(socket, socket.root);
     await waitFor(() => !ws.data.nativeControl);
