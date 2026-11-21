@@ -36,6 +36,7 @@ export function projectLunaReasoning(parsed: OcxParsedRequest, stripsReasoning: 
   if (!isPlainObject(body) || !Array.isArray(body.input)) return body;
   let issued: ReturnType<typeof issuedReasoningMatcher> | undefined;
   let boundary: number | undefined;
+  const dropped = Symbol();
   let input: unknown[] | undefined;
   for (const [i, item] of body.input.entries()) {
     if (!isPlainObject(item) || item.type !== "reasoning") continue;
@@ -43,15 +44,21 @@ export function projectLunaReasoning(parsed: OcxParsedRequest, stripsReasoning: 
     const blob = typeof item.encrypted_content === "string" ? item.encrypted_content : "";
     if (!id && !blob) continue;
     issued ??= issuedReasoningMatcher(parsed._reasoningReplayScope, parsed._issuedReasoningProofs);
-    const matches = issued(id, blob);
-    if (matches && !stripsReasoning && !(blob && parsed._stripReasoningEncryptedContent)
+    const issuer = issued(id, blob);
+    if (issuer === "own" && !stripsReasoning && !(blob && parsed._stripReasoningEncryptedContent)
       && !(id && parsed._dropForeignReasoningItemIds)) continue;
     // Other state may pin this request (a handle, for example) without making an older
     // summarized item from another issuer indispensable. Check the item, not the pin.
     boundary ??= parsed._lunaProjectForeignReasoning === "portable" ? body.input.length : closedReasoningPrefix(body.input);
-    if (i >= boundary || !hasReasoningSummary(item)) throw new LunaReasoningOwnerError();
+    if (i >= boundary || !hasReasoningSummary(item)) {
+      if (issuer === "unknown" && bound && parsed._recordedResponsesStore) {
+        (input ??= body.input.slice())[i] = dropped;
+        continue;
+      }
+      throw new LunaReasoningOwnerError();
+    }
     const { id: _id, encrypted_content: _blob, ...readable } = item;
     (input ??= body.input.slice())[i] = readable;
   }
-  return input ? { ...body, input } : body;
+  return input ? { ...body, input: input.filter(item => item !== dropped) } : body;
 }

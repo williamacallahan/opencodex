@@ -224,25 +224,32 @@ export function responsesReplayStore(current: OcxReasoningReplayIdentity | undef
   return current?.adapterName === "openai-responses" && current.providerDestinationDurableIdentity && current.credentialDurableIdentity
     ? `${current.providerDestinationDurableIdentity}/${current.credentialDurableIdentity}` : undefined;
 }
+export type IssuedReasoningProof = { owned: string; item: string };
+export type ItemIssuerVerdict = "own" | "foreign" | "unknown";
+export type LookupItemIssuer = (proof: IssuedReasoningProof, store: string) => ItemIssuerVerdict;
 function itemProofScope(scope: OcxReasoningReplayScopeRef | undefined) {
   const store = responsesReplayStore(scope?.current);
   const thread = scope?.servingThreadId ?? scope?.clientThreadId;
-  if (thread && store) return JSON.stringify([scope?.clientPrincipalId ?? null, thread, store]);
+  if (thread && store) return { store, owner: JSON.stringify([scope?.clientPrincipalId ?? null, thread, store]),
+    thread: JSON.stringify([scope?.clientPrincipalId ?? null, thread]) };
 }
 function proofKey(owner: string, id: string, blob: string) {
   return createHash("sha256").update(owner).update(`:${Buffer.byteLength(id)}:`).update(id).update(blob).digest("hex");
 }
-export function rememberIssuedReasoning(scope: OcxReasoningReplayScopeRef | undefined, output: unknown, capture = false): string[] | undefined {
+export function rememberIssuedReasoning(scope: OcxReasoningReplayScopeRef | undefined, output: unknown, capture = false): IssuedReasoningProof[] | undefined {
   if (!Array.isArray(output)) return;
   const owner = itemProofScope(scope);
   if (!owner) return;
   const at = now();
-  const pin = capture ? new Set<string>() : undefined;
+  const proofs = capture ? new Map<string, string>() : undefined;
   const remember = (id: string, blob: string) => {
-    const key = proofKey(owner, id, blob);
+    const key = proofKey(owner.owner, id, blob);
     issuedReasoning.delete(key); issuedReasoning.set(key, at);
     if (issuedReasoning.size > MAX_ITEM_PROOFS) issuedReasoning.delete(issuedReasoning.keys().next().value!);
-    if (pin) { pin.add(key); if (pin.size > PIN_ITEM_PROOFS) pin.delete(pin.values().next().value!); }
+    if (proofs) {
+      proofs.set(key, proofKey(owner.thread, id, blob));
+      if (proofs.size > MAX_ITEM_PROOFS) proofs.delete(proofs.keys().next().value!);
+    }
   };
   for (const item of output) {
     if (item?.type !== "reasoning") continue;
@@ -251,14 +258,15 @@ export function rememberIssuedReasoning(scope: OcxReasoningReplayScopeRef | unde
     remember(id, blob);
     if (id && blob) { remember(id, ""); remember("", blob); }
   }
-  return pin?.size ? [...pin] : undefined;
+  return proofs?.size ? Array.from(proofs, ([owned, item]) => ({ owned, item })) : undefined;
 }
-export function issuedReasoningMatcher(scope: OcxReasoningReplayScopeRef | undefined, pinned?: readonly string[]) {
+export function issuedReasoningMatcher(scope: OcxReasoningReplayScopeRef | undefined, lookup?: LookupItemIssuer) {
   const owner = itemProofScope(scope), at = now();
-  return (id: string, blob: string): boolean => {
-    if (!owner) return false;
-    const key = proofKey(owner, id, blob), recorded = issuedReasoning.get(key);
-    return (recorded !== undefined && at >= recorded && at - recorded < TTL_MS) || pinned?.includes(key) === true;
+  return (id: string, blob: string): ItemIssuerVerdict => {
+    if (!owner) return "unknown";
+    const key = proofKey(owner.owner, id, blob), recorded = issuedReasoning.get(key);
+    if (recorded !== undefined && at >= recorded && at - recorded < TTL_MS) return "own";
+    return lookup?.({ owned: key, item: proofKey(owner.thread, id, blob) }, owner.store) ?? "unknown";
   };
 }
 

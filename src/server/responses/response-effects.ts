@@ -42,7 +42,7 @@ export function createResponsesEffects(
   let responseCompletionNotified = false;
   let responseCompletionCancelled = false;
   const cancelResponseCompletion = (): void => { responseCompletionCancelled = true; };
-  const notifyResponseComplete = (response: { status?: unknown; model?: unknown; output?: unknown }): void => {
+  const notifyResponseComplete = (response: { id?: unknown; status?: unknown; model?: unknown; output?: unknown }): void => {
     if (responseCompletionNotified || responseCompletionCancelled
       || options.abortSignal?.aborted || req.signal.aborted
       || response.status !== "completed"
@@ -58,7 +58,7 @@ export function createResponsesEffects(
         : ctx.mainQuotaDispatch && isMainQuotaDispatchLive(ctx.mainQuotaDispatch))) {
       bindThreadAffinity(ctx.affinityKey, ctx.accountId, Date.now(), ctx.quotaScope);
     }
-    options.onResponseComplete?.(response.model, parsed._responsesStore, proofs);
+    options.onResponseComplete?.(response.model, parsed._responsesStore, proofs, typeof response.id === "string" ? response.id : undefined);
   };
 
   const continuationStateForResponse = (

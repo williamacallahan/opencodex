@@ -30,7 +30,7 @@ import {
 import { refreshKiroAccountModelsDetached } from "../../providers/kiro-model-catalog";
 import type { ProviderAdapter, AdapterRequest } from "../../adapters/base";
 import { copyVertexRequestAuthority, hasVertexRequestAuthority, vertexRequestAuthorityIsCurrent } from "../../lib/gcp-adc";
-import { releaseProviderRequestSlot, waitForProviderRequestSlot, type ProviderRequestSlot } from "../../providers/request-pacing";
+import { RequestPacingQueueOverloadError, releaseProviderRequestSlot, waitForProviderRequestSlot, type ProviderRequestSlot } from "../../providers/request-pacing";
 import type { AdapterEvent, OcxParsedRequest, OcxProviderConfig, OcxUsage } from "../../types";
 import type { AnthropicAccountSelectionReason } from "../../oauth/anthropic-routing";
 import { resolveAnthropicModelRouteForInstance, routeCandidates, type AnthropicRouteDecision } from "../../oauth/anthropic-model-routes";
@@ -97,7 +97,7 @@ import { captureConfigGeneration } from "../../lib/state-store-sweeper";
 import { recordAnthropicAccountQuotaFromHeadersForInstance, hasPassiveAccountQuota } from "../../providers/quota";
 import { checkOutboundBodySize, describeOutboundBodyRefusal } from "./outbound-body-guard";
 import { formatErrorResponse } from "../../bridge";
-import { bindRouteReasoningReplayScope, couldServeResponsesStore } from "./core-replay";
+import { bindRouteReasoningReplayScope, couldServeResponsesStore, PreviousResponseOwnerUnavailable } from "./core-replay";
 import { assignNativeLogConversationId, sessionIdHeaderFromRequest, normalizeLogConversationId } from "../request-log-conversation";
 import { redactSecretString } from "../../lib/redact";
 import { captureAccountAutoPauseAttempt } from "../../oauth/account-auto-pause";
@@ -148,8 +148,17 @@ export async function prepareResponsesTransport(
   const { config, logCtx, options, req } = requestContext;
   const { route, parsed, inboundWire, translatorBudget } = requestState;
   const ownerStore = parsed._lunaProjectForeignReasoning === "owner" ? parsed._recordedResponsesStore : undefined;
-  const pickKey = (provider: OcxProviderConfig) => selectProactiveApiKeyTransport(config, route.providerName, provider,
-    parsed.options.promptCacheKey, Date.now(), ownerStore ? candidate => couldServeResponsesStore(candidate, ownerStore, true) : undefined);
+  const boundPreviousId = ownerStore && parsed.previousResponseId && !parsed._previousResponseInputExpanded;
+  const pickKey = (provider: OcxProviderConfig) => {
+    try {
+      return selectProactiveApiKeyTransport(config, route.providerName, provider, parsed.options.promptCacheKey, Date.now(),
+        ownerStore ? candidate => couldServeResponsesStore(candidate, ownerStore, true) : undefined);
+    } catch (error) {
+      if (boundPreviousId && (error instanceof BoundApiKeyUnavailableError || error instanceof ProviderApiKeyPausedError
+        || error instanceof RequestPacingQueueOverloadError && error.reason === "keys_exhausted")) throw new PreviousResponseOwnerUnavailable();
+      throw error;
+    }
+  };
   const deferPhysicalAttribution = route.providerName === "github-copilot" && route.provider.authMode !== "forward";
   let copilotCandidate: { model: string; adapter: string; accountLogLabel?: string } | undefined;
   bindResponsesSpendTarget(logCtx);
@@ -1316,6 +1325,7 @@ export async function prepareResponsesTransport(
   }
   if (proactiveKeyProvider) route.provider = proactiveKeyProvider;
   if (isProviderApiKeyPaused(route.provider)) {
+    if (boundPreviousId) throw new PreviousResponseOwnerUnavailable();
     const err = new ProviderApiKeyPausedError();
     return markProxyError(formatErrorResponse(403, "permission_error", publicOAuthAuthenticationErrorMessage(err)), publicOAuthErrorPresentation(err));
   }

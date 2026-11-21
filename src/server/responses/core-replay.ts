@@ -116,7 +116,7 @@ export function providerContinuationDestinationIdentity(
 }
 
 
-export class LegacyResponseOwnerMismatch extends Error {}
+export class PreviousResponseOwnerUnavailable extends Error {}
 
 /** Only an issuer recorded on this response row can authorize expanding its older transcript. */
 export function legacyResponseOwnerMatches(owner: OcxProviderContinuationOwner, config: OcxConfig, selector: unknown, headers: Headers): boolean {
@@ -145,6 +145,8 @@ export function bindRouteReasoningReplayScope(args: {
     modelId: parsed.modelId,
   });
   parsed._responsesStore = responsesReplayStore(replayIdentity);
+  if (parsed.previousResponseId && !parsed._previousResponseInputExpanded && parsed._lunaProjectForeignReasoning === "owner"
+    && parsed._recordedResponsesStore && parsed._recordedResponsesStore !== parsed._responsesStore) throw new PreviousResponseOwnerUnavailable();
   const owner = nativeReasoningOwnerForRoute(args);
   if (owner) parsed._nativeReasoningBoundOwner = owner;
   else delete parsed._nativeReasoningBoundOwner;
@@ -164,7 +166,7 @@ export function bindRouteReasoningReplayScope(args: {
       : undefined,
   );
   const issuer = legacyResponseIssuer(parsed._rawBody);
-  if (issuer && (!continuationOwner || !sameProviderContinuationOwner(issuer, continuationOwner))) throw new LegacyResponseOwnerMismatch();
+  if (issuer && (!continuationOwner || !sameProviderContinuationOwner(issuer, continuationOwner))) throw new PreviousResponseOwnerUnavailable();
   if (adapterName === "cursor") {
     // The final route owner is authoritative for Cursor and supersedes the account-derived
     // seed assigned before route binding. A Cursor conversation must be scoped to the exact

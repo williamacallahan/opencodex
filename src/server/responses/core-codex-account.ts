@@ -207,6 +207,10 @@ export function poolPreOutputRefusalHold(
   return comboAttempt && !reserveFirstPlacement ? undefined : { ...hold, reserveFirstPlacement };
 }
 
+// The combo consumes the exact upstream Response before rebuilding its client-safe error.
+const wrappedReserveQuota = new WeakSet<Response>();
+export const isWrappedReserveQuota = (response: Response): boolean => wrappedReserveQuota.has(response);
+
 /**
  * One dispatch's view of its pre-output refusal projections (#6969): the last one the initial
  * transient ladder observed, the single exit where the dispatch itself must record it, and the
@@ -220,6 +224,7 @@ export class PoolPreOutputRefusals {
     if (this.recordedReserveQuota === response || isNonReplayableResponse(response) || wasPermanentAccountRefusal(response)) return;
     recordCodexPreOutputRefusalOutcome(config, authCtx, provider, response, model, status);
     this.recordedReserveQuota = response;
+    if (response.status >= 500 && status === 429) wrappedReserveQuota.add(response);
   }
 
   /** True when the response handed to delivery is a restored projection already recorded. */

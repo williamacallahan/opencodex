@@ -1,3 +1,4 @@
+import type { IssuedReasoningProof, LookupItemIssuer } from "../../responses/reasoning-replay-cache";
 import type { ClientFacingModelLabel } from "../../lib/error-destination";
 import type { CodexAccountModelRefusal } from "../../combos/failover";
 import type { NativeResponseControl } from "./native-response-control";
@@ -32,6 +33,7 @@ import type { PolicyRequestEvidence } from "../../routing/evaluator";
 export interface ConsumedComboFailure {
   response: Response;
   classificationText: string;
+  wrappedReserveQuota?: boolean;
   /** Complete bounded-envelope evidence captured before display truncation; never serialized. */
   codexModelRefusal?: CodexAccountModelRefusal;
   /** Complete bounded-envelope malformed response_format diagnostic verdict captured before display truncation. */
@@ -183,7 +185,7 @@ export interface HandleResponsesOptions {
   /** Internal deterministic seam for account-gated native fallback tests. */
   resolveCodexModelEntitlements?: typeof resolveCodexModelEntitlements;
   /** Internal: validated final client-visible model, after completed terminal success only. */
-  onResponseComplete?: (model: string, responsesStore?: string, proofs?: readonly string[]) => void;
+  onResponseComplete?: (model: string, responsesStore?: string, proofs?: readonly IssuedReasoningProof[], responseId?: string) => void;
   recordTerminalOutcomes?: boolean;
   setTerminalOutcomeRecorder?: (recorder: ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined) => void;
   onNativePassthroughTerminal?: (status: ResponsesTerminalStatus) => void;
@@ -284,7 +286,7 @@ export interface HandleResponsesOptions {
     previousResponseInputExpanded: boolean;
     projectForeignReasoning?: "portable" | "owner";
     recordedResponsesStore?: string;
-    issuedReasoningProofs?: readonly string[];
+    issuedReasoningProofs?: LookupItemIssuer;
     providerContinuation: OcxProviderContinuationState | undefined;
     recoveredPlaintext: boolean;
   };

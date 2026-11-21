@@ -28,7 +28,7 @@ export async function settlePoolResponse(args: Omit<CodexPoolAccountRetryArgs, "
       clearCodexModelDenialEvidence(ctx.accountId, parsed.modelId, generation);
       break;
     }
-    if (walk && walk.remaining.size > 1 && response.status >= 500 && !ctx.fixedAccount) {
+    if (walk && response.status >= 500 && !ctx.fixedAccount) {
       response = await finishReserveWalkInspection(response, upstream.signal);
     }
     const denial = await codexPoolAccountModel400Denial(response, route.modelId, options.abortSignal, parsed.modelId);

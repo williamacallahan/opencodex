@@ -19,7 +19,7 @@ import type { OcxUsage } from "../../types";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { carryAnthropicRefusalCredential } from "../../oauth/anthropic-account-refusal";
 import { carryCodexAccountCooldownResponse } from "../../codex/account-cooldown-response";
-import { codexQuotaFailureMessage, codexQuotaOutcomeMeta } from "./core-codex-account";
+import { codexQuotaFailureMessage, codexQuotaOutcomeMeta, isWrappedReserveQuota } from "./core-codex-account";
 import {
   isRateLimitOrQuotaFailureMessage,
   isCyberPolicyCode,
@@ -198,6 +198,7 @@ export async function consumeComboFailure(
     ...(nonReplayable ? { nonReplayable: true } : {}),
     ...(verifiedPlanRefusal ? { verifiedPlanRefusal: true } : {}),
     classificationText,
+    ...(isWrappedReserveQuota(response) ? { wrappedReserveQuota: true } : {}),
     ...(codexModelRefusal !== undefined ? { codexModelRefusal } : {}),
     ...(malformedResponseFormat !== undefined ? { malformedResponseFormat } : {}),
     ...(openRouterOpaque400 !== undefined ? { openRouterOpaque400 } : {}),
@@ -273,10 +274,10 @@ export function createChildPassthroughCallbackGate(options: HandleResponsesOptio
   return {
     onTerminal: (status: ResponsesTerminalStatus) => receive({ kind: "terminal", status }),
     onCancel: () => receive({ kind: "cancel" }),
-    onResponseComplete: (model: string, store?: string, proofs?: readonly string[]) => {
-      if (state === "discarded" || completionRejected || completionAccepted || !model.trim()) return;
+    onResponseComplete: (...completion: Parameters<NonNullable<HandleResponsesOptions["onResponseComplete"]>>) => {
+      if (state === "discarded" || completionRejected || completionAccepted || !completion[0].trim()) return;
       completionAccepted = true;
-      pendingCompletion = [model, store, proofs];
+      pendingCompletion = completion;
       publishCompletion();
     },
     commit: () => {

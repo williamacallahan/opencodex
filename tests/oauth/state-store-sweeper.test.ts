@@ -255,6 +255,14 @@ describe("state-store sweeper", () => {
       expect(recallComboForLane(config, "lane-2048", fullModel(2048))).toBe("first");
     });
 
+    test("a periodic tick collects both the lane and its count-bounded response issuers", () => {
+      registerStateStore(STATE_STORE_REGISTRATIONS.find(row => row.name === "combo-session-recall")!);
+      const store = `destination:${"a".repeat(64)}/credential:${"b".repeat(64)}`;
+      for (let n = 0; n <= 4096; n++) rememberComboForLane("lane", "first", { provider: "a", model: "m1" }, "visible",
+        captureConfigGeneration(), store, undefined, `response-${n}`);
+      expect(sweepExpired(Date.now() + 24 * 60 * 60_000 + 1)).toEqual({ storesVisited: 1, rowsRemoved: 4097 });
+    });
+
     test("a periodic tick expires lanes that are never read again", () => {
       registerStateStore(STATE_STORE_REGISTRATIONS.find(row => row.name === "combo-session-recall")!);
       for (let i = 0; i < 64; i += 1) remember(`stale-${i}`, fullModel(i));

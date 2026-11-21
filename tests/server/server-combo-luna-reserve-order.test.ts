@@ -1,3 +1,4 @@
+import { clearResponseStateForTests } from "../../src/responses/state";
 import { clearReasoningReplayCacheForTests, rememberIssuedReasoning } from "../../src/responses/reasoning-replay-cache";
 import { captureConfigGeneration } from "../../src/lib/state-store-sweeper";
 import { listLiveComboTargetKeys } from "../../src/combos/types";
@@ -9,7 +10,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OcxConfig } from "../../src/types";
-import { handleResponses } from "../../src/server/responses";
+import { handleResponses, handleResponsesCompact } from "../../src/server/responses";
 import { CODEX_RESPONSES_HTTP_URL } from "../../src/server/responses/codex-ws-request";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { clearAccountQuota, setAccountQuotaFromParsed, updateAccountQuota } from "../../src/codex/quota";
@@ -58,6 +59,8 @@ type Call = string;
 let calls: Call[] = [];
 let nativeHints: (string | null)[] = [];
 let nativeAccounts: (string | null)[] = [];
+const standardRelayUrl = "https://relay.example.test/backend-api/codex/v1/responses";
+let relayUrl: string;
 let relay: (request: Request, body: { model: string }) => Response | Promise<Response>;
 let native: (body: { model: string }) => Response | Promise<Response>;
 let metered: () => Response;
@@ -129,14 +132,15 @@ beforeEach(() => {
   clearAccountNeedsReauth("__main__");
   calls = []; nativeHints = []; nativeAccounts = [];
   native = body => sse(body.model, "ok");
+  relayUrl = standardRelayUrl;
   relay = () => sse("gpt-6-luna", "ok");
   metered = () => sse("gpt-6-luna", "ok");
   spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(input, init);
     const body = await request.clone().json() as { model: string };
     if (request.url === CODEX_RESPONSES_HTTP_URL) { calls.push(`native:${body.model}`); nativeHints.push(request.headers.get("x-codex-routing-hint")); nativeAccounts.push(request.headers.get("chatgpt-account-id")); return native(body); }
-    if (request.url.startsWith("https://relay.example.test")) { calls.push(`relay:${body.model}`); return relay(request, body); }
-    if (request.url.startsWith("https://metered.example.test")) { calls.push(`metered:${body.model}`); return metered(); }
+    if (request.url === relayUrl) { calls.push(`relay:${body.model}`); return relay(request, body); }
+    if (request.url === "https://metered.example.test/v1/responses") { calls.push(`metered:${body.model}`); return metered(); }
     throw new Error(`unexpected upstream ${request.url}`);
   }, { preconnect() {} }));
 });
@@ -464,6 +468,16 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(result.status).toBe(200);
     expect(calls).toEqual(["native:gpt-reserve", "relay:gpt-6-luna", "native:gpt-6-luna"]);
   });
+  test("a quota-confirmed final Reserve 503 leaves ordinary Luna available after a relay connect failure", async () => {
+    const cfg = config(); seats(); addUnreportedSpentSeat(cfg, "last-seat");
+    native = body => body.model !== "gpt-reserve" ? sse(body.model, "ok") : nativeAccounts.length === 1 ? reserveRefused()
+      : Response.json({ error: { code: "usage_limit_reached", message: "Monthly usage limit reached" } }, { status: 503 });
+    relay = refusedConnect;
+    const result = await post(cfg);
+    expect(calls.slice(-2)).toEqual(["relay:gpt-6-luna", "native:gpt-6-luna"]);
+    expect(nativeAccounts).toContain("fixture-workspace-last-seat"); expect(nativeAccounts.at(-1)).toBe(`fixture-workspace-${A}`);
+    expect(result.text).toContain("response.completed");
+  });
   test("a Reserve refusal does not cool the native target, so ordinary Luna on it stays available", async () => {
     seats(); native = body => body.model === "gpt-reserve" ? reserveRefused() : sse(body.model, "ok");
     relay = refusedConnect;
@@ -692,6 +706,7 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     release?.();
     const db = new Database(join(home, "codex-combo-affinity.sqlite"));
     try {
+      db.exec("DROP TABLE combo_evidence"); // The pre-upgrade writer had no issuer index.
       // The old writer had neither column. These are the values SQLite gives its row after migration.
       expect(db.run("UPDATE combo_pins SET store = NULL, proofs = NULL WHERE provider = 'relay'").changes).toBe(1);
     } finally { db.close(); }
@@ -858,6 +873,72 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(logCtx.routeDecision?.selected.reason).toBe("luna-owner-encrypted-reasoning");
   });
 
+  test.each([true, false])("an evicted response id follows its issuing key, not the latest completion (available: %s)", async available => {
+    const cfg = config(), lane = { "thread-id": "id-issuer" }; seats(false);
+    const provider = cfg.providers.relay!;
+    provider.apiKeyPool = [{ id: "a", key: "fixture-a" }, { id: "b", key: "fixture-b" }];
+    provider.apiKey = "fixture-a";
+    provider.requestPacing = { enabled: true, keySelection: "round-robin" };
+    const keys: (string | null)[] = [];
+    relay = (request, body) => {
+      keys.push(request.headers.get("authorization"));
+      return Response.json({ id: `resp_issuer_${keys.length}`, object: "response", status: "completed", model: body.model, output: [] });
+    };
+    for (const turn of [1, 2]) expect((await post(cfg, { stream: false, store: true }, lane)).text).toContain(`resp_issuer_${turn}`);
+    expect(keys[0]).not.toBe(keys[1]);
+    clearResponseStateForTests();
+    release?.(); clearComboRecallForTests(); release = acquireOwnedSpendHome();
+    if (!available) {
+      const retained = provider.apiKeyPool!.find(entry => `Bearer ${entry.key}` === keys[1])!;
+      provider.apiKey = retained.key;
+      provider.apiKeyPool = [retained, { id: "c", key: "fixture-c" }];
+    }
+    let resumedOnFirst = false, receivedId: unknown;
+    relay = async (req, body) => { resumedOnFirst = req.headers.get("authorization") === keys[0]; receivedId = (await req.json()).previous_response_id; return sse(body.model, "ok"); };
+    calls.length = 0;
+    const unknown = await post(cfg, { previous_response_id: "resp_never_issued", input: "next" }, lane);
+    expect(unknown.status).toBe(400); expect(calls).toEqual([]);
+    const result = await post(cfg, { previous_response_id: "resp_issuer_1", input: "next" }, lane);
+    if (!available) { expect(result.status).toBe(400); expect(result.text).toContain("previous_response_not_found"); expect(calls).toEqual([]); }
+    else { expect(result.status).toBe(200); expect(resumedOnFirst).toBe(true); expect(receivedId).toBe("resp_issuer_1"); }
+  });
+
+  test("reasoning older than the lane proof cap survives restart without admitting unknown ciphertext", async () => {
+    const cfg = config(), lane = { "thread-id": "long-relay-history" }; seats(false);
+    const item = (n: number) => ({ type: "reasoning", id: `rs_old_${n}`, encrypted_content: `fixture-cipher-${n}`, summary: [] });
+    for (const turn of [1, 2]) {
+      const output = Array.from({ length: 6 }, (_, i) => item(turn * 10 + i));
+      relay = (_req, body) => Response.json({ id: `resp_long_${turn}`, object: "response", status: "completed", model: body.model, output });
+      expect((await post(cfg, { stream: false, store: true }, lane)).text).toContain(output[0]!.id);
+    }
+    release?.(); clearComboRecallForTests(); clearReasoningReplayCacheForTests(); release = acquireOwnedSpendHome();
+    calls.length = 0; seats(); let sent: unknown[] = [];
+    relay = async (req, body) => { sent = (await req.json()).input; return sse(body.model, "ok"); };
+    const result = await post(cfg, { store: true, input: [item(10), item(99), { role: "user", content: "continue" }] }, lane);
+    expect(result.status).toBe(200); expect(calls).toEqual(["relay:gpt-6-luna"]);
+    expect(sent).toContainEqual(item(10)); expect(sent).not.toContainEqual(item(99));
+    expect(sent.filter(entry => (entry as { type: string }).type === "reasoning")).toHaveLength(1);
+  });
+
+  test("readable Terra compaction recalls the combo after the gateway key changes", async () => {
+    const cfg = config({}, [{ provider: "relay", model: "gpt-6-terra" }]);
+    cfg.combos = { terra: cfg.combos!.luna! }; cfg.defaultProvider = "metered";
+    const lane = { "thread-id": "terra-compaction" };
+    relay = (_req, body) => sse(body.model, "ok");
+    expect((await post(cfg, { model: "combo/terra" }, lane)).text).toContain("gpt-6-terra");
+    cfg.providers.relay!.apiKey = "fixture-new-key"; calls.length = 0;
+    const log: RequestLogContext = { model: "", provider: "" };
+    const compact = (input: unknown[]) => handleResponsesCompact(new Request("http://localhost/v1/responses/compact", { method: "POST",
+      headers: { ...lane, "content-type": "application/json" }, body: JSON.stringify({ model: "gpt-6-terra", input }) }), cfg, log, undefined, local);
+    const result = await compact([{ type: "message", role: "user", content: [{ type: "input_text", text: "retain history" }] }]);
+    const compacted = await result.json();
+    expect(calls).toEqual(["relay:gpt-6-terra"]); expect(log.comboId).toBe("terra");
+    expect(result.status).toBe(200); expect(compacted.output.at(-1).content[0].text).toEndWith("\nhi");
+    cfg.providers.relay!.apiKey = "fixture-another-key"; calls.length = 0;
+    const bound = await compact([{ type: "item_reference", id: "msg_1" }]);
+    expect(bound.ok).toBe(false); expect(calls).toEqual([]);
+  });
+
   test("mixed history after restart restores only the items issued by the serving store", async () => {
     const cfg = config(), lane = { "thread-id": "mixed-after-restart" }; seats();
     const foreign = { type: "reasoning", id: "rs_native", encrypted_content: "native-cipher", summary: [{ type: "summary_text", text: "earlier plan" }] };
@@ -968,6 +1049,7 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     relay = (_request, body) => issuedReasoning(body.model, item);
     expect((await post(cfg, {}, lane)).text).toContain(item.encrypted_content);
     cfg.providers.relay!.responsesPath = "/new-store/responses";
+    relayUrl = "https://relay.example.test/backend-api/codex/new-store/responses";
     let wire = "";
     relay = (request, body) => { expect(request.url).toBe("https://relay.example.test/backend-api/codex/new-store/responses"); wire = JSON.stringify(body); return sse(body.model, "ok"); };
     const result = await post(cfg, { input: [item, { role: "user", content: "continue" }], store: true }, lane);

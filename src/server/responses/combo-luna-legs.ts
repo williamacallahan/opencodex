@@ -25,7 +25,7 @@ type ComboTarget = Combo["targets"][number];
 export function isReserveSeatQuotaRefusal(failure: ConsumedComboFailure, scope = comboFailureCooldownScope(
   failure.response.status, failure.classificationText, { code: failure.upstreamCode },
 )): boolean {
-  return (failure.response.status === 429 && scope === "target")
+  return failure.wrappedReserveQuota === true || (failure.response.status === 429 && scope === "target")
     || (failure.response.status === 402 && isReserveQuotaCode(failure.upstreamCode ?? failure.upstreamType)
       && !failure.upstreamRootCode && (!failure.upstreamType || isReserveQuotaCode(failure.upstreamType)));
 }

@@ -692,8 +692,10 @@ export async function executeComboResponses(
       from: resolvedComboDestination(config, primary), to: resolvedComboDestination(config, target),
     });
   };
+  const missingPrevious = () => formatErrorResponse(400, "previous_response_not_found", "Resend the full conversation without previous_response_id.");
   const unavailableOwner = (missingStore = false): Response => {
     if (options.abortSignal?.aborted || req.signal.aborted) return clientCancelledResponse();
+    if (unresolvedPrevious && !handleOwner) return missingPrevious();
     const target = combo.targets.find(target => targetKey(target) === boundTargetKey);
     const now = Date.now();
     const expiry = target && !config.providers[target.provider]?.disabled && scopedRoute(target) && pinEligible(target)
@@ -708,7 +710,7 @@ export async function executeComboResponses(
     return refusal;
   };
   const recorded = options.compactionRoutingOverride || options.mainHardLockFallbackOverride ? undefined
-    : recallComboOwnerForLane(config, comboLane, comboId);
+    : recallComboOwnerForLane(config, comboLane, comboId, !handleOwner && unresolvedPrevious ? requestedPreviousId : undefined);
   const recalledPick = conversationPinnedPick({ config, comboId, previous: recorded?.preference, body,
     toolLoopOnly: combo.strategy === "jev", eligible: pinEligible, now: initialNow });
   const native = nativeLunaTarget(combo, scopedRoute);
@@ -716,14 +718,18 @@ export async function executeComboResponses(
   const lunaPair = native && !unreadableEncryptedAgentTask ? planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed, native) : undefined;
   const lunaCandidate = native !== undefined || combo.strategy === "failover" && combo.targets.some(target =>
     modelHasPoolReserve(target.model) && config.providers[target.provider] && isCanonicalOpenAiForwardProvider(config.providers[target.provider]!));
-  let lunaReplay = handleOwner || lunaCandidate ? prepareLunaReplay(body, comboReplaySnapshot.previousResponseInputExpanded && !localExpansion,
+  // Name recall for readable compaction grants no right to send bound input to a replacement store.
+  const projectStore = lunaCandidate || (recorded?.store && isPlainObject(body) && Array.isArray(body.input)
+    && body.input.some(entry => isPlainObject(entry) && entry.type === "compaction_trigger"));
+  let lunaReplay = handleOwner || projectStore || unresolvedPrevious ? prepareLunaReplay(body, comboReplaySnapshot.previousResponseInputExpanded && !localExpansion,
     req.headers, unreadableEncryptedAgentTask && encryptedTaskRecoveryAdmitted) : undefined;
   let lunaLegs = lunaReplay?.kind === "portable" ? lunaPair : undefined;
   let dispatchBody = lunaReplay?.kind === "portable" ? lunaReplay.body : body;
   // A migrated pin may route the ID, not other bound state. Check the delta with the ID removed.
-  const legacyIdPin = !handleOwner && !legacyTarget && recorded?.target && !recorded.store
+  const legacyIdPin = !handleOwner && !legacyTarget && recorded?.target && !recorded.store && !recorded.idIssuer
     && lunaReplay?.kind === "bound" && lunaReplay.reason === "previous-response-id"
     && prepareLunaReplay(body, true, req.headers).kind === "portable";
+  if (unresolvedPrevious && !handleOwner && !recorded?.idIssuer && !legacyIdPin) return unavailableOwner();
   if (lunaReplay?.kind === "bound") {
     const owner = legacyTarget ? combo.targets.find(target => targetKey(target) === legacyTarget) : recorded?.target;
     if (handleOwner) {
@@ -735,7 +741,7 @@ export async function executeComboResponses(
     }
     if (!boundTargetKey) {
       if (options.abortSignal?.aborted || req.signal.aborted) return clientCancelledResponse();
-      if (lunaReplay.reason === "previous-response-id") return formatErrorResponse(400, "previous_response_not_found", "Resend the full conversation without previous_response_id.");
+      if (lunaReplay.reason === "previous-response-id") return missingPrevious();
       return unavailableOwner(!handleOwner && lunaReplay.reason !== "turn-state");
     }
   }
@@ -1192,10 +1198,8 @@ export async function executeComboResponses(
     const spendProvider = resolveWireProtocolOverride(targetRoute.providerName, targetRoute.modelId,
       targetRoute.provider, options.inboundWire ?? "responses", targetRoute.staticPolicy);
     const responsesWire = spendProvider.adapter === "openai-responses";
-    if (legacyIdPin && (targetRoute.providerName !== pick.target.provider || targetRoute.modelId !== pick.target.model
-      || !responsesWire || spendProvider.authMode === "forward" || spendProvider.statelessResponses)) {
-      return formatErrorResponse(400, "previous_response_not_found", "Resend the full conversation without previous_response_id.");
-    }
+    if ((legacyIdPin || recorded?.idIssuer) && (!responsesWire || spendProvider.authMode === "forward" || spendProvider.statelessResponses
+      || (legacyIdPin && (targetRoute.providerName !== pick.target.provider || targetRoute.modelId !== pick.target.model)))) return missingPrevious();
     if (boundTargetKey && !localExpansion && recorded?.store && !responsesWire) return unavailableOwner();
     const outputBudget = effectiveAzureOutputBudget(spendProvider, callerBudget);
     if (outputBudget !== callerBudget && typeof outputBudget === "number" && outputBudget > 0) {
@@ -1256,7 +1260,7 @@ export async function executeComboResponses(
     // re-tiered mid-session and its prompt cache survives the turn.
     const jevEffortApplies = initialJevDecision !== undefined && combo.jevEffortMode !== "client";
     // Native Responses can decide from the final credential; other wires get only the proven cross-owner copy.
-    const lateReasoningProjection = responsesWire && ((lunaCandidate && lunaReplay?.kind === "bound") || (localExpansion && recorded?.store)) ? "owner"
+    const lateReasoningProjection = responsesWire && (((projectStore || recorded?.idIssuer) && lunaReplay?.kind === "bound") || (localExpansion && recorded?.store)) ? "owner"
       : responsesWire && lunaReplay?.kind === "portable" && lunaReplay.ownerBody !== undefined ? "portable" : undefined;
     // A verified handle owns its physical send even when lane recall names another account.
     const recordedResponsesStore = handleOwner || localExpansion ? undefined : recorded?.store;
@@ -1349,7 +1353,7 @@ export async function executeComboResponses(
     let failedInPreflight = false;
     const callbackGate = createChildPassthroughCallbackGate({
       ...options,
-      onResponseComplete: (model, store, proofs) => {
+      onResponseComplete: (model, store, proofs, responseId) => {
         if (poolCooldownRevision !== undefined && attempt.sendCount > 0) {
           clearComboTargetCooldownIfUnchanged(comboId, completedTarget, poolCooldownRevision);
         }
@@ -1360,10 +1364,10 @@ export async function executeComboResponses(
           && Object.hasOwn(config.providers, completedTarget.provider)
           && provider && provider.disabled !== true
           && currentCombo?.targets.some(target => targetKey(target) === targetKey(completedTarget))) {
-          rememberComboForLane(comboLane, comboId, completedTarget, model, writerGeneration, store, proofs);
+          rememberComboForLane(comboLane, comboId, completedTarget, model, writerGeneration, store, proofs, responseId);
           jevPin?.complete(targetKey(completedTarget), initialJevDecision, writerGeneration);
         }
-        options.onResponseComplete?.(model, store, proofs);
+        options.onResponseComplete?.(model, store, proofs, responseId);
       },
       onNativePassthroughTerminal: status => {
         // A committed stream can acquire terminal metadata after preflight copied
@@ -1597,6 +1601,7 @@ export async function executeComboResponses(
       Date.now() - started,
       failure.usage ?? childLog.usage,
     );
+    if (recorded?.idIssuer && attempt.sendCount === 0 && failure.upstreamCode === "previous_response_not_found") return missingPrevious();
     if (isReplayRefusalResponse(failure.response)) {
       // Numeric 429 is a client replay policy here, not an upstream quota observation.
       childLog.causeHint = "transport-ambiguous";

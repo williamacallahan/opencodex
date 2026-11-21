@@ -1,5 +1,5 @@
 import type { KiroOAuthMetadata } from "../oauth/types";
-import type { NativeReasoningOwner } from "../responses/reasoning-replay-cache";
+import type { LookupItemIssuer, NativeReasoningOwner } from "../responses/reasoning-replay-cache";
 import type { OcxTool, OcxToolChoice } from "./tools";
 import type { TierDecision, TierObservationContext } from "./provider";
 import type { TranslatorBudget } from "../lib/translator-budget";
@@ -112,7 +112,7 @@ export interface OcxParsedRequest {
   /** Digests only: final Responses endpoint/credential and the store recorded at completion. */
   _responsesStore?: string;
   _recordedResponsesStore?: string;
-  _issuedReasoningProofs?: readonly string[];
+  _issuedReasoningProofs?: LookupItemIssuer;
   /** Provider-private stable Cursor conversation id resolved from the Responses previous_response_id chain. */
   _cursorConversationId?: string;
   /** Stable upstream client thread identity, used only to derive provider-scoped continuation ids. */

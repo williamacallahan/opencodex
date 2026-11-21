@@ -45,13 +45,19 @@ export type StoredComboPin = {
   store?: string | null;
   proofs?: string | null;
 };
+export const COMBO_EVIDENCE_LIMIT = 4096;
+export type StoredComboEvidence = {
+  digest: string; comboId: string; at: number; provider: string | null; model: string | null; store: string | null;
+};
+type ComboRows = { pins: StoredComboPin[]; evidence: StoredComboEvidence[] };
 type ComboSnapshot = {
-  restore(rows: Iterable<StoredComboPin>): void;
+  restore(rows: ComboRows): void;
   rows(): Iterable<StoredComboPin>;
+  evidence(): Iterable<StoredComboEvidence>;
 };
 let comboSnapshot: ComboSnapshot | undefined;
 /** Admission belongs to the serving lease, not the SQLite handle that may close and reopen under it. */
-let servingIdentity: { home: string; durableKey?: Uint8Array; unclaimedComboPins?: StoredComboPin[] } | undefined;
+let servingIdentity: { home: string; durableKey?: Uint8Array; unclaimedComboPins?: ComboRows } | undefined;
 
 export function registerComboPinSnapshot(snapshot: ComboSnapshot): void {
   comboSnapshot = snapshot;
@@ -125,7 +131,7 @@ let current: Scope | undefined;
 const ephemeralSecret = randomBytes(32);
 
 /** Admission never opens SQLite. Without an owned store, identities remain private to this process and home. */
-export function affinityDigest(domain: "principal" | "transcript" | "combo-lane", components: string): string {
+export function affinityDigest(domain: "principal" | "transcript" | "combo-lane" | "response-id", components: string): string {
   const secret = servingIdentity?.durableKey;
   const mac = createHmac("sha256", secret ?? ephemeralSecret);
   if (!secret) mac.update(servingIdentity?.home ?? getConfigDir()).update("\0");
@@ -204,6 +210,8 @@ const oldComboSchema = "CREATE TABLE combo_pins(generation TEXT, lane TEXT, comb
 
 const comboSchema = oldComboSchema.replace("responseDigest TEXT)", "responseDigest TEXT, store TEXT, proofs TEXT)");
 
+const evidenceSchema = "CREATE TABLE combo_evidence(generation TEXT, digest TEXT, comboId TEXT, at INTEGER, provider TEXT, model TEXT, store TEXT)";
+
 /** v1 rejects extra tables in the native database. The companion has the same lease and file protections. */
 function withComboTable<T>(s: Scope, create: boolean, work: (db: Database) => T): T | undefined {
   const path = spendLedgerStoragePath(s.comboToken);
@@ -214,10 +222,12 @@ function withComboTable<T>(s: Scope, create: boolean, work: (db: Database) => T)
     db = new Database(path);
     assertWritableFile(s.comboToken, before);
     db.exec("PRAGMA busy_timeout=0; PRAGMA secure_delete=ON; BEGIN IMMEDIATE");
-    const schema = db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master LIMIT 2").all();
+    const schema = db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master ORDER BY name LIMIT 3").all().map(row => row.sql);
     if (!schema.length) db.exec(comboSchema);
-    else if (schema.length === 1 && schema[0]?.sql === oldComboSchema) db.exec("ALTER TABLE combo_pins ADD COLUMN store TEXT; ALTER TABLE combo_pins ADD COLUMN proofs TEXT");
-    else if (schema.length !== 1 || schema[0]?.sql !== comboSchema) throw new Error("shape");
+    else if (schema.length === 1 && schema[0] === oldComboSchema) db.exec("ALTER TABLE combo_pins ADD COLUMN store TEXT; ALTER TABLE combo_pins ADD COLUMN proofs TEXT");
+    else if (!(schema.length === 1 && schema[0] === comboSchema)
+      && !(schema.length === 2 && schema[0] === evidenceSchema && schema[1] === comboSchema)) throw new Error("shape");
+    if (schema.length < 2) db.exec(evidenceSchema);
     limitDatabaseSize(db);
     const result = work(db);
     db.exec("COMMIT");
@@ -627,11 +637,15 @@ function flush(s: Scope, clean: boolean): boolean {
     db.exec("COMMIT");
     if (shutdown && servingIdentity?.durableKey && s.secret && timingSafeEqual(servingIdentity.durableKey, s.secret)) {
       const now = Date.now();
-      const pins = Array.from(comboSnapshot?.rows() ?? servingIdentity.unclaimedComboPins ?? []).filter(pin => pin.at <= now && pin.at >= now - TTL);
-      if (pins.length) withComboTable(s, true, table => {
-        table.exec("DELETE FROM combo_pins");
+      const pins = Array.from(comboSnapshot?.rows() ?? servingIdentity.unclaimedComboPins?.pins ?? []).filter(pin => pin.at <= now && pin.at >= now - TTL);
+      const evidence = Array.from(comboSnapshot?.evidence() ?? servingIdentity.unclaimedComboPins?.evidence ?? []).filter(row => row.at <= now && row.at >= now - TTL);
+      if (pins.length || evidence.length) withComboTable(s, true, table => {
+        table.exec("DELETE FROM combo_pins; DELETE FROM combo_evidence");
         const insert = table.query("INSERT INTO combo_pins VALUES (?,?,?,?,?,?,?,?,?)");
         for (const pin of pins) insert.run(shutdown.generation, pin.lane, pin.comboId, pin.provider, pin.model, pin.at, pin.responseDigest, pin.store ?? null, pin.proofs ?? null);
+        const issued = table.query("INSERT INTO combo_evidence VALUES (?,?,?,?,?,?,?)");
+        for (const row of evidence)
+          issued.run(shutdown.generation, row.digest, row.comboId, row.at, row.provider, row.model, row.store);
       });
     }
     s.log = [];
@@ -659,16 +673,20 @@ onSpendLedgerOwnerAcquired(home => {
   const s = isPassiveRead() ? undefined : scope(home);
   servingIdentity = { home, durableKey: s?.secret };
   // Hydrate once before serving. Reopening SQLite must not replace this owner's live pins.
-  const pins = s?.db ? withComboTable(s, false, table => {
+  const snapshot = s?.db ? withComboTable(s, false, table => {
     const now = Date.now();
     const rows = s.snapshotGeneration === undefined ? [] : table.query<StoredComboPin, [string, number, number]>(
       `SELECT lane, comboId, provider, model, at, responseDigest, store, proofs FROM combo_pins WHERE generation=? AND at BETWEEN ? AND ? ORDER BY rowid DESC LIMIT ${COMBO_PIN_LIMIT}`,
     ).all(s.snapshotGeneration, now - TTL, now).reverse();
-    table.exec("DELETE FROM combo_pins");
-    return rows;
-  }) ?? [] : [];
-  if (comboSnapshot) comboSnapshot.restore(pins);
-  else servingIdentity.unclaimedComboPins = pins;
+    const evidence = s.snapshotGeneration === undefined ? [] : table.query<StoredComboEvidence, [string, number, number]>(
+      `SELECT digest, comboId, at, provider, model, store FROM combo_evidence WHERE generation=? AND at BETWEEN ? AND ? ORDER BY rowid DESC LIMIT ${COMBO_EVIDENCE_LIMIT}`,
+    ).all(s.snapshotGeneration, now - TTL, now).reverse();
+    table.exec("DELETE FROM combo_pins; DELETE FROM combo_evidence");
+    return { pins: rows, evidence };
+  }) : undefined;
+  const rows = snapshot ?? { pins: [], evidence: [] };
+  if (comboSnapshot) comboSnapshot.restore(rows);
+  else servingIdentity.unclaimedComboPins = rows;
 });
 // Commit clean before closing; a later close failure cannot undo that commit.
 onSpendLedgerOwnerReleasing(() => {
