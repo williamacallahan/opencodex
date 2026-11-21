@@ -1,3 +1,5 @@
+import type { OcxProviderContinuationOwner } from "../../types";
+
 /**
  * Request bodies that must never enter the continuation cache.
  *
@@ -30,13 +32,22 @@ export function isBodyNonPersistable(body: unknown): boolean {
 // once. It records the boundary whether the proxy prepended the history or the client already
 // carried it — the boundary is the same either way, and only its provenance differs.
 const upstreamHistoryBodies = new WeakSet<object>();
+const legacyIssuers = new WeakMap<object, OcxProviderContinuationOwner>();
 const replayedInputPrefixLengths = new WeakMap<object, number>();
 const clientCarriedReplays = new WeakSet<object>(); // overlap skip: the client resent the window itself
 
 export function noteUpstreamHistory(body: object): void { upstreamHistoryBodies.add(body); }
-export function recordExpandedHistory(body: object, prefix: number, clientCarried = false): void {
+export function recordExpandedHistory(body: object, prefix: number, clientCarried = false, issuer?: OcxProviderContinuationOwner): void {
+  if (issuer) { legacyIssuers.set(body, issuer); noteUpstreamHistory(body); }
   replayedInputPrefixLengths.set(body, prefix);
   if (clientCarried) clientCarriedReplays.add(body);
+}
+/** Local expansion is sufficient for the original route, but not evidence of a complete cold replay. */
+export function legacyResponseIssuer(body: unknown): OcxProviderContinuationOwner | undefined {
+  return body && typeof body === "object" ? legacyIssuers.get(body) : undefined;
+}
+export function isLegacyResponseExpansion(body: unknown): boolean {
+  return legacyResponseIssuer(body) !== undefined;
 }
 export function isCompleteResponseTranscript(request: Record<string, unknown>): boolean {
   return !upstreamHistoryBodies.has(request) && request.conversation == null && request.prompt == null
@@ -58,11 +69,14 @@ export function previousResponseRestoredPrefixLength(body: unknown): number {
 export function copyPreviousResponseReplayProvenance(source: unknown, target: unknown): void {
   if (!source || typeof source !== "object" || Array.isArray(source)) return;
   if (!target || typeof target !== "object" || Array.isArray(target)) return;
+  if (nonPersistableBodies.has(source)) nonPersistableBodies.add(target);
   if (upstreamHistoryBodies.has(source)) upstreamHistoryBodies.add(target);
   const prefixLength = replayedInputPrefixLengths.get(source);
   if (prefixLength === undefined) return;
   const input = (target as { input?: unknown }).input;
   if (!Array.isArray(input) || prefixLength > input.length) return;
+  const issuer = legacyIssuers.get(source);
+  if (issuer) legacyIssuers.set(target, issuer);
   replayedInputPrefixLengths.set(target, prefixLength);
   if (clientCarriedReplays.has(source)) clientCarriedReplays.add(target);
 }

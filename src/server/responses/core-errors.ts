@@ -27,7 +27,7 @@ export async function readDisplaySafeErrorText(
   fallback: string,
 ): Promise<string> {
   try {
-    const inspected = inspectedReserveRefusal(response);
+    const inspected = inspectedReserveRefusal(response, "final");
     if (inspected) { cancelResponseBodyBestEffort(response); signal.throwIfAborted(); }
     const body = inspected ?? await readBoundedResponseBody(response, { signal });
     return body.displaySafe ? body.text : fallback;

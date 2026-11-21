@@ -1,3 +1,4 @@
+import { isLegacyResponseExpansion } from "../../responses/state/body-policy";
 import { comboTurnStateOwner, withComboTurnStateOwner, CodexTurnStateOwnerUnavailableError } from "../turn-state-handles";
 import { comboLogLabel, comboTargetLogLabel } from "../../combos/resolve";
 import { clientFacingModelLabel, clientFacingModelText } from "../../lib/error-destination";
@@ -43,6 +44,7 @@ import {
   targetKey,
   concreteComboRequestBody,
   comboDefaultEffort,
+  earliestComboCooldownExpiry,
   isComboTargetInCooldown,
   snapshotComboQuotaCooldowns,
   comboExclusionReasons,
@@ -115,7 +117,7 @@ import {
 import type { CodexAuthContext } from "../../codex/auth-context";
 import type { ResponsesTerminalStatus } from "../../bridge";
 import { beginRequestAttempt, sealRequestAttemptIdentity, finishRequestAttempt } from "../request-log";
-import { recallComboTargetForLane, rememberComboForLane } from "./combo-session-recall";
+import { recallComboOwnerForLane, rememberComboForLane } from "./combo-session-recall";
 import { COMBO_CONVERSATION_PIN_REASON, conversationPinnedPick } from "./combo-conversation-pin";
 import { JEV_SESSION_PIN_ROUTE_REASON, jevSessionPinScope } from "./jev-session-pin";
 import { runTurnAdapterSseResponses } from "./core-lifetime";
@@ -137,7 +139,7 @@ import {
   jsonIncompleteResponse,
   streamingIncompleteResponse,
 } from "./context-overflow";
-import { mandatoryResponsesReasoningReplayUnavailable } from "./core-replay";
+import { legacyResponseOwnerMatches, mandatoryResponsesReasoningReplayUnavailable } from "./core-replay";
 import { anthropicSessionKeyFromParts } from "../../oauth/anthropic-routing";
 import { agentServingThreadKey } from "../../oauth/session-affinity-key";
 import { markResponseNonReplayable, isReplayRefusalResponse, settleOperatorReplacement, UPSTREAM_RESET_REPLAY_REFUSED_CODE } from "../../lib/upstream-retry";
@@ -463,7 +465,14 @@ export async function executeComboResponses(
   // continuation that only references prior images still fails closed when
   // imageInput is disabled (and so targets see the full replayed input).
   const inboundClientThreadId = req.headers.get("x-codex-parent-thread-id")?.trim() || undefined;
-  const body = expandPreviousResponseInput(rawBody, inboundClientThreadId);
+  let legacyTarget: string | undefined;
+  const body = expandPreviousResponseInput(rawBody, inboundClientThreadId, owner => {
+    if (options.compactionRoutingOverride || options.mainHardLockFallbackOverride) return false;
+    const member = combo.targets.find(target => legacyResponseOwnerMatches(owner, config, targetKey(target), req.headers));
+    legacyTarget = member && targetKey(member);
+    return legacyTarget !== undefined;
+  });
+  const localExpansion = isLegacyResponseExpansion(body);
   const replayFailure = previousResponseReplayFailure(body);
   if (replayFailure?.reason === "scope_mismatch") {
     console.warn("[opencodex] refusing continuation because the client task scope does not match replay state");
@@ -639,10 +648,10 @@ export async function executeComboResponses(
     && museToolEligible(target)
     && reasoningReplayEligible(target)
     && (protocolLanes?.pickable(target) ?? true);
-  let boundLunaTarget: string | undefined;
+  let boundTargetKey: string | undefined;
   let unavailableOrdinaryTarget: string | undefined;
   const targetEligible = (target: (typeof combo.targets)[number]): boolean =>
-    (!boundLunaTarget || boundLunaTarget === targetKey(target)) && unavailableOrdinaryTarget !== targetKey(target)
+    (!boundTargetKey || boundTargetKey === targetKey(target)) && unavailableOrdinaryTarget !== targetKey(target)
     && payloadEligible(target) && recoveryEligible(target);
   const initialNow = Date.now();
   const comboLane = options.claudeBridgePoolSession;
@@ -682,45 +691,57 @@ export async function executeComboResponses(
       from: resolvedComboDestination(config, primary), to: resolvedComboDestination(config, target),
     });
   };
-  const unavailableOwner = (): Response => {
+  const unavailableOwner = (missingStore = false): Response => {
+    if (options.abortSignal?.aborted || req.signal.aborted) return clientCancelledResponse();
+    const target = combo.targets.find(target => targetKey(target) === boundTargetKey);
+    const now = Date.now();
+    const expiry = target && !config.providers[target.provider]?.disabled && scopedRoute(target) && pinEligible(target)
+      ? earliestComboCooldownExpiry(comboId, [target], now) : undefined;
     const message = handleOwner ? new CodexTurnStateOwnerUnavailableError().message
       : "The owner of this conversation state is unavailable. The request was not sent.";
-    const refusal = markProxyError(formatErrorResponse(409, "invalid_request_error", message));
+    const refusal = expiry !== undefined ? comboUnavailableResponse("The conversation owner is cooling down. No request was sent.", {
+      retryAfter: String(Math.max(1, Math.ceil((expiry - now) / 1000))),
+    }) : missingStore ? comboUnavailableResponse("The recorded conversation store is unavailable. No request was sent.")
+      : markProxyError(formatErrorResponse(409, "invalid_request_error", message));
     markResponseNonReplayable(refusal);
     return refusal;
   };
-  const recalledPick = options.compactionRoutingOverride || options.mainHardLockFallbackOverride
-    ? undefined
-    : conversationPinnedPick({
-      config,
-      comboId,
-      lane: comboLane,
-      body,
-      toolLoopOnly: combo.strategy === "jev",
-      eligible: pinEligible,
-      now: initialNow,
-    });
+  const recorded = options.compactionRoutingOverride || options.mainHardLockFallbackOverride ? undefined
+    : recallComboOwnerForLane(config, comboLane, comboId);
+  const recalledPick = conversationPinnedPick({ config, comboId, previous: recorded?.preference, body,
+    toolLoopOnly: combo.strategy === "jev", eligible: pinEligible, now: initialNow });
   const native = nativeLunaTarget(combo, scopedRoute);
   const nativeKey = native && targetKey(native);
   const lunaPair = native && !unreadableEncryptedAgentTask ? planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed, native) : undefined;
   const lunaCandidate = native !== undefined || combo.strategy === "failover" && combo.targets.some(target =>
     modelHasPoolReserve(target.model) && config.providers[target.provider] && isCanonicalOpenAiForwardProvider(config.providers[target.provider]!));
-  const lunaReplay = handleOwner || lunaCandidate ? prepareLunaReplay(body, comboReplaySnapshot.previousResponseInputExpanded,
+  const lunaReplay = handleOwner || lunaCandidate ? prepareLunaReplay(body, comboReplaySnapshot.previousResponseInputExpanded && !localExpansion,
     req.headers, unreadableEncryptedAgentTask && encryptedTaskRecoveryAdmitted) : undefined;
   const lunaLegs = lunaReplay?.kind === "portable" ? lunaPair : undefined;
   const dispatchBody = lunaReplay?.kind === "portable" ? lunaReplay.body : body;
   if (lunaReplay?.kind === "bound") {
-    const owner = recalledPick?.target ?? (!options.compactionRoutingOverride && !options.mainHardLockFallbackOverride
-      ? recallComboTargetForLane(config, comboLane, comboId) : undefined);
+    const owner = legacyTarget ? combo.targets.find(target => targetKey(target) === legacyTarget) : recorded?.target;
     if (handleOwner) {
       const match = combo.targets.find(target => owner && targetKey(target) === targetKey(owner) && pinEligible(target)) ?? combo.targets.find(pinEligible);
-      boundLunaTarget = match && targetKey(match);
-    } else boundLunaTarget = owner ? targetKey(owner) : nativeKey;
-    if (!boundLunaTarget) return unavailableOwner();
+      boundTargetKey = match && targetKey(match);
+    } else if (owner && (legacyTarget || recorded?.store)) {
+      if (!pinEligible(owner)) return unavailableOwner();
+      boundTargetKey = targetKey(owner);
+    }
+    if (!boundTargetKey) {
+      if (options.abortSignal?.aborted || req.signal.aborted) return clientCancelledResponse();
+      if (lunaReplay.reason === "previous-response-id") return formatErrorResponse(400, "previous_response_not_found", "Resend the full conversation without previous_response_id.");
+      return unavailableOwner(!handleOwner && lunaReplay.reason !== "turn-state");
+    }
+  }
+  if (localExpansion && legacyTarget !== undefined) {
+    if (boundTargetKey && legacyTarget !== boundTargetKey) return unavailableOwner();
+    boundTargetKey = legacyTarget;
   }
   // Recall identifies a provider, not an account dependency. A portable relay pin cannot skip Reserve.
-  const conversationPin = recalledPick && (!boundLunaTarget || boundLunaTarget === targetKey(recalledPick.target))
+  const conversationPin = recalledPick && (!boundTargetKey || boundTargetKey === targetKey(recalledPick.target))
     && (!lunaLegs || targetKey(recalledPick.target) === lunaLegs.nativeKey) ? recalledPick : undefined;
+  let evaluatedStrictReserve = false;
   let lunaStage: "off" | "reserve" | "relay" | "done" = "off";
   const comboLegCount = lunaLegs?.legCount ?? combo.targets.length;
   const onlyReplayIncompatibleTargetsRemain = (excluded: Iterable<string> = []): boolean => {
@@ -789,10 +810,11 @@ export async function executeComboResponses(
     now?: number;
   }) => pickComboTargetWithWait(config, comboId, {
     ...pickOptions,
+    allowCooldownReprobe: boundTargetKey ? false : pickOptions.allowCooldownReprobe,
     routeConcreteModel,
     // Every pick, including the recovery picks that skip `targetEligible`, keeps metered
     // targets away from callers that may not spend on them.
-    eligible: target => (!boundLunaTarget || targetKey(target) === boundLunaTarget) && (meteredAllowed || !target.metered) && (pickOptions.eligible?.(target) ?? true),
+    eligible: target => (!boundTargetKey || targetKey(target) === boundTargetKey) && (meteredAllowed || !target.metered) && (pickOptions.eligible?.(target) ?? true),
     waitForCooldownMs: combo.waitForCooldownMs,
     abortSignal: options.abortSignal,
   });
@@ -805,7 +827,7 @@ export async function executeComboResponses(
     ? undefined
     : jevSessionPinScope({ combo, comboId, admission: options.admission, lane: comboLane });
 
-  if (!pick && (handleOwner || boundLunaTarget && !unreadableEncryptedAgentTask)) return unavailableOwner();
+  if (!pick && (handleOwner || boundTargetKey && !unreadableEncryptedAgentTask)) return unavailableOwner();
   if (unreadableEncryptedAgentTask && !pick) {
     pick = await pickWithWait({
       eligible: recoveryEligible,
@@ -819,7 +841,7 @@ export async function executeComboResponses(
         config,
         { parentThreadId: inboundClientThreadId },
       );
-      if (boundLunaTarget && !options.abortSignal?.aborted) return unavailableOwner();
+      if (boundTargetKey && !options.abortSignal?.aborted) return unavailableOwner();
       if (!options.abortSignal?.aborted && onlyMuseToolIncompatible()) {
         return comboUnavailableResponse("No available targets for combo; targets cannot preserve mandatory tool_choice");
       }
@@ -1100,7 +1122,7 @@ export async function executeComboResponses(
     ?? (typeof callerBudget === "number" && Number.isFinite(callerBudget) && callerBudget > 0
       ? Math.trunc(callerBudget) : undefined);
   const reserveWalk = isRequestExecutionBudget(options.sendBudget)
-    && pick && lunaLegs && targetKey(pick.target) === lunaLegs.nativeKey
+    && lunaLegs
     ? createPoolReserveWalk(config) : undefined;
   const ordinaryPoolSends = 1 + CODEX_TEXT_GUARDED_BUDGET_POLICY.maxAlternateTargetSends;
   // A previously charged ledger can still visit unreported seats, but cannot grow its send limit.
@@ -1112,7 +1134,11 @@ export async function executeComboResponses(
     const firstComboTarget = comboTargetsDispatched === 0;
     const legTargetKey = targetKey(pick.target);
     if (lunaLegs && firstComboTarget) lunaStage = legTargetKey === lunaLegs.nativeKey ? "reserve" : legTargetKey === lunaLegs.relayKey ? "relay" : "off";
-    const legIntent: PoolCapacityIntent | undefined = boundLunaTarget && boundLunaTarget === nativeKey ? "owner-only"
+    if (lunaLegs && legTargetKey === lunaLegs.nativeKey && !evaluatedStrictReserve) {
+      lunaStage = "reserve";
+      evaluatedStrictReserve = true;
+    }
+    const legIntent: PoolCapacityIntent | undefined = boundTargetKey && boundTargetKey === nativeKey ? "owner-only"
       : legTargetKey !== lunaLegs?.nativeKey ? undefined
       : lunaStage === "reserve" ? "reserve-only" : lunaStage === "done" ? "ordinary-only" : undefined;
     // The physical destination after provider aliases and blockedModelRedirects: hops are
@@ -1160,6 +1186,8 @@ export async function executeComboResponses(
     // already see this target's effective cap rather than a previous target's cap.
     const spendProvider = resolveWireProtocolOverride(targetRoute.providerName, targetRoute.modelId,
       targetRoute.provider, options.inboundWire ?? "responses", targetRoute.staticPolicy);
+    const responsesWire = spendProvider.adapter === "openai-responses";
+    if (boundTargetKey && !localExpansion && recorded?.store && !responsesWire) return unavailableOwner();
     const outputBudget = effectiveAzureOutputBudget(spendProvider, callerBudget);
     if (outputBudget !== callerBudget && typeof outputBudget === "number" && outputBudget > 0) {
       logCtx.spendOutputCeilingTokens = Math.trunc(outputBudget);
@@ -1219,9 +1247,10 @@ export async function executeComboResponses(
     // re-tiered mid-session and its prompt cache survives the turn.
     const jevEffortApplies = initialJevDecision !== undefined && combo.jevEffortMode !== "client";
     // Native Responses can decide from the final credential; other wires get only the proven cross-owner copy.
-    const responsesWire = targetRoute.staticPolicy.model.adapter === "openai-responses";
-    const lateReasoningProjection = responsesWire && lunaCandidate && lunaReplay?.kind === "bound" ? "owner"
+    const lateReasoningProjection = responsesWire && ((lunaCandidate && lunaReplay?.kind === "bound") || (localExpansion && recorded?.store)) ? "owner"
       : responsesWire && lunaReplay?.kind === "portable" && lunaReplay.ownerBody !== undefined ? "portable" : undefined;
+    // A verified handle owns its physical send even when lane recall names another account.
+    const recordedResponsesStore = handleOwner || localExpansion ? undefined : recorded?.store;
     const targetBody = lateReasoningProjection === "portable" && lunaReplay?.kind === "portable" ? lunaReplay.ownerBody : dispatchBody;
     const childInput = options.droidDefaultEffort && isPlainObject(targetBody) ? { ...targetBody } : targetBody;
     applyDroidResponsesReasoningDefault(childInput, options.droidDefaultEffort, {
@@ -1311,7 +1340,7 @@ export async function executeComboResponses(
     let failedInPreflight = false;
     const callbackGate = createChildPassthroughCallbackGate({
       ...options,
-      onResponseComplete: model => {
+      onResponseComplete: (model, store, proofs) => {
         if (poolCooldownRevision !== undefined && attempt.sendCount > 0) {
           clearComboTargetCooldownIfUnchanged(comboId, completedTarget, poolCooldownRevision);
         }
@@ -1322,10 +1351,10 @@ export async function executeComboResponses(
           && Object.hasOwn(config.providers, completedTarget.provider)
           && provider && provider.disabled !== true
           && currentCombo?.targets.some(target => targetKey(target) === targetKey(completedTarget))) {
-          rememberComboForLane(comboLane, comboId, completedTarget, model, writerGeneration);
+          rememberComboForLane(comboLane, comboId, completedTarget, model, writerGeneration, store, proofs);
           jevPin?.complete(targetKey(completedTarget), initialJevDecision, writerGeneration);
         }
-        options.onResponseComplete?.(model);
+        options.onResponseComplete?.(model, store, proofs);
       },
       onNativePassthroughTerminal: status => {
         // A committed stream can acquire terminal metadata after preflight copied
@@ -1360,7 +1389,7 @@ export async function executeComboResponses(
           && targetEligible(target)
           && !isComboTargetInCooldown(comboId, target),
         );
-      const nativeChild = handleOwner || legIntent || lateReasoningProjection || dispatchBody !== body ? undefined : protocolLanes?.nativeChild(pick.target, targetRoute, targetSendBudget, initialJevDecision, jevEffortApplies);
+      const nativeChild = localExpansion || handleOwner || legIntent || lateReasoningProjection || dispatchBody !== body ? undefined : protocolLanes?.nativeChild(pick.target, targetRoute, targetSendBudget, initialJevDecision, jevEffortApplies);
       response = nativeChild ? await dispatchNativeComboChild({
         source: options.protocolSource!,
         plan: nativeChild,
@@ -1393,7 +1422,8 @@ export async function executeComboResponses(
         comboAttempt: true,
         comboInitialSend: initialSend,
         comboDispatchPermit: hopDecision?.allowed ? hopDecision.permit : undefined,
-        comboReplaySnapshot: lateReasoningProjection ? { ...comboReplaySnapshot, projectForeignReasoning: lateReasoningProjection } : comboReplaySnapshot,
+        comboReplaySnapshot: lateReasoningProjection ? { ...comboReplaySnapshot, projectForeignReasoning: lateReasoningProjection,
+          recordedResponsesStore, issuedReasoningProofs: recorded?.proofs } : comboReplaySnapshot,
         deferCodexResetDerivedCooldown,
         poolCapacityIntent: legIntent,
         reserveWalk: walkSeats,
@@ -1597,7 +1627,7 @@ export async function executeComboResponses(
     }
     // A non-replayable failure (the answer to a spent ambiguous-reset replacement) may follow a
     // send that already ran the turn, so no later target may receive it, whatever its status says.
-    const failureDecision = boundLunaTarget !== undefined || failure.nonReplayable || spentReplacement
+    const failureDecision = boundTargetKey !== undefined || failure.nonReplayable || spentReplacement
       ? "stop"
       : isPolicyCandidateRefusal(failure.response) ? "hop"
       : comboFailureDecision(failure.response.status, failure.classificationText, {

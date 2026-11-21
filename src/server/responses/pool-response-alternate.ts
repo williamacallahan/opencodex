@@ -2,6 +2,7 @@ import type { CodexAuthContext } from "../../codex/auth-context";
 import { clearCodexModelDenialEvidence, recordCodexModelDenialEvidence } from "../../codex/model-entitlements";
 import { wasAccountAutoPaused } from "../../oauth/account-auto-pause";
 import { preflightReserveFirstResponse } from "./combo-stream-preflight";
+import { finishReserveWalkInspection } from "./reserve-refusal-body";
 import { reserveQuotaPermitsMove } from "./combo-luna-legs";
 import { codexPoolAccountModel400Denial, PoolPreOutputRefusals, retryCodexPoolOnAlternateAccount,
   shouldRetryCodexPoolAccountQuota, shouldRetryCodexPoolAccountTransient, usesCodexForwardPoolAuth,
@@ -26,6 +27,9 @@ export async function settlePoolResponse(args: Omit<CodexPoolAccountRetryArgs, "
       clearCodexModelDenialEvidence(ctx.accountId, route.modelId, generation);
       clearCodexModelDenialEvidence(ctx.accountId, parsed.modelId, generation);
       break;
+    }
+    if (walk && walk.remaining.size > 1 && response.status >= 500 && !ctx.fixedAccount) {
+      response = await finishReserveWalkInspection(response, upstream.signal);
     }
     const denial = await codexPoolAccountModel400Denial(response, route.modelId, options.abortSignal, parsed.modelId);
     const paused = wasAccountAutoPaused(response);

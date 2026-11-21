@@ -183,7 +183,7 @@ export interface HandleResponsesOptions {
   /** Internal deterministic seam for account-gated native fallback tests. */
   resolveCodexModelEntitlements?: typeof resolveCodexModelEntitlements;
   /** Internal: validated final client-visible model, after completed terminal success only. */
-  onResponseComplete?: (model: string) => void;
+  onResponseComplete?: (model: string, responsesStore?: string, proofs?: readonly string[]) => void;
   recordTerminalOutcomes?: boolean;
   setTerminalOutcomeRecorder?: (recorder: ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined) => void;
   onNativePassthroughTerminal?: (status: ResponsesTerminalStatus) => void;
@@ -283,6 +283,8 @@ export interface HandleResponsesOptions {
     sourceBody: unknown;
     previousResponseInputExpanded: boolean;
     projectForeignReasoning?: "portable" | "owner";
+    recordedResponsesStore?: string;
+    issuedReasoningProofs?: readonly string[];
     providerContinuation: OcxProviderContinuationState | undefined;
     recoveredPlaintext: boolean;
   };

@@ -1,3 +1,6 @@
+import { clearReasoningReplayCacheForTests, rememberIssuedReasoning } from "../../src/responses/reasoning-replay-cache";
+import { captureConfigGeneration } from "../../src/lib/state-store-sweeper";
+import { listLiveComboTargetKeys } from "../../src/combos/types";
 import { shouldRetryCodexPoolAccountQuota } from "../../src/server/responses/core-codex-account";
 import { sendReserveSeat } from "../../src/server/responses/reserve-seat-dispatch";
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
@@ -16,7 +19,7 @@ import { resetQuotaQueryBackoffForTests } from "../../src/codex/quota-query-back
 import { planLunaReserveLegs } from "../../src/server/responses/combo-luna-legs";
 import { clearComboSelectionState, clearComboTargetCooldowns, coolComboTarget, isComboTargetInCooldown } from "../../src/combos";
 import { issueTurnStateHandle, TURN_STATE_HEADER, turnStateBinding } from "../../src/server/turn-state-handles";
-import { clearComboRecallForTests } from "../../src/server/responses/combo-session-recall";
+import { clearComboRecallForTests, reconcileComboRecall } from "../../src/server/responses/combo-session-recall";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
@@ -104,7 +107,7 @@ async function post(cfg: OcxConfig, extra: Record<string, unknown> = {}, headers
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify({ model: "combo/luna", input: "ping", stream: true, prompt_cache_key: "luna-order", ...extra }) }),
     cfg, logCtx, { admission: local, sendBudget, ...(signal ? { abortSignal: signal } : {}) });
-  return { status: response.status, text: await response.text() };
+  return { status: response.status, headers: response.headers, text: await response.text() };
 }
 
 beforeEach(() => {
@@ -755,6 +758,165 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect((await post(cfg, { input: [first, user, second, user], store: true }, lane)).status).toBe(200);
     expect(calls).toEqual(["native:gpt-reserve"]); expect(nativeReplay).toContain(first.encrypted_content);
     expect(nativeReplay).not.toContain(second.encrypted_content); expect(nativeReplay).toContain("second plan");
+  });
+
+  test("mixed history after restart restores only the items issued by the serving store", async () => {
+    const cfg = config(), lane = { "thread-id": "mixed-after-restart" }; seats();
+    const foreign = { type: "reasoning", id: "rs_native", encrypted_content: "native-cipher", summary: [{ type: "summary_text", text: "earlier plan" }] };
+    const own = { type: "reasoning", id: "rs_relay", encrypted_content: "relay-cipher", summary: [] };
+    native = body => issuedReasoning(body.model, foreign);
+    expect((await post(cfg, {}, lane)).text).toContain(foreign.id);
+    seats(false); relay = (_req, body) => issuedReasoning(body.model, own);
+    expect((await post(cfg, {}, lane)).text).toContain(own.id);
+    release?.(); clearComboRecallForTests(); clearReasoningReplayCacheForTests(); release = acquireOwnedSpendHome();
+    const wires: string[] = [];
+    relay = (_req, body) => { wires.push(JSON.stringify(body)); return sse(body.model, "ok"); };
+    const user = { role: "user", content: "continue" };
+    const unknown = { ...foreign, id: "rs_unknown", encrypted_content: "unissued" };
+    expect((await post(cfg, { store: true, input: [foreign, unknown, user, own] }, lane)).status).toBe(200);
+    expect(wires).toHaveLength(1); expect(wires[0]).toContain("earlier plan"); expect(wires[0]).toContain(own.encrypted_content);
+    for (const item of [foreign, unknown]) { expect(wires[0]).not.toContain(item.id); expect(wires[0]).not.toContain(item.encrypted_content); }
+  });
+
+  test("native cooldown expiring during a relay connect failure still offers strict Reserve first", async () => {
+    const cfg = config(); seats(); coolComboTarget("luna", { provider: "openai", model: "gpt-6-luna" }, { status: 503, retryAfter: "1" });
+    relay = () => { now += 1100; return refusedConnect(); };
+    expect((await post(cfg)).text).toContain("response.completed");
+    expect(calls).toEqual(["relay:gpt-6-luna", "native:gpt-reserve"]);
+  });
+
+  test("a bound relay turn selects its issuing key before round-robin allocation", async () => {
+    const cfg = config(), lane = { "thread-id": "relay-key-owner" }; seats(false);
+    cfg.providers.relay!.apiKeyPool = [{ id: "a", key: "fixture-a" }, { id: "b", key: "fixture-b" }];
+    cfg.providers.relay!.apiKey = "fixture-a";
+    cfg.providers.relay!.requestPacing = { enabled: true, keySelection: "round-robin" };
+    let issuer: string | null = null;
+    relay = (request, body) => { issuer = request.headers.get("authorization"); return sse(body.model, "ok"); };
+    expect((await post(cfg, { store: true }, lane)).text).toContain("response.completed"); expect(issuer).not.toBeNull();
+    const matches: boolean[] = [];
+    relay = (request, body) => { matches.push(request.headers.get("authorization") === issuer); return sse(body.model, "ok"); };
+    expect((await post(cfg, { store: true, input: [{ type: "item_reference", id: "msg_1" }] }, lane)).text).toContain("response.completed");
+    expect(matches).toEqual([true]);
+  });
+
+  test("a bound continuation does not spend a cooldown reprobe", async () => {
+    const cfg = config(), lane = { "thread-id": "cooled-bound-reprobe" }; seats(false);
+    expect((await post(cfg, {}, lane)).text).toContain("response.completed"); calls.length = 0;
+    cfg.combos!.luna!.cooldownReprobe = { enabled: true, intervalMs: 60_000 };
+    coolComboTarget("luna", { provider: "relay", model: "gpt-6-luna" }, { status: 503, retryAfter: "23" });
+    const refusal = await post(cfg, { store: true, input: [{ type: "item_reference", id: "msg_1" }] }, lane);
+    expect(refusal.status).toBe(503); expect(refusal.headers.get("retry-after")).toBe("23"); expect(calls).toEqual([]);
+  });
+
+  test.each(["restart", "expiry", "eviction"])("the recorded relay receives its unchanged tool reasoning after proof %s", async loss => {
+    seats(false);
+    const cfg = config(), lane = { "thread-id": "tool-continuation" };
+    const item = { type: "reasoning", id: "rs_relay123", encrypted_content: "fixture-relay-reasoning", summary: [] };
+    const call = { type: "function_call", id: "fc_lookup", call_id: "call_lookup", name: "lookup", arguments: "{}" };
+    relay = (_request, body) => Response.json({ id: "resp_tool", object: "response", model: body.model, status: "completed", output: [item, call] });
+    const tools = [{ type: "function", name: "lookup", parameters: { type: "object", properties: {} } }];
+    expect((await post(cfg, { stream: false, store: true, tools }, lane)).text).toContain(item.encrypted_content);
+    if (loss === "restart") {
+      release?.(); clearComboRecallForTests(); clearReasoningReplayCacheForTests(); release = acquireOwnedSpendHome();
+    } else if (loss === "expiry") now += 3_600_001;
+    else {
+      // Unrelated completions fill the bounded proof cache, without more sends on the tested lane.
+      rememberIssuedReasoning({ clientThreadId: "other-thread", current: { providerName: "other", adapterName: "openai-responses",
+        modelId: "fixture", providerDestinationIdentity: "fixture", providerDestinationDurableIdentity: "fixture-destination",
+        credentialIdentity: "fixture", credentialDurableIdentity: "fixture-credential" } },
+      Array.from({ length: 4097 }, (_, i) => ({ type: "reasoning", id: `rs_other${i}` })));
+    }
+    calls.length = 0; seats();
+    let sent: unknown;
+    relay = async (request, body) => { sent = (await request.json() as { input: unknown }).input; return sse(body.model, "ok"); };
+    const result = await post(cfg, { store: true, tools, input: [item, call, { type: "function_call_output", call_id: call.call_id, output: "found" }] }, lane);
+    expect(result.text).toContain("response.completed"); expect(calls).toEqual(["relay:gpt-6-luna"]);
+    expect(sent).toContainEqual(item);
+  });
+
+  test.each(["renamed", "new path", "removed"])("a bound reference follows its store, not its provider label: %s", async change => {
+    seats(false);
+    const cfg = config(), lane = { "thread-id": "reference-owner" };
+    // Native has an older valid seat binding: falling back to it really can send this reference.
+    relay = refusedConnect;
+    expect((await post(cfg, {}, lane)).text).toContain("response.completed");
+    expect(calls.at(-1)).toBe("native:gpt-6-luna");
+    clearComboTargetCooldowns("luna", ["relay/gpt-6-luna"]);
+    const relayId = "msg_relay_reference";
+    relay = (_request, body) => Response.json({ id: "resp_relay_reference", object: "response", status: "completed", model: body.model,
+      output: [{ id: relayId, type: "message", role: "assistant", content: [{ type: "output_text", text: "relay" }] }] });
+    expect((await post(cfg, { stream: false, store: true }, lane)).text).toContain(relayId);
+    expect(calls.at(-1)).toBe("relay:gpt-6-luna");
+    const relayTarget = { provider: "renamed", model: "gpt-6-luna" };
+    cfg.providers.renamed = { ...cfg.providers.relay!, ...(change === "new path" ? { responsesPath: "/new-store/responses" } : {}) };
+    delete cfg.providers.relay;
+    cfg.combos!.luna!.targets.splice(1, 1, ...(change === "removed" ? [] : [relayTarget]));
+    reconcileComboRecall({ generation: captureConfigGeneration() + 1, comboIds: new Set(["luna"]), comboTargets: listLiveComboTargetKeys(cfg),
+      providerNames: new Set(Object.keys(cfg.providers)), codexAccountIds: new Set(), oauthAccountKeys: new Set(), configRoots: new Set() });
+    seats(); calls.length = 0;
+    let sent: unknown;
+    relay = async (request, body) => { expect(request.url).toBe("https://relay.example.test/backend-api/codex/v1/responses");
+      sent = (await request.json() as { input: unknown }).input; return sse(body.model, "ok"); };
+    const ref = { type: "item_reference", id: relayId };
+    const result = await post(cfg, { input: [ref], store: true }, lane);
+    if (change === "renamed") {
+      expect(result.text).toContain("response.completed"); expect(calls).toEqual(["relay:gpt-6-luna"]); expect(sent).toContainEqual(ref);
+    } else { expect(result.status).toBe(503); expect(calls).toEqual([]); }
+  });
+
+  test("changing only responsesPath does not carry item proof into the new store", async () => {
+    const cfg = config(), lane = { "thread-id": "endpoint-proof" }; seats(false);
+    const item = { type: "reasoning", id: "rs_old123", encrypted_content: "old-endpoint-cipher", summary: [{ type: "summary_text", text: "use this plan" }] };
+    relay = (_request, body) => issuedReasoning(body.model, item);
+    expect((await post(cfg, {}, lane)).text).toContain(item.encrypted_content);
+    cfg.providers.relay!.responsesPath = "/new-store/responses";
+    let wire = "";
+    relay = (request, body) => { expect(request.url).toBe("https://relay.example.test/backend-api/codex/new-store/responses"); wire = JSON.stringify(body); return sse(body.model, "ok"); };
+    const result = await post(cfg, { input: [item, { role: "user", content: "continue" }], store: true }, lane);
+    expect(result.text).toContain("response.completed"); expect(wire).toContain("use this plan");
+    expect(wire).not.toContain(item.id); expect(wire).not.toContain(item.encrypted_content);
+  });
+
+  test.each([false, true])("bound relay cooldown preserves retry advice or caller cancellation (abort: %s)", async abort => {
+    seats(false); const cfg = config(), lane = { "thread-id": "cooled-owner" };
+    expect((await post(cfg, {}, lane)).text).toContain("response.completed"); calls.length = 0;
+    coolComboTarget("luna", { provider: "relay", model: "gpt-6-luna" }, { status: 503, retryAfter: abort ? "1" : "73" });
+    coolComboTarget("luna", { provider: "metered", model: "gpt-6-luna" }, { status: 503, retryAfter: "2" });
+    if (abort) cfg.combos!.luna!.waitForCooldownMs = 2_000;
+    const controller = new AbortController();
+    const timer = abort ? setTimeout(() => controller.abort(), 50) : undefined;
+    try {
+      const result = await post(cfg, { input: [{ type: "item_reference", id: "msg_1" }], store: true }, lane, controller.signal);
+      expect(result.status).toBe(abort ? 499 : 503); expect(calls).toEqual([]);
+      if (!abort) { expect(result.headers.get("retry-after")).toBe("73"); expect(result.text).toContain("combo_unavailable"); }
+    } finally { clearTimeout(timer); }
+  });
+
+  test.each(["quota", "origin refusal"])("the Reserve walker classifies a slow alternate %s before selecting a seat", async kind => {
+    const cfg = threeSpentSeats();
+    native = body => nativeAccounts.length === 1 ? reserveRefused() : nativeAccounts.length > 2 ? sse(body.model, "ok") : new Response(new ReadableStream({
+      async start(controller) {
+        await Bun.sleep(350);
+        controller.enqueue(new TextEncoder().encode(JSON.stringify({ error: { code: kind === "quota" ? "usage_limit_reached" : "origin_rejected", message: "Monthly usage limit reached" } })));
+        controller.close();
+      },
+    }), { status: 503, headers: { "content-type": "application/json" } });
+    const result = await post(cfg);
+    expect(result.status).toBe(kind === "quota" ? 200 : 503);
+    expect(calls).toEqual(Array(kind === "quota" ? 3 : 2).fill("native:gpt-reserve"));
+  });
+
+  test("an alternate Reserve refusal completed after the retry probe remains terminal", async () => {
+    const cfg = threeSpentSeats();
+    native = () => nativeAccounts.length === 1 ? reserveRefused() : new Response(new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const encoder = new TextEncoder(); controller.enqueue(encoder.encode('{"error":{"code":"'));
+        await Bun.sleep(350); controller.enqueue(encoder.encode('origin_rejected","message":"refused"}}')); controller.close();
+      },
+    }), { status: 503, headers: { "content-type": "application/json" } });
+    const result = await post(cfg);
+    expect(result.status).toBe(503);
+    expect(calls).toEqual(["native:gpt-reserve", "native:gpt-reserve"]);
   });
 
   test("a pending tool turn retains its only reasoning ciphertext on the issuing seat", async () => {
