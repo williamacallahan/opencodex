@@ -119,6 +119,7 @@ import { createCodexAuthDispatchGuard, releaseCodexAuthContextProbeLease, unwrap
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { mapCodexAuthContextErrorToResponse } from "./codex-auth-error";
 import { chargeWorkflowSends } from "../../lib/workflow-budget";
+import { reserveCompactionPlacement } from "./reserve-compaction";
 import { hasWorkflowSendObserver } from "../../lib/request-execution-budget";
 import { isAntigravityValidationRefusal } from "./antigravity-validation-refusal";
 import { createAntigravityModelDenialRecovery, recoverAntigravityAccount } from "./antigravity-model-denial-recovery";
@@ -133,7 +134,7 @@ export async function prepareAdapterExchange(
     | "parsed"
     | "toolBridgeMaps"
     | "translatorBudget" | "completedToolBlocks"
-    | "selectedForwardHeaders"
+    | "selectedForwardHeaders" | "callerAuthHeaders"
     | "route"
     | "inboundWire"
     | "clientRequestedStream"
@@ -264,6 +265,7 @@ export async function prepareAdapterExchange(
   const localUpstream = isLocalUpstream(route.provider.baseUrl);
   // Header arrival and body silence are separate clocks (structure/transports/timeouts.md).
   const connectMs = resolveConnectTimeoutMs(config.connectTimeoutMs, { localUpstream });
+  const reserve = reserveCompactionPlacement(requestContext, admissionState, requestState, transportState, upstream, connectMs, sendBudgetState.workflowRootId);
   const sendConnectMs = () => route.provider.authMode === "forward" ? resolveConnectTimeoutMs(config.connectTimeoutMs, { localUpstream: isLocalUpstream(route.provider.baseUrl) }) : 0;
   transportState.activeAdapter = transportState.adapter;
   const antigravityPoolActivated = route.providerName === "google-antigravity"
@@ -471,16 +473,16 @@ export async function prepareAdapterExchange(
       // Combo and emergency compaction admission already book this target's first send.
       // Its configured initial ceiling is target-local; the shared remainder below still
       // accounts for earlier targets without deducting their sends from this target twice.
-      const initialSendCap = transientPolicy || resetPolicy
+      const initialSendCap = reserve || transientPolicy || resetPolicy
         || (options.comboAttempt && route.provider.adapter === "google")
         ? transientSendCapFor(transientPolicy?.attempts,
           (options.comboAttempt || compactPrepaid) ? 0 : sendBudgetState.sendsUsed)
         : 1;
-      const fetchWithRetryPolicy = (route.provider.adapter === "google" || transientPolicy)
+      const fetchWithRetryPolicy = (reserve || route.provider.adapter === "google" || transientPolicy)
         ? fetchWithTransientRetry
         : fetchWithResetRetry;
       const initialReporter = transientSendReporter(compactPrepaid ?? options.comboDispatchPermit);
-      const deferredInitial = (billingPoolRequest || route.providerName === "github-copilot" && route.provider.authMode !== "forward") && !receiptMode ? deferPhysicalSendReporter(initialReporter) : undefined;
+      const deferredInitial = (reserve || billingPoolRequest || route.providerName === "github-copilot" && route.provider.authMode !== "forward") && !receiptMode ? deferPhysicalSendReporter(initialReporter) : undefined;
       try { upstreamResponse = await fetchWithRetryPolicy(
         recovery => {
           // Unconfigured generic sends may omit the counting reporter. Capture policy
@@ -492,7 +494,7 @@ export async function prepareAdapterExchange(
             compactPrepaidUsed = true;
           }
           // Key transport keeps this metadata pending until it binds the actual selection.
-          transportState.noteRoutedAttemptSend(inputTokenEstimate, recovery ?? initialRecovery);
+          if (!reserve) transportState.noteRoutedAttemptSend(inputTokenEstimate, recovery ?? initialRecovery);
           return fetchWithHeaderTimeout(builtInitialRequest.url, applyUpstreamRecoveryInit({
             method: builtInitialRequest.method,
             headers: builtInitialRequest.headers,
@@ -502,7 +504,9 @@ export async function prepareAdapterExchange(
               dispatchOverride: oauthDispatch(builtInitialRequest),
               providerName: route.providerName,
               modelId: route.modelId,
+              preOutputRefusalHold: reserve?.hold,
               onPhysicalDispatch: () => {
+                reserve?.assertWire(builtInitialRequest);
                 if (deferredInitial) {
                   if (!deferredInitial.beforeDispatch()) throw new SendBudgetExhaustedError(errorDestinationLabel(builtInitialRequest.url));
                   if (compactPrepaid && !compactPrepaidUsed) {
@@ -516,6 +520,7 @@ export async function prepareAdapterExchange(
                   sendBudgetState.noteInitialDispatch(compactPrepaid && !compactPrepaidUsed ? compactPrepaid : undefined);
                   compactPrepaidUsed = true;
                 }
+                reserve?.noteInitial(builtInitialRequest, recovery);
               },
               beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
                 ? createCodexAuthDispatchGuard(admissionState.authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
@@ -545,6 +550,7 @@ export async function prepareAdapterExchange(
         },
       ); } finally { compactPrepaid?.release(); }
     }
+    if (reserve) upstreamResponse = await reserve.settle(upstreamResponse);
   } catch (err) {
     cleanupUpstreamAbort();
     upstream.abort();
@@ -795,6 +801,7 @@ export async function prepareAdapterExchange(
                   providerFetch(route.provider, options.codexWsRuntimeIdentity, {
                     dispatchOverride: oauthDispatch(retryRequest),
                     onPhysicalDispatch: deferredRefetch ? () => {
+                      reserve?.assertWire(retryRequest);
                       if (!deferredRefetch.beforeDispatch()) throw new SendBudgetExhaustedError(errorDestinationLabel(retryRequest.url));
                       confirmDispatch();
                     } : undefined,

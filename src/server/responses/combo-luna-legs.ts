@@ -9,6 +9,12 @@ import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { isCodexLbProvider } from "../../providers/quota/codex-lb-url";
 import type { RouteResult } from "../../router";
 
+import { stripPreviousResponseId } from "../../adapters/openai-responses/canonical-forward";
+import { sanitizeReasoningInputContent } from "../../adapters/openai-responses/reasoning";
+import { CODEX_TURN_STATE_HEADER } from "../../codex/forward-transport-headers";
+import { isPlainObject } from "../../lib/plain-data";
+import { canPortConversationState, collectConversationStateCarriers, type PortabilityDenial } from "./account-change-state";
+
 type Combo = NonNullable<ReturnType<typeof getCombo>>;
 type ComboTarget = Combo["targets"][number];
 
@@ -43,16 +49,36 @@ export interface LunaReserveLegPlan {
   legCount: number;
 }
 
+/** Judge the same expanded transcript the child will send. A native compaction blob or an
+ * encrypted task is not a reasoning summary: if any opaque carrier survives, keep its owner. */
+export function prepareLunaReplay(body: unknown, expanded: boolean, headers: Headers):
+  { kind: "portable"; body: unknown } | { kind: "bound"; reason: PortabilityDenial | "turn-state" | "item-reference" } {
+  if (headers.has(CODEX_TURN_STATE_HEADER) || (isPlainObject(body) && isPlainObject(body.client_metadata)
+    && CODEX_TURN_STATE_HEADER in body.client_metadata)) return { kind: "bound", reason: "turn-state" };
+  const full = stripPreviousResponseId(body, expanded);
+  if (isPlainObject(full) && Array.isArray(full.input) && full.input.some(item => isPlainObject(item) && item.type === "item_reference")) {
+    return { kind: "bound", reason: "item-reference" };
+  }
+  const verdict = canPortConversationState(collectConversationStateCarriers(full));
+  if (verdict.portable) return { kind: "portable", body: full };
+  if (verdict.reason === "encrypted-reasoning") {
+    const scrubbed = sanitizeReasoningInputContent(full, { stripEncryptedContent: true, dropForeignItemId: true, preserveRawReasoningContent: true });
+    if (scrubbed !== full && canPortConversationState(collectConversationStateCarriers(scrubbed)).portable) {
+      return { kind: "portable", body: scrubbed };
+    }
+  }
+  return { kind: "bound", reason: verdict.reason };
+}
+
 export function planLunaReserveLegs(
   combo: Combo,
-  portable: () => boolean,
   /** The leg's real destination, or undefined when it cannot route or the caller's key may not reach it. */
   resolve: (target: ComboTarget) => RouteResult | undefined,
   eligible: (target: ComboTarget) => boolean,
   hopAllowed: (from: ComboTarget, to: ComboTarget) => boolean,
 ): LunaReserveLegPlan | undefined {
   // Configured model ids are enough to rule out every other combo before any route is resolved.
-  if (combo.strategy !== "failover" || !combo.targets.some(target => modelHasPoolReserve(target.model)) || !portable()) return undefined;
+  if (combo.strategy !== "failover" || !combo.targets.some(target => modelHasPoolReserve(target.model))) return undefined;
   // Each leg is judged by its resolved destination: a model redirect can leave Luna, and a per-model wire
   // override can make the relay a Chat route whose failures carry no Responses no-start evidence.
   const nativeIndex = combo.targets.findIndex(target => {

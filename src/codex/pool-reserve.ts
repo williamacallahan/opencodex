@@ -18,7 +18,7 @@ export const POOL_RESERVE_UNAVAILABLE_MESSAGE = "No Codex pool account can serve
 /** The one model whose ChatGPT pool seats can hold a separate Reserve window. */
 export const modelHasPoolReserve = (modelId: unknown): boolean => modelId === "gpt-6-luna";
 /** Request-local capacity for a native Luna leg: Reserve or nothing, or ordinary Luna without ever consulting Reserve. */
-export type PoolCapacityIntent = "reserve-only" | "ordinary-only";
+export type PoolCapacityIntent = "reserve-only" | "ordinary-only" | "owner-only";
 export const permitsPoolWireModel = (intent: PoolCapacityIntent | undefined, wireModel: string | undefined): boolean =>
   intent !== "reserve-only" || wireModel === NATIVE_RESERVE_MODEL;
 // Longer than the 5-minute recovery probe cadence (CODEX_QUOTA_PROBE_INTERVAL_MS), so a grant
@@ -105,14 +105,15 @@ function reserveSeatEvidence(account: NonNullable<OcxConfig["codexAccounts"]>[nu
 }
 
 /** Freeze membership, not entitlement: the picker rechecks these seats before every move. */
-export function poolReserveWalkSeats(config: OcxConfig, now = Date.now()): Set<string> {
+export interface PoolReserveWalk { remaining: Set<string>; movesSent: number; transientRetries: number }
+export function createPoolReserveWalk(config: OcxConfig, now = Date.now()): PoolReserveWalk {
   const seats = new Set<string>();
   for (const account of config.codexAccounts ?? []) {
     if (reserveSeatEvidence(account, now, false)) seats.add(account.id);
   }
   const options: CodexAccountUsabilityOptions = { poolCapacity: "reserve", modelEligibleAccountIds: seats };
   for (const id of seats) if (!isCodexAccountSelectable(config, id, now, "reserve", options)) seats.delete(id);
-  return seats;
+  return { remaining: seats, movesSent: 0, transientRetries: 0 };
 }
 
 /**
@@ -127,11 +128,13 @@ export function poolLunaReserveSelection(
   options: CodexAccountUsabilityOptions, excludeId?: string, affinityKey?: string, now = Date.now(),
   pinnedAccountId?: string, verifiedOnly = false, intent?: PoolCapacityIntent, remainingReserveSeats?: ReadonlySet<string>,
 ): { options: CodexAccountUsabilityOptions; quotaScope: CodexQuotaScope | undefined; reserve: boolean; discovery?: boolean; servingAccountId?: string } {
-  if (options.retainAccountForUploadedFiles && affinityKey && modelHasPoolReserve(modelId)) {
-    const issuer = peekConversationStateIssuer(affinityKey, now);
-    const owner = issuer === CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER ? peekConversationStateStoredIssuerAccount(affinityKey) : issuer;
-    if (owner) options = { ...options, modelEligibleAccountIds: new Set(
-      !options.modelEligibleAccountIds || options.modelEligibleAccountIds.has(owner) ? [owner] : [],
+  const needsIssuer = intent === "owner-only" && !pinnedAccountId && !options.modelEligibleAccountIds;
+  if ((needsIssuer || (options.retainAccountForUploadedFiles && affinityKey)) && modelHasPoolReserve(modelId)) {
+    const issuer = affinityKey ? peekConversationStateIssuer(affinityKey, now) : undefined;
+    const owner = issuer === CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER
+      ? (!needsIssuer && affinityKey ? peekConversationStateStoredIssuerAccount(affinityKey) : undefined) : issuer;
+    if (owner || needsIssuer) options = { ...options, modelEligibleAccountIds: new Set(
+      owner && (!options.modelEligibleAccountIds || options.modelEligibleAccountIds.has(owner)) ? [owner] : [],
     ) };
   }
   const unchanged = { options, quotaScope, reserve: false };

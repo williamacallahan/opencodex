@@ -104,17 +104,10 @@ import {
   upstreamHostCircuitOpenResponse,
   usesCodexForwardPoolAuth,
   codexWsQuotaObserver,
-  codexPoolAccountModel400Denial,
-  shouldRetryCodexPoolAccountQuota,
-  shouldRetryCodexPoolAccountTransient,
-  retryCodexPoolOnAlternateAccount,
   PoolPreOutputRefusals,
   poolPreOutputRefusalHold,
 } from "./core-codex-account";
-import {
-  clearCodexModelDenialEvidence,
-  recordCodexModelDenialEvidence,
-} from "../../codex/model-entitlements";
+import { settlePoolResponse } from "./pool-response-alternate";
 import { consumeComboFailure } from "./core-combo-failure";
 import { isCodexWsPreOutputRefusal, codexWsSocketDeathStage, isCodexWsUpstreamResponse } from "./codex-ws-wire";
 import { linkAbortSignal } from "./core-lifetime";
@@ -137,7 +130,7 @@ import { classifyTransportFailureKind, transportErrorCode } from "../../lib/upst
 import { captureAccountAutoPauseAttempt, wasAccountAutoPaused, wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
 import { codexFailureWindowOutcomeMeta, recordCodexUpstreamOutcome } from "../../codex/routing";
 import { describeUpstreamConnectFailure } from "./upstream-error";
-import { markUpstreamNotStarted, reserveQuotaPermitsMove } from "./combo-luna-legs";
+import { markUpstreamNotStarted } from "./combo-luna-legs";
 import {
   rateLimitRetryPolicyFor,
   rateLimitRetryDelayMs,
@@ -167,7 +160,7 @@ import {
   CONSOLE_GO_UPLOAD_RETRY_DELAY_MS,
   refusedReasoningEffortDowngrade, withRawBodyReasoningEffort,
 } from "./core-opaque-recovery";
-import { preflightComboStreamResponse, preflightReserveFirstResponse } from "./combo-stream-preflight";
+import { preflightComboStreamResponse } from "./combo-stream-preflight";
 import type { RequestFailureStage } from "../../lib/request-failure-model";
 import {
   ambiguousResendAllowanceFor, ambiguousResendAuthorizer, UnsafePhysicalReplacement,
@@ -792,8 +785,8 @@ export async function preparePassthroughExchange(
      * row replaces an HTTP stream, which a WS create frame is not, and the WebSocket row replaces
      * the transport that just failed.
      */
-    const copilotSendAccounting = (permit?: Parameters<typeof transientSendReporter>[0]) => physicalSendAccounting(
-      transientSendReporter(permit), route.providerName === "github-copilot" && route.provider.authMode !== "forward"
+    const nativeSendAccounting = (permit?: Parameters<typeof transientSendReporter>[0]) => physicalSendAccounting(
+      transientSendReporter(permit), options.poolCapacityIntent === "reserve-only" || route.providerName === "github-copilot" && route.provider.authMode !== "forward"
         ? { permit, destination: () => errorDestinationLabel(request.url) } : undefined);
     const sendAmbiguousReplacement = (
       signal: AbortSignal = upstream.signal,
@@ -801,7 +794,7 @@ export async function preparePassthroughExchange(
       if (admissionState.authCtx.kind === "main" && admissionState.authCtx.mainQuotaDispatch) {
         admissionState.authCtx.mainQuotaDispatch = renewMainQuotaDispatchForAttempt(admissionState.authCtx.mainQuotaDispatch);
       }
-      const accounting = copilotSendAccounting(), report = accounting.report;
+      const accounting = nativeSendAccounting(), report = accounting.report;
       let started = false;
       const run = () => fetchWithHeaderTimeout(
       request.url,
@@ -980,14 +973,13 @@ export async function preparePassthroughExchange(
     // Stable per request: the Combo booking (`reserveDispatch`) already started and froze the spend
     // policy, so `spendEnforced` cannot change before dispatch even though no reporter starts it here.
     const receiptMode = !sendBudgetState.adapterSendBudget?.spendEnforced && Boolean(options.comboInitialSend);
-    const initialAccounting = copilotSendAccounting();
+    const initialAccounting = nativeSendAccounting();
     // #6969: Pool sends hold empty lifecycle frames so a pre-output refusal reaches the ladder below.
     const preOutputRefusals = new PoolPreOutputRefusals();
     const firstPoolContext = admissionState.authCtx;
-    let movedReserveSeat = false;
-    const reserveSeats = options.poolCapacityIntent === "reserve-only" ? options.remainingReserveSeats : undefined;
+    const reserveSeats = options.poolCapacityIntent === "reserve-only" ? options.reserveWalk?.remaining : undefined;
     const reserveDeadline = reserveSeats ? Date.now() + (connectMs || resolveConnectTimeoutMs(undefined)) : undefined;
-    const preOutputRefusalHold = poolPreOutputRefusalHold(firstPoolContext, route.provider, connectMs, options.comboAttempt, parsed, req.headers);
+    const preOutputRefusalHold = poolPreOutputRefusalHold(firstPoolContext, route.provider, connectMs, options.comboAttempt, parsed, req.headers, options.poolCapacityIntent);
     const onContinuationDispatch = createNativeContinuationDispatch(sendBudgetState, logCtx);
     try {
       // Transient-5xx pre-stream retry (devlog/_plan/260716_claudecode_hardening/010):
@@ -1000,7 +992,7 @@ export async function preparePassthroughExchange(
           // first send, everything after it is the same request trying again. Without this the
           // ratio has no denominator and the window collapses to its quiet-pool floor, which
           // would throttle recovery on a busy proxy exactly as hard as on an idle one (#4701).
-          if (recovery === undefined) classifyPoolRecoveryDispatch("initial");
+          if (recovery === undefined && !options.reserveWalk) classifyPoolRecoveryDispatch("initial");
           noteAttemptSend(recovery);
           return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
             method: request.method,
@@ -1015,7 +1007,12 @@ export async function preparePassthroughExchange(
               dispatchOverride: oauthDispatch(request, parsed, "passthrough"),
               providerName: route.providerName,
               modelId: route.modelId,
-              onPhysicalDispatch: recordPhysicalSend(receiptMode ? sendBudgetState.noteInitialDispatch : initialAccounting.onPhysicalDispatch),
+              onPhysicalDispatch: recordPhysicalSend(() => {
+                (receiptMode ? sendBudgetState.noteInitialDispatch : initialAccounting.onPhysicalDispatch)?.();
+                if (options.reserveWalk) {
+                  if (recovery) options.reserveWalk.transientRetries++; else classifyPoolRecoveryDispatch("initial");
+                }
+              }),
               onContinuationDispatch,
               accountAutoPause: (name, provider, headers) => captureAccountAutoPauseAttempt(name, provider, { config, codex: admissionState.authCtx }, headers),
               onCodexWsQuota: codexWsQuotaObserver(admissionState.authCtx, route.provider, route.modelId),
@@ -1133,7 +1130,7 @@ export async function preparePassthroughExchange(
       if (recovery === "empty-completion") allowance.attempts = Math.min(1, allowance.attempts);
       // An unfunded combo rung keeps the upstream refusal for combo failover instead of a budget 429.
       if (preserveFailureResponse && allowance.attempts < 1) { request.releaseBodyObservation?.(); return { failed: preserveFailureResponse }; }
-      const recoveryAccounting = copilotSendAccounting(allowance.permit);
+      const recoveryAccounting = nativeSendAccounting(allowance.permit);
       try {
         return await fetchWithTransientRetry(
           innerRecovery => {
@@ -1269,25 +1266,26 @@ export async function preparePassthroughExchange(
         const replayGuard = isCanonicalOpenAiForwardProvider(route.provider)
           ? createCodexAuthDispatchGuard(admissionState.authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined;
         let replayNotified = false;
+        const replayAccounting = nativeSendAccounting();
         const oauthReplayExecutor = providerFetch(route.provider, options.codexWsRuntimeIdentity, {
             httpOnly: streamOnlyBufferedJson,
             nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
               && responseEffects.plaintextV2AgentMessageToolNames.size === 0
               ? options.nativeControl : undefined,
             dispatchOverride: oauthDispatch(request, parsed, "passthrough"),
-            onPhysicalDispatch: recordPhysicalSend(),
+            onPhysicalDispatch: recordPhysicalSend(() => {
+              replayAccounting.onPhysicalDispatch?.();
+              if (codex401ReplayKind === "stored" && !replayNotified) {
+                replayNotified = true;
+                options.onStoredPool401ReplayDispatched?.();
+              }
+            }),
             providerName: route.providerName,
             modelId: route.modelId,
             onContinuationDispatch,
             accountAutoPause: (name, provider, headers) => captureAccountAutoPauseAttempt(name, provider, { config, codex: admissionState.authCtx }, headers),
             onCodexWsQuota: codexWsQuotaObserver(admissionState.authCtx, route.provider, route.modelId),
-            beforeDispatch: headers => {
-              replayGuard?.(headers);
-              if (codex401ReplayKind === "stored" && !replayNotified) {
-                replayNotified = true;
-                options.onStoredPool401ReplayDispatched?.();
-              }
-            },
+            beforeDispatch: replayGuard,
           });
         // Routed through the shared helper so an ambiguous reset on THIS leg answers with the
         // same refusal every other leg gives. A bare fetch here rejected instead, and the
@@ -1313,7 +1311,7 @@ export async function preparePassthroughExchange(
           },
           { abortSignal: upstream.signal, label: safeHostLabel(request.url), destination: errorDestinationLabel(request.url),
             attempts: remainingTransientSendBudget(transientSendAttempts()),
-            onSendsConsumed: transientSendReporter(), claimAmbiguousResend: claimPreHeaderResend },
+            onSendsConsumed: replayAccounting.report, claimAmbiguousResend: claimPreHeaderResend },
         );
       } catch (err) {
         return transportFailureResponse(err);
@@ -1409,7 +1407,7 @@ export async function preparePassthroughExchange(
       refreshUndeclaredToolGuard(request);
       const refreshedBodyRefusal = refuseOversizedOutboundBody(request);
       if (refreshedBodyRefusal) return refreshedBodyRefusal;
-      const oauthReplayAccounting = copilotSendAccounting();
+      const oauthReplayAccounting = nativeSendAccounting();
       try {
         upstreamResponse = await fetchWithTransientRetry(
           recovery => {
@@ -1557,7 +1555,7 @@ export async function preparePassthroughExchange(
         upstream.abort();
         return clientCancelledResponse();
       }
-      const failoverAccounting = copilotSendAccounting();
+      const failoverAccounting = nativeSendAccounting();
       try {
         upstreamResponse = await fetchWithTransientRetry(
           recovery => {
@@ -1607,119 +1605,25 @@ export async function preparePassthroughExchange(
     };
     recordDistributedResponseFailure(lastDistributedResponse ?? upstreamResponse, config, route.providerName, options.abortSignal);
     captureAffinityResponse(upstreamResponse);
-    while (usesCodexForwardPoolAuth(admissionState.authCtx, route.provider)) {
-      const reservePreflight = preflightReserveFirstResponse(upstreamResponse, movedReserveSeat || admissionState.authCtx === firstPoolContext,
-        preOutputRefusalHold, logCtx, upstream.signal, upstreamRequestsStream);
-      if (reservePreflight) upstreamResponse = (await reservePreflight).response;
-      let poolRetryOutcome: number | undefined;
-      // A success is the freshest evidence there is about this pair, and it outranks any earlier
-      // refusal: whatever the entitlement was when upstream declined, it is not that now. Both
-      // ids are cleared because the wire model can differ from the routed one.
-      if (upstreamResponse.ok) {
-        clearCodexModelDenialEvidence(
-          admissionState.authCtx.accountId,
-          route.modelId,
-          admissionState.authCtx.kind === "pool" ? admissionState.authCtx.generation : undefined,
-        );
-        clearCodexModelDenialEvidence(
-          admissionState.authCtx.accountId,
-          parsed.modelId,
-          admissionState.authCtx.kind === "pool" ? admissionState.authCtx.generation : undefined,
-        );
-      }
-      const model400Denial = await codexPoolAccountModel400Denial(
-        upstreamResponse,
-        route.modelId,
-        options.abortSignal,
-        parsed.modelId,
-      );
-      if (wasAccountAutoPaused(upstreamResponse)) {
-        poolRetryOutcome = upstreamResponse.status;
-      } else if (model400Denial !== undefined) {
-        // Spend this refusal on more than one retry. It is the account's own authenticated
-        // answer about this model, and the roster cache that selection otherwise reads expires
-        // five minutes after a catalog sync fills it -- so without remembering this, the next
-        // request selects the same account on quota alone and takes the same 400 (#4906).
-        recordCodexModelDenialEvidence(
-          admissionState.authCtx.accountId,
-          model400Denial,
-          admissionState.authCtx.kind === "pool" ? admissionState.authCtx.generation : undefined,
-        );
-        poolRetryOutcome = 400;
-      } else if (!admissionState.authCtx.fixedAccount && await shouldRetryCodexPoolAccountQuota(
-        upstreamResponse,
-        options.abortSignal,
-      )) {
-        // Pre-stream only: once SSE has begun, mid-stream quota stays terminal.
-        // ChatGPT sometimes wraps quota exhaustion in a generic 5xx. Normalize only
-        // body-confirmed cases to quota evidence so cooldown and rotation both apply.
-        poolRetryOutcome = upstreamResponse.status >= 500 ? 429 : upstreamResponse.status;
-      } else if (!admissionState.authCtx.fixedAccount && shouldRetryCodexPoolAccountTransient(upstreamResponse)) {
-        // A plain transient 5xx the same-account retry layer could not absorb. Keep the real
-        // status so it records as transient rather than quota.
-        poolRetryOutcome = upstreamResponse.status;
-      }
-
-      if (poolRetryOutcome !== undefined) {
-        // A stored 401 replay precludes an account move, but not the gated-model same-account retry.
-        const storedReplaySpent = codex401ReplayKind === "stored" && !wasAccountAutoPaused(upstreamResponse);
-        let walkSeats: ReadonlySet<string> | undefined;
-        if (reserveSeats && admissionState.authCtx.kind === "pool" && admissionState.authCtx.poolReserve
-          && (poolRetryOutcome === 429 || poolRetryOutcome === 402)) {
-          preOutputRefusals.recordReserveQuota(config, admissionState.authCtx, route.provider, upstreamResponse, route.modelId, poolRetryOutcome);
-          if (!reserveSeats.delete(admissionState.authCtx.accountId) || !reserveSeats.size || storedReplaySpent
-            || sendBudgetState.ambiguousResendSpent || (reserveDeadline !== undefined && Date.now() >= reserveDeadline)
-            || !await reserveQuotaPermitsMove(upstreamResponse, upstream.signal)) break;
-          walkSeats = reserveSeats;
-        }
-        if (movedReserveSeat && !walkSeats) break;
-        const retry = await retryCodexPoolOnAlternateAccount({
-          remainingReserveSeats: walkSeats,
-          reserveDeadline: walkSeats ? reserveDeadline : undefined,
-          callerAuthHeaders,
-          config,
-          route,
-          parsed,
-          logCtx,
-          options: { ...options, workflowRootId },
-          firstAuthCtx: admissionState.authCtx,
-          firstResponse: upstreamResponse,
-          outcomeStatus: poolRetryOutcome,
-          sameAccountOnly: storedReplaySpent,
-          upstream,
-          connectMs,
-          passthroughEstimate,
-          stream: upstreamRequestsStream,
-          httpOnly: streamOnlyBufferedJson,
-          preOutputRefusalHold: walkSeats ? preOutputRefusalHold : preOutputRefusalHold && { ...preOutputRefusalHold, reserveFirstPlacement: false },
-          onPhysicalSend: replayGuard.record,
-          onResponse: (response, retryAuthCtx, retryRequest) => {
-            adoptCodexWsStage(response, logCtx);
-            captureAffinityResponse(
-              response,
-              retryAuthCtx,
-              retryRequest,
-              retryAuthCtx.kind !== "main",
-            );
-          },
-        });
-        if (retry.kind === "transport") {
-          admissionState.authCtx = retry.authCtx;
-          return transportFailureResponse(retry.error);
-        }
-        if (retry.kind === "retried") {
+    if (usesCodexForwardPoolAuth(admissionState.authCtx, route.provider)) {
+      const settled = await settlePoolResponse({ callerAuthHeaders, config, route, parsed, logCtx,
+        options: { ...options, workflowRootId }, firstAuthCtx: admissionState.authCtx, firstResponse: upstreamResponse,
+        reserveWalk: options.reserveWalk, reserveDeadline, firstPlacement: admissionState.authCtx === firstPoolContext,
+        sameAccountOnly: codex401ReplayKind === "stored", ambiguousResendSpent: sendBudgetState.ambiguousResendSpent,
+        refusals: preOutputRefusals, upstream, connectMs, passthroughEstimate, stream: upstreamRequestsStream,
+        httpOnly: streamOnlyBufferedJson, preOutputRefusalHold, onPhysicalSend: replayGuard.record,
+        onResponse: (response, ctx, sent) => { adoptCodexWsStage(response, logCtx); captureAffinityResponse(response, ctx, sent, ctx.kind !== "main"); },
+        onMove: retry => {
           admissionState.authCtx = retry.authCtx;
           request = retry.request;
           refreshRequestToolAliases(request);
           refreshUndeclaredToolGuard(request);
-          upstreamResponse = retry.upstreamResponse;
           requestState.selectedForwardHeaders = retry.selectedForwardHeaders;
-          // Keep subagent quota-failure health keyed to the account that actually served.
           requestState.subagentFallbackAccountId = retry.authCtx.accountId;
-          if (walkSeats) { movedReserveSeat = true; continue; }
-        }
-      }
-      break;
+        },
+      });
+      if (settled.kind === "transport") { admissionState.authCtx = settled.authCtx; return transportFailureResponse(settled.error); }
+      upstreamResponse = settled.response;
     }
     // The strict child's native pool is exhausted, not the parent combo. Give it the verified
     // refusal; ordinary delivery still builds the client-safe stream if no hop is admitted.

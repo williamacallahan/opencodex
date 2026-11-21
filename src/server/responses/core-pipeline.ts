@@ -14,7 +14,7 @@ import { prepareResponsesTransport } from "./request-transport";
 import { prepareResponsesSidecarAuth } from "./request-sidecar-auth";
 import { createResponsesEffects } from "./response-effects";
 import { createResponsesSendBudget } from "./request-send-budget";
-import { executePassthroughResponse } from "./passthrough-execution";
+import { executePassthroughResponse, retainReserveTrial } from "./passthrough-execution";
 import { executeResponsesSidecars } from "./sidecar-execution";
 import { createResponsesCompletionPolicy } from "./completion-policy";
 import { executeResponsesRunTurn } from "./run-turn-execution";
@@ -139,7 +139,7 @@ export async function handleResponsesInner(
         sendBudgetState,
         adapterExchange,
       );
-      return await deliverAdapterResponse(
+      const delivered = await deliverAdapterResponse(
         requestContext,
         requestState,
         transportState,
@@ -149,6 +149,11 @@ export async function handleResponsesInner(
         adapterExchange,
         continuationState,
       );
+      if (sidecarState.routedCompaction && options.poolCapacityIntent === "reserve-only") {
+        const held = retainReserveTrial(delivered, admissionState.authCtx, options.abortSignal ?? req.signal);
+        if (held) { passthroughOwnsTrial = true; return held; }
+      }
+      return delivered;
     };
     const response = await execute();
     return retention ? retention.deliver(response) : response;

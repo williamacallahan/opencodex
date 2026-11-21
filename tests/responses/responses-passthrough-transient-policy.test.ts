@@ -61,10 +61,11 @@ describe("the Responses passthrough lane reads the provider transient policy", (
     const allowanceBacked = occurrences(packed, "attempts:allowance.attempts");
     const prepaidInitial = occurrences(packed, "attempts:sendBudgetState.initialSendAllowance(transientSendAttempts())");
     expect(prepaidInitial).toBe(1);
-    // Combo receipt mode settles directly; other sends keep the shared reporter. Copilot's
-    // reporter defers its charge until physical dispatch, after negotiation can refuse locally.
-    expect(packed).toContain("constinitialAccounting=copilotSendAccounting()");
-    expect(packed).toContain("onPhysicalDispatch:recordPhysicalSend(receiptMode?sendBudgetState.noteInitialDispatch:initialAccounting.onPhysicalDispatch)");
+    // Combo receipt mode settles directly; other sends keep the shared reporter. Copilot's and
+    // the strict Luna Reserve leg's reporter defers its charge until physical dispatch, after
+    // negotiation or a pre-wire seat or model check can refuse locally.
+    expect(packed).toContain("constinitialAccounting=nativeSendAccounting()");
+    expect(packed).toContain("onPhysicalDispatch:recordPhysicalSend(()=>{(receiptMode?sendBudgetState.noteInitialDispatch:initialAccounting.onPhysicalDispatch)?.();");
     expect(packed).toContain("...(receiptMode?{}:{onSendsConsumed:initialAccounting.report})");
     expect(packed).toContain("=>physicalSendAccounting(transientSendReporter(permit),");
     expect(budgeted + allowanceBacked + prepaidInitial).toBe(sites);

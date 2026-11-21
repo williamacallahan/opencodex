@@ -17,6 +17,21 @@ import { releaseCodexAuthContextProbeLease } from "../../codex/auth-context";
 import { attachResponseToolOwnership } from "./response-tool-ownership";
 import { finalizeAccountLease } from "./core-lifetime";
 
+/** A streamed native or bridged compaction result owns its discovery lease until its body settles. */
+export function retainReserveTrial(response: Response, context: ResponsesAdmissionState["authCtx"], signal: AbortSignal): Response | undefined {
+  if (response.status >= 400 || context.kind !== "pool" || !context.poolReserve || !context.probeLeaseId) return;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    signal.removeEventListener("abort", release);
+    releaseCodexAuthContextProbeLease(context);
+  };
+  signal.addEventListener("abort", release, { once: true });
+  if (signal.aborted) release();
+  return finalizeAccountLease(response, release);
+}
+
 /** Owns the native host lease across dispatch, recovery, and response construction. */
 export async function executePassthroughResponse(
   requestContext: ResponsesRequestContext,
@@ -59,24 +74,9 @@ export async function executePassthroughResponse(
       nativeExchange.upstream.signal,
       resolveStallTimeoutMs(requestContext.config.stallTimeoutSec, { localUpstream: nativeExchange.localUpstream }),
     ), nativeExchange.providerExecutedCallTypes);
-    const context = admissionState.authCtx;
-    if (context.kind !== "pool" || !context.poolReserve || !context.probeLeaseId) return guarded;
-    // A terminal failure needs no body-lifetime wrapper: the finally releases the trial without
-    // locking the response that the combo failure callback retains for its parent.
-    if (guarded.status >= 400) return guarded;
-    const signal = requestContext.options.abortSignal ?? requestContext.req.signal;
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      signal.removeEventListener("abort", release);
-      releaseCodexAuthContextProbeLease(context);
-    };
-    signal.addEventListener("abort", release, { once: true });
-    if (signal.aborted) release();
-    const wrapped = finalizeAccountLease(guarded, release);
-    reserveTrialAttached = true;
-    return wrapped;
+    const wrapped = retainReserveTrial(guarded, admissionState.authCtx, requestContext.options.abortSignal ?? requestContext.req.signal);
+    reserveTrialAttached = wrapped !== undefined;
+    return wrapped ?? guarded;
   } finally {
     if (nativeHostState.lease) releaseUpstreamHostAdmission(nativeHostState.lease);
     if (!reserveTrialAttached && (nativeHostState.lease || (admissionState.authCtx.kind === "pool" && admissionState.authCtx.poolReserve))) {

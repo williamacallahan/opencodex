@@ -4,6 +4,7 @@ import type { PreparedResponsesRequest } from "./request-prepare";
 import type { ResponsesSidecarAuth } from "./request-sidecar-auth";
 import type { OcxProviderContinuationState } from "../../types";
 import { providerContinuationPayload } from "./core-replay";
+import { codexForwardTerminalOutcomeRecorder } from "./core-codex-account";
 import { mergeProviderContinuationPayload } from "../../responses/provider-continuation";
 import { commitReasoningReplayServingIdentity } from "../../responses/reasoning-replay-cache";
 import { rememberServingConversationStateIssuer } from "./account-change-state";
@@ -48,6 +49,9 @@ export function createResponsesEffects(
       || typeof response.model !== "string" || !response.model.trim()) return;
     responseCompletionNotified = true;
     const ctx = admissionState.authCtx;
+    if (recordTerminalOutcomes && routedCompaction && options.poolCapacityIntent === "reserve-only" && ctx.kind === "pool" && ctx.poolReserve) {
+      codexForwardTerminalOutcomeRecorder(config, ctx, route.provider, route.modelId)?.("completed", undefined, true);
+    }
     if (ctx.kind !== "main" && ctx.bindIncludedAlternateOnCompletion && ctx.affinityKey
       && (ctx.kind === "pool" ? isCodexAccountGenerationLive(ctx.accountId, ctx.generation)
         : ctx.mainQuotaDispatch && isMainQuotaDispatchLive(ctx.mainQuotaDispatch))) {

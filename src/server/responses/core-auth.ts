@@ -18,7 +18,7 @@ import {
   captureCallerDirectAuth,
 } from "../../providers/caller-authorization";
 import { inspectChatGptDomainClaim } from "../../oauth/chatgpt";
-import { poolReserveWalkSeats, POOL_RESERVE_UNAVAILABLE_MESSAGE } from "../../codex/pool-reserve";
+import { createPoolReserveWalk, POOL_RESERVE_UNAVAILABLE_MESSAGE } from "../../codex/pool-reserve";
 import { isRequestExecutionBudget } from "../../lib/request-execution-budget";
 import {
   resolveCodexAuthContext,
@@ -306,7 +306,7 @@ export async function resolveResponsesCodexAuth(
     if (route.codexAccountMode) {
       // A strict caller without a combo plan still selects only from untried seats, within its existing ledger.
       if (route.codexAccountMode === "pool" && options.poolCapacityIntent === "reserve-only" && !requestScopedMainCredential
-        && isRequestExecutionBudget(options.sendBudget)) options.remainingReserveSeats ??= poolReserveWalkSeats(config);
+        && isRequestExecutionBudget(options.sendBudget)) options.reserveWalk ??= createPoolReserveWalk(config);
       // Only selection sees the Claude bridge pool identity; materialization below keeps the
       // uncompleted headers, so the wire matches the original request.
       authCtx = await resolveCodexAuthContext(applyClaudeBridgePoolSession(authInputHeaders, route, options), config, route.codexAccountMode, {
@@ -323,7 +323,7 @@ export async function resolveResponsesCodexAuth(
         retainAccountForUploadedFiles,
         turnStateOwner: owner,
         poolCapacityIntent: options.poolCapacityIntent,
-        remainingReserveSeats: options.remainingReserveSeats,
+        remainingReserveSeats: options.reserveWalk?.remaining,
       });
       if (!owner) options.onCodexAuthContextResolved?.(authCtx);
     } else {

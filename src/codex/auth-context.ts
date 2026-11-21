@@ -1390,6 +1390,10 @@ async function resolveCodexAuthContextUnannotated(
     const poolSelection = poolLunaReserveSelection(config, reserveModelId,
       quotaScope, selectionOptions, options.excludeAccountId, affinityKey, Date.now(), fixedAccountId, options.verifiedPoolReserveOnly, options.poolCapacityIntent, options.remainingReserveSeats);
     selectionOptions = poolSelection.options;
+    if (options.poolCapacityIntent === "owner-only" && selectionOptions.modelEligibleAccountIds) {
+      modelEligibleAccountIds = new Set(selectionOptions.modelEligibleAccountIds);
+      if (!modelEligibleAccountIds.size) throw new CodexTurnStateOwnerUnavailableError();
+    }
     quotaScope = poolSelection.quotaScope;
     poolReserve = poolSelection.reserve;
     reserveDiscovery = poolSelection.discovery === true;

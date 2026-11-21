@@ -314,9 +314,7 @@ redirects must still be Reserve-capable, the relay's effective wire must be Resp
 reports relay no-start evidence), and the caller's key scope (`routeAllowedByScope`) must admit both legs, so a key
 that may not reach codex-lb keeps today's order instead of ending on the relay's 403. A portable turn dispatches native with `reserve-only`, then codex-lb
 (sent ordinary `gpt-6-luna`, so its own pool prefers its Reserve), then native with `ordinary-only`, then the
-remaining targets; the extra leg is counted in the shared send budget. Portable means no account-bound carrier
-by `canPortConversationState` (continuation id, provider conversation, uploaded file, encrypted reasoning), no
-turn state in the `x-codex-turn-state` header or `client_metadata`, and no unreadable encrypted agent task. A
+remaining targets; the extra leg is counted in the shared send budget. A remembered provider is not an account owner. The planner judges the actual replay: it removes `previous_response_id` only after local expansion proved the full history, and may remove private reasoning blobs and foreign reasoning ids while retaining summaries and transcript content. Children receive that projected body. An unresolved continuation, provider conversation, upload, turn state or remaining opaque payload stays with its owner; an unreadable encrypted agent task keeps its existing dedicated handling. History records `luna-reserve-first` or the bounded `luna-owner-…` reason, never the token or the transcript. A
 bridged Messages or Chat turn (`protocolSource`, every Claude Code turn) plans the same legs, and a leg carrying a
 capacity intent always takes the bridge child, which forwards that intent. The plan also requires both added hops (native to codex-lb, codex-lb to native) to pass
 `fallbackHopAllowed`, so provider fallback turned off keeps today's order. Any other turn, and any other combo,

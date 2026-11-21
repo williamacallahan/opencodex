@@ -35,6 +35,9 @@ import { createSpendReservationLedger, DEFAULT_SPEND_RESERVATION_POLICY } from "
 import { createRequestSpendTracker } from "../../src/server/responses/request-spend";
 import { configureSharedPoolBackpressure, DEFAULT_POOL_BACKPRESSURE_POLICY, resetSharedPoolBackpressureForTests } from "../../src/routing/probe-lease";
 
+import { providerRequestPacingStatus, resetProviderRequestPacingForTest, waitForProviderRequestSlot } from "../../src/providers/request-pacing";
+import { decodeCompactionSummary } from "../../src/responses/compaction";
+
 const A = "luna-order-a";
 const B = "luna-order-b";
 const clientFetch = globalThis.fetch;
@@ -291,6 +294,101 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(lines.filter(line => JSON.parse(line).kind === "dispatch")).toHaveLength(9);
   });
 
+  function twoSpentSeats() {
+    const cfg = threeSpentSeats();
+    cfg.codexAccounts = cfg.codexAccounts!.filter(account => account.id === A || account.id === B);
+    return cfg;
+  }
+
+  test.each(["before the move", "after the move"])("a fast transient failure %s does not cancel Reserve placement", async timing => {
+    const cfg = twoSpentSeats();
+    native = body => {
+      const firstSeat = nativeAccounts.at(-1) === nativeAccounts[0];
+      if (timing === "before the move" && firstSeat && nativeAccounts.length <= 2
+        || timing === "after the move" && !firstSeat && nativeAccounts.length === 2) return new Response("upstream busy", { status: 502 });
+      return firstSeat ? reserveRefused() : sse(body.model, "ok");
+    };
+    expect((await post(cfg)).text).toContain("response.completed");
+    expect(calls).toEqual(Array(timing === "before the move" ? 4 : 3).fill("native:gpt-reserve"));
+    expect(new Set(nativeAccounts).size).toBe(2);
+  });
+
+  test("a third send on one seat does not buy a third send on the relay", async () => {
+    const cfg = eightSpentSeats();
+    cfg.combos!.luna!.targets[2] = { provider: "relay", model: "gpt-6-sol" };
+    native = () => nativeAccounts.length < 3 ? new Response("bad gateway", { status: 502 })
+      : Response.json({ error: { message: "Monthly usage limit reached" } }, { status: 429 });
+    relay = (_req, body) => body.model === "gpt-6-sol" || calls.filter(call => call === "relay:gpt-6-luna").length === 3
+      ? sse(body.model, "ok") : new Response("busy", { status: 502 });
+    expect((await post(cfg)).text).toContain("response.completed");
+    expect(calls).toEqual([...Array(3).fill("native:gpt-reserve"), "relay:gpt-6-luna", "relay:gpt-6-luna", "relay:gpt-6-sol"]);
+  });
+
+  async function waitForNativeQueue(cfg: OcxConfig) {
+    for (let i = 0; i < 500 && !providerRequestPacingStatus("openai", cfg.providers.openai!).queued; i++) await Bun.sleep(1);
+    expect(providerRequestPacingStatus("openai", cfg.providers.openai!).queued).toBe(1);
+  }
+
+  test("an enforced pre-wire refusal charges the relay but not the cooled Reserve seat", async () => {
+    const cfg = config(); seats(); cfg.providers.openai!.requestPacing = { enabled: true, maxConcurrentRequests: 1 };
+    const journal: string[] = [];
+    const ledger = createSpendReservationLedger({ policy: { ...DEFAULT_SPEND_RESERVATION_POLICY, root: { maxTokens: 1_000_000 } },
+      journal: { read: () => [...journal], append: line => { journal.push(line); }, rewrite: next => { journal.splice(0, journal.length, ...next); } } });
+    const logCtx: RequestLogContext = { model: "combo/luna", provider: "combo", spendInputEstimateTokens: 1 };
+    const tracker = createRequestSpendTracker(logCtx, "reserve-before-pacing", ledger);
+    const sendBudget = createRequestExecutionBudget(undefined, undefined, tracker);
+    const blocker = await waitForProviderRequestSlot("openai", cfg.providers.openai!, "gpt-6-luna");
+    const pending = post(cfg, {}, {}, undefined, { logCtx, sendBudget });
+    try {
+      await waitForNativeQueue(cfg);
+      recordCodexUpstreamOutcome(cfg, B, 429, { now, modelId: "gpt-6-luna", poolReserve: true, retryAfter: "3600" });
+      blocker.release();
+      expect((await pending).text).toContain("response.completed");
+      expect(calls).toEqual(["relay:gpt-6-luna"]);
+      expect(sendBudget.physicalStarted).toBe(1); expect(sendBudget.used).toBe(1);
+    } finally { blocker.release(); await pending; resetProviderRequestPacingForTest(); tracker.settle(logCtx.usage); }
+    expect(journal.filter(line => JSON.parse(line).kind === "dispatch")).toHaveLength(1);
+  });
+
+  test("a queued alternate that regains included usage is skipped without losing the next seat", async () => {
+    const cfg = twoSpentSeats(); addUnreportedSpentSeat(cfg, "still-spent");
+    cfg.providers.openai!.requestPacing = { enabled: true, maxConcurrentRequests: 1 };
+    const blockerReady = Promise.withResolvers<Awaited<ReturnType<typeof waitForProviderRequestSlot>>>();
+    const controller = new AbortController();
+    native = body => {
+      if (nativeAccounts.length === 1) {
+        blockerReady.resolve(waitForProviderRequestSlot("openai", cfg.providers.openai!, "gpt-6-luna", controller.signal));
+        return reserveRefused();
+      }
+      return sse(body.model, "ok");
+    };
+    const pending = post(cfg, {}, {}, controller.signal);
+    const blocker = await Promise.race([blockerReady.promise, pending.then(() => { throw new Error("first Reserve seat did not send"); })]);
+    try {
+      await waitForNativeQueue(cfg);
+      const stale = nativeAccounts[0] === `fixture-workspace-${A}` ? B : A;
+      updateAccountQuota(stale, 20, now + 86_400_000); blocker.release();
+      expect((await pending).text).toContain("response.completed");
+      expect(calls).toEqual(["native:gpt-reserve", "native:gpt-reserve"]);
+      expect(nativeAccounts[1]).toBe("fixture-workspace-still-spent");
+    } finally { blocker.release(); controller.abort(); await pending; resetProviderRequestPacingForTest(); }
+  });
+
+  test("a portable compaction override walks Reserve and returns a compaction item", async () => {
+    const cfg = twoSpentSeats(); cfg.compactionRouting = { model: "combo/luna" };
+    const sent: string[] = [];
+    native = body => { sent.push(JSON.stringify(body)); return sent.length === 1 ? reserveRefused() : sse(body.model, "ok"); };
+    const result = await post(cfg, { model: "metered/gpt-6-sol", stream: false, input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "retain this fixture history" }] }, { type: "compaction_trigger" },
+    ] }, { "x-codex-turn-metadata": JSON.stringify({ request_kind: "compaction", compaction: { trigger: "manual" } }) });
+    expect(result.status).toBe(200);
+    expect(calls).toEqual(["native:gpt-reserve", "native:gpt-reserve"]);
+    for (const body of sent) { expect(body).toContain("retain this fixture history"); expect(body).not.toContain("compaction_trigger"); }
+    const output = JSON.parse(result.text).output;
+    expect(output).toHaveLength(1); expect(output[0].type).toBe("compaction");
+    expect(decodeCompactionSummary(output[0].encrypted_content)).toContain("hi");
+  });
+
   test("a live Reserve cooldown skips that seat before the relay", async () => {
     const cfg = threeSpentSeats();
     recordCodexUpstreamOutcome(cfg, B, 429, { now, modelId: "gpt-6-luna", poolReserve: true, retryAfter: "3600" });
@@ -467,30 +565,37 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     await post(config(), {}, {}, controller.signal).catch(() => undefined);
     expect(calls).toEqual(["relay:gpt-6-luna"]);
   });
-  test("a turn-state handle keeps today's routing: native serves ordinary Luna and the relay is untouched", async () => {
+  test("unknown turn state with no recorded owner does not guess a seat", async () => {
     seats(false);
     const result = await post(config(), {}, { "x-codex-turn-state": "opaque" });
-    expect(result.status).toBe(200);
-    expect(calls).toEqual(["native:gpt-6-luna"]);
+    expect(result.status).toBe(409);
+    expect(calls).toEqual([]);
   });
-  test("a continuation of a stored response keeps today's routing and stays with native", async () => {
+  test("a locally restored continuation sends the complete transcript to the relay, not the response id", async () => {
     seats(false);
-    expect((await post(config())).status).toBe(200);
-    expect(calls).toEqual(["relay:gpt-6-luna"]);
+    expect((await post(config(), { input: "remember this original question", store: true })).status).toBe(200);
     calls.length = 0;
-    expect((await post(config(), { previous_response_id: "resp_1" })).status).toBe(200);
-    expect(calls).toEqual(["native:gpt-6-luna"]);
+    let wire = "";
+    relay = (_request, body) => { wire = JSON.stringify(body); return sse(body.model, "ok"); };
+    expect((await post(config(), { previous_response_id: "resp_1", input: "follow-up" })).status).toBe(200);
+    expect(calls).toEqual(["relay:gpt-6-luna"]);
+    expect(wire).toContain("remember this original question"); expect(wire).toContain("follow-up");
+    expect(wire).not.toContain("previous_response_id");
   });
   test.each([
-    ["encrypted reasoning in the input", { input: [{ type: "reasoning", id: "rs_1", summary: [], encrypted_content: "opaque-cipher" }, { role: "user", content: "ping" }] }],
+    ["an opaque compaction checkpoint", { input: [{ type: "compaction", encrypted_content: "opaque-cipher" }, { role: "user", content: "ping" }] }],
     ["a turn-state handle in client_metadata", { client_metadata: { "x-codex-turn-state": "opaque" } }],
     ["an uploaded file reference", { input: [{ role: "user", content: [{ type: "input_file", file_id: "file_1" }] }] }],
-  ])("%s keeps today's order: native serves ordinary Luna and the relay is untouched", async (_name, extra) => {
-    seats(false);
-    expect((await post(config(), extra)).status).toBe(200);
-    expect(calls).toEqual(["native:gpt-6-luna"]);
+  ])("%s stays on its recorded native issuer while another seat has Reserve", async (_name, extra) => {
+    const cfg = config(), lane = { "thread-id": "bound-native" };
+    seats(false); relay = refusedConnect;
+    expect((await post(cfg, {}, lane)).status).toBe(200);
+    clearComboTargetCooldowns("luna", ["relay/gpt-6-luna"]);
+    calls.length = 0; nativeAccounts.length = 0; seats();
+    expect((await post(cfg, extra, lane)).status).toBe(200);
+    expect(calls).toEqual(["native:gpt-6-luna"]); expect(nativeAccounts).toEqual([`fixture-workspace-${A}`]);
   });
-  test("a later turn of a conversation the relay served stays on the relay: no Reserve re-plan, no move to native", async () => {
+  test("a relay owner keeps its opaque checkpoint, but its next portable turn replans Reserve", async () => {
     seats(false);
     const lane = { "thread-id": "luna-conversation" };
     expect((await post(config(), {}, lane)).status).toBe(200);
@@ -499,20 +604,20 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     seats();
     const laterTurn = { input: [
       { role: "user", content: "ping" },
-      { type: "reasoning", id: "rs_1", summary: [], encrypted_content: "relay-cipher" },
+      { type: "compaction", encrypted_content: "relay-cipher" },
       { type: "message", role: "assistant", content: [{ type: "output_text", text: "pong" }] },
       { role: "user", content: "again" },
     ] };
     expect((await post(config(), laterTurn, lane)).status).toBe(200);
     expect((await post(config(), { input: "portable follow-up" }, lane)).status).toBe(200);
-    expect(calls).toEqual(["relay:gpt-6-luna", "relay:gpt-6-luna"]);
+    expect(calls).toEqual(["relay:gpt-6-luna", "native:gpt-reserve"]);
   });
   test.each([
     { name: "a portable turn asks the eligible relay before spending native included usage", input: "again", nativeReserve: false, expected: "relay:gpt-6-luna" },
     { name: "a portable turn uses newly available native Reserve before the relay", input: "again", nativeReserve: true, expected: "native:gpt-reserve" },
-    { name: "a turn carrying native encrypted reasoning stays on native", nativeReserve: false, input: [
+    { name: "a turn carrying scrub-safe native reasoning tries the relay", nativeReserve: false, input: [
       { type: "reasoning", id: "rs_native", summary: [], encrypted_content: "native-cipher" }, { role: "user", content: "again" },
-    ], expected: "native:gpt-6-luna" },
+    ], expected: "relay:gpt-6-luna" },
   ])("after native ordinary Luna served, $name", async ({ input, nativeReserve, expected }) => {
     seats(false);
     const lane = { "thread-id": "native-conversation" };
@@ -526,6 +631,55 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect((await post(config(), { input }, lane)).status).toBe(200);
     expect(calls).toEqual([expected]);
   });
+  test("a recalled included seat cannot consume a continuation after the spent seats refuse", async () => {
+    const cfg = config(), lane = { "thread-id": "long-native-history" };
+    seats(false); relay = refusedConnect;
+    expect((await post(cfg, {}, lane)).text).toContain("response.completed");
+    expect(calls).toEqual(["relay:gpt-6-luna", "native:gpt-6-luna"]);
+    clearComboTargetCooldowns("luna", ["relay/gpt-6-luna"]);
+    calls.length = 0; nativeAccounts.length = 0;
+    seats(); addUnreportedSpentSeat(cfg, "walk-c");
+    const wires: string[] = [];
+    native = body => { wires.push(JSON.stringify(body)); return body.model === "gpt-reserve"
+      ? Response.json({ error: { code: "rate_limit_exceeded" } }, { status: 429 }) : sse(body.model, "ok"); };
+    relay = (_req, body) => { wires.push(JSON.stringify(body)); return sse(body.model, "ok"); };
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const input = [{ type: "reasoning", id: "rs_foreign", encrypted_content: "private-fixture-blob", summary: [{ type: "summary_text", text: "readable summary" }] },
+      { role: "user", content: "continue the original question" }];
+    expect((await post(cfg, { input }, lane, undefined, { logCtx })).text).toContain("response.completed");
+    expect(calls).toEqual(["native:gpt-reserve", "native:gpt-reserve", "relay:gpt-6-luna"]);
+    expect(nativeAccounts).not.toContain(`fixture-workspace-${A}`);
+    for (const wire of wires) {
+      expect(wire).toContain("continue the original question"); expect(wire).toContain("readable summary");
+      expect(wire).not.toContain("private-fixture-blob"); expect(wire).not.toContain("rs_foreign");
+    }
+    expect(logCtx.routeDecision?.selected.reason).toBe("luna-reserve-first");
+  });
+
+  test("a verified handle uses only its unspent owner and does not hop on refusal", async () => {
+    seats(); const cfg = config();
+    const handle = issueTurnStateHandle("fixture-owner-state", turnStateBinding("openai", new Headers({
+      authorization: `Bearer fixture-access-${A}`, "chatgpt-account-id": `fixture-workspace-${A}`,
+    })));
+    native = reserveRefused;
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const result = await post(cfg, {}, { [TURN_STATE_HEADER]: handle }, undefined, { logCtx });
+    expect(result.status).toBe(429); expect(calls).toEqual(["native:gpt-6-luna"]);
+    expect(nativeAccounts).toEqual([`fixture-workspace-${A}`]);
+    expect(logCtx.routeDecision?.selected.reason).toBe("luna-owner-turn-state");
+  });
+
+  test("a portable follow-up holds a remembered Reserve seat's empty quota prelude", async () => {
+    const cfg = threeSpentSeats(), lane = { "thread-id": "previous-reserve-owner" };
+    expect((await post(cfg, {}, lane)).text).toContain("response.completed");
+    const owner = nativeAccounts[0]; calls.length = 0; nativeAccounts.length = 0;
+    native = body => sse(body.model, nativeAccounts.at(-1) === owner ? "created-then-quota" : "ok");
+    const result = await post(cfg, { input: "another portable question" }, lane);
+    expect(result.text).toContain("response.completed"); expect(result.text).not.toContain("usage_limit_reached");
+    expect(calls).toEqual(["native:gpt-reserve", "native:gpt-reserve"]);
+    expect(nativeAccounts[0]).toBe(owner); expect(nativeAccounts[1]).not.toBe(owner);
+  });
+
   test("a native pin later in the combo still asks the relay when an earlier target becomes eligible", async () => {
     seats(false);
     const cfg = config();
@@ -574,7 +728,7 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     const targets = Array.from({ length: 30 }, (_, index) => ({ provider: "openai", model: `gpt-6-sol-${index}` }));
     const cfg = config({}, targets);
     const resolve = mock(() => undefined);
-    const plan = planLunaReserveLegs({ ...cfg.combos!.luna!, targets } as never, () => true, resolve, () => true, () => true);
+    const plan = planLunaReserveLegs({ ...cfg.combos!.luna!, targets } as never, resolve, () => true, () => true);
     expect(plan).toBeUndefined();
     expect(resolve).not.toHaveBeenCalled();
   });
