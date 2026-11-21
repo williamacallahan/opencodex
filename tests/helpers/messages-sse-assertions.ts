@@ -41,7 +41,14 @@ export function registerSseLane(lane: string) {
         if (lane === "fold") {
           expect(after.internal.settlements, key).toEqual(before.internal.settlements.map((row: any) => ({ ...row, status: row.status === 200 ? 502 : row.status })));
           expect(internal({ ...after.internal, settlements: [] }), key).toEqual(internal({ ...before.internal, settlements: [] }));
-        } else expect(internal(after.internal), key).toEqual(internal(before.internal));
+        } else {
+          // 9cd5a5748 changed the accounting, not the transport. Use the pinned client's
+          // error observations, not the current response or the fixture's presentation kind.
+          const hadErrorEvent = golden.dictionaries.diagnostics[values[9]].length > 0;
+          const expectedTerminal = (row: { status: number }) => hadErrorEvent && row.status === 200 ? { ...row, terminalStatus: "failed" } : row;
+          expect(internal(after.internal), key).toEqual(internal({ ...before.internal,
+            calls: before.internal.calls.map(expectedTerminal), settlements: before.internal.settlements.map(expectedTerminal) }));
+        }
         const ordinary = input.kind === "non-error" || input.kind === "rename" || lane === "tap";
         if (ordinary) {
           expect(after.bodySha256, key).toBe(before.bodySha256);

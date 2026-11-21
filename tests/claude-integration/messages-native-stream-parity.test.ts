@@ -35,6 +35,10 @@ for (const lane of ["tap", "native-fixture", "native-anthropic"]) for (const sce
     if (scenario === "cancel" && lane !== "tap") {
       expect(head).toHaveProperty("usage", { inputTokens: 5, outputTokens: 0 });
       expect({ ...headFacts, usage: undefined }).toEqual({ ...baseFacts, usage: undefined });
+    } else if (scenario === "overflow" || scenario === "throughput") {
+      // 9cd5a5748: the client received an error terminal even though HTTP stayed 200.
+      const rows = lane === "tap" ? "calls" : "settlements";
+      expect(headFacts).toEqual({ ...baseFacts, [rows]: baseFacts[rows]!.map(row => ({ ...row, terminalStatus: "failed" })) });
     } else expect(headFacts).toEqual(baseFacts);
     // Changed client rows only: owned overflow data; fixed throughput/stall/cap/read wording.
     const changed = lane !== "tap" && ["overflow", "throughput", "cap", "stall", "read-error"].includes(scenario);

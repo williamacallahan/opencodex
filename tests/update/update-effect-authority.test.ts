@@ -98,6 +98,8 @@ for (const operation of ["wrapper", "winsw", "scheduler", "tray", "pid", "runtim
       const fn = load("src/config/process-state.ts", operation === "pid" ? "removePid" : "removeRuntimePort", {
         readPidFileValue: () => 4242, readRuntimePort: () => ({}), getPidPath: prepare,
         getRuntimePortPath: prepare, unlinkSync: effect, unregisterOwnerRegistryHome() {}, getConfigDir: () => "fixture",
+        // The unscoped update removes the record; it does not claim the PID owner's lock.
+        releaseOwnLockOnceRecordGone: (pid: number | undefined) => expect(pid).toBeUndefined(),
       });
       invoke = () => operation === "pid" ? adapter("guardedRemovePid", { removePid: fn })(policy.authorizeMutation, 4242)
         : adapter("guardedRemoveRuntimePort", { removeRuntimePort: fn })(policy.authorizeMutation);
