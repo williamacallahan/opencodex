@@ -14,6 +14,7 @@
 
 import { createTranslatorBudget, type TranslatorBudget } from "../lib/translator-budget";
 import { jsonUtf8Bytes } from "../lib/json-byte-size";
+import { isRec } from "../claude/inbound-records";
 
 export const OCX_REASONING_PREFIX = "ocxr1:";
 
@@ -141,31 +142,104 @@ export function isLikelyRealAnthropicThinkingSignature(signature: string | undef
  * against the 32 MiB translator turn budget (once in the translated body's three coexisting
  * copies, twice as retained input), so an uncapped long session (a 2,150-message gpt-6.2-sol
  * session replayed 556 blobs, 3.4 MB of ciphertext) used most of the budget on ciphertext and
- * the hub answered 413 until the session died. The newest blobs are kept; older ones fall back to
- * their visible text, exactly as a blob minted by another model does.
+ * the hub answered 413 until the session died. Only blobs the requested model minted count.
  */
 export const NATIVE_REASONING_REPLAY_MAX_SIGNATURE_CHARS = 2.5 * 1024 * 1024;
 
-/** The assistant thinking blocks (by identity) whose native reasoning stays within the replay cap, newest first. */
-export function replayableNativeReasoningBlocks(messages: readonly unknown[]): ReadonlySet<object> {
-  const kept = new Set<object>();
+/**
+ * Completed turns leave replay oldest first in steps of this many signature characters, so the
+ * cutoff stays put for many turns instead of moving every request. GPT-6.2 keeps later reasoning
+ * when whole earlier items are deleted, but every move still costs the prompt cache from that point.
+ */
+const NATIVE_REASONING_REPLAY_PRUNE_STEP_CHARS = NATIVE_REASONING_REPLAY_MAX_SIGNATURE_CHARS / 2;
+
+/**
+ * What a translator does with one thinking block carrying a provider-native envelope:
+ * `replay` hands the blob back, `omit` drops the whole item (an expired blob of the requested
+ * model: replacing it in place would edit the prefix ahead of the reasoning still replayed), and
+ * `visible` keeps only the visible text (a blob another model minted, or one too large to replay).
+ */
+export type NativeReasoningReplayDecision = "replay" | "omit" | "visible";
+
+/** A user message that is not only tool results starts a new turn; tool results continue the active one. */
+function startsTurn(content: unknown): boolean {
+  return !Array.isArray(content) || content.some(block => !isRec(block) || block.type !== "tool_result");
+}
+
+/**
+ * Whether an envelope too large to replay is a native one, read without the full decode
+ * reservation (eight bytes per character would exceed the turn budget above 4 MiB). JSON escapes
+ * every quote inside a string, so these byte sequences can only be object keys.
+ */
+function isOversizedNativeEnvelope(signature: string, budget: TranslatorBudget): boolean {
+  const reservation = budget.reserveTransient(2 * signature.length, { kind: "reasoning" });
+  try {
+    const json = Buffer.from(signature.slice(OCX_REASONING_PREFIX.length), "base64");
+    return json.includes("\"nat\":{") && !json.includes("\"sig\":");
+  } finally {
+    reservation.release();
+  }
+}
+
+/**
+ * Decide, per thinking block (by identity), which provider-native blobs one Messages request
+ * replays. Blocks absent from the result are not native envelopes and keep the translator's own
+ * validation. Only blobs `requestedModel` minted count toward the cap; one over the cap alone is
+ * skipped without ending the selection. Completed turns leave first, whole turns at a time; the
+ * active tool chain (after the last user turn) keeps its newest blobs that fit.
+ */
+export function nativeReasoningReplayPlan(
+  messages: readonly unknown[],
+  requestedModel: string,
+  budget: TranslatorBudget,
+): ReadonlyMap<object, NativeReasoningReplayDecision> {
+  const plan = new Map<object, NativeReasoningReplayDecision>();
+  const candidates: { block: object; chars: number; turn: number }[] = [];
+  let turn = 0;
   let total = 0;
-  for (let m = messages.length - 1; m >= 0; m--) {
-    const message = messages[m];
-    if (!message || typeof message !== "object" || (message as { role?: unknown }).role !== "assistant") continue;
-    const content = (message as { content?: unknown }).content;
-    if (!Array.isArray(content)) continue;
-    for (let b = content.length - 1; b >= 0; b--) {
-      const block: unknown = content[b];
-      if (!block || typeof block !== "object" || (block as { type?: unknown }).type !== "thinking") continue;
-      const signature = (block as { signature?: unknown }).signature;
-      if (typeof signature !== "string" || !signature.startsWith(OCX_REASONING_PREFIX)) continue;
+  for (const message of messages) {
+    if (!isRec(message)) continue;
+    if (message.role === "user") {
+      if (startsTurn(message.content)) turn++;
+      continue;
+    }
+    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+    for (const block of message.content) {
+      if (!isRec(block) || block.type !== "thinking" || typeof block.signature !== "string") continue;
+      const signature = block.signature;
+      if (!signature.startsWith(OCX_REASONING_PREFIX)) continue;
+      if (signature.length > NATIVE_REASONING_REPLAY_MAX_SIGNATURE_CHARS) {
+        if (isOversizedNativeEnvelope(signature, budget)) plan.set(block, "visible");
+        continue;
+      }
+      const envelope = decodeReasoningEnvelope(signature, budget);
+      if (!envelope?.nat || Object.hasOwn(envelope, "sig")) continue;
+      if (envelope.nat.model !== requestedModel) {
+        plan.set(block, "visible");
+        continue;
+      }
+      plan.set(block, "replay");
+      candidates.push({ block, chars: signature.length, turn });
       total += signature.length;
-      if (total > NATIVE_REASONING_REPLAY_MAX_SIGNATURE_CHARS) return kept;
-      kept.add(block);
     }
   }
-  return kept;
+  let excess = total - NATIVE_REASONING_REPLAY_MAX_SIGNATURE_CHARS;
+  if (excess <= 0) return plan;
+  let drop = Math.ceil(excess / NATIVE_REASONING_REPLAY_PRUNE_STEP_CHARS) * NATIVE_REASONING_REPLAY_PRUNE_STEP_CHARS;
+  let next = 0;
+  while (drop > 0 && next < candidates.length && candidates[next]!.turn < turn) {
+    const completed = candidates[next]!.turn;
+    for (; next < candidates.length && candidates[next]!.turn === completed; next++) {
+      plan.set(candidates[next]!.block, "omit");
+      drop -= candidates[next]!.chars;
+      excess -= candidates[next]!.chars;
+    }
+  }
+  for (; excess > 0 && next < candidates.length; next++) {
+    plan.set(candidates[next]!.block, "omit");
+    excess -= candidates[next]!.chars;
+  }
+  return plan;
 }
 
 /** Decode an ocxr1 envelope; returns null for native (OpenAI-encrypted) blobs or garbage. */

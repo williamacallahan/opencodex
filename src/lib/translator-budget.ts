@@ -44,6 +44,8 @@ export interface TranslatorBudgetSnapshot {
   highWaterBytes: number;
   activeCalls: number;
   overflows: number;
+  /** Bytes a further hard charge or reservation may still take before this turn answers 413. */
+  admissionHeadroomBytes: number;
 }
 
 export interface TranslatorBudgetOptions {
@@ -313,6 +315,7 @@ class Budget implements TranslatorBudget {
       highWaterBytes: this.highWaterBytes,
       activeCalls: this.calls.size,
       overflows: this.overflowCount,
+      admissionHeadroomBytes: Math.max(0, this.maxTurnBytes - this.hardChargedBytes),
     };
   }
 

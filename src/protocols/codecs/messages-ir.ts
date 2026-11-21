@@ -42,7 +42,7 @@ import { hasRoutedIdentity, nameRoutedIdentity } from "../../adapters/identity";
 import type { TranslatorBudget } from "../../lib/translator-budget";
 import { inlineDocumentFromDataUrl, inlineDocumentMarker } from "../../responses/inline-document";
 import { functionCallArgumentsFromText } from "../../responses/parser";
-import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX, replayableNativeReasoningBlocks } from "../../responses/reasoning-envelope";
+import { decodeReasoningEnvelope, encodeReasoningEnvelope, nativeReasoningReplayPlan, OCX_REASONING_PREFIX } from "../../responses/reasoning-envelope";
 import { normalizeVisualizationContext } from "../../responses/visualization-directives";
 import type { PolicyRequestEvidence } from "../../routing/evaluator";
 import { createToolChoiceResolver, namespacedToolName } from "../../types";
@@ -182,7 +182,7 @@ export function messagesConversationToIr(
   const nativeReasoningReplay = new Map<string, string>();
   const blockedNames = effectiveBlockedSkillNames(cc);
   const blockedCalls = blockedSkillCallIds(raw.messages, blockedNames);
-  const replayable = replayableNativeReasoningBlocks(raw.messages);
+  const replayPlan = nativeReasoningReplayPlan(raw.messages, requestedModel, budget);
   // The parser's pending reasoning: it belongs to the next assistant turn, and turn boundaries
   // clear it after keeping any signed or redacted replay.
   const pending: Array<{ part: OcxThinkingContent; envelopeSigned: boolean }> = [];
@@ -387,22 +387,25 @@ export function messagesConversationToIr(
           flush();
           const thinking = typeof block.thinking === "string" ? block.thinking : "";
           const signature = typeof block.signature === "string" ? block.signature : "";
+          // The provider's own blob goes back only to the model that minted it, within the replay cap.
+          const decision = replayPlan.get(block);
+          if (decision === "omit") break;
+          if (decision === "visible") {
+            if (thinking.length > 0) pushReasoning(reasoningItemId(), thinking, undefined);
+            break;
+          }
           if (signature.startsWith(OCX_REASONING_PREFIX)) {
             const owned = decodeReasoningEnvelope(signature, budget);
             if (!owned) throw markProxyError(new AnthropicRequestError(MALFORMED_REASONING_SIGNATURE));
             if (Object.hasOwn(owned, "sig")) {
               throw markProxyError(new AnthropicRequestError("OpenCodex reasoning continuity cannot be replayed as an Anthropic signature"));
             }
-            if (owned.nat) {
-              // The provider's own blob goes back only to the model that minted it.
-              const nat = owned.nat.model === requestedModel && replayable.has(block) ? owned.nat : undefined;
-              if (nat) {
-                const previous = nativeReasoningReplay.get(nat.enc);
-                nativeReasoningReplay.set(nat.enc, previous === undefined || previous === nat.tag ? nat.tag : "");
-                budget.chargeRetained(2 * nat.enc.length, { kind: "reasoning" });
-              }
-              if (thinking.length === 0 && !nat) break;
-              pushReasoning(nat?.id ?? reasoningItemId(), thinking, nat?.enc);
+            if (decision === "replay" && owned.nat) {
+              const nat = owned.nat;
+              const previous = nativeReasoningReplay.get(nat.enc);
+              nativeReasoningReplay.set(nat.enc, previous === undefined || previous === nat.tag ? nat.tag : "");
+              budget.chargeRetained(2 * nat.enc.length, { kind: "reasoning" });
+              pushReasoning(nat.id ?? reasoningItemId(), thinking, nat.enc);
               break;
             }
           }

@@ -50,7 +50,7 @@ function upstreamResponse(blob = BLOB) {
   ], usage: { input_tokens: 2, output_tokens: 2, total_tokens: 4 } });
 }
 
-async function send(cfg: OcxConfig, payload: ReturnType<typeof turn>, observe: (wire: Record<string, unknown>, url: string) => Response = () => upstreamResponse()) {
+async function send(cfg: OcxConfig, payload: object, observe: (wire: Record<string, unknown>, url: string) => Response = () => upstreamResponse()) {
   const wires: Record<string, unknown>[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const wire = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -372,5 +372,59 @@ describe("Claude native reasoning provenance", () => {
         expect(JSON.stringify(wire)).not.toContain(blobOnly);
       } finally { globalThis.fetch = previousFetch; }
     }
+  });
+});
+
+describe("Claude native reasoning replay through the Messages bridge", () => {
+  const owner = () => nativeReasoningOwnerForRoute({ provider: provider() });
+  const native = (enc: string, model = MODEL, thinking = `Plan ${enc.slice(0, 8)}.`) => ({
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking, signature: encodeReasoningEnvelope({ txt: thinking, nat: { enc, model, id: `rs_${enc.slice(0, 8)}`, tag: nativeReasoningTag(owner(), enc)! } }, createTestTranslatorBudget({ maxTurnBytes: 256 * 1024 * 1024 })) },
+      { type: "text", text: "Step." },
+    ],
+  });
+  const blob = (label: string, chars: number) => `${label}${"x".repeat(chars - label.length)}`;
+  const replayed = (wire: Record<string, unknown>) => (wire.input as Record<string, unknown>[])
+    .filter(item => typeof item.encrypted_content === "string").map(item => (item.encrypted_content as string).slice(0, 8));
+
+  test("history whose ciphertext would push the reserved request copies over budget is trimmed oldest first and admitted", async () => {
+    // 5.6 MiB of history and 1.8 MiB of ciphertext under the signature cap: one charged body copy,
+    // three reserved copies and twice the ciphertext come to about 33 MiB of the 32 MiB turn budget.
+    const blobs = Array.from({ length: 18 }, (_, i) => blob(`blob${String(i).padStart(4, "0")}`, 100 * 1024));
+    const messages: Record<string, unknown>[] = [{ role: "user", content: `Read this. ${"y".repeat(5.6 * 1024 * 1024)}` }];
+    for (const enc of blobs) messages.push(native(enc), { role: "user", content: "Continue." });
+    const { wires } = await send(config(), { model: MODEL, max_tokens: 128, thinking: { type: "adaptive" }, messages });
+    const kept = replayed(wires[0]!);
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept.length).toBeLessThan(blobs.length);
+    expect(kept).toEqual(blobs.slice(blobs.length - kept.length).map(enc => enc.slice(0, 8)));
+  });
+
+  test("an older blob of the requested model is kept when newer blobs of another model fill the cap", async () => {
+    const older = blob("oldsol00", 64);
+    const foreign = Array.from({ length: 3 }, (_, i) => blob(`foreign${i}`, 1024 * 1024));
+    const messages: Record<string, unknown>[] = [{ role: "user", content: "Start." }, native(older), { role: "user", content: "Switch." }];
+    for (const enc of foreign) messages.push(native(enc, "other-model"), { role: "user", content: "Continue." });
+    const { wires } = await send(config(), { model: MODEL, max_tokens: 128, thinking: { type: "adaptive" }, messages });
+    const wire = JSON.stringify(wires[0]);
+    expect(replayed(wires[0]!)).toEqual(["oldsol00"]);
+    for (const enc of foreign) expect(wire).not.toContain(enc);
+    expect(wire).toContain("Plan foreign2.");
+  });
+
+  test("a single blob too large to replay is skipped without its decode reservation", async () => {
+    // A 6 MiB signature would reserve 48 MiB to decode; the older blob after it still replays.
+    const giant = blob("giant000", 4.5 * 1024 * 1024);
+    const older = blob("oldsol00", 64);
+    const messages = [
+      { role: "user", content: "Start." }, native(older), { role: "user", content: "Continue." },
+      native(giant), { role: "user", content: "Continue." },
+    ];
+    const { wires } = await send(config(), { model: MODEL, max_tokens: 128, thinking: { type: "adaptive" }, messages });
+    const wire = JSON.stringify(wires[0]);
+    expect(replayed(wires[0]!)).toEqual(["oldsol00"]);
+    expect(wire).not.toContain(giant.slice(0, 64));
+    expect(wire).toContain("Plan giant000.");
   });
 });

@@ -142,27 +142,28 @@ describe("Claude route carries a provider's own encrypted reasoning", () => {
     expect(JSON.stringify(body)).not.toContain(BLOB);
   });
 
-  test("a long session replays only the newest native blobs and keeps older visible text", () => {
-    const blobChars = 100_000;
-    const turns = 40;
-    const messages: Record<string, unknown>[] = [{ role: "user", content: "Start." }];
-    for (let turn = 0; turn < turns; turn++) {
-      const enc = `${String(turn).padStart(4, "0")}${"x".repeat(blobChars)}`;
-      const signature = encodeReasoningEnvelope({ txt: `Plan ${turn}.`, nat: { enc, model: MODEL, id: `rs_${turn}`, tag: TAG } });
-      messages.push({ role: "assistant", content: [{ type: "thinking", thinking: `Plan ${turn}.`, signature }, { type: "text", text: `Step ${turn}.` }] });
-      messages.push({ role: "user", content: "Continue." });
-    }
-    const body = anthropicToResponsesBody({ model: MODEL, max_tokens: 1024, thinking: { type: "adaptive" }, messages });
-    const reasoning = (body.input as Record<string, unknown>[]).filter(item => item.type === "reasoning");
-    expect(reasoning).toHaveLength(turns);
-    const withBlob = reasoning.filter(item => typeof item.encrypted_content === "string");
-    const replayedChars = withBlob.reduce((sum, item) => sum + (item.encrypted_content as string).length, 0);
-    expect(withBlob.length).toBeGreaterThan(0);
-    expect(withBlob.length).toBeLessThan(turns);
+  test("a long session replays only the newest native blobs, deletes expired items whole, and keeps its cutoff as turns arrive", () => {
+    const session = (turns: number) => {
+      const messages: Record<string, unknown>[] = [{ role: "user", content: "Start." }];
+      for (let turn = 0; turn < turns; turn++) {
+        const enc = `${String(turn).padStart(4, "0")}${"x".repeat(100_000)}`;
+        const signature = encodeReasoningEnvelope({ txt: `Plan ${turn}.`, nat: { enc, model: MODEL, id: `rs_${turn}`, tag: TAG } });
+        messages.push({ role: "assistant", content: [{ type: "thinking", thinking: `Plan ${turn}.`, signature }, { type: "text", text: `Step ${turn}.` }] });
+        messages.push({ role: "user", content: "Continue." });
+      }
+      const body = anthropicToResponsesBody({ model: MODEL, max_tokens: 1024, thinking: { type: "adaptive" }, messages });
+      return (body.input as Record<string, unknown>[]).filter(item => item.type === "reasoning");
+    };
+    const reasoning = session(40);
+    const replayedChars = reasoning.reduce((sum, item) => sum + (item.encrypted_content as string).length, 0);
+    expect(reasoning.length).toBeGreaterThan(0);
+    expect(reasoning.length).toBeLessThan(40);
     expect(replayedChars).toBeLessThan(NATIVE_REASONING_REPLAY_MAX_SIGNATURE_CHARS);
-    // The kept blobs are the newest ones; every older item still carries its visible summary.
-    expect(reasoning.slice(turns - withBlob.length).every(item => typeof item.encrypted_content === "string")).toBe(true);
-    expect(reasoning.slice(0, turns - withBlob.length).every(item => !("encrypted_content" in item) && Array.isArray(item.summary))).toBe(true);
+    // Expired blobs leave no summary-only replacement; the survivors are the newest turns.
+    expect(reasoning.every(item => typeof item.encrypted_content === "string")).toBe(true);
+    expect(reasoning.map(item => item.id)).toEqual(Array.from({ length: reasoning.length }, (_, i) => `rs_${40 - reasoning.length + i}`));
+    // One more turn does not move the cutoff: the oldest replayed item is the same.
+    expect(session(41)[0]!.id).toBe(reasoning[0]!.id);
   });
 
   test("an empty thinking block for a different model leaves no reasoning item", () => {

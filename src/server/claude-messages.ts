@@ -45,7 +45,7 @@ import {
 import { claudeRequestShape } from "./claude-request-shape";
 import { agentServingThreadKey } from "../oauth/session-affinity-key";
 import { rememberServedClaudeCacheGroup, resolveClaudeFork, servedClaudeCacheGroup } from "./claude-fork-session";
-import { AnthropicRequestError, callerCacheRetention, claudeCodeAgentId, claudeCacheGroupKey, claudeSessionKeyHash, DesktopModelMappingUnavailableError, extractOcxEffortDirective, extractOcxRouteDirective, nativeAnthropicProjection, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
+import { AnthropicRequestError, callerCacheRetention, claudeCodeAgentId, claudeCacheGroupKey, claudeSessionKeyHash, DesktopModelMappingUnavailableError, extractOcxEffortDirective, extractOcxRouteDirective, fitNativeReasoningReplayToBudget, nativeAnthropicProjection, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
 import { nativeReasoningTag, type NativeReasoningOwner } from "../responses/reasoning-replay-cache";
 import { isKnownDesktop3pModelId, resolveDesktop3pAlias } from "../claude/desktop-3p";
 import { resolveAlias, claudeCodeNativeAlias, legacyAliasForNative } from "../claude/alias";
@@ -1424,6 +1424,7 @@ async function handleClaudeMessagesWithBudget(
   let internalReq: Request;
   try {
     // The UTF-16 JSON string and the Request's UTF-8 body coexist until dispatch.
+    if (nativeReasoningReplay) nativeReasoningReplay = fitNativeReasoningReplayToBudget(internalBody, nativeReasoningReplay, translatorBudget, 3);
     const bodyBytes = jsonUtf8Bytes(internalBody);
     const reservation = translatorBudget.reserveTransient(3 * bodyBytes, { kind: "request_copies" });
     try {

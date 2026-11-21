@@ -21,9 +21,10 @@ import { AnthropicRequestError, isRec, type Rec } from "./inbound-records";
 import { resolveInboundModel, effortForThinkingBudget, effortFromOutputConfig, formatFromOutputConfig } from "./inbound-model-options";
 import { systemToInstructions, toolsToResponses, toolChoiceToResponses } from "./inbound-content-options";
 import { stabilizeClaudeInstructionsForPromptCache } from "./inbound-cache-stabilize";
-import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX, replayableNativeReasoningBlocks } from "../responses/reasoning-envelope";
+import { decodeReasoningEnvelope, encodeReasoningEnvelope, nativeReasoningReplayPlan, OCX_REASONING_PREFIX, type NativeReasoningReplayDecision } from "../responses/reasoning-envelope";
 import { inlineDocumentMarker } from "../responses/inline-document";
 import { createTranslatorBudget, type TranslatorBudget } from "../lib/translator-budget";
+import { jsonUtf8Bytes } from "../lib/json-byte-size";
 import { collectAnthropicCacheTtls } from "../adapters/anthropic/cache-retention";
 
 
@@ -302,7 +303,7 @@ function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionC
   pushUserMessage(input, pending);
 }
 
-function assistantMessageToItems(content: unknown, input: Rec[], budget: TranslatorBudget, requestedModel: string, nativeReasoningReplay: Map<string, string>, replayable: ReadonlySet<object>): void {
+function assistantMessageToItems(content: unknown, input: Rec[], budget: TranslatorBudget, nativeReasoningReplay: Map<string, string>, replayPlan: ReadonlyMap<object, NativeReasoningReplayDecision>): void {
   if (typeof content === "string") {
     if (content.length > 0) input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: content }] });
     return;
@@ -331,25 +332,28 @@ function assistantMessageToItems(content: unknown, input: Rec[], budget: Transla
         flush();
         const thinking = typeof raw.thinking === "string" ? raw.thinking : "";
         const signature = typeof raw.signature === "string" ? raw.signature : "";
+        // The provider's own blob goes back only to the model that minted it, within the replay
+        // cap; any other model gets the visible text alone, as before this envelope field existed.
+        const decision = replayPlan.get(raw);
+        if (decision === "omit") break;
+        if (decision === "visible") {
+          if (thinking.length > 0) input.push({ type: "reasoning", id: `rs_${crypto.randomUUID().replace(/-/g, "")}`, summary: [{ type: "summary_text", text: thinking }] });
+          break;
+        }
         if (signature.startsWith(OCX_REASONING_PREFIX)) {
           const owned = decodeReasoningEnvelope(signature, budget);
           if (!owned) throw markProxyError(new AnthropicRequestError("malformed ocxr1 reasoning signature"));
           if (Object.hasOwn(owned, "sig")) throw markProxyError(new AnthropicRequestError("OpenCodex reasoning continuity cannot be replayed as an Anthropic signature"));
-          if (owned.nat) {
-            // The provider's own blob goes back only to the model that minted it; any other
-            // model gets the visible text alone, as before this envelope field existed.
-            const nat = owned.nat.model === requestedModel && replayable.has(raw) ? owned.nat : undefined;
-            if (nat) {
-              const previous = nativeReasoningReplay.get(nat.enc);
-              nativeReasoningReplay.set(nat.enc, previous === undefined || previous === nat.tag ? nat.tag : "");
-            }
-            if (nat) budget.chargeRetained(2 * nat.enc.length, { kind: "reasoning" });
-            if (thinking.length === 0 && !nat) break;
+          if (decision === "replay" && owned.nat) {
+            const nat = owned.nat;
+            const previous = nativeReasoningReplay.get(nat.enc);
+            nativeReasoningReplay.set(nat.enc, previous === undefined || previous === nat.tag ? nat.tag : "");
+            budget.chargeRetained(2 * nat.enc.length, { kind: "reasoning" });
             input.push({
               type: "reasoning",
-              id: nat?.id ?? `rs_${crypto.randomUUID().replace(/-/g, "")}`,
+              id: nat.id ?? `rs_${crypto.randomUUID().replace(/-/g, "")}`,
               summary: thinking.length > 0 ? [{ type: "summary_text", text: thinking }] : [],
-              ...(nat ? { encrypted_content: nat.enc } : {}),
+              encrypted_content: nat.enc,
             });
             break;
           }
@@ -413,6 +417,51 @@ export interface ClaudeInboundTranslation {
   body: Rec;
   cacheKeySource: ClaudeCacheKeySource;
   nativeReasoningReplay: ReadonlyMap<string, string>;
+}
+
+/**
+ * Delete replayed native reasoning items from a translated body, oldest first and as whole items,
+ * until `copies` more serializations of it fit the turn budget. The bridge already holds one charged
+ * copy of the body plus twice each replayed blob, so a body under the replay cap can still overflow
+ * once images or long tool results share the turn. Each deleted item hands back its body bytes and
+ * its blob charge. Returns the replay map for the blobs that remain. A body that still does not fit
+ * is left to the caller's reservation, which answers 413 as before.
+ */
+export function fitNativeReasoningReplayToBudget(
+  body: Rec,
+  replay: ReadonlyMap<string, string>,
+  budget: TranslatorBudget,
+  copies: number,
+): ReadonlyMap<string, string> {
+  const input = body.input;
+  if (replay.size === 0 || !Array.isArray(input)) return replay;
+  let shortfall = copies * jsonUtf8Bytes(body) - budget.snapshot().admissionHeadroomBytes;
+  if (shortfall <= 0) return replay;
+  let removedBytes = 0;
+  let removedBlobChars = 0;
+  let kept = 0;
+  for (const item of input as unknown[]) {
+    const blob = shortfall > 0 && isRec(item) && item.type === "reasoning" && typeof item.encrypted_content === "string"
+      && replay.has(item.encrypted_content) ? item.encrypted_content : undefined;
+    if (blob === undefined) {
+      input[kept++] = item;
+      continue;
+    }
+    const itemBytes = jsonUtf8Bytes(item) + 1;
+    removedBytes += itemBytes;
+    removedBlobChars += blob.length;
+    shortfall -= (copies + 1) * itemBytes + 2 * blob.length;
+  }
+  input.length = kept;
+  budget.releaseRetained(2 * removedBlobChars, { kind: "reasoning" });
+  budget.releaseRetained(removedBytes, { kind: "request_copies" });
+  const remaining = new Map<string, string>();
+  for (const item of input as unknown[]) {
+    if (isRec(item) && typeof item.encrypted_content === "string" && replay.has(item.encrypted_content)) {
+      remaining.set(item.encrypted_content, replay.get(item.encrypted_content)!);
+    }
+  }
+  return remaining;
 }
 
 /**
@@ -490,11 +539,11 @@ function translateAnthropicRequest(
     callIds: blockedSkillCallIds(raw.messages, blockedNames),
     names: blockedNames,
   };
-  const replayable = replayableNativeReasoningBlocks(raw.messages);
+  const replayPlan = nativeReasoningReplayPlan(raw.messages, raw.model, budget);
   for (const msg of raw.messages) {
     if (!isRec(msg)) throw markProxyError(new AnthropicRequestError("each message must be an object"));
     if (msg.role === "user") userMessageToItems(msg.content, input, elide);
-    else if (msg.role === "assistant") assistantMessageToItems(msg.content, input, budget, raw.model, nativeReasoningReplay, replayable);
+    else if (msg.role === "assistant") assistantMessageToItems(msg.content, input, budget, nativeReasoningReplay, replayPlan);
     else if (msg.role === "system") {
       const text = systemMessageText(msg.content);
       // Keep it where the client put it. `developer` is first-class in the Responses
