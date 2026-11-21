@@ -1758,12 +1758,13 @@ export async function executeComboResponses(
     // A Reserve-window rejection is narrower than explicit provider-wide evidence.
     const reserveCapacityRefused = legIntent === "reserve-only" && (attempt.sendCount === 0
       || isReserveSeatQuotaRefusal(failure, classifiedScope));
-    const relayCooldown = hasUpstreamSeatPool(targetRoute, childLog.providerAdapter)
+    const pooledRelay = hasUpstreamSeatPool(targetRoute, childLog.providerAdapter);
+    const relayCooldown = pooledRelay
       ? relayFailureCooldownMs(failure.response.status, failure.relayRetryAfterHeader, combo.cooldownMs, failureNow) : undefined;
     const failureCooldownScope = reserveCapacityRefused || isPolicyCandidateRefusal(failure.response) ? "none"
       : relayCooldown !== undefined && classifiedScope === "provider" ? "target" : classifiedScope;
     const failedTargetKey = targetKey(pick.target);
-    let failedTargetCooldownRecorded = false;
+    let failedTargetCooled = false;
     // The dispatch rewrote this to name the pool account that actually served the turn.
     const poolAccountLabel = poolAccountProviderLabel(childLog.provider, pick.target.provider);
     const failedAccount = failure.response.status === 402
@@ -1790,7 +1791,8 @@ export async function executeComboResponses(
       routeConcreteModel,
       retryAfter: poolLocalRefusal || codexLocalRefusal || relayCooldown !== undefined ? undefined : failure.retryAfter,
       resetAt: codexLocalRefusal || relayCooldown !== undefined ? undefined : failure.resetAt,
-      relayCooldownMs: relayCooldown,
+      cooldownMs: relayCooldown,
+      preserveLongerCooldown: pooledRelay,
       now: failureNow,
       cooldownScope: failureCooldownScope,
       // A pin may start in the middle. Ask its planned relay before resuming configured order.
@@ -1801,15 +1803,10 @@ export async function executeComboResponses(
       code: failure.upstreamCode,
       message: failure.classificationText,
       failedAccount,
-      onCooldownRecorded: target => {
-        failedTargetCooldownRecorded ||= targetKey(target) === failedTargetKey;
+      onTargetCooled: target => {
+        failedTargetCooled ||= targetKey(target) === failedTargetKey;
       },
     });
-    // A sibling cooldown is not this failure's write: stale-generation removal can
-    // refuse recording even for a cooldown-producing classification. Require both.
-    const failedTargetCooled = failureCooldownScope !== "none"
-      && failedTargetCooldownRecorded
-      && isComboTargetInCooldown(comboId, pick.target, failureNow);
     // Drop exclusions for the single-target retry, but wait for normal cooldown
     // expiry: an in-flight request cannot reserve a fresh recovery pass, though the
     // reservation it already owns still applies to entries unchanged since it was made.

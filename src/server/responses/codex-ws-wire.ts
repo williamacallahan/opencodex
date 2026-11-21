@@ -69,7 +69,7 @@ interface CodexWsResponseEvidence {
 
 const codexWsUpstreamResponses = new WeakMap<Response, CodexWsResponseEvidence>();
 const quotaObservedResponses = new WeakMap<Response, true>();
-const codexWsPreludeProjections = new WeakMap<Response, true>();
+const codexWsPreludeProjections = new WeakMap<Response, boolean | undefined>();
 registerProviderResponseProvenance(codexWsUpstreamResponses);
 registerProviderResponseProvenance(quotaObservedResponses);
 registerProviderResponseProvenance(codexWsPreludeProjections);
@@ -85,8 +85,13 @@ export function isCodexWsUpstreamResponse(response: Response): boolean {
 }
 
 /** Pre-response projection; its headers retain the exchange's prelude snapshot. */
-export function markCodexWsPreludeProjection(response: Response): void {
-  codexWsPreludeProjections.set(response, true);
+export function markCodexWsPreludeProjection(response: Response, confirmedCapacity?: boolean): void {
+  codexWsPreludeProjections.set(response, confirmedCapacity);
+}
+
+/** False vetoes confirmation; undefined leaves non-quota projections and HTTP on their ordinary path. */
+export function codexWsProjectedCapacity(response: Response): boolean | undefined {
+  return codexWsPreludeProjections.get(response);
 }
 
 export function isCodexWsPreludeProjection(response: Response): boolean {

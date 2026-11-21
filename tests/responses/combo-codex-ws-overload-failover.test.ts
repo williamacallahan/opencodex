@@ -32,7 +32,8 @@ const HOME_KEYS = ["HOME", "OPENCODEX_HOME", "CODEX_HOME"] as const;
 const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"] as const;
 
 type Listener = (event: unknown) => void;
-type Step = "quota-then-refuse" | "quota-output-then-refuse" | "reserve-started-then-refuse"
+const reasoning = { type: "reasoning", id: "rs_inspected", encrypted_content: "fixture-owner-cipher", summary: [] };
+type Step = "issue-reasoning" | "first-quota" | "first-conflict" | "quota-then-refuse" | "quota-output-then-refuse" | "reserve-started-then-refuse"
   | "wrapped-quota" | "conflicting-wrapper" | "foreign-wrapper" | "missing-status" | "unknown-status";
 
 class FakeWebSocket {
@@ -53,9 +54,20 @@ class FakeWebSocket {
   run(step: Step) {
     this.emit("open", {});
     const id = `resp_${FakeWebSocket.instances.indexOf(this)}`;
+    if (step === "first-quota" || step === "first-conflict") {
+      this.frame({ type: "error", status: 429, headers: { "retry-after": "120" },
+        ...(step === "first-conflict" && { code: "origin_rejected" }),
+        error: { code: "usage_limit_reached", message: "Limit reached" } });
+      return;
+    }
     this.frame({ type: "codex.rate_limits", rate_limits: { primary: { used_percent: 10, window_minutes: 10080 } } });
     this.frame({ type: "response.created", response: { id, status: "in_progress", output: [] } });
     this.frame({ type: "response.in_progress", response: { id, status: "in_progress", output: [] } });
+    if (step === "issue-reasoning") {
+      this.frame({ type: "response.output_item.done", response_id: id, output_index: 0, item: reasoning });
+      this.frame({ type: "response.completed", response: { id, model: "gpt-6-luna", status: "completed", output: [reasoning] } });
+      return;
+    }
     if (step !== "quota-then-refuse" && step !== "reserve-started-then-refuse") {
       this.frame({ type: "response.output_item.added", response_id: id, output_index: 0,
         item: { id: "msg_1", type: "message", role: "assistant", content: [] } });
@@ -206,14 +218,15 @@ function comboConfig(): OcxConfig {
   } as OcxConfig;
 }
 
-async function send(config = comboConfig()) {
+async function send(config = comboConfig(), input: unknown = "hello", thread?: string, model = "chain/overload") {
   const logCtx: RequestLogContext = { model: "", provider: "" };
   const request = new Request("http://localhost/v1/responses", {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: "chain/overload", input: "hello", stream: true, store: false }),
+    headers: { "content-type": "application/json", ...(thread && { "thread-id": thread }) },
+    body: JSON.stringify({ model, input, stream: true, store: false, prompt_cache_key: thread }),
   });
   const response = await handleResponses(request, config, logCtx, {
+    admission: { kind: "loopback", source: "loopback" },
     codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME,
     sendBudget: createRequestExecutionBudget(),
   });
@@ -275,6 +288,39 @@ describe("a failover combo moves past a native Codex overload that preceded any 
         expect(cooldown?.confirmedCapacity).toBeUndefined();
       }
     });
+
+  test.each(["wrapped-quota", "unknown-status"] as const)("a verified ciphertext turn retains its WebSocket verdict: %s", async terminal => {
+    FakeWebSocket.plan = ["issue-reasoning", terminal];
+    const cfg = comboConfig();
+    cfg.combos!.overload!.targets[0]!.model = "gpt-6-luna";
+    const thread = `inspected-${terminal}`;
+    expect((await send(cfg, "start", thread)).body).toContain(reasoning.encrypted_content);
+    codexWsPool.dispose();
+    const result = await send(cfg, [reasoning, { role: "user", content: "continue" }], thread);
+    expect(result.logCtx.routeDecision?.selected.reason).toBe("luna-owner-encrypted-reasoning");
+    expect(FakeWebSocket.instances[1]?.sent.join("")).toContain(reasoning.encrypted_content);
+    expect(result.body).toContain("response.output_item.added");
+    expect(fallbackSends).toBe(0);
+    const cooldown = getCodexQuotaHealthSnapshot(WORK, "shared");
+    if (terminal === "wrapped-quota") {
+      expect(cooldown?.confirmedCapacity).toBe(true);
+      expect(cooldown?.cooldownSource).toBe("retry-after");
+    } else expect(cooldown?.confirmedCapacity).toBeUndefined();
+  });
+
+  test.each([
+    ["chain/overload", "first-conflict"], ["chain/overload", "first-quota"],
+    ["openai/gpt-6-luna", "first-conflict"], ["openai/gpt-6-luna", "first-quota"],
+  ] as const)("%s honors the first-frame 429 verdict: %s", async (model, terminal) => {
+    FakeWebSocket.plan = [terminal];
+    const cfg = comboConfig();
+    cfg.combos!.overload!.targets = [{ provider: "openai", model: "gpt-6-luna" }];
+    const { response } = await send(cfg, "hello", undefined, model);
+    expect(response.status).toBe(429);
+    const cooldown = getCodexQuotaHealthSnapshot(WORK, "shared");
+    expect(cooldown?.cooldownSource).toBe("retry-after");
+    expect(cooldown?.confirmedCapacity).toBe(terminal === "first-quota" ? true : undefined);
+  });
 
   test("output after the rate-limit frame still commits the native target", async () => {
     FakeWebSocket.plan = ["quota-output-then-refuse"];

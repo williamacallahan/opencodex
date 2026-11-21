@@ -16,6 +16,7 @@ import { httpStatusFromTerminalError } from "../../lib/errors";
 import { hasResponseMediaType } from "../../lib/http-response-semantics";
 import type { RequestFailureStage } from "../../lib/request-failure-model";
 import type { RequestLogContext } from "../request-log";
+import { carryProviderResponseProvenance } from "../../providers/request-pacing";
 import { carryResponseToolOwnership } from "./response-tool-ownership";
 import { createSseInspector } from "../relay";
 import { sseDataPayload } from "../sse-payload-rewrite";
@@ -563,11 +564,8 @@ function replayBufferedResponse(
       reader.cancel(reason).catch(() => undefined);
     },
   });
-  return carryResponseToolOwnership(response, new Response(body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
-  }));
+  const replay = new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+  return carryProviderResponseProvenance(response, carryResponseToolOwnership(response, replay));
 }
 
 function failedTerminalResponse(

@@ -669,8 +669,16 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
             if (beforeAcceptance) { failStream(error); return; }
             // Rejected metadata cannot change how an accepted turn is delivered.
           }
-          if (rejection && beforeAcceptance && !(preOutputRefusalHold?.reserveFirstPlacement === false
-            && (rejection.status === 402 || rejection.status === 429))) {
+          const projectCreateRefusal = beforeAcceptance && !(preOutputRefusalHold?.reserveFirstPlacement === false
+            && (rejection?.status === 402 || rejection?.status === 429));
+          if (rejection && (rejection.status === 402 || rejection.status === 429)) {
+            // Before acceptance the refusal is for this create, not an independently named response.
+            const correlated = projectCreateRefusal ? normalized.payload.response_id === undefined
+              : !!acceptedId && normalized.payload.response_id === acceptedId;
+            terminalQuota = { status: rejection.status, headers: rejection.headers, confirmedCapacity: refusalEligible && correlated
+              && terminalOwnerCapacityStatus(normalized.payload, rejection.status) === rejection.status };
+          }
+          if (rejection && projectCreateRefusal) {
             const projection = new Response(JSON.stringify({
               error: rejection.error ?? { type: "upstream_error", message: "Upstream rejected the request" },
             }), { status: rejection.status, headers: rejection.headers });
@@ -678,15 +686,9 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
             cleanup();
             try { controller.close(); } catch { /* unused stream already closed */ }
             session.dispose();
-            markCodexWsPreludeProjection(projection);
+            markCodexWsPreludeProjection(projection, terminalQuota?.confirmedCapacity);
             resolve(projection);
             return;
-          }
-          if (rejection && (rejection.status === 402 || rejection.status === 429)) {
-            // Keep the quota evidence if the correlated first-placement check below declines the move.
-            terminalQuota = { status: rejection.status, headers: rejection.headers,
-              confirmedCapacity: refusalEligible && !!acceptedId && normalized.payload.response_id === acceptedId
-                && terminalOwnerCapacityStatus(normalized.payload, rejection.status) === rejection.status };
           }
         }
         let holdFrame = false;

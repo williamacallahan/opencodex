@@ -241,7 +241,7 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(isComboTargetInCooldown("luna", luna, now + delay)).toBe(false);
   });
 
-  test("a slow 503 body cannot shorten a newer live relay hold", async () => {
+  test.each([503, 404])("a slow %i body cannot shorten a newer live relay hold", async status => {
     const luna = { provider: "relay", model: "gpt-6-luna" };
     const cfg = config({}, [luna]);
     cfg.providers.relay!.upstreamWebsocket = false;
@@ -250,15 +250,33 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     const resume = Promise.withResolvers<void>();
     relay = () => new Response(new ReadableStream({ async pull(controller) {
       readStarted.resolve(); await resume.promise;
-      controller.enqueue(new TextEncoder().encode('{"error":{"code":"server_is_overloaded"}}')); controller.close();
-    } }), { status: 503, headers: { "retry-after": "120", "x-should-retry": "false" } });
+      controller.enqueue(new TextEncoder().encode(JSON.stringify({ error: { code: status === 503 ? "server_is_overloaded" : "model_not_found" } }))); controller.close();
+    } }), { status, headers: status === 503 ? { "retry-after": "120", "x-should-retry": "false" } : undefined });
     const earlier = post(cfg);
     await readStarted.promise;
     coolComboTarget("luna", luna, { now, status: 503, retryAfter: "300" });
     resume.resolve();
-    expect((await earlier).status).toBe(503);
+    expect((await earlier).status).toBe(status);
     expect(isComboTargetInCooldown("luna", luna, now + 299_999)).toBe(true);
     expect(isComboTargetInCooldown("luna", luna, now + 300_000)).toBe(false);
+  });
+
+  test("a single relay waits for the preserved hold and retries only once", async () => {
+    const luna = { provider: "relay", model: "gpt-6-luna" };
+    const cfg = config({}, [luna]);
+    cfg.providers.relay!.upstreamWebsocket = false;
+    Object.assign(cfg.combos!.luna!, { cooldownMs: 10, waitForCooldownMs: 1_000 });
+    const sends: number[] = [];
+    relay = () => {
+      sends.push(performance.now());
+      if (sends.length === 1) coolComboTarget("luna", luna, { now, cooldownMs: 120, status: 503 });
+      return Response.json({ error: { message: `relay attempt ${calls.length}` } }, { status: 503, headers: { "x-should-retry": "false" } });
+    };
+    const result = await post(cfg);
+    expect(result.status).toBe(503);
+    expect(result.text).toContain("relay attempt 2");
+    expect(sends).toHaveLength(2);
+    expect(sends[1]! - sends[0]!).toBeGreaterThanOrEqual(119);
   });
 
   test("a third Reserve seat serves after two seats refuse", async () => {

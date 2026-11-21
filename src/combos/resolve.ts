@@ -541,8 +541,8 @@ export function advanceComboAfterFailure(
     eligible?: (target: NormalizedComboTarget) => boolean;
     routeConcreteModel?: typeof routeConcreteModel;
     cooldownScope?: ComboFailureCooldownScope;
-    relayCooldownMs?: number;
-    onCooldownRecorded?: (target: Pick<OcxComboTarget, "provider" | "model">) => void;
+    preserveLongerCooldown?: boolean;
+    onTargetCooled?: (target: Pick<OcxComboTarget, "provider" | "model">) => void;
     status?: number;
     code?: string | null;
     message?: string;
@@ -573,13 +573,13 @@ export function advanceComboAfterFailure(
       ? combo.targets.filter(target => target.provider === pick.target.provider)
       : [pick.target];
     for (const target of cooldownTargets) {
-      const recorded = coolComboTarget(pick.comboId, target, {
+      const cooled = coolComboTarget(pick.comboId, target, {
         ...options,
         scope: options.cooldownScope,
         cooldownMs: options.cooldownMs ?? combo?.cooldownMs,
         writerGeneration: pick.writerGeneration,
       });
-      if (recorded) options.onCooldownRecorded?.(target);
+      if (cooled) options.onTargetCooled?.(target);
     }
   }
   // #5691: under `cooldownWaitPolicy: "before-last-resort"` this final synchronous pick

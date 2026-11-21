@@ -49,6 +49,7 @@ import {
 import { isMainQuotaDispatchLive, isMainQuotaDispatchWsClaimed } from "../../codex/main-account-cache";
 import { MAIN_CODEX_ACCOUNT_ID } from "../../codex/account-id";
 import type { ResponsesTerminalStatus } from "../../bridge";
+import { codexWsProjectedCapacity } from "./codex-ws-wire";
 import { isCodexWsQuotaObservedResponse, isCodexWsUpstreamResponse, isCodexWsPreludeProjection } from "./ws-upstream";
 import { recordSubagentQuotaFailureForThreadSpawn } from "../../codex/subagent-model-fallback";
 import { recordCodexUpstreamOutcome } from "../../codex/routing";
@@ -662,7 +663,9 @@ export async function deliverPassthroughResponse(
       // The bounded reader owns the original body, deadline, abort settlement, and lock.
       // Unsafe partial data falls back to #452's non-empty status-only JSON.
       const errorText = await readDisplaySafeErrorText(upstreamResponse, upstream.signal, "");
-      if (confirmCapacity) {
+      const projectedCapacity = codexWsProjectedCapacity(upstreamResponse);
+      if (projectedCapacity === true) confirmCapacity?.();
+      else if (confirmCapacity && projectedCapacity === undefined) {
         const { code, type, safeText } = normalizeUpstreamErrorText(errorText, "");
         if (isOwnerCapacityRefusal(upstreamResponse.status, { classificationText: safeText, upstreamCode: code,
           upstreamType: type, upstreamRootCode: upstreamEnvelopeRootCode(errorText) })) confirmCapacity();

@@ -294,11 +294,11 @@ test("advance reports only the current failure's committed cooldown", () => {
   const pick = pickComboTarget(cfg, "free")!;
   expect(pick).not.toBeNull();
   const recorded: string[] = [];
-  advanceComboAfterFailure(cfg, pick, { cooldownScope: "target", onCooldownRecorded: t => recorded.push(t.model) });
+  advanceComboAfterFailure(cfg, pick, { cooldownScope: "target", onTargetCooled: t => recorded.push(t.model) });
   expect(recorded).toEqual(["m1"]);
   recorded.length = 0;
   reconcileComboTargetCooldowns(removalContext());
-  advanceComboAfterFailure(cfg, pick, { cooldownScope: "target", onCooldownRecorded: t => recorded.push(t.model) });
+  advanceComboAfterFailure(cfg, pick, { cooldownScope: "target", onTargetCooled: t => recorded.push(t.model) });
   expect(recorded).toEqual([]);
   expect(isComboTargetInCooldown("free", target)).toBe(true);
 });

@@ -34,6 +34,7 @@ export interface ConsumedComboFailure {
   response: Response;
   classificationText: string;
   wrappedReserveQuota?: boolean;
+  wsConfirmedCapacity?: boolean;
   /** Complete bounded-envelope evidence captured before display truncation; never serialized. */
   codexModelRefusal?: CodexAccountModelRefusal;
   /** Complete bounded-envelope malformed response_format diagnostic verdict captured before display truncation. */
