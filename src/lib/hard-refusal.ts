@@ -220,7 +220,7 @@ export function hasHardRefusalInEnvelope(parsed: unknown, evidence: { source: "w
 
       // Authoritative diagnostic carriers only (avoid request echo fields like input, prompt, request, body, reason).
       // Parse structured diagnostic strings first so nested request echo is not matched by prose rules (#8173).
-      for (const field of ["message", "error", "details", "detail", "last_error", "response", "errors"] as const) {
+      for (const field of ["message", "error", "innererror", "details", "detail", "last_error", "response", "errors"] as const) {
         const val = rec[field];
         if (typeof val === "string") {
           let innerParsed: unknown;

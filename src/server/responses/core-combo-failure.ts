@@ -1,4 +1,4 @@
-import { carryCodexWsPreludeVerdict, codexWsPreludeVerdict } from "./codex-ws-wire";
+import { carryCodexWsPreludeVerdict, codexWsPreludeRootCode, codexWsPreludeVerdict } from "./codex-ws-wire";
 import { inspectedReserveRefusal } from "./reserve-refusal-body";
 import { recordUpstreamProviderErrorDetail, recordUpstreamValidationDetail, type FailureDetail } from "../request-log-failure-detail";
 import { carryProxyErrorPresentation } from "../../lib/client-error-body";
@@ -74,7 +74,7 @@ export async function consumeComboFailure(
   let providerModerationRefusal: boolean | undefined;
   let usage: OcxUsage | undefined;
   let upstreamCode: string | undefined;
-  let upstreamRootCode: string | undefined;
+  let upstreamRootCode = codexWsPreludeRootCode(response);
   let upstreamMessage: string | undefined;
   let upstreamType: string | undefined;
   // Whether the body itself confirms a quota/rate-limit refusal, computed on the SAME read as
@@ -122,7 +122,7 @@ export async function consumeComboFailure(
       }
       // Status-independent: the nested record is what normalization selects, so a root verdict
       // beside it has to be captured here or the conflict rule never sees it.
-      upstreamRootCode = upstreamEnvelopeRootCode(body.text);
+      upstreamRootCode ??= upstreamEnvelopeRootCode(body.text);
       const normalized = normalizeUpstreamErrorText(body.text, fallback);
       if (utf8Trusted || isCyberPolicyCode(normalized.code) || isCyberPolicyMessage(normalized.safeText)) {
         classificationText = normalized.safeText;

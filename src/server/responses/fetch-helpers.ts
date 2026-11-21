@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { NativeResponseControl } from "./native-response-control";
 import { PROVIDER_HEADER_DEADLINE as HEADER_DEADLINE, type ProviderHeaderDeadline as HeaderDeadline } from "../../lib/provider-admission-wait";
 import type { CodexWsPreOutputRefusalHold } from "./codex-ws-wire";
@@ -36,6 +37,12 @@ import { compressUpstreamRequestBody, isCanonicalCodexResponsesUrl } from "./req
 import { requiredComboSendOwner, redeemOutboundTurnState, TURN_STATE_BINDING_INIT, TURN_STATE_OWNER, type TurnStateConstrained, turnStateBinding } from "../turn-state-handles";
 
 export { withUpstreamHttpVersion };
+
+// A queued child may rebuild its credentials or switch from WebSocket to HTTP before sending.
+const physicalAdmission = new AsyncLocalStorage<() => void>();
+export function withPhysicalSendAdmission<T>(check: (() => void) | undefined, dispatch: () => T): T {
+  return check ? physicalAdmission.run(check, dispatch) : dispatch();
+}
 
 const egressWebsocketDowngradeWarned = new Set<string>();
 /** A provider name is configuration-controlled, so the notice set is bounded like any cache. */
@@ -264,6 +271,7 @@ export function sendWithConnectionPolicy(
     ...(decide || redirectedToLoopback ? { [EGRESS_DECIDED]: true } : {}),
     ...{ [UPSTREAM_REWRITTEN]: true },
   };
+  physicalAdmission.getStore()?.();
   init?.[TURN_STATE_OWNER]?.assertHeaders(headers);
   (init as Record<symbol, ((destination: string, headers: Headers) => void) | undefined> | undefined)?.[PHYSICAL_SEND_GUARD]?.(target, headers);
   (init as Record<symbol, ((url: string, init: RequestInit) => void) | undefined> | undefined)?.[PHYSICAL_SEND_INTEGRITY]?.(target, physicalInit);
@@ -444,8 +452,10 @@ export function providerFetch(
       // used, protocol pin included: a WS turn that falls back is serving the
       // request over HTTP, and dropping the provider's `upstreamHttpVersion`
       // there would silently negotiate a transport the operator ruled out.
+      const check = physicalAdmission.getStore();
       let notified = false;
       const notifyOnce = (body: BodyInit | null | undefined): void => {
+        check?.();
         if (notified) return;
         options.onPhysicalDispatch?.(body);
         notified = true;

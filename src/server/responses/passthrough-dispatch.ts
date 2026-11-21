@@ -109,7 +109,7 @@ import {
 } from "./core-codex-account";
 import { settlePoolResponse } from "./pool-response-alternate";
 import { consumeComboFailure } from "./core-combo-failure";
-import { isCodexWsPreOutputRefusal, codexWsSocketDeathStage, isCodexWsUpstreamResponse } from "./codex-ws-wire";
+import { codexWsPreludeVerdict, isCodexWsPreOutputRefusal, codexWsSocketDeathStage, isCodexWsUpstreamResponse } from "./codex-ws-wire";
 import { linkAbortSignal } from "./core-lifetime";
 import { checkOutboundBodySize, describeOutboundBodyRefusal } from "./outbound-body-guard";
 import { streamingContextOverflowResponse } from "./context-overflow";
@@ -1198,7 +1198,7 @@ export async function preparePassthroughExchange(
 
 
     if (
-      upstreamResponse.status === 401 && !wasPermanentAccountRefusal(upstreamResponse)
+      upstreamResponse.status === 401 && codexWsPreludeVerdict(upstreamResponse) !== "hard-stop" && !wasPermanentAccountRefusal(upstreamResponse)
       && (admissionState.authCtx.kind === "main-pool" || admissionState.authCtx.kind === "pool")
       && usesCodexForwardPoolAuth(admissionState.authCtx, route.provider)
       && codex401ReplayKind === null
@@ -1638,7 +1638,9 @@ export async function preparePassthroughExchange(
       && isCodexWsPreOutputRefusal(upstreamResponse) && (upstreamResponse.status === 429 || upstreamResponse.status === 402)) {
       options.onConsumedComboFailure(await consumeComboFailure(upstreamResponse, options.abortSignal));
     }
+    const hardStop = codexWsPreludeVerdict(upstreamResponse) === "hard-stop";
     upstreamResponse = preOutputRefusals.restore(upstreamResponse);
+    if (hardStop) break;
     // The deterministic route record cannot classify history it never observed (restart, expiry,
     // eviction, or an older transcript). Inspect only a bounded clone of a 4xx whose exact outbound
     // Responses body still carries opaque state, then rebuild once through the ordinary adapter

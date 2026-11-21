@@ -1,4 +1,5 @@
 import { NativeSteeringError } from "./native-steering";
+import { envelopeRecordCode } from "../../combos/failover";
 import { hasHardRefusalInEnvelope } from "../../lib/hard-refusal";
 import { terminalOwnerCapacityStatus } from "./owner-capacity-refusal";
 import { reserveQuotaPrelude } from "./combo-stream-preflight";
@@ -105,6 +106,12 @@ function refusalErrorBody(source: unknown): Record<string, string> {
     ...(typeof error.code === "string" ? { code: error.code } : {}),
     message: typeof error.message === "string" ? error.message : "Upstream declined the request before any output",
   };
+}
+
+function markFrameRefusal(response: Response, frame: Record<string, unknown>, confirmedCapacity?: boolean): void {
+  markCodexWsPreludeProjection(response, { rootCode: envelopeRecordCode(frame),
+    verdict: hasHardRefusalInEnvelope(frame, { source: "ws-frame" }) ? "hard-stop"
+      : confirmedCapacity === undefined ? "ordinary-refusal" : confirmedCapacity ? "confirmed-capacity" : "unconfirmed-capacity" });
 }
 
 /** The sole SSE exchange state machine for both one-shot and retained sockets. */
@@ -309,7 +316,9 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         ? payload.error
         : record(payload.response) ? payload.response.error : undefined;
       const projection = new Response(JSON.stringify({ error: refusalErrorBody(source) }), { status, headers });
-      markCodexWsPreludeProjection(projection);
+      const capacity = status === 429 || status === 402
+        ? terminalOwnerCapacityStatus(payload, payload.type === "error" ? status : undefined) === status : undefined;
+      markFrameRefusal(projection, payload, capacity);
       markCodexWsStage(projection, stage);
       const observed = Boolean(metadata && onQuota);
       markCodexWsPreOutputRefusal(projection, () => {
@@ -687,8 +696,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
             cleanup();
             try { controller.close(); } catch { /* unused stream already closed */ }
             session.dispose();
-            markCodexWsPreludeProjection(projection, hasHardRefusalInEnvelope(normalized.payload, { source: "ws-frame" }) ? "hard-stop"
-              : !terminalQuota ? "ordinary-refusal" : terminalQuota.confirmedCapacity ? "confirmed-capacity" : "unconfirmed-capacity");
+            markFrameRefusal(projection, normalized.payload, terminalQuota?.confirmedCapacity);
             resolve(projection);
             return;
           }

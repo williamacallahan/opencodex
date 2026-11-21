@@ -3,6 +3,7 @@ import { comboTurnStateOwner, withComboTurnStateOwner, CodexTurnStateOwnerUnavai
 import { comboLogLabel, comboTargetLogLabel } from "../../combos/resolve";
 import { clientFacingModelLabel, clientFacingModelText } from "../../lib/error-destination";
 import { projectLocalModelRefusalLog } from "../request-log-failure-detail";
+import { withPhysicalSendAdmission } from "./fetch-helpers";
 import { carryProxyErrorContext, hasProxyErrorMessage, markProxyError } from "../../lib/client-error-body";
 import { classifyUpstreamCondition } from "../../lib/upstream-condition";
 import { effectiveAzureOutputBudget } from "../../adapters/azure";
@@ -1061,6 +1062,7 @@ export async function executeComboResponses(
   };
 
   let lastFailure: Response | null = null;
+  let cooldownRetryGeneration: number | undefined;
   let originalReserveRefusal: Response | undefined;
   // Dispatched targets, not attempted picks: it indexes the declared target list so the clamp
   // below can tell how many targets are still entitled to a send.
@@ -1398,6 +1400,18 @@ export async function executeComboResponses(
       },
     });
     let response: Response;
+    let retryWithheld = false;
+    const failedGeneration = cooldownRetryGeneration;
+    const checkRetry = failedGeneration === undefined ? undefined : () => {
+      if (comboTargetContinuousSince(comboId, legTargetKey, failedGeneration)) return;
+      retryWithheld = true;
+      throw new Error("Combo target membership ended before the cooldown retry could send");
+    };
+    const withheldFailure = () => {
+      childLog.attempts?.splice(childLog.attempts.indexOf(attempt), 1);
+      if (lastFailedChildLog) adoptFailedChildLog(lastFailedChildLog);
+      return lastFailure!;
+    };
     try {
       const currentTargetProvider = pick.target.provider;
       const attempted = new Set(pick.attempted);
@@ -1408,7 +1422,7 @@ export async function executeComboResponses(
           && !isComboTargetInCooldown(comboId, target),
         );
       const nativeChild = localExpansion || handleOwner || legIntent || lateReasoningProjection || dispatchBody !== body ? undefined : protocolLanes?.nativeChild(pick.target, targetRoute, targetSendBudget, initialJevDecision, jevEffortApplies);
-      response = nativeChild ? await dispatchNativeComboChild({
+      response = await withPhysicalSendAdmission(checkRetry, () => nativeChild ? dispatchNativeComboChild({
         source: options.protocolSource!,
         plan: nativeChild,
         comboDispatchPermit: hopDecision?.allowed ? hopDecision.permit : undefined,
@@ -1429,7 +1443,7 @@ export async function executeComboResponses(
           onCancel: callbackGate.onCancel,
           onResponseComplete: callbackGate.onResponseComplete,
         },
-      }) : await withComboTurnStateOwner(handleOwner, () => requestDispatchers.handleResponses(childRequest, config, childLog, {
+      }) : withComboTurnStateOwner(handleOwner, () => requestDispatchers.handleResponses(childRequest, config, childLog, {
         ...options,
         replayPrincipal,
         // A bridge child is a concrete route; the native source belongs to this loop only.
@@ -1465,7 +1479,7 @@ export async function executeComboResponses(
         onNativePassthroughTerminal: callbackGate.onTerminal,
         onNativePassthroughCancel: callbackGate.onCancel,
         onResponseComplete: callbackGate.onResponseComplete,
-      }));
+      })));
       // Both lanes applied the initial choice before provider pins/caps; retain those transitions.
       restoreOriginalRequestedEffort(childLog, jevEffortApplies ? initialJevDecision?.effort : undefined);
     } catch (error) {
@@ -1474,6 +1488,7 @@ export async function executeComboResponses(
         retainCancelledAttempt();
         return clientCancelledResponse();
       }
+      if (retryWithheld) return withheldFailure();
       jevPin?.forget();
       finishRequestAttempt(attempt, 502, Date.now() - started, childLog.usage);
       throw error;
@@ -1484,6 +1499,12 @@ export async function executeComboResponses(
       void response.body?.cancel(options.abortSignal.reason).catch(() => undefined);
       retainCancelledAttempt();
       return clientCancelledResponse();
+    }
+
+    if (retryWithheld) {
+      callbackGate.discard();
+      void response.body?.cancel().catch(() => undefined);
+      return withheldFailure();
     }
 
     if (legIntent === "reserve-only" && consumedChildFailure && response.ok) {
@@ -1835,6 +1856,7 @@ export async function executeComboResponses(
           eligible: target => targetKey(target) === failedTargetKey
             && comboTargetContinuousSince(comboId, failedTargetKey, writerGeneration) && targetEligible(target),
         });
+        if (pick) cooldownRetryGeneration = writerGeneration;
       }
     }
     if (activeLunaLegs && failureDecision === "hop"

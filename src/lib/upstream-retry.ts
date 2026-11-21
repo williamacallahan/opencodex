@@ -38,8 +38,8 @@ export function markResponseNonReplayable(response: Response): void {
 }
 
 /**
- * A server-instructed wait longer than the retry budget: same-target 429 replay loops stop and
- * return the original response, while key rotation and ordinary error delivery are unaffected.
+ * A transport verdict that forbids another same-target send (a hard refusal or a wait outside
+ * the retry budget). It does not change how the original upstream error is delivered.
  */
 const sameTargetRetryHolds = new WeakSet<Response>();
 
@@ -877,7 +877,7 @@ export async function fetchWithTransientRetry(
     // An upstream that answers with the exact `x-should-retry: false` verdict has said the same
     // thing about its own failure, so the ladder stops and hands the response back untouched.
     if (res.ok || !isTransientUpstreamStatus(res.status) || isNonReplayableResponse(res)
-      || res.headers.get(REPLAY_REFUSAL_NO_RETRY_HEADER) === REPLAY_REFUSAL_NO_RETRY_VALUE) return res;
+      || isSameTargetRetryHold(res) || res.headers.get(REPLAY_REFUSAL_NO_RETRY_HEADER) === REPLAY_REFUSAL_NO_RETRY_VALUE) return res;
     if (opts.abortSignal?.aborted || Date.now() - attemptStart > slowAttemptMs) return res;
     const instructedDelay = retryAfterDelayMs(res.headers);
     // The deadline is the CALLER'S, not this module's default. Reading the constant directly

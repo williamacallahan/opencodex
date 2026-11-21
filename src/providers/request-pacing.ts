@@ -1,7 +1,7 @@
 import type { OcxProviderConfig, RequestPacingRule } from "../types";
 import { createHash } from "node:crypto";
 import type { GenerationContext } from "../lib/state-store-sweeper";
-import { carryReplayRefusal, isNonReplayableResponse, markResponseNonReplayable } from "../lib/upstream-retry";
+import { carryReplayRefusal, isNonReplayableResponse, isSameTargetRetryHold, markResponseNonReplayable, markSameTargetRetryHold } from "../lib/upstream-retry";
 import { redactSecretString } from "../lib/redact";
 import { errorDestinationText, providerErrorDestinationLabel } from "../lib/error-destination";
 
@@ -647,6 +647,7 @@ export function carryProviderResponseProvenance(response: Response, wrapped: Res
   // Retry helpers mark the response they return from, and recovery decisions key on these
   // identity markers; the rewrap must not make a non-replayable response look replayable.
   if (isNonReplayableResponse(response)) markResponseNonReplayable(wrapped);
+  if (isSameTargetRetryHold(response)) markSameTargetRetryHold(wrapped);
   for (const markers of responseProvenance) {
     if (markers.has(response)) markers.set(wrapped, markers.get(response));
   }

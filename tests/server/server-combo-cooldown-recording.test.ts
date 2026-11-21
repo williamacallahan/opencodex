@@ -8,6 +8,7 @@ import { clearComboTargetCooldowns, coolComboTarget, isComboTargetInCooldown, re
 import { captureConfigGeneration, reconcileStateGeneration, type GenerationContext } from "../../src/lib/state-store-sweeper";
 import { listLiveComboTargetKeys } from "../../src/combos/types";
 import "../../src/lib/state-store-registrations";
+import { providerRequestPacingStatus } from "../../src/providers/request-pacing";
 import { handleResponses } from "../../src/server/responses";
 import type { OcxConfig } from "../../src/types";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
@@ -322,22 +323,23 @@ test("a pool account's 429 cools nothing at the combo layer, other failures stil
   // Provider-scoped evidence (a rejected credential) outranks the account attribution.
   expect(cool({ status: 429, cooldownScope: "provider", ...account })).toBe(true);
 });
-test.each([true, false])("a cooldown retry requires uninterrupted target membership (replaced: %s)", async replaced => {
+for (const phase of ["cooldown", "queued"] as const) test.each([true, false])(`a ${phase} retry requires uninterrupted target membership (replaced: %s)`, async replaced => {
   let sends = 0;
   const server = serve(() => ++sends === 1
     ? Response.json({ error: { message: "first target unavailable" } }, { status: 503, headers: { "x-should-retry": "false" } })
     : chatSuccess("retry served", "m1"));
   const cfg = config(baseUrl(server));
-  const live = { ...removalContext(), comboTargets: listLiveComboTargetKeys(cfg) };
-  reconcileStateGeneration(live);
+  if (phase === "queued") cfg.providers.a!.requestPacing = { enabled: true, minIntervalMs: 500 };
+  const live = () => ({ ...removalContext(), comboTargets: listLiveComboTargetKeys(cfg) });
+  reconcileStateGeneration(live());
   const pending = post(cfg);
   const deadline = performance.now() + 2_000;
-  while (!isComboTargetInCooldown("free", target)) {
-    if (performance.now() >= deadline) throw new Error("first 503 did not cool the target");
+  while (phase === "cooldown" ? !isComboTargetInCooldown("free", target) : !sends || !providerRequestPacingStatus("a", cfg.providers.a!).queued) {
+    if (performance.now() >= deadline) throw new Error(`retry did not reach ${phase}`);
     await Bun.sleep(1);
   }
   if (replaced) reconcileStateGeneration(removalContext());
-  reconcileStateGeneration(live);
+  reconcileStateGeneration(live());
   const response = await pending;
   expect(response.status).toBe(replaced ? 503 : 200);
   expect(await response.text()).toContain(replaced ? "first target unavailable" : "retry served");

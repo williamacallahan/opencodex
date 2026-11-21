@@ -3,6 +3,7 @@ import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
 import {
   isTransientUpstreamStatus,
   markResponseNonReplayable,
+  markSameTargetRetryHold,
   UPSTREAM_CLOSED_BEFORE_RESPONSE_CODE,
   UPSTREAM_NO_RESPONSE_CODE,
 } from "../../lib/upstream-retry";
@@ -70,7 +71,8 @@ interface CodexWsResponseEvidence {
 const codexWsUpstreamResponses = new WeakMap<Response, CodexWsResponseEvidence>();
 const quotaObservedResponses = new WeakMap<Response, true>();
 export type CodexWsPreludeVerdict = "hard-stop" | "confirmed-capacity" | "unconfirmed-capacity" | "ordinary-refusal";
-const codexWsPreludeProjections = new WeakMap<Response, CodexWsPreludeVerdict | undefined>();
+interface PreludeEvidence { verdict: CodexWsPreludeVerdict; rootCode?: string }
+const codexWsPreludeProjections = new WeakMap<Response, PreludeEvidence | undefined>();
 registerProviderResponseProvenance(codexWsUpstreamResponses);
 registerProviderResponseProvenance(quotaObservedResponses);
 registerProviderResponseProvenance(codexWsPreludeProjections);
@@ -86,19 +88,24 @@ export function isCodexWsUpstreamResponse(response: Response): boolean {
 }
 
 /** Pre-response projection; its headers retain the exchange's prelude snapshot. */
-export function markCodexWsPreludeProjection(response: Response, verdict?: CodexWsPreludeVerdict): void {
-  codexWsPreludeProjections.set(response, verdict);
+export function markCodexWsPreludeProjection(response: Response, evidence?: PreludeEvidence): void {
+  codexWsPreludeProjections.set(response, evidence);
+  if (evidence?.verdict === "hard-stop") markSameTargetRetryHold(response);
 }
 
 /** The original frame decides whether a refusal stops the request or confirms seat capacity. */
 export function codexWsPreludeVerdict(response: Response): CodexWsPreludeVerdict | undefined {
-  return codexWsPreludeProjections.get(response);
+  return codexWsPreludeProjections.get(response)?.verdict;
+}
+
+export function codexWsPreludeRootCode(response: Response): string | undefined {
+  return codexWsPreludeProjections.get(response)?.rootCode;
 }
 
 /** A formatted error can omit the root code. Keep the verdict separate from its client body. */
 export function carryCodexWsPreludeVerdict(source: Response, delivered: Response): Response {
-  const verdict = codexWsPreludeVerdict(source);
-  if (verdict !== undefined) markCodexWsPreludeProjection(delivered, verdict);
+  const evidence = codexWsPreludeProjections.get(source);
+  if (evidence) markCodexWsPreludeProjection(delivered, evidence);
   return delivered;
 }
 

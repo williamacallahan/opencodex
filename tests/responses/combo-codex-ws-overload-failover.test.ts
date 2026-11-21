@@ -33,7 +33,8 @@ const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "h
 
 type Listener = (event: unknown) => void;
 const reasoning = { type: "reasoning", id: "rs_inspected", encrypted_content: "fixture-owner-cipher", summary: [] };
-type Step = "issue-reasoning" | "first-quota" | "first-conflict" | "quota-then-refuse" | "quota-output-then-refuse" | "reserve-started-then-refuse"
+type FirstFrame = { status: number; code?: string; request?: { innererror: { code: string } }; error: { code: string; message: string; innererror?: { code: string } } };
+type Step = FirstFrame | "issue-reasoning" | "first-quota" | "first-conflict" | "quota-then-refuse" | "quota-output-then-refuse" | "reserve-started-then-refuse"
   | "first-model-missing" | "first-model-missing-underscore" | "wrapped-quota" | "conflicting-wrapper" | "foreign-wrapper" | "missing-status" | "unknown-status";
 
 class FakeWebSocket {
@@ -54,6 +55,10 @@ class FakeWebSocket {
   run(step: Step) {
     this.emit("open", {});
     const id = `resp_${FakeWebSocket.instances.indexOf(this)}`;
+    if (typeof step === "object") {
+      this.frame({ type: "error", ...step });
+      return;
+    }
     if (step === "first-model-missing" || step === "first-model-missing-underscore") {
       this.frame({ type: "error", status: 400, error: { code: "model_not_found",
         type: step === "first-model-missing" ? "origin-rejected" : "origin_rejected", message: "Model unavailable" } });
@@ -362,6 +367,41 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect(response.status).toBe(terminal === "first-conflict" ? 429 : 200);
     expect(body).toContain(terminal === "first-conflict" ? "Limit reached" : "resp_fallback");
   });
+
+  test.each([401, 503])("native dispatch returns a first-frame hard refusal without resending: %i", async status => {
+    let refreshes = 0;
+    const fixtureFetch = globalThis.fetch;
+    globalThis.fetch = (async (input, init) => {
+      if (new URL(input instanceof Request ? input.url : String(input)).hostname !== "auth.openai.com") return fixtureFetch(input, init);
+      refreshes++;
+      return Response.json({ access_token: "refreshed-fixture", refresh_token: "fixture-grant", expires_in: 3600 });
+    }) as typeof fetch;
+    FakeWebSocket.plan = [{ status, code: "origin_rejected", error: { code: status === 503 ? "server_is_overloaded" : "authentication_error", message: "Fixture refusal" } }, "issue-reasoning"];
+    const { response, body } = await send(comboConfig(), "hello", undefined, "openai/gpt-5.5");
+    expect(FakeWebSocket.instances.flatMap(ws => ws.sent)).toHaveLength(1);
+    expect(refreshes).toBe(0);
+    expect(response.status).toBe(status === 503 ? 200 : 401);
+    expect(body).toContain("Fixture refusal");
+  });
+
+  for (const model of ["chain/overload", "policy/ordered"]) {
+    test.each(["nested innererror", "competing root code", "request echo"] as const)(`${model} distinguishes routing evidence from display and echo: %s`, async conflict => {
+      const cfg = comboConfig();
+      cfg.routingProfiles = { ordered: { candidates: cfg.combos!.overload!.targets } };
+      FakeWebSocket.plan = [{ status: 400, ...(conflict === "request echo" && { request: { innererror: { code: "origin_rejected" } } }), ...(conflict === "competing root code" && { code: "invalid_request_error" }),
+        error: { code: "model_not_found", message: "Model unavailable", ...(conflict === "nested innererror" && { innererror: { code: "origin_rejected" } }) } }];
+      const { response, body } = await send(cfg, "hello", undefined, model);
+      expect(response.status).toBe(conflict === "request echo" ? 200 : 400);
+      expect(body).toContain(conflict === "request echo" ? "resp_fallback" : "model_not_found");
+      if (conflict === "competing root code") {
+        // Combo formats any 400 as invalid_request_error; the projected upstream diagnostic is separate.
+        const delivered = JSON.parse(body);
+        expect(delivered).not.toHaveProperty("code");
+        expect(delivered.error.message).not.toContain("invalid_request_error");
+      }
+      expect(fallbackSends).toBe(conflict === "request echo" ? 1 : 0);
+    });
+  }
 
   test.each(["first-model-missing", "first-model-missing-underscore"] as const)("a non-Luna combo honors a model_not_found code over a diagnostic type: %s", async step => {
     FakeWebSocket.plan = [step];
