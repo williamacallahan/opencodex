@@ -4,6 +4,7 @@ import { listLiveComboTargetKeys } from "../../src/combos/types";
 import { shouldRetryCodexPoolAccountQuota } from "../../src/server/responses/core-codex-account";
 import { sendReserveSeat } from "../../src/server/responses/reserve-seat-dispatch";
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -678,6 +679,53 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(result.status).toBe(429); expect(calls).toEqual(["native:gpt-6-luna"]);
     expect(nativeAccounts).toEqual([`fixture-workspace-${A}`]);
     expect(logCtx.routeDecision?.selected.reason).toBe("luna-owner-turn-state");
+  });
+
+  test.each(["unchanged", "renamed", "redirected"])("a migrated NULL-store pin resumes only on its named relay: %s", async target => {
+    const cfg = config(), lane = { "thread-id": "legacy-relay-continuation" };
+    const id = "resp_legacy_pin";
+    seats(false);
+    expect((await post(cfg, {}, lane)).text).toContain("response.completed");
+    relay = (_request, body) => Response.json({ id, object: "response", status: "completed", model: body.model, output: [] });
+    expect((await post(cfg, { stream: false, conversation: "conv_at_relay", input: "first delta" }, lane)).text).toContain(id);
+    expect(calls).toEqual(["relay:gpt-6-luna", "relay:gpt-6-luna"]);
+    release?.();
+    const db = new Database(join(home, "codex-combo-affinity.sqlite"));
+    try {
+      // The old writer had neither column. These are the values SQLite gives its row after migration.
+      expect(db.run("UPDATE combo_pins SET store = NULL, proofs = NULL WHERE provider = 'relay'").changes).toBe(1);
+    } finally { db.close(); }
+    clearComboRecallForTests(); release = acquireOwnedSpendHome();
+    if (target === "redirected") {
+      cfg.disabledModels = ["relay/gpt-6-luna"];
+      cfg.blockedModelRedirects = { "relay/gpt-6-luna": "metered/gpt-6-luna" };
+    } else if (target === "renamed") {
+      cfg.providers.renamed = cfg.providers.relay!;
+      delete cfg.providers.relay;
+      cfg.combos!.luna!.targets[1] = { provider: "renamed", model: "gpt-6-luna" };
+    }
+    seats(); calls.length = 0;
+    const input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "just the delta" }] }];
+    let sent: unknown;
+    relay = async (request, body) => { sent = await request.json(); return sse(body.model, "ok"); };
+    if (target === "unchanged") {
+      const upload = [{ role: "user", content: [{ type: "input_file", file_id: "file_legacy" }] }];
+      expect((await post(cfg, { previous_response_id: id, input: upload }, lane)).status).toBe(400);
+      expect(calls).toEqual([]);
+    }
+    const result = await post(cfg, { previous_response_id: id, input }, lane);
+    if (target !== "unchanged") {
+      expect(result.status).toBe(400); expect(result.text).toContain("previous_response_not_found"); expect(calls).toEqual([]);
+    } else {
+      expect(result.status, `${result.text} (sends: ${calls.length})`).toBe(200);
+      expect(result.text).toContain("response.completed"); expect(calls).toEqual(["relay:gpt-6-luna"]);
+      expect(sent).toMatchObject({ previous_response_id: id, input });
+      // The completion replaces the migrated pin. Its name can no longer stand in for the recorded store.
+      cfg.providers.relay!.responsesPath = "/different-store/responses";
+      calls.length = 0;
+      expect((await post(cfg, { previous_response_id: id, input }, lane)).status).toBe(400);
+      expect(calls).toEqual([]);
+    }
   });
 
   test("an append to a server conversation is not a complete locally replayable transcript", async () => {

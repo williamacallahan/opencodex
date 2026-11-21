@@ -720,12 +720,16 @@ export async function executeComboResponses(
     req.headers, unreadableEncryptedAgentTask && encryptedTaskRecoveryAdmitted) : undefined;
   let lunaLegs = lunaReplay?.kind === "portable" ? lunaPair : undefined;
   let dispatchBody = lunaReplay?.kind === "portable" ? lunaReplay.body : body;
+  // A migrated pin may route the ID, not other bound state. Check the delta with the ID removed.
+  const legacyIdPin = !handleOwner && !legacyTarget && recorded?.target && !recorded.store
+    && lunaReplay?.kind === "bound" && lunaReplay.reason === "previous-response-id"
+    && prepareLunaReplay(body, true, req.headers).kind === "portable";
   if (lunaReplay?.kind === "bound") {
     const owner = legacyTarget ? combo.targets.find(target => targetKey(target) === legacyTarget) : recorded?.target;
     if (handleOwner) {
       const match = combo.targets.find(target => owner && targetKey(target) === targetKey(owner) && pinEligible(target)) ?? combo.targets.find(pinEligible);
       boundTargetKey = match && targetKey(match);
-    } else if (owner && (legacyTarget || recorded?.store)) {
+    } else if (owner && (legacyTarget || recorded?.store || legacyIdPin)) {
       if (!pinEligible(owner)) return unavailableOwner();
       boundTargetKey = targetKey(owner);
     }
@@ -1188,6 +1192,10 @@ export async function executeComboResponses(
     const spendProvider = resolveWireProtocolOverride(targetRoute.providerName, targetRoute.modelId,
       targetRoute.provider, options.inboundWire ?? "responses", targetRoute.staticPolicy);
     const responsesWire = spendProvider.adapter === "openai-responses";
+    if (legacyIdPin && (targetRoute.providerName !== pick.target.provider || targetRoute.modelId !== pick.target.model
+      || !responsesWire || spendProvider.authMode === "forward" || spendProvider.statelessResponses)) {
+      return formatErrorResponse(400, "previous_response_not_found", "Resend the full conversation without previous_response_id.");
+    }
     if (boundTargetKey && !localExpansion && recorded?.store && !responsesWire) return unavailableOwner();
     const outputBudget = effectiveAzureOutputBudget(spendProvider, callerBudget);
     if (outputBudget !== callerBudget && typeof outputBudget === "number" && outputBudget > 0) {
