@@ -10,8 +10,7 @@ export interface OcxReasoningReplayIdentity {
   /** Opaque process-local digest of the exact upstream destination. */
   providerDestinationIdentity: string;
   /**
-   * The same destination, digested WITHOUT the process-local random key, so it can key a
-   * durable store. Absent when no base URL was resolvable.
+   * Restart-stable store destination. Responses uses the resolved send URL, not the provider base.
    */
   providerDestinationDurableIdentity?: string;
   adapterName: string;
@@ -104,13 +103,16 @@ export interface OcxParsedRequest {
   /** Parsed-message index before the first conversational item in a continuation's current delta. */
   _continuationConversationMessageIndex?: number;
   /**
-   * True when the full history for a previous_response_id request is present in the input —
-   * whether the proxy expanded it or the client already sent it. Consumers read this as
-   * "this request is self-contained", never as "the proxy mutated it".
+   * A local response row supplied the history, or matched a prefix the client already sent.
+   * A legacy row can continue in place without proving it is complete enough to move.
    */
   _previousResponseInputExpanded?: boolean;
   /** Preserve the original reasoning only at its proven serving identity. */
   _lunaProjectForeignReasoning?: "portable" | "owner";
+  /** Digests only: final Responses endpoint/credential and the store recorded at completion. */
+  _responsesStore?: string;
+  _recordedResponsesStore?: string;
+  _issuedReasoningProofs?: readonly string[];
   /** Provider-private stable Cursor conversation id resolved from the Responses previous_response_id chain. */
   _cursorConversationId?: string;
   /** Stable upstream client thread identity, used only to derive provider-scoped continuation ids. */

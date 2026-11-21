@@ -48,7 +48,7 @@ export function createResponsesEffects(
       || response.status !== "completed"
       || typeof response.model !== "string" || !response.model.trim()) return;
     responseCompletionNotified = true;
-    rememberIssuedReasoning(parsed._reasoningReplayScope, response.output);
+    const proofs = rememberIssuedReasoning(parsed._reasoningReplayScope, response.output, options.comboAttempt && !!options.claudeBridgePoolSession);
     const ctx = admissionState.authCtx;
     if (recordTerminalOutcomes && routedCompaction && options.poolCapacityIntent === "reserve-only" && ctx.kind === "pool" && ctx.poolReserve) {
       codexForwardTerminalOutcomeRecorder(config, ctx, route.provider, route.modelId)?.("completed", undefined, true);
@@ -58,7 +58,7 @@ export function createResponsesEffects(
         : ctx.mainQuotaDispatch && isMainQuotaDispatchLive(ctx.mainQuotaDispatch))) {
       bindThreadAffinity(ctx.affinityKey, ctx.accountId, Date.now(), ctx.quotaScope);
     }
-    options.onResponseComplete?.(response.model);
+    options.onResponseComplete?.(response.model, parsed._responsesStore, proofs);
   };
 
   const continuationStateForResponse = (

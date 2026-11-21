@@ -1,3 +1,4 @@
+import { isLegacyResponseExpansion, previousResponseRestoredPrefixLength } from "../../responses/state/body-policy";
 import { projectLunaReasoning } from "./luna-reasoning";
 import { truncationReasonFor } from "../../responses/truncated-stop-reason";
 import { normalizeRoutedAgentMessages } from "../routed-agent-messages";
@@ -183,10 +184,15 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       let plaintextV2AgentMessageToolNames: ReadonlySet<string> | undefined;
       let plaintextV2AgentMessageAliasedToolNames: ReadonlySet<string> | undefined;
       let convertedMuseToolNameAliases: Map<string, string> | undefined;
-      const unexpandedMiss = !!parsed.previousResponseId && parsed._previousResponseInputExpanded !== true;
-      const replayPrefixLen = parsed._replayPrefixLen;
+      // A stateful gateway can resolve its ID: don't replace that chain with an unproved older snapshot.
+      const keepUpstreamId = !forward && !provider.statelessResponses && !!parsed.previousResponseId && isLegacyResponseExpansion(parsed._rawBody);
+      const unexpandedMiss = !!parsed.previousResponseId && (keepUpstreamId || parsed._previousResponseInputExpanded !== true);
+      const replayPrefixLen = keepUpstreamId ? undefined : parsed._replayPrefixLen;
       let outBody = parsed._lunaProjectForeignReasoning
         ? projectLunaReasoning(parsed, provider.dropResponsesReasoningItems === true || requiresPlaintextReasoningReplay(provider)) : parsed._rawBody;
+      if (keepUpstreamId && isPlainObject(outBody) && Array.isArray(outBody.input)) {
+        outBody = { ...outBody, input: outBody.input.slice(previousResponseRestoredPrefixLength(parsed._rawBody)) };
+      }
       // Clone and tag before any input rewrite can remove, replace, or reorder replay items.
       if (
         typeof replayPrefixLen === "number"
@@ -201,7 +207,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       }
       outBody = stripPreviousResponseId(
         outBody,
-        forward || parsed._previousResponseInputExpanded === true,
+        !keepUpstreamId && (forward || parsed._previousResponseInputExpanded === true),
       );
       if (isMetaAiResponsesDestination(url)) {
         outBody = normalizeMuseToolCatalog(outBody, parsed._replayPrefixLen, provider.supportsResponsesCustomTools);

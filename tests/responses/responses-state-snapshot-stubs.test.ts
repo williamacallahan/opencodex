@@ -1,3 +1,9 @@
+import { providerContinuationDestinationIdentity } from "../../src/server/responses/core-replay";
+import { reasoningReplayCodexCredentialIdentity, reasoningReplayKeyCredentialIdentity } from "../../src/responses/reasoning-replay-cache";
+import { withRawBodyReasoningEffort } from "../../src/server/responses/core-opaque-recovery";
+import { chatStream, chatSuccess } from "../helpers/combo-failover-upstream";
+import { fakeChatGptJwt } from "../helpers/fake-chatgpt-jwt";
+import type { OcxConfig } from "../../src/types";
 import { handleResponses } from "../../src/server/responses";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
@@ -10,6 +16,7 @@ import {
   expandPreviousResponseInput,
   flushResponseState,
   rememberResponseState,
+  markBodyNonPersistable,
   previousResponseReplayFailure,
   responseStateMetrics,
   setResponseStateByteCapForTests,
@@ -95,6 +102,60 @@ describe("Responses snapshot spill stub retention", () => {
       expect(sent[0]?.previous_response_id).toBe("resp_owned"); expect(JSON.stringify(sent[0]?.input)).toContain("next");
       expect(JSON.stringify(sent[0]?.input)).not.toContain("historical");
     } finally { fetchSpy.mockRestore(); release(); }
+  });
+
+  test.each(["native Codex", "translated combo member", "unknown issuer", "different direct issuer", "retargeted single member"])("a legacy resident transcript continues on %s", async target => {
+    const path = join(home, "responses-state.json");
+    const native = target === "native Codex";
+    const oldCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = home;
+    const cfg: OcxConfig = { port: 0, defaultProvider: "openai", codexMainAccountHardLock: false, providers: {
+      openai: { adapter: "openai-responses", authMode: "forward", codexAccountMode: "direct", baseUrl: "https://chatgpt.com/backend-api/codex", upstreamWebsocket: false },
+      chat: { adapter: "openai-chat", authMode: "key", apiKey: "fixture", baseUrl: "https://state.example.test/v1" },
+    }, combos: { translated: { targets: [{ provider: "chat", model: "fixture" }] } } };
+    const authorization = `Bearer ${fakeChatGptJwt({ chatgpt_account_id: "fixture-account", exp: Math.floor(Date.now() / 1000) + 3600 })}`;
+    const providerName = native ? "openai" : "chat";
+    const provider = cfg.providers[providerName]!;
+    const owner = { version: 1, providerName, modelId: native ? "gpt-5.5" : "fixture", adapterName: provider.adapter,
+      providerDestinationIdentity: providerContinuationDestinationIdentity({}, provider), credentialIdentity: native
+        ? reasoningReplayCodexCredentialIdentity({ authorization, chatgptAccountId: "fixture-account" }) : reasoningReplayKeyCredentialIdentity(provider) };
+    writeFileSync(path, JSON.stringify({ version: 2, states: [["resp_old", { createdAt: Date.now(),
+      ...(target === "unknown issuer" ? {} : { providers: { __ocxOwner: owner } }),
+      items: [{ type: "message", role: "user", content: [{ type: "input_text", text: "original question" }] }], providerOutputStart: 1 }]] }));
+    if (target === "different direct issuer" || target === "retargeted single member") cfg.providers.chat = { ...provider, baseUrl: "https://other.example.test/v1" };
+    const wires: string[] = [];
+    const release = acquireOwnedSpendHome();
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const req = new Request(url, init); const wire = await req.text(); wires.push(wire);
+      const response = { id: "resp_next", object: "response", status: "completed", model: "gpt-5.5", output: [] };
+      return native ? new Response(`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response })}\n\n`, { headers: { "content-type": "text/event-stream" } })
+        : JSON.parse(wire).stream ? chatStream("reply") : chatSuccess("reply", "fixture");
+    }, { preconnect() {} }));
+    try {
+      const result = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
+        headers: { ...(native ? { authorization, "chatgpt-account-id": "fixture-account" } : {}), "content-type": "application/json" }, body: JSON.stringify({ model: native ? "openai/gpt-5.5" : target === "different direct issuer" ? "chat/fixture" : "combo/translated",
+          input: "next question", previous_response_id: "resp_old", stream: false }) }), cfg, { model: "", provider: "" });
+      const text = await result.text();
+      if (!native && target !== "translated combo member") {
+        expect(result.status).toBe(400); expect(text).toContain("previous_response_not_found"); expect(wires).toEqual([]); return;
+      }
+      expect(result.status).toBe(200);
+      expect(wires).toHaveLength(1); expect(wires[0]).toContain("original question"); expect(wires[0]).toContain("next question");
+      expect(wires[0]).not.toContain("previous_response_id");
+    } finally {
+      fetchSpy.mockRestore(); release();
+      if (oldCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = oldCodexHome;
+    }
+  });
+
+  test("an effort-only rewrite cannot persist a decoded assignment", async () => {
+    const body = { input: "decoded fixture assignment", reasoning: { effort: "max" }, store: true };
+    markBodyNonPersistable(body);
+    rememberResponseState(withRawBodyReasoningEffort(body, "high"), fixedResponse("resp_private", []), undefined, { force: true });
+    rememberResponseState({ input: "ordinary continuation" }, fixedResponse("resp_public_fixture", []));
+    await flushResponseState();
+    const snapshot = readFileSync(join(home, "responses-state.json"), "utf8");
+    expect(snapshot).toContain("resp_public_fixture"); expect(snapshot).not.toContain("resp_private"); expect(snapshot).not.toContain(body.input);
   });
 
   test("an effort downgrade preserves complete history for the third turn", async () => {

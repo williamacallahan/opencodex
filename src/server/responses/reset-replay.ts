@@ -23,6 +23,7 @@
  * substitution metadata through `createPhysicalReplayGuard`, because a rebuild after the grant
  * was claimed can reintroduce a hazard the inbound body never had.
  */
+import { isLegacyResponseExpansion } from "../../responses/state/body-policy";
 import type { OcxParsedRequest, OcxProviderConfig } from "../../types";
 import { resetReplayPolicyFor } from "../../providers/key-failover";
 import { authorizeResendForRecovery, type AmbiguousResendAllowance, type ResendDecision } from "../../lib/request-resend-gate";
@@ -145,7 +146,7 @@ export function nativePassthroughReplayJudgmentBody(
   parsed: Pick<OcxParsedRequest, "_rawBody" | "_previousResponseInputExpanded">,
 ): unknown {
   const body = parsed._rawBody;
-  if (parsed._previousResponseInputExpanded !== true || !record(body) || !Object.hasOwn(body, "previous_response_id")) {
+  if (parsed._previousResponseInputExpanded !== true || isLegacyResponseExpansion(body) || !record(body) || !Object.hasOwn(body, "previous_response_id")) {
     return body;
   }
   const { previous_response_id: _expandedLocally, ...wire } = body;

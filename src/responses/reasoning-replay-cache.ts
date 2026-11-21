@@ -218,46 +218,47 @@ export function reasoningReplayServingIdentityChanged(
 // alone is insufficient: a single client history may contain output from several issuers.
 const issuedReasoning = new Map<string, number>();
 const MAX_ITEM_PROOFS = 4096;
-function itemProofScope(scope: OcxReasoningReplayScopeRef | undefined): string | undefined {
-  const current = servingIdentityFor(scope);
-  return current && createHash("sha256").update(JSON.stringify([current.key, current.identity])).digest("hex");
+// At most 2 KiB per lane in the bounded combo snapshot. Losing evidence never grants authority.
+export const PIN_ITEM_PROOFS = 30;
+export function responsesReplayStore(current: OcxReasoningReplayIdentity | undefined): string | undefined {
+  return current?.adapterName === "openai-responses" && current.providerDestinationDurableIdentity && current.credentialDurableIdentity
+    ? `${current.providerDestinationDurableIdentity}/${current.credentialDurableIdentity}` : undefined;
 }
-function opaqueDigest(value: string): string {
-  return value ? createHash("sha256").update(value).digest("hex") : "";
+function itemProofScope(scope: OcxReasoningReplayScopeRef | undefined) {
+  const store = responsesReplayStore(scope?.current);
+  const thread = scope?.servingThreadId ?? scope?.clientThreadId;
+  if (thread && store) return JSON.stringify([scope?.clientPrincipalId ?? null, thread, store]);
 }
-function proofKey(owner: string, id: string, blob: string): string {
-  return createHash("sha256").update(`${owner}:${id}:${blob}`).digest("hex");
+function proofKey(owner: string, id: string, blob: string) {
+  return createHash("sha256").update(owner).update(`:${Buffer.byteLength(id)}:`).update(id).update(blob).digest("hex");
 }
-function rememberProof(key: string, at: number): void {
-  issuedReasoning.delete(key);
-  issuedReasoning.set(key, at);
-  if (issuedReasoning.size > MAX_ITEM_PROOFS) issuedReasoning.delete(issuedReasoning.keys().next().value!);
-}
-export function rememberIssuedReasoning(scope: OcxReasoningReplayScopeRef | undefined, output: unknown): void {
-  if (!Array.isArray(output) || scope?.current?.adapterName !== "openai-responses") return;
-  let owner: string | undefined;
+export function rememberIssuedReasoning(scope: OcxReasoningReplayScopeRef | undefined, output: unknown, capture = false): string[] | undefined {
+  if (!Array.isArray(output)) return;
+  const owner = itemProofScope(scope);
+  if (!owner) return;
   const at = now();
+  const pin = capture ? new Set<string>() : undefined;
+  const remember = (id: string, blob: string) => {
+    const key = proofKey(owner, id, blob);
+    issuedReasoning.delete(key); issuedReasoning.set(key, at);
+    if (issuedReasoning.size > MAX_ITEM_PROOFS) issuedReasoning.delete(issuedReasoning.keys().next().value!);
+    if (pin) { pin.add(key); if (pin.size > PIN_ITEM_PROOFS) pin.delete(pin.values().next().value!); }
+  };
   for (const item of output) {
     if (item?.type !== "reasoning") continue;
-    const id = typeof item.id === "string" ? opaqueDigest(item.id) : "";
-    const blob = typeof item.encrypted_content === "string" ? opaqueDigest(item.encrypted_content) : "";
+    const id = typeof item.id === "string" ? item.id : "", blob = typeof item.encrypted_content === "string" ? item.encrypted_content : "";
     if (!id && !blob) continue;
-    owner ??= itemProofScope(scope);
-    if (!owner) return;
-    // Clients may omit either field. Never authorize a new pairing of two issued fields.
-    rememberProof(proofKey(owner, id, blob), at);
-    if (id && blob) {
-      rememberProof(proofKey(owner, id, ""), at);
-      rememberProof(proofKey(owner, "", blob), at);
-    }
+    remember(id, blob);
+    if (id && blob) { remember(id, ""); remember("", blob); }
   }
+  return pin?.size ? [...pin] : undefined;
 }
-export function issuedReasoningMatcher(scope: OcxReasoningReplayScopeRef | undefined) {
-  const owner = itemProofScope(scope);
-  const at = now();
-  return (id: string, ciphertext: string): boolean => {
-    const recorded = owner ? issuedReasoning.get(proofKey(owner, opaqueDigest(id), opaqueDigest(ciphertext))) : undefined;
-    return recorded !== undefined && at >= recorded && at - recorded < TTL_MS;
+export function issuedReasoningMatcher(scope: OcxReasoningReplayScopeRef | undefined, pinned?: readonly string[]) {
+  const owner = itemProofScope(scope), at = now();
+  return (id: string, blob: string): boolean => {
+    if (!owner) return false;
+    const key = proofKey(owner, id, blob), recorded = issuedReasoning.get(key);
+    return (recorded !== undefined && at >= recorded && at - recorded < TTL_MS) || pinned?.includes(key) === true;
   };
 }
 

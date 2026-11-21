@@ -9,6 +9,7 @@ import type {
   ResponsesDispatchers,
 } from "./core-options";
 import type { TranslatorBudget } from "../../lib/translator-budget";
+import { LegacyResponseOwnerMismatch } from "./core-replay";
 import { prepareResponsesRequest } from "./request-prepare";
 import { prepareResponsesTransport } from "./request-transport";
 import { prepareResponsesSidecarAuth } from "./request-sidecar-auth";
@@ -159,6 +160,7 @@ export async function handleResponsesInner(
     return retention ? retention.deliver(response) : response;
   } catch (error) {
     retention?.dispose();
+    if (error instanceof LegacyResponseOwnerMismatch) return markProxyError(formatErrorResponse(400, "previous_response_not_found", "Resend the full conversation without previous_response_id."));
     if (error instanceof InvalidRetainedCompactionSummary) return formatErrorResponse(502, "invalid_compaction_summary", error.message);
     throw error;
   } finally {

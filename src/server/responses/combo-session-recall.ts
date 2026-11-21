@@ -1,4 +1,7 @@
+import { PIN_ITEM_PROOFS } from "../../responses/reasoning-replay-cache";
 import { createHash } from "node:crypto";
+import { routeConcreteModel } from "../../router";
+import { couldServeResponsesStore } from "./core-replay";
 import { getCombo, targetKey } from "../../combos/types";
 import { CODEX_THREAD_AFFINITY_IDLE_TTL_MS } from "../../codex/routing/thread-affinity";
 import { captureConfigGeneration, type GenerationContext } from "../../lib/state-store-sweeper";
@@ -19,6 +22,8 @@ registerComboPinSnapshot({
     for (const pin of rows) {
       if (typeof pin.lane !== "string" || !/^[0-9a-f]{64}$/.test(pin.lane) || !Number.isSafeInteger(pin.at)
         || typeof pin.comboId !== "string" || typeof pin.provider !== "string" || typeof pin.model !== "string"
+        || (pin.proofs != null && (pin.proofs.length > PIN_ITEM_PROOFS * 65 || !/^[0-9a-f]{64}(?:,[0-9a-f]{64})*$/.test(pin.proofs)))
+        || (pin.store != null && !/^destination:[a-f0-9]{64}\/credential:[a-f0-9]{64}$/.test(pin.store))
         || (pin.responseDigest !== null && !/^[0-9a-f]{64}$/.test(pin.responseDigest))) continue;
       pins.set(pinKey(pin.lane, pin.comboId), pin);
       if (pin.responseDigest !== null) latest.set(pin.lane, pin);
@@ -53,15 +58,17 @@ function modelDigest(model: string): string | undefined {
 
 export function rememberComboForLane(
   lane: string | undefined, comboId: string, target: Pick<OcxComboTarget, "provider" | "model">,
-  responseModel: string, writerGeneration: number,
+  responseModel: string, writerGeneration: number, store?: string, issued?: readonly string[],
 ): void {
   if (!lane || !comboId || writerGeneration < Math.max(lastReconciledGeneration, captureConfigGeneration())) return;
   const responseDigest = modelDigest(responseModel);
   if (!responseDigest) return;
   lane = affinityDigest("combo-lane", lane);
-  const pin = { lane, comboId, provider: target.provider, model: target.model, responseDigest, at: Date.now() };
-  if (liveOwners && !ownsPin(liveOwners, pin)) return;
   const key = pinKey(lane, comboId);
+  const previous = pins.get(key)?.proofs;
+  const proofs = issued ? [...new Set([...(previous?.split(",") ?? []), ...issued])].slice(-PIN_ITEM_PROOFS).join(",") : previous;
+  const pin = { lane, comboId, proofs, provider: target.provider, model: target.model, responseDigest, store, at: Date.now() };
+  if (liveOwners && !ownsPin(liveOwners, pin)) return;
   pins.delete(key);
   pins.set(key, pin);
   latest.set(lane, pin);
@@ -71,24 +78,44 @@ export function rememberComboForLane(
   }
 }
 
-function recordedPin(config: OcxConfig, pin: ComboPin | undefined): ComboPin | undefined {
-  if (!pin) return undefined;
-  const provider = config.providers[pin.provider];
-  if (!expired(pin, Date.now()) && Object.hasOwn(config.providers, pin.provider) && provider
-    && getCombo(config, pin.comboId)?.targets.some(target => targetKey(target) === targetKey(pin))) return pin;
-  remove(pinKey(pin.lane, pin.comboId), pin);
-  return undefined;
+function livePin(pin: ComboPin | undefined): ComboPin | undefined {
+  if (pin && !expired(pin, Date.now())) return pin;
+  if (pin) remove(pinKey(pin.lane, pin.comboId), pin);
+}
+function recordedTarget(config: OcxConfig, pin: ComboPin) {
+  const targets = getCombo(config, pin.comboId)?.targets ?? [];
+  const named = targets.find(target => targetKey(target) === targetKey(pin));
+  const store = pin.store;
+  if (!store) return named && Object.hasOwn(config.providers, named.provider) ? named : undefined;
+  const matches = (target: typeof targets[number]) => {
+    if (target.model !== pin.model || config.providers[target.provider]?.disabled) return false;
+    try {
+      const route = routeConcreteModel(config, targetKey(target));
+      return route.staticPolicy.model.adapter === "openai-responses" && couldServeResponsesStore(route.provider, store);
+    } catch { return false; }
+  };
+  if (named && matches(named)) return named;
+  return targets.find(target => target !== named && matches(target)) ?? (named && config.providers[named.provider]?.disabled ? named : undefined);
 }
 export function recallComboForLane(config: OcxConfig, lane: string | undefined, model: string): string | undefined {
   if (!lane || !model || model.includes("/")) return undefined;
-  const pin = recordedPin(config, latest.get(affinityDigest("combo-lane", lane)));
-  return pin && !config.providers[pin.provider]?.disabled && pin.responseDigest === modelDigest(model) ? pin.comboId : undefined;
+  const pin = livePin(latest.get(affinityDigest("combo-lane", lane)));
+  if (!pin || pin.responseDigest !== modelDigest(model)) return;
+  const target = recordedTarget(config, pin);
+  return target && !config.providers[target.provider]?.disabled ? pin.comboId : undefined;
+}
+export function recallComboOwnerForLane(config: OcxConfig, lane: string | undefined, comboId: string) {
+  if (!lane || !comboId) return;
+  const pin = livePin(pins.get(pinKey(affinityDigest("combo-lane", lane), comboId)));
+  if (!pin) return;
+  const target = recordedTarget(config, pin);
+  // A name can still be a preference for a stateless turn after retargeting, never an issuer.
+  const preference = target ?? getCombo(config, comboId)?.targets.find(member => targetKey(member) === targetKey(pin));
+  return { target, preference, store: pin.store ?? undefined, proofs: pin.proofs?.split(",") };
 }
 export function recallComboTargetForLane(config: OcxConfig, lane: string | undefined, comboId: string): Pick<OcxComboTarget, "provider" | "model"> | undefined {
-  if (!lane || !comboId) return undefined;
-  // The picker checks eligibility. Disabling a member does not change who issued its state.
-  const pin = recordedPin(config, pins.get(pinKey(affinityDigest("combo-lane", lane), comboId)));
-  return pin && { provider: pin.provider, model: pin.model };
+  const target = recallComboOwnerForLane(config, lane, comboId)?.target;
+  return target && { provider: target.provider, model: target.model };
 }
 export function sweepExpiredComboRecall(now: number): number {
   const before = pins.size;
@@ -101,7 +128,11 @@ export function reconcileComboRecall(context: GenerationContext): number {
   liveOwners = context;
   const before = pins.size;
   const now = Date.now();
-  for (const [key, pin] of pins) if (!ownsPin(context, pin) || expired(pin, now)) remove(key, pin);
+  for (const [key, pin] of pins) {
+    // The member may have been renamed. Match a store-bound pin against the next request's config.
+    const retained = pin.store ? context.comboIds.has(pin.comboId) : ownsPin(context, pin);
+    if (!retained || expired(pin, now)) remove(key, pin);
+  }
   return before - pins.size;
 }
 export function clearComboRecallForTests(): void {

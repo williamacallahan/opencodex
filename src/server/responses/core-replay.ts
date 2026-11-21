@@ -1,3 +1,7 @@
+import { legacyResponseIssuer } from "../../responses/state/body-policy";
+import { routeConcreteModel } from "../../router";
+import type { OcxConfig } from "../../types";
+import { responsesTransportUrl } from "../../adapters/openai-responses/transport";
 import { bindAnthropicRejectionPolicy } from "../../adapters/anthropic-rejection-memo";
 import { getReasoningReplayOpaqueBlobRejection } from "../../responses/reasoning-replay-cache";
 import type {
@@ -15,6 +19,7 @@ import {
   providerContinuationRouteScope,
 } from "../../responses/provider-continuation";
 import {
+  responsesReplayStore,
   reasoningReplayDestinationIdentity,
   reasoningReplayOAuthCredentialIdentity,
   durableReplayCredentialIdentity,
@@ -97,7 +102,7 @@ export function bindProviderContinuationForRoute(
 
 
 export function providerContinuationDestinationIdentity(
-  parsed: OcxParsedRequest,
+  parsed: Pick<OcxParsedRequest, "_kiroAuthContext">,
   provider: OcxProviderConfig,
 ): string | undefined {
   const kiroContext = parsed._kiroAuthContext;
@@ -110,6 +115,20 @@ export function providerContinuationDestinationIdentity(
   ]));
 }
 
+
+export class LegacyResponseOwnerMismatch extends Error {}
+
+/** Only an issuer recorded on this response row can authorize expanding its older transcript. */
+export function legacyResponseOwnerMatches(owner: OcxProviderContinuationOwner, config: OcxConfig, selector: unknown, headers: Headers): boolean {
+  if (typeof selector !== "string") return false;
+  try {
+    const route = routeConcreteModel(config, selector);
+    const current = routeReasoningReplayIdentity({ ...route, adapterName: route.staticPolicy.model.adapter, forwardHeaders: headers });
+    const destination = providerContinuationDestinationIdentity({}, route.provider);
+    const candidate = current && destination && providerContinuationOwnerFromReplayIdentity({ ...current, providerDestinationIdentity: destination });
+    return !!candidate && sameProviderContinuationOwner(owner, candidate);
+  } catch { return false; }
+}
 
 export function bindRouteReasoningReplayScope(args: {
   parsed: OcxParsedRequest;
@@ -125,6 +144,7 @@ export function bindRouteReasoningReplayScope(args: {
     ...args,
     modelId: parsed.modelId,
   });
+  parsed._responsesStore = responsesReplayStore(replayIdentity);
   const owner = nativeReasoningOwnerForRoute(args);
   if (owner) parsed._nativeReasoningBoundOwner = owner;
   else delete parsed._nativeReasoningBoundOwner;
@@ -143,6 +163,8 @@ export function bindRouteReasoningReplayScope(args: {
       ? { ...replayIdentity, providerDestinationIdentity: continuationDestinationIdentity }
       : undefined,
   );
+  const issuer = legacyResponseIssuer(parsed._rawBody);
+  if (issuer && (!continuationOwner || !sameProviderContinuationOwner(issuer, continuationOwner))) throw new LegacyResponseOwnerMismatch();
   if (adapterName === "cursor") {
     // The final route owner is authoritative for Cursor and supersedes the account-derived
     // seed assigned before route binding. A Cursor conversation must be scoped to the exact
@@ -256,6 +278,20 @@ export function nativeReasoningOwnerForRoute(args: {
 }
 
 
+function responsesDestination(provider: OcxProviderConfig): string {
+  // The generic digest normalizes trailing slashes, but a custom send path can distinguish them.
+  return JSON.stringify([responsesTransportUrl(provider)]);
+}
+
+/** The physical credential is rechecked after selection (including pool and queued rebuilds). */
+export function couldServeResponsesStore(provider: OcxProviderConfig, store: string, keySelected = false): boolean {
+  const destination = durableReplayDestinationIdentity(responsesDestination(provider));
+  if (!destination || !store.startsWith(`${destination}/`)) return false;
+  if ((provider.authMode ?? "key") !== "key" || (!keySelected && provider.apiKeyPool?.length)) return true;
+  const credential = durableReplayCredentialIdentity("key", provider.apiKey, provider.headers, thoughtSignatureReplaySalt());
+  return store === `${destination}/${credential}`;
+}
+
 function routeReasoningReplayIdentity(args: {
   providerName: string;
   provider: OcxProviderConfig;
@@ -323,12 +359,13 @@ function routeReasoningReplayIdentity(args: {
       durableSalt,
     );
   }
+  const destination = adapterName === "openai-responses" ? responsesDestination(provider) : provider.baseUrl;
   const providerDestinationIdentity = reasoningReplayDestinationIdentity(provider.baseUrl);
   return credentialIdentity && providerDestinationIdentity
     ? {
         providerName,
         providerDestinationIdentity,
-        providerDestinationDurableIdentity: durableReplayDestinationIdentity(provider.baseUrl),
+        providerDestinationDurableIdentity: durableReplayDestinationIdentity(destination),
         adapterName,
         modelId,
         credentialIdentity,

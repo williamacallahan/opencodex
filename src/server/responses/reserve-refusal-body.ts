@@ -1,12 +1,13 @@
-import { BOUNDED_BODY_MAX_BYTES, decodeUtf8WithValidity } from "../../lib/bounded-body";
+import { BOUNDED_BODY_MAX_BYTES, BOUNDED_BODY_TIMEOUT_MS, decodeUtf8WithValidity } from "../../lib/bounded-body";
 import { carryProviderResponseProvenance } from "../../providers/request-pacing";
 
-// Quota and combo error classification must not open a second reader or deadline after handback.
+// A retry probe must not read again after handback. The terminal consumer owns the remaining stream.
 type Inspection = { text: string; utf8Valid: boolean; displaySafe: boolean; truncated: boolean };
+const deferredReads = new WeakSet<Response>();
 const inspectedBodies = new WeakMap<Response, Uint8Array | Inspection | null>();
-export function inspectedReserveRefusal(response: Response) {
+export function inspectedReserveRefusal(response: Response, consumer: "retry" | "final" = "retry") {
   const stored = inspectedBodies.get(response);
-  if (stored === undefined) return undefined;
+  if (stored === undefined || (stored === null && consumer === "final")) return undefined;
   if (stored === null) return { text: "", displaySafe: false, truncated: true, utf8Valid: false };
   if (!(stored instanceof Uint8Array)) return stored;
   const result = { ...decodeUtf8WithValidity(stored), displaySafe: true, truncated: false };
@@ -18,8 +19,16 @@ function inspected(response: Response, bytes?: Uint8Array) {
   return { response, bytes };
 }
 
+/** Finish a handed-back slow read once, before a quota decision could skip the remaining seats. */
+export async function finishReserveWalkInspection(response: Response, signal: AbortSignal): Promise<Response> {
+  if (!deferredReads.delete(response)) return response;
+  const final = await inspectReserveRefusal(response, BOUNDED_BODY_TIMEOUT_MS, signal, true);
+  signal.throwIfAborted();
+  return final.response;
+}
+
 /** Inspect one prefix. On handback the client owns the prefix, outstanding read and unread tail. */
-export async function inspectReserveRefusal(response: Response, waitMs: number, signal: AbortSignal): Promise<{
+export async function inspectReserveRefusal(response: Response, waitMs: number, signal: AbortSignal, final = false): Promise<{
   response: Response; bytes?: Uint8Array;
 }> {
   const body = response.body;
@@ -36,7 +45,7 @@ export async function inspectReserveRefusal(response: Response, waitMs: number, 
     const chunks: Uint8Array[] = [];
     if (used) chunks.push(prefix.subarray(0, used));
     if (extra) chunks.push(extra);
-    return inspected(wrap(new ReadableStream<Uint8Array>({
+    const handed = inspected(wrap(new ReadableStream<Uint8Array>({
       async pull(controller) {
         const chunk = chunks.shift();
         if (chunk) { controller.enqueue(chunk); return; }
@@ -48,6 +57,9 @@ export async function inspectReserveRefusal(response: Response, waitMs: number, 
       },
       cancel(reason) { return reader.cancel(reason).finally(() => reader.releaseLock()); },
     }, { highWaterMark: 0 })));
+    if (final || extra) inspectedBodies.set(handed.response, { text: "", displaySafe: false, truncated: true, utf8Valid: false });
+    else deferredReads.add(handed.response);
+    return handed;
   };
   let wake: (() => void) | undefined;
   const interrupt = () => wake?.();
@@ -56,7 +68,7 @@ export async function inspectReserveRefusal(response: Response, waitMs: number, 
   signal.addEventListener("abort", interrupt, { once: true });
   try {
     // Bound empty/tiny chunks too. One interrupt handler owns only the current read.
-    for (let pulls = 0; pulls < 256 && performance.now() < end && !signal.aborted; pulls++) {
+    for (let pulls = 0; (final || pulls < 256) && performance.now() < end && !signal.aborted; pulls++) {
       const pending = reader.read();
       const next = await new Promise<Awaited<typeof pending> | undefined>((resolve, reject) => {
         wake = () => resolve(undefined);

@@ -69,7 +69,11 @@ export function claudeWireSessionId(hex32: string): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
-function keyedResponsesUrl(provider: OcxProviderConfig): string {
+export function responsesTransportUrl(provider: OcxProviderConfig): string {
+  if (provider.authMode === "forward") {
+    const base = isCanonicalOpenAiForwardProvider(provider) ? CODEX_FORWARD_BASE_URL : stripTrailingSlashes(provider.baseUrl);
+    return `${base}/responses`;
+  }
   return provider.responsesPath === undefined ? openaiResponsesUrl(provider.baseUrl)
     : `${stripTrailingSlashes(provider.baseUrl)}${provider.responsesPath}`;
 }
@@ -78,7 +82,7 @@ function keyedResponsesUrl(provider: OcxProviderConfig): string {
 export function isCodexRelaySend(provider: OcxProviderConfig, target?: string): boolean {
   if (!provider.apiKey || (provider.authMode ?? "key") !== "key" || !isCodexLbProvider(provider)) return false;
   const base = stripTrailingSlashes(provider.baseUrl);
-  const url = target ?? keyedResponsesUrl(provider);
+  const url = target ?? responsesTransportUrl(provider);
   return url === `${base}/responses` || url === `${base}/v1/responses`;
 }
 
@@ -188,11 +192,9 @@ export function buildResponsesTransport(provider: OcxProviderConfig, incoming: P
   url: string; headers: Record<string, string>;
 } {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  let url: string;
+  const url = responsesTransportUrl(provider);
   if (provider.authMode === "forward") {
     const mayForwardCallerCredentials = isCanonicalOpenAiForwardProvider(provider);
-    const baseUrl = mayForwardCallerCredentials ? CODEX_FORWARD_BASE_URL : stripTrailingSlashes(provider.baseUrl);
-    url = `${baseUrl}/responses`;
     if (provider.headers) Object.assign(headers, provider.headers);
     const runtimeProvider = provider as {
       _codexAccountOverride?: { accessToken: string; chatgptAccountId: string; kind?: "pool" | "main-pool" };
@@ -234,7 +236,6 @@ export function buildResponsesTransport(provider: OcxProviderConfig, incoming: P
       if (assertion) headers[AGENT_ASSERTION_HEADER] = assertion;
     }
   } else {
-    url = keyedResponsesUrl(provider);
     if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
     if (provider.headers) Object.assign(headers, provider.headers);
   }

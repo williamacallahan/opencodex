@@ -22,7 +22,6 @@ import { pickComboTarget, targetKey, type ComboPick } from "../../combos";
 import type { NormalizedComboTarget } from "../../combos/types";
 import type { OcxConfig } from "../../types";
 import { routeConcreteModel } from "../../router";
-import { recallComboTargetForLane } from "./combo-session-recall";
 
 export const COMBO_CONVERSATION_PIN_REASON = "combo-conversation-pin";
 
@@ -56,7 +55,7 @@ export function isToolLoopContinuation(body: unknown): boolean {
 export function conversationPinnedPick(args: {
   config: OcxConfig;
   comboId: string;
-  lane: string | undefined;
+  previous: NormalizedComboTarget | undefined;
   body: unknown;
   /** Pin only a tool-output continuation (a JEV combo re-decides each user turn). */
   toolLoopOnly: boolean;
@@ -64,7 +63,7 @@ export function conversationPinnedPick(args: {
   now?: number;
 }): ComboPick | undefined {
   if (args.toolLoopOnly && !isToolLoopContinuation(args.body)) return undefined;
-  const previous = recallComboTargetForLane(args.config, args.lane, args.comboId);
+  const previous = args.previous;
   if (!previous) return undefined;
   const previousKey = targetKey(previous);
   const pick = pickComboTarget(args.config, args.comboId, {

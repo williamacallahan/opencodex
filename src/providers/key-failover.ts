@@ -557,32 +557,39 @@ export function selectProactiveApiKeyTransport(
   routedProvider: OcxProviderTransport,
   promptCacheKey?: string,
   now = Date.now(),
+  acceptsKey?: (candidate: OcxProviderConfig) => boolean,
 ): OcxProviderTransport | null {
   const configured = config.providers[providerName];
   if (configured?.requestPacing?.enabled && configured.requestPacing.keySelection === "round-robin"
     && hasKeyPoolFailover(configured)) {
-    return applyRotatedTransport(providerName, routedProvider, allocateDistributedKey(providerName, configured, now), promptCacheKey);
+    return applyRotatedTransport(providerName, routedProvider, allocateDistributedKey(providerName, configured, now, acceptsKey), promptCacheKey);
   }
+  // Do not change the committed account of a non-distributed pool to serve a bound request.
+  if (acceptsKey) return null;
   const committed = selectProactiveApiKey(config, providerName, now);
   if (!committed) return null;
   return applyRotatedTransport(providerName, routedProvider, committed, promptCacheKey);
 }
 
+export class BoundApiKeyUnavailableError extends Error {}
+
 const dispatchKeyCursor = new Map<string, string>();
-function allocateDistributedKey(providerName: string, provider: OcxProviderConfig, now: number): OcxProviderConfig {
+function allocateDistributedKey(providerName: string, provider: OcxProviderConfig, now: number, acceptsKey?: (candidate: OcxProviderConfig) => boolean): OcxProviderConfig {
   const pool = (provider.apiKeyPool ?? []).filter(entry => !entry.disabled).filter((entry, index, all) => all.findIndex(other => other.key === entry.key) === index);
   if (pool.length === 0) throw new ProviderApiKeyPausedError();
+  const admitted = acceptsKey ? pool.filter(entry => acceptsKey(routedProviderConfig(providerName, { ...provider, apiKey: entry.key }))) : pool;
+  if (!admitted.length) throw new BoundApiKeyUnavailableError();
   const previous = dispatchKeyCursor.get(providerName);
-  const start = pool.findIndex(entry => entry.id === previous);
-  for (let offset = 1; offset <= pool.length; offset++) {
-    const entry = pool[(start + offset) % pool.length]!;
+  const start = admitted.findIndex(entry => entry.id === previous);
+  for (let offset = 1; offset <= admitted.length; offset++) {
+    const entry = admitted[(start + offset) % admitted.length]!;
     if (isKeyInCooldown(providerName, entry.id, now)) continue;
-    dispatchKeyCursor.set(providerName, entry.id);
+    if (!acceptsKey) dispatchKeyCursor.set(providerName, entry.id);
     return { ...provider, apiKey: entry.key, _apiKeyAttempt: {
       entryId: entry.id, reference: entry.key, revision: provider.apiKeySelectionRevision, distributed: true,
     } };
   }
-  const next = pool.length ? Math.min(...pool.map(entry => getKeyCooldownUntil(providerName, entry.id, now) ?? now + 1000)) : now + 1000;
+  const next = Math.min(...admitted.map(entry => getKeyCooldownUntil(providerName, entry.id, now) ?? now + 1000));
   throw new RequestPacingQueueOverloadError(providerName, "keys_exhausted", Math.max(1, Math.ceil((next - now) / 1000)));
 }
 

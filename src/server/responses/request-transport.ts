@@ -97,11 +97,11 @@ import { captureConfigGeneration } from "../../lib/state-store-sweeper";
 import { recordAnthropicAccountQuotaFromHeadersForInstance, hasPassiveAccountQuota } from "../../providers/quota";
 import { checkOutboundBodySize, describeOutboundBodyRefusal } from "./outbound-body-guard";
 import { formatErrorResponse } from "../../bridge";
-import { bindRouteReasoningReplayScope } from "./core-replay";
+import { bindRouteReasoningReplayScope, couldServeResponsesStore } from "./core-replay";
 import { assignNativeLogConversationId, sessionIdHeaderFromRequest, normalizeLogConversationId } from "../request-log-conversation";
 import { redactSecretString } from "../../lib/redact";
 import { captureAccountAutoPauseAttempt } from "../../oauth/account-auto-pause";
-import { selectProactiveApiKeyTransport } from "../../providers/key-failover";
+import { BoundApiKeyUnavailableError, selectProactiveApiKeyTransport } from "../../providers/key-failover";
 import { distributedKeyPhysicalFetch } from "../../providers/api-key-response-ownership";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { providerConsumesCallerAuthorization } from "../../providers/caller-authorization";
@@ -147,6 +147,9 @@ export async function prepareResponsesTransport(
 ) {
   const { config, logCtx, options, req } = requestContext;
   const { route, parsed, inboundWire, translatorBudget } = requestState;
+  const ownerStore = parsed._lunaProjectForeignReasoning === "owner" ? parsed._recordedResponsesStore : undefined;
+  const pickKey = (provider: OcxProviderConfig) => selectProactiveApiKeyTransport(config, route.providerName, provider,
+    parsed.options.promptCacheKey, Date.now(), ownerStore ? candidate => couldServeResponsesStore(candidate, ownerStore, true) : undefined);
   const deferPhysicalAttribution = route.providerName === "github-copilot" && route.provider.authMode !== "forward";
   let copilotCandidate: { model: string; adapter: string; accountLogLabel?: string } | undefined;
   bindResponsesSpendTarget(logCtx);
@@ -805,7 +808,7 @@ export async function prepareResponsesTransport(
       if (!current && (route.provider._apiKeyAttempt?.distributed || (route.provider.requestPacing?.enabled
         && (route.provider.requestPacing.keys || route.provider.requestPacing.keySelection === "round-robin")))) {
         const fresh = resolveCurrentProviderApiKeyTransport(config, route.providerName, { ...route.provider, _apiKeyAttempt: undefined });
-        if (fresh) current = selectProactiveApiKeyTransport(config, route.providerName, fresh) ?? fresh;
+        if (fresh) current = pickKey(fresh) ?? fresh;
       }
       if (!current) {
         // Rethrown through oauthDispatch so adapter-dispatch / passthrough-dispatch map it
@@ -1303,13 +1306,9 @@ export async function prepareResponsesTransport(
   // and static headers registry backfill supplies, throwing `Unknown adapter: undefined`.
   let proactiveKeyProvider: OcxProviderConfig | null;
   try {
-    proactiveKeyProvider = selectProactiveApiKeyTransport(
-      config,
-      route.providerName,
-      route.provider,
-      parsed.options.promptCacheKey,
-    );
+    proactiveKeyProvider = pickKey(route.provider);
   } catch (err) {
+    if (err instanceof BoundApiKeyUnavailableError) return markProxyError(formatErrorResponse(409, "invalid_request_error", "No available key owns this conversation state."));
     if (err instanceof OAuthAccountPausedError) {
       return markProxyError(formatErrorResponse(403, "permission_error", publicOAuthAuthenticationErrorMessage(err)), publicOAuthErrorPresentation(err));
     }

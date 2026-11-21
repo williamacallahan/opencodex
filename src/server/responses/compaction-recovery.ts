@@ -150,7 +150,7 @@ export async function runWithCompactionRecovery(
       else if (event.type === "error") adapterError = event;
       else if (event.type !== "done") partialOutput = true;
     },
-    onResponseComplete: model => snapshot ? gate.onResponseComplete(model) : options.onResponseComplete?.(model),
+    onResponseComplete: (...completion) => snapshot ? gate.onResponseComplete(...completion) : options.onResponseComplete?.(...completion),
     onNativePassthroughTerminal: status => snapshot ? gate.onTerminal(status) : options.onNativePassthroughTerminal?.(status),
     onNativePassthroughCancel: () => snapshot ? gate.onCancel() : options.onNativePassthroughCancel?.(),
   };
