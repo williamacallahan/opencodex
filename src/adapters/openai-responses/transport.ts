@@ -10,15 +10,15 @@ import {
   CODEX_RESPONSES_LITE_HEADER,
   isolateCodexPoolAccountHeaders,
 } from "../../codex/forward-transport-headers";
-import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers-destination";
+import { isCanonicalOpenAiForwardProvider, responsesTransportUrl } from "../../providers/openai-tiers-destination";
 import { copyForwardedClientHeaders, forwardableClientHeaders } from "../../lib/provider-client-headers";
 import { AGENT_ASSERTION_HEADER } from "../../lib/authorization-scheme";
-import { openaiResponsesUrl } from "../openai-responses-url";
-import { isCodexLbProvider } from "../../providers/quota/codex-lb-url";
+import { isCodexLbResponsesEndpoint } from "../../providers/quota/codex-lb-url";
 import { isThreadSpawnRequest } from "../../server/effort-policy";
 import { callerSessionAlias, claudeTranscriptQualifier, safeCallerSessionId, scopedWireHash } from "../../server/caller-session-identity";
 import { agentServingThreadKey } from "../../oauth/session-affinity-key";
 
+export { responsesTransportUrl };
 export { FORWARD_HEADERS } from "../../codex/forward-transport-headers";
 
 /** Copy the provider's opted-in client metadata onto already-materialized auth headers, never credentials. */
@@ -33,18 +33,6 @@ export function copyResponsesClientMetadata(target: Headers, incoming: Headers, 
   const userAgent = incoming.get("user-agent");
   if (userAgent && !target.has("user-agent")) target.set("user-agent", userAgent);
   copyConfiguredClientHeaders(target, incoming, provider);
-}
-
-/**
- * Strip trailing slashes with a linear scan rather than a regex.
- *
- * `/\/+$/` retries candidate end positions when a long slash run is not at the end of the
- * string; the scan walks each character once and produces the same result on every input.
- */
-function stripTrailingSlashes(value: string): string {
-  let end = value.length;
-  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
-  return end === value.length ? value : value.slice(0, end);
 }
 
 /** Normalize caller aliases only on native egress; preserve ingress and fallback identity. */
@@ -69,21 +57,9 @@ export function claudeWireSessionId(hex32: string): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
-export function responsesTransportUrl(provider: OcxProviderConfig): string {
-  if (provider.authMode === "forward") {
-    const base = isCanonicalOpenAiForwardProvider(provider) ? CODEX_FORWARD_BASE_URL : stripTrailingSlashes(provider.baseUrl);
-    return `${base}/responses`;
-  }
-  return provider.responsesPath === undefined ? openaiResponsesUrl(provider.baseUrl)
-    : `${stripTrailingSlashes(provider.baseUrl)}${provider.responsesPath}`;
-}
-
 /** Only these two Responses endpoints serve Codex relay requests, not arbitrary paths on the same host. */
 export function isCodexRelaySend(provider: OcxProviderConfig, target?: string): boolean {
-  if (!provider.apiKey || (provider.authMode ?? "key") !== "key" || !isCodexLbProvider(provider)) return false;
-  const base = stripTrailingSlashes(provider.baseUrl);
-  const url = target ?? responsesTransportUrl(provider);
-  return url === `${base}/responses` || url === `${base}/v1/responses`;
+  return !!provider.apiKey && isCodexLbResponsesEndpoint(provider, provider.adapter, target);
 }
 
 function withoutCallerContinuity(incoming: Headers): Headers {

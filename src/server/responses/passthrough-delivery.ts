@@ -440,6 +440,7 @@ export async function deliverPassthroughResponse(
     | "normalizeFunctionCompletionJson"
     | "localUpstream"
     | "terminalOutcomeRecorded"
+    | "terminalCapacityStatus"
   >,
   dispatchSidecarSend?: AuxiliaryModelSend,
 ): Promise<Response> {
@@ -540,7 +541,8 @@ export async function deliverPassthroughResponse(
         // every other terminal callback but must not write the same refusal a second time.
         if (!nativeExchange.terminalOutcomeRecorded) recordTerminalOutcome(status, httpStatusOverride,
           status === "completed" && logCtx.terminalSource !== "synthetic"
-            && nativeExchange.request.outboundModelId === NATIVE_RESERVE_MODEL);
+            && nativeExchange.request.outboundModelId === NATIVE_RESERVE_MODEL,
+          logCtx.terminalSource !== "synthetic" && !isNonReplayableResponse(upstreamResponse) ? nativeExchange.terminalCapacityStatus : undefined);
       }
       : undefined;
     const terminalBodyWillRecord = !!terminalRecorder && upstreamResponse.ok && isEventStream;
@@ -653,7 +655,7 @@ export async function deliverPassthroughResponse(
         const comboCause: Pick<typeof logCtx, "causeHint"> = {};
         const failure = await consumeComboFailure(upstreamResponse, options.abortSignal, undefined, comboCause);
         if (comboCause.causeHint) logCtx.causeHint = comboCause.causeHint;
-        if (confirmCapacity && !failure.nonReplayable && isOwnerCapacityRefusal(failure)) confirmCapacity();
+        if (confirmCapacity && !failure.nonReplayable && isOwnerCapacityRefusal(failure.response.status, failure)) confirmCapacity();
         options.onConsumedComboFailure?.(failure);
         return failure.response;
       }
@@ -662,7 +664,7 @@ export async function deliverPassthroughResponse(
       const errorText = await readDisplaySafeErrorText(upstreamResponse, upstream.signal, "");
       if (confirmCapacity) {
         const { code, type, safeText } = normalizeUpstreamErrorText(errorText, "");
-        if (isOwnerCapacityRefusal({ response: upstreamResponse, classificationText: safeText, upstreamCode: code,
+        if (isOwnerCapacityRefusal(upstreamResponse.status, { classificationText: safeText, upstreamCode: code,
           upstreamType: type, upstreamRootCode: upstreamEnvelopeRootCode(errorText) })) confirmCapacity();
       }
       if (upstreamResponse.status === 413) {

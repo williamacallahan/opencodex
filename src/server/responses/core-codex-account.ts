@@ -1268,7 +1268,7 @@ export function codexForwardTerminalOutcomeRecorder(
   modelId?: string,
   logCtx?: RequestLogContext,
   response?: Response,
-): ((status: ResponsesTerminalStatus, httpStatusOverride?: number, reserveServed?: boolean) => void) | undefined {
+): ((status: ResponsesTerminalStatus, httpStatusOverride?: number, reserveServed?: boolean, capacityStatus?: 402 | 429) => void) | undefined {
   if (!usesCodexForwardPoolAuth(authCtx, provider)) {
     if (!isKeyedRequestOwnedMain(authCtx) || !isCanonicalOpenAiForwardProvider(provider)) return undefined;
     return (status, httpStatusOverride) => {
@@ -1278,11 +1278,12 @@ export function codexForwardTerminalOutcomeRecorder(
     };
   }
   const windowMeta = codexFailureWindowOutcomeMeta(authCtx);
-  return (status, httpStatusOverride, reserveServed) => {
+  return (status, httpStatusOverride, reserveServed, capacityStatus) => {
     const terminalQuota = status === "failed" && response ? readCodexWsTerminalQuota(response) : undefined;
     const quotaStatus = [httpStatusOverride, logCtx?.terminalHttpStatus]
       .find(value => value === 429 || value === 402)
       ?? terminalQuota?.status
+      ?? (status !== "completed" && (httpStatusOverride ?? logCtx?.terminalHttpStatus ?? 502) === 502 ? capacityStatus : undefined)
       ?? (status === "failed" && windowMeta.poolReserve && logCtx?.causeHint === "rate-limit" ? 429 : undefined);
     if (status === "incomplete" && quotaStatus === undefined) {
       // Normal limit/content-filter/stall terminal — the account served the
@@ -1312,7 +1313,7 @@ export function codexForwardTerminalOutcomeRecorder(
     const outcome = status === "completed"
       ? 200
       : (quotaStatus ?? httpStatusOverride ?? logCtx?.terminalHttpStatus ?? 502);
-    recordCodexUpstreamOutcome(config, authCtx.accountId, outcome, {
+    const confirmCapacity = recordCodexUpstreamOutcome(config, authCtx.accountId, outcome, {
       ...windowMeta,
       ...(quotaStatus !== undefined && response ? codexQuotaOutcomeMeta(response, terminalQuota?.headers) : {}),
       reserveServed,
@@ -1328,5 +1329,6 @@ export function codexForwardTerminalOutcomeRecorder(
       // not retire the replacement either (#2887).
       ...(authCtx.kind === "pool" ? { credentialGeneration: authCtx.generation } : {}),
     });
+    if (capacityStatus === outcome) confirmCapacity?.();
   };
 }

@@ -158,10 +158,10 @@ export function parseRetryAfterMs(
   return options?.preserveImmediate ? 1 : undefined;
 }
 
-/** An upstream seat's reset is not the relay's reset. Only its quota Retry-After speaks for the relay. */
-export function relayFailureCooldownMs(status: number, quotaRetryAfterHeader: string | null | undefined, configuredMs: number | undefined, now: number): number | undefined {
-  if (quotaRetryAfterHeader !== undefined) return Math.min(MAX_RELAY_COOLDOWN_MS,
-    parseRetryAfterMs(quotaRetryAfterHeader, now, { preserveImmediate: true }) ?? DEFAULT_COOLDOWN_MS);
+/** A seat reset is not a relay deadline. Honor only the relay's own quota or transport Retry-After. */
+export function relayFailureCooldownMs(status: number, wireRetryAfter: string | null | undefined, configuredMs: number | undefined, now: number): number | undefined {
+  if (wireRetryAfter !== undefined) return Math.min(MAX_RELAY_COOLDOWN_MS,
+    parseRetryAfterMs(wireRetryAfter, now, { preserveImmediate: true }) ?? DEFAULT_COOLDOWN_MS);
   return status >= 500 ? configuredMs ?? DEFAULT_COOLDOWN_MS : undefined;
 }
 

@@ -12,6 +12,8 @@ import { resetQuotaResetStoreForTests } from "../../src/quota/reset-seen-store";
 import type { QuotaResetEvent } from "../../src/quota/reset-detector";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 import { handleManagementAPI } from "../../src/server/management-api";
+import { hasUpstreamSeatPool } from "../../src/providers/quota/codex-lb-url";
+import { routeConcreteModel } from "../../src/router";
 import { ManagementRequest } from "../helpers/management-auth";
 
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
@@ -66,6 +68,18 @@ function config(name: string, providerConfig: OcxProviderConfig): OcxConfig {
 }
 
 describe("codex-lb pooled usage quota", () => {
+  test.each([
+    ["codex-lb", { responsesPath: "/responses" }, true],
+    ["codex-lb", {}, true],
+    ["codex-lb", { responsesPath: "/other/responses" }, false],
+    ["codex-lb", { modelAdapters: { luna: "openai-chat" } }, false],
+    ["codex-lb", { responsesPath: "/other/responses", modelCapabilities: { luna: { upstreamSeatPool: true } } }, true],
+    ["openai", { authMode: "forward", baseUrl: "https://chatgpt.com/backend-api/codex" }, false],
+  ] as const)("seat-pool cooldown follows the model destination: %s %j", (name, override, pooled) => {
+    const cfg = config(name, { adapter: "openai-responses", baseUrl: "https://lb.example.test/backend-api/codex", authMode: "key", ...override });
+    expect(hasUpstreamSeatPool(routeConcreteModel(cfg, `${name}/luna`))).toBe(pooled);
+  });
+
   test("one rejected provider probe does not prevent other quota reports", async () => {
     const failing = provider("https://lb.example.com/backend-api/codex", LIVE_USAGE, []);
     failing.fetch = (async () => { throw new Error("fixture transport failure"); }) as typeof fetch;

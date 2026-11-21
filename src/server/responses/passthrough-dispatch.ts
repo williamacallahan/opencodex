@@ -130,7 +130,7 @@ import { classifyTransportFailureKind, transportErrorCode } from "../../lib/upst
 import { captureAccountAutoPauseAttempt, wasAccountAutoPaused, wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
 import { codexFailureWindowOutcomeMeta, recordCodexUpstreamOutcome } from "../../codex/routing";
 import { describeUpstreamConnectFailure } from "./upstream-error";
-import { markUpstreamNotStarted } from "./combo-luna-legs";
+import { markUpstreamNotStarted, terminalOwnerCapacityStatus } from "./combo-luna-legs";
 import {
   rateLimitRetryPolicyFor,
   rateLimitRetryDelayMs,
@@ -553,6 +553,7 @@ export async function preparePassthroughExchange(
     let inspectedTerminal: ResponsesTerminalStatus | null = null;
     let inspectedCompletionSeen = false;
     let firstTerminalAllowsRecall = false;
+    let terminalCapacityStatus: 402 | 429 | undefined;
     const passiveQuotaObserved = hasPassiveAccountQuota(route.providerName)
       && route.provider.authMode === "oauth";
     const noteInspectedPayload = (payload: unknown) => {
@@ -561,6 +562,9 @@ export async function preparePassthroughExchange(
       const terminal = terminalStatusFromParsed(payload);
       if (inspectedTerminal === null && terminal !== null) {
         inspectedTerminal = terminal;
+        if (terminal !== "completed" && usesCodexForwardPoolAuth(admissionState.authCtx, route.provider)) {
+          terminalCapacityStatus = terminalOwnerCapacityStatus(payload);
+        }
         // The client boundary accepts a terminal by event type, even without a
         // response object. Such a terminal must permanently decline recall.
         if (terminal === "completed" && payload && typeof payload === "object"
@@ -1890,6 +1894,7 @@ export async function preparePassthroughExchange(
       undeclaredToolGuardActive = value;
     },
     noteInspectedPayload,
+    get terminalCapacityStatus() { return terminalCapacityStatus; },
     rememberPassthroughResponseChecked,
     upstream,
     connectMs: resolveConnectTimeoutMs(config.connectTimeoutMs, { localUpstream }),

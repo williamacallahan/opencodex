@@ -30,12 +30,34 @@ export function isReserveSeatQuotaRefusal(failure: ConsumedComboFailure, scope =
 }
 
 /** An owner may release opaque state only on positive quota evidence, not on every hoppable 429. */
-export function isOwnerCapacityRefusal(failure: ConsumedComboFailure): boolean {
-  const { response: { status }, upstreamCode: code, upstreamRootCode: rootCode, upstreamType } = failure;
+export function isOwnerCapacityRefusal(status: number, failure: Pick<ConsumedComboFailure,
+  "wrappedReserveQuota" | "upstreamCode" | "upstreamRootCode" | "upstreamType" | "classificationText">): boolean {
+  const { upstreamCode: code, upstreamRootCode: rootCode, upstreamType } = failure;
   return (failure.wrappedReserveQuota === true || ((status === 429 || status === 402)
     && isReserveQuotaCode(code ?? upstreamType) && (!upstreamType || isReserveQuotaCode(upstreamType))))
     && (!rootCode || isReserveQuotaCode(rootCode))
     && comboFailureDecision(status, failure.classificationText, { code, rootCode }) === "hop";
+}
+
+/** Classify the original terminal before presentation can discard a conflicting verdict. */
+export function terminalOwnerCapacityStatus(frame: unknown): 402 | 429 | undefined {
+  if (!isPlainObject(frame) || (frame.type !== "response.failed" && frame.type !== "response.incomplete")
+    || !isPlainObject(frame.response)) return;
+  const snapshot = frame.response;
+  const error = snapshot.error ?? snapshot.incomplete_details;
+  if (!isPlainObject(error)) return;
+  const code = error.code ?? error.reason ?? error.type;
+  if (typeof code !== "string" || !isReserveQuotaCode(code)) return;
+  const status = code === "usage_not_included" ? 402 : 429;
+  if (snapshot.status != null && frame.type !== `response.${snapshot.status}`) return;
+  const messages: string[] = [];
+  for (const carrier of [frame, snapshot, frame.error, frame.last_error, snapshot.error, snapshot.last_error, snapshot.incomplete_details]) {
+    if (carrier == null) continue;
+    if (!isPlainObject(carrier) || carrier.retryable === false || [carrier.code, carrier.reason, carrier === frame ? null : carrier.type]
+      .some(tag => tag != null && !isReserveQuotaCode(tag))) return;
+    if (typeof carrier.message === "string") messages.push(carrier.message);
+  }
+  return isOwnerCapacityRefusal(status, { upstreamCode: code, classificationText: messages.join("\n") }) ? status : undefined;
 }
 
 /** The pool already classified this response as quota (including body-confirmed 5xx). */

@@ -67,14 +67,14 @@ let relay: (request: Request, body: { model: string }) => Response | Promise<Res
 let native: (body: { model: string }) => Response | Promise<Response>;
 let metered: () => Response;
 
-function sse(model: string, frames: "ok" | "created-then-fail" | "created-then-quota" | "output-then-quota"): Response {
+function sse(model: string, frames: "ok" | "created-then-fail" | "created-then-quota" | "output-then-quota", quotaCode = "usage_limit_reached", rootCode?: string): Response {
   const created = { type: "response.created", response: { id: "resp_1", object: "response", status: "in_progress", model, output: [] } };
   const delta = { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: "hi" };
   const body = frames === "ok" ? [created, delta,
     { type: "response.completed", response: { ...created.response, status: "completed", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
       output: [{ id: "msg_1", type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "hi", annotations: [] }] }] } }]
-    : [created, ...(frames === "output-then-quota" ? [delta] : []), { type: "response.failed", response: { ...created.response, status: "failed",
-      error: frames === "created-then-fail" ? { code: "server_error", message: "boom" } : { code: "usage_limit_reached", message: "Limit reached" } } }];
+    : [created, ...(frames === "output-then-quota" ? [delta] : []), { type: "response.failed", code: rootCode, response: { ...created.response, status: "failed",
+      error: frames === "created-then-fail" ? { code: "server_error", message: "boom" } : { code: quotaCode, message: "Limit reached" } } }];
   return new Response(body.map(frame => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
 }
 const reserveRefused = () => Response.json({ error: { code: "usage_limit_reached", message: "Limit reached" } }, { status: 429, headers: { "retry-after": "3600" } });
@@ -227,16 +227,18 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(isComboTargetInCooldown("luna", luna, now + 86_400_000)).toBe(false);
   });
 
-  test("relay transport failure uses the configured short schedule, not quota advice", async () => {
+  test.each([
+    ["120", 120_000], ["86400", 300_000], ["invalid", 7_000], [undefined, 7_000],
+  ] as const)("relay overload honors its wire Retry-After (%s), not a seat's reset prose", async (retryAfter, delay) => {
     const luna = { provider: "relay", model: "gpt-6-luna" };
     const cfg = config({}, [luna]);
     cfg.providers.relay!.upstreamWebsocket = false;
     Object.assign(cfg.combos!.luna!, { cooldownMs: 7_000, waitForCooldownMs: 0 });
-    relay = () => Response.json({ error: { code: "server_error", message: "Gateway unavailable" } },
-      { status: 502, headers: { "retry-after": "86400" } });
-    expect((await post(cfg)).status).toBe(502);
-    expect(isComboTargetInCooldown("luna", luna, now + 6_999)).toBe(true);
-    expect(isComboTargetInCooldown("luna", luna, now + 7_000)).toBe(false);
+    relay = () => Response.json({ error: { code: "server_is_overloaded", message: "Gateway busy. Try again in 144 hours." } },
+      { status: 503, headers: { "x-should-retry": "false", ...(retryAfter && { "retry-after": retryAfter }) } });
+    expect((await post(cfg)).status).toBe(503);
+    expect(isComboTargetInCooldown("luna", luna, now + delay - 1)).toBe(true);
+    expect(isComboTargetInCooldown("luna", luna, now + delay)).toBe(false);
   });
 
   test("a third Reserve seat serves after two seats refuse", async () => {
@@ -939,6 +941,17 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     native = () => Response.json({ ...(conflict && { code: "origin_rejected" }), error: { code: "usage_limit_reached" } }, { status: 429 });
     // Keep this first turn on its issuer even if capacity is confirmed.
     expect((await post(cfg, { ...ownerDelta, prompt: { id: "pmpt_fixture" } }, ownerLane)).status).toBe(429);
+    expect(calls).toEqual(["native:gpt-6-luna"]); calls.length = 0;
+    expect((await post(cfg, ownerDelta, ownerLane)).status).toBe(conflict ? 429 : 200);
+    expect(calls).toEqual(conflict ? [] : ["relay:gpt-6-luna"]);
+  });
+
+  test.each([["insufficient_quota", false], ["usage_limit_reached", false], ["insufficient_quota", true]] as const)(
+    "a native stream releases its issuer only on a confirmed terminal refusal (%s, conflict: %s)", async (code, conflict) => {
+    const cfg = config(); await issueOwner(cfg);
+    native = body => sse(body.model, "output-then-quota", code, conflict ? "origin_rejected" : undefined);
+    const first = await post(cfg, { ...ownerDelta, prompt: { id: "pmpt_fixture" } }, ownerLane);
+    expect(first.status).toBe(200); expect(first.text).toContain("response.failed");
     expect(calls).toEqual(["native:gpt-6-luna"]); calls.length = 0;
     expect((await post(cfg, ownerDelta, ownerLane)).status).toBe(conflict ? 429 : 200);
     expect(calls).toEqual(conflict ? [] : ["relay:gpt-6-luna"]);

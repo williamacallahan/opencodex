@@ -1700,7 +1700,7 @@ export async function executeComboResponses(
       return lastFailure;
     }
     if (ported !== undefined && lunaPair && boundTargetKey && !failure.nonReplayable && !spentReplacement && native
-      && (attempt.sendCount === 0 ? isIssuerCapacityRefusal(failure.response) : isOwnerCapacityRefusal(failure))) {
+      && (attempt.sendCount === 0 ? isIssuerCapacityRefusal(failure.response) : isOwnerCapacityRefusal(failure.response.status, failure))) {
       replayEligibilityBody = ported;
       boundTargetKey = undefined;
       const plan = planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed, native);
@@ -1757,8 +1757,8 @@ export async function executeComboResponses(
     // A Reserve-window rejection is narrower than explicit provider-wide evidence.
     const reserveCapacityRefused = legIntent === "reserve-only" && (attempt.sendCount === 0
       || isReserveSeatQuotaRefusal(failure, classifiedScope));
-    const relayCooldown = hasUpstreamSeatPool(targetRoute)
-      ? relayFailureCooldownMs(failure.response.status, failure.quotaRetryAfterHeader, combo.cooldownMs, failureNow) : undefined;
+    const relayCooldown = hasUpstreamSeatPool(targetRoute, childLog.providerAdapter)
+      ? relayFailureCooldownMs(failure.response.status, failure.relayRetryAfterHeader, combo.cooldownMs, failureNow) : undefined;
     const failureCooldownScope = reserveCapacityRefused || isPolicyCandidateRefusal(failure.response) ? "none"
       : relayCooldown !== undefined && classifiedScope === "provider" ? "target" : classifiedScope;
     const failedTargetKey = targetKey(pick.target);

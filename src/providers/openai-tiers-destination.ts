@@ -8,6 +8,27 @@ export const LEGACY_CHATGPT_PROVIDER_ID = "chatgpt";
 
 export const CODEX_FORWARD_BASE_URL = "https://chatgpt.com/backend-api/codex";
 
+/**
+ * Strip trailing slashes with a linear scan rather than a regex.
+ *
+ * `/\/+$/` retries candidate end positions when a long slash run is not at the end of the
+ * string; the scan walks each character once and produces the same result on every input.
+ */
+export function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return end === value.length ? value : value.slice(0, end);
+}
+
+export function responsesTransportUrl(provider: OcxProviderConfig): string {
+  if (provider.authMode === "forward") {
+    const base = isCanonicalOpenAiForwardProvider(provider) ? CODEX_FORWARD_BASE_URL : stripTrailingSlashes(provider.baseUrl);
+    return `${base}/responses`;
+  }
+  return provider.responsesPath === undefined ? openaiResponsesUrl(provider.baseUrl)
+    : `${stripTrailingSlashes(provider.baseUrl)}${provider.responsesPath}`;
+}
+
 function normalizedBaseUrl(value: string): string | undefined {
   try {
     const url = new URL(value.trim());

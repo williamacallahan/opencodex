@@ -159,6 +159,8 @@ export async function consumeComboFailure(
     ? "0"
     : upstreamRetryAfter;
   const quotaStatusOrMessage = response.status === 429 || response.status === 402 || quotaConfirmedByBody;
+  const relayQuota = quotaStatusOrMessage || isUpstreamQuotaToken(upstreamCode) || isUpstreamQuotaToken(upstreamType)
+    || isAnthropicBillingFailure(response.status, classificationText, upstreamCode);
   // The synthetic "2" fallback is client advice only, never target cooldown metadata.
   const clientRetryAfter = replayRefusal ? undefined : resolveClientRetryAfter({
     status: response.status,
@@ -212,9 +214,8 @@ export async function consumeComboFailure(
     ...(upstreamMessage !== undefined ? { upstreamMessage } : {}),
     ...(upstreamType !== undefined ? { upstreamType } : {}),
     ...(!cyberFailure && cooldownRetryAfter !== undefined ? { retryAfter: cooldownRetryAfter } : {}),
-    ...(!cyberFailure && !replayRefusal && (quotaStatusOrMessage || isUpstreamQuotaToken(upstreamCode)
-      || isUpstreamQuotaToken(upstreamType) || isAnthropicBillingFailure(response.status, classificationText, upstreamCode))
-      ? { quotaRetryAfterHeader: validateClientRetryAfterHeader(effectiveRetryAfter, now) ?? null } : {}),
+    ...(!cyberFailure && !replayRefusal && (relayQuota || serverError)
+      ? { relayRetryAfterHeader: validateClientRetryAfterHeader(effectiveRetryAfter, now) ?? (relayQuota ? null : undefined) } : {}),
     // The EFFECTIVE classification decides, not the raw status. An upstream that wraps a quota
     // refusal in a 5xx still carries `x-codex-*-reset-at`, and gating on 402/429 alone threw
     // those away, so the combo target came back up immediately instead of waiting for the

@@ -742,7 +742,7 @@ five seconds. A valid immediate
 `Retry-After: 0` remains an immediate upstream directive rather than being replaced by a configured
 cooldown.
 
-For a pooling Codex relay, such as codex-lb, quota or billing refusals cool only the failed model. The proxy waits for the relay’s `Retry-After` header (up to five minutes), or 60 seconds without one. It ignores an individual seat’s reset time. Other relay 5xx errors use `cooldownMs` or the 60-second default. Codex backend relay URLs are recognized automatically. For another upstream that pools seats, set `modelCapabilities.<model-id>.upstreamSeatPool` to `true` on its provider for each affected model.
+For a pooling Codex relay, such as codex-lb, quota or billing refusals cool only the failed model. The proxy honors the relay’s `Retry-After` header for these refusals and for transport errors, up to five minutes. Without a valid header, quota and billing refusals wait 60 seconds; other 5xx errors use `cooldownMs` or the 60-second default. A seat’s reset time does not set the relay deadline. The proxy recognizes the Codex relay’s Responses endpoints automatically, but not models routed to a different handler or wire. For another upstream that pools seats, set `modelCapabilities.<model-id>.upstreamSeatPool` to `true` on its provider for each affected model.
 
 For an Anthropic OAuth or Codex pool, a 429 tied to one account that the pool has cooled does
 not cool the whole combo target. Other accounts behind that target remain available. A 429 with
