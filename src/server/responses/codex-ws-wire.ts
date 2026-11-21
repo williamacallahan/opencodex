@@ -64,6 +64,7 @@ export interface CodexWsTerminalQuota {
 }
 
 interface CodexWsResponseEvidence {
+  hardStopStatus?: number;
   ambiguousTerminal?: true;
   terminalQuota?: CodexWsTerminalQuota;
 }
@@ -110,6 +111,8 @@ export function codexWsPreludeRootCode(response: Response): string | undefined {
 export function carryCodexWsPreludeVerdict(source: Response, delivered: Response): Response {
   const evidence = codexWsPreludeProjections.get(source);
   if (evidence) markCodexWsPreludeProjection(delivered, evidence);
+  const streamEvidence = codexWsUpstreamResponses.get(source);
+  if (streamEvidence) codexWsUpstreamResponses.set(delivered, streamEvidence);
   return delivered;
 }
 

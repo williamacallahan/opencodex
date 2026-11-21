@@ -33,7 +33,7 @@ export function createTerminalErrorRedactionBlockRewrite(
     return maskKnown(safe);
   };
   return (block) => {
-    const terminalFrame = /^event:[ \t]*response\.(?:failed|incomplete)[ \t]*\r?$/m.test(block);
+    const terminalFrame = /^event:[ \t]*(?:error|response\.(?:failed|incomplete))[ \t]*\r?$/m.test(block);
     const payload = sseDataPayload(block);
     if (payload === null) return [terminalFrame ? maskCredential(block) : block];
     let event: Record<string, unknown>;
@@ -42,7 +42,7 @@ export function createTerminalErrorRedactionBlockRewrite(
     } catch {
       return [terminalFrame ? maskCredential(block) : block];
     }
-    if (event?.type !== "response.failed" && event?.type !== "response.incomplete") {
+    if (event?.type !== "error" && event?.type !== "response.failed" && event?.type !== "response.incomplete") {
       return [terminalFrame ? maskCredential(block) : block];
     }
     const safeEvent = redactDiagnostic(event);

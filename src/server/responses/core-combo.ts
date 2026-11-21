@@ -1063,7 +1063,7 @@ export async function executeComboResponses(
 
   let lastFailure: Response | null = null;
   let cooldownRetryGeneration: number | undefined;
-  let restoredRefusal: Response | undefined;
+  let restoredRefusal: { response: Response; deliver(): Response } | undefined;
   // Dispatched targets, not attempted picks: it indexes the declared target list so the clamp
   // below can tell how many targets are still entitled to a send.
   let comboTargetsDispatched = 0;
@@ -1110,7 +1110,7 @@ export async function executeComboResponses(
     const failedChildLog = returnsQuota ? quotaFailedChildLog : lastFailedChildLog;
     if (failedChildLog) adoptFailedChildLog(failedChildLog);
     if (targetsExhausted && toolChoiceRefusalsOnly === true) return comboUnavailableResponse("No available targets for combo; attempted targets cannot preserve mandatory tool_choice");
-    if (!lastFailure || ![400, 401, 403].includes(lastFailure.status)) return restoredRefusal ?? lastFailure!;
+    if (!lastFailure || ![400, 401, 403].includes(lastFailure.status)) return restoredRefusal?.deliver() ?? lastFailure!;
     if (quotaFailure) return quotaFailure;
     // The quota-refused target was cooled before this request picked, so the ladder never saw
     // its refusal. The cooldown, with its Retry-After, is still the honest answer.
@@ -1195,7 +1195,7 @@ export async function executeComboResponses(
       });
       if (!hop.ok) {
         if (lastFailedChildLog) adoptFailedChildLog(lastFailedChildLog);
-        return restoredRefusal ?? hop.response;
+        return restoredRefusal?.deliver() ?? hop.response;
       }
       pendingHopCommit = hop.commit;
     }
@@ -1242,7 +1242,7 @@ export async function executeComboResponses(
       return exhaustedFailure();
     }
     if (restoredRefusal) {
-      void restoredRefusal.body?.cancel().catch(() => undefined);
+      void restoredRefusal.response.body?.cancel().catch(() => undefined);
       restoredRefusal = undefined;
     }
     // Admitted: only now is a guarded hop to this target recorded as taken.
@@ -1381,7 +1381,9 @@ export async function executeComboResponses(
         // the child log. Publish it before the outer logger finalizes, but only
         // through the gate: discarded attempts must never affect the parent.
         // Undefined child fields must preserve metadata already inspected by WS.
-        if (childLog.terminalHttpStatus !== undefined) logCtx.terminalHttpStatus = childLog.terminalHttpStatus;
+        const httpStatus = consumedChildFailure?.response.status ?? childLog.terminalHttpStatus;
+        if (httpStatus !== undefined) logCtx.terminalHttpStatus = httpStatus;
+        if (restoredRefusal && childLog.usage) logCtx.usage = childLog.usage;
         if (childLog.terminalIncompleteReason !== undefined) logCtx.terminalIncompleteReason = childLog.terminalIncompleteReason;
         if (childLog.terminalErrorCode !== undefined) logCtx.terminalErrorCode = childLog.terminalErrorCode;
         if (childLog.upstreamError !== undefined) logCtx.upstreamError = childLog.upstreamError;
@@ -1399,6 +1401,7 @@ export async function executeComboResponses(
         options.onNativePassthroughTerminal?.(status);
       },
     });
+    const retainedRefusal = (stream: Response) => ({ response: stream, deliver() { callbackGate.commit(); return stream; } });
     let response: Response;
     let retryWithheld = false;
     const failedGeneration = cooldownRetryGeneration;
@@ -1509,9 +1512,9 @@ export async function executeComboResponses(
 
     if (consumedChildFailure && response.ok && (consumedChildFailure.wsPreludeVerdict === "hard-stop" || legIntent === "reserve-only")) {
       // Classify the original refusal, but deliver the restored client stream if the turn stops.
-      restoredRefusal = response;
+      restoredRefusal = retainedRefusal(response);
       response = consumedChildFailure.response;
-      terminalRecorder?.("failed", response.status);
+      if (options.recordTerminalOutcomes === false) terminalRecorder?.("failed", response.status);
     }
     // A native Chat child reports a pre-stream failure by status before any byte, so its body
     // is never peeked; a non-OK one takes the ordinary failure path below.
@@ -1544,6 +1547,12 @@ export async function executeComboResponses(
         response = preflight.response;
         if (nativePassthrough) markNativePassthroughSseResponse(response);
         if (eagerRelay) markEagerRelaySseResponse(response);
+        if (preflight.kind === "hard-stop") {
+          restoredRefusal = retainedRefusal(response);
+          response = new Response(null, { status: preflight.status });
+          consumedChildFailure = { response, classificationText: "", wsPreludeVerdict: "hard-stop" };
+          if (options.recordTerminalOutcomes === false) terminalRecorder?.("failed", response.status);
+        }
       }
     }
 
@@ -1586,7 +1595,7 @@ export async function executeComboResponses(
       return response;
     }
 
-    callbackGate.discard();
+    if (!restoredRefusal) callbackGate.discard();
     if (response.status === 499) {
       retainCancelledAttempt();
       return clientCancelledResponse();
@@ -1657,7 +1666,7 @@ export async function executeComboResponses(
     const hardRefusal = failure.wsPreludeVerdict && failure.wsPreludeVerdict === "hard-stop";
     if (hardRefusal && restoredRefusal) {
       adoptFailedChildLog(childLog);
-      return restoredRefusal;
+      return restoredRefusal.deliver();
     }
     // A replacement that answers 200 is unmarked, and its zero-output failure only exists once
     // preflight has rebuilt the stream as a fresh Response. A spent grant never hops: a status the

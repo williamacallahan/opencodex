@@ -542,9 +542,12 @@ describe("upstream refusal terminal mapping (#5176)", () => {
     ["tee", "nested"],
     ["eager", "flat"],
     ["eager", "nested"],
+    ["tee", "root with nested overload"],
+    ["eager", "root with nested overload"],
   ] as const)("%s %s bare refusal ends the turn with the upstream verdict", async (mode, shape) => {
-    const bare = shape === "flat"
-      ? { type: "error", code: SAFETY_REFUSAL_CODE, message: SAFETY_REFUSAL_MESSAGE }
+    const bare = shape === "root with nested overload"
+      ? { type: "error", code: SAFETY_REFUSAL_CODE, error: { code: "overloaded_error", message: SAFETY_REFUSAL_MESSAGE } }
+      : shape === "flat" ? { type: "error", code: SAFETY_REFUSAL_CODE, message: SAFETY_REFUSAL_MESSAGE }
       : {
         type: "error",
         error: {

@@ -12,7 +12,9 @@ import { handleResponses } from "../../src/server/responses";
 import { codexWsPool } from "../../src/server/responses/codex-ws-pool";
 import { createRequestExecutionBudget } from "../../src/lib/request-execution-budget";
 import { clearPoolRecoveryState } from "../../src/routing/probe-lease";
-import type { RequestLogContext } from "../../src/server/request-log";
+import { getRequestLogEntries, type RequestLogContext } from "../../src/server/request-log";
+import { configureSharedSpendLedger, sharedSpendLedger, spendPolicyFromConfig } from "../../src/lib/spend-reservation-ledger";
+import { createServeOptions } from "../../src/server/index/serve-options";
 import type { OcxConfig } from "../../src/types";
 import { BOUNDED_WS_RUNTIME } from "../helpers/ws-upstream-fixtures";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
@@ -60,8 +62,8 @@ class FakeWebSocket {
       return;
     }
     if (step === "held-hard-failure") {
-      this.frame({ type: "response.failed", code: "origin_rejected", headers: { "x-fixture-private": "not-for-client" }, response: { id, status: "failed", output: [],
-        error: { code: "server_is_overloaded", message: "Reserve refused", param: "input" } } });
+      this.frame({ type: "response.failed", code: "origin_rejected", headers: { "x-fixture-private": "not-for-client" }, response: { id, status: "failed", output: [], usage: { input_tokens: 7, output_tokens: 0 },
+        error: { code: "overloaded_error", message: "Reserve refused", param: "input" } } });
       return;
     }
     if (step === "first-model-missing" || step === "first-model-missing-underscore") {
@@ -247,7 +249,67 @@ async function send(config = comboConfig(), input: unknown = "hello", thread?: s
   return { response, body, logCtx };
 }
 
+function strictReserveConfig() {
+  const cfg = comboConfig();
+  for (const target of cfg.combos!.overload!.targets) target.model = "gpt-6-luna";
+  cfg.providers.fallback!.baseUrl = "https://combo-fixture.invalid/backend-api/codex";
+  cfg.codexAccounts![0]!.plan = "pro";
+  const resetAt = Math.floor(Date.now() / 1000) + 3600;
+  setAccountQuotaFromParsed(WORK, { weeklyPercent: 100, weeklyResetAt: resetAt,
+    customWindows: [{ label: "Luna Reserve", percent: 10, observedAt: Date.now(), resetAt }] });
+  return cfg;
+}
+
 describe("a failover combo moves past a native Codex overload that preceded any output (#8107)", () => {
+  test.each(["chain/overload", "openai/gpt-5.5"])('masks every public diagnostic on %s', async model => {
+    const cfg = model === "chain/overload" ? strictReserveConfig() : comboConfig();
+    const marker = `${WORK}-access`;
+    FakeWebSocket.plan = [{ status: 503, code: "invalid_prompt", error: { code: "server_is_overloaded", message: `Fixture diagnostic: ${marker}` } }];
+    const { body } = await send(cfg, "hello", undefined, model);
+    expect(body).toContain("Fixture diagnostic:");
+    expect(body.includes(marker)).toBe(false);
+  });
+
+  test("a nonfatal bare diagnostic is masked without changing its overload verdict", async () => {
+    const marker = `${WORK}-access`;
+    const refusal = { status: 503, error: { code: "server_is_overloaded", message: `Fixture diagnostic: ${marker}` } };
+    FakeWebSocket.plan = [refusal, refusal, refusal];
+    const { body } = await send(comboConfig(), "hello", undefined, "openai/gpt-5.5");
+    expect(body).toContain("Fixture diagnostic:");
+    expect(body).toContain("event: error\n");
+    expect(body).toContain("server_is_overloaded");
+    expect(body.includes(marker)).toBe(false);
+  });
+
+  test("an ordinary combo stops on a hard failed terminal without selecting fallback", async () => {
+    FakeWebSocket.plan = ["held-hard-failure"];
+    const { body, response, logCtx } = await send();
+    expect(fallbackSends).toBe(0);
+    expect(logCtx.attempts?.map(attempt => attempt.status)).toEqual([503]);
+    expect(response.status).toBe(200);
+    expect(body).toContain('"code":"invalid_prompt"');
+    expect(body).toContain("Reserve refused");
+  });
+
+  test("an alternate seat's rejected credential becomes unavailable without a replay", async () => {
+    const cfg = comboConfig();
+    writeSeats(WORK, "backup");
+    cfg.codexAccounts!.push({ id: "backup", label: "backup" });
+    setAccountQuotaFromParsed("backup", { weeklyPercent: 50 });
+    FakeWebSocket.plan = ["first-quota", { status: 401, code: "origin_rejected", error: { code: "token_invalidated", message: "Alternate rejected" } }];
+    const fixtureFetch = globalThis.fetch;
+    globalThis.fetch = (async (input, init) => new URL(input instanceof Request ? input.url : String(input)).hostname === "auth.openai.com"
+      ? Response.json({ error: "invalid_grant" }, { status: 400 }) : fixtureFetch(input, init)) as typeof fetch;
+    try {
+      const { response, body } = await send(cfg, "hello", undefined, "openai/gpt-6-luna");
+      expect(response.status).toBe(401);
+      expect(body).toContain("Alternate rejected");
+      expect(fallbackSends).toBe(0);
+      expect(FakeWebSocket.instances.flatMap(ws => ws.sent)).toHaveLength(2);
+      expect(isAccountNeedsReauth(WORK)).toBe(false);
+      expect(isAccountNeedsReauth("backup")).toBe(true);
+    } finally { clearAccountNeedsReauth("backup"); }
+  });
   test("a rate-limit frame ahead of the preamble does not commit the native target", async () => {
     FakeWebSocket.plan = ["quota-then-refuse"];
     const { response, body, logCtx } = await send();
@@ -300,13 +362,7 @@ describe("a failover combo moves past a native Codex overload that preceded any 
   });
 
   test.each(["root", "innererror", "held-hard-failure"])("strict Reserve stops before the relay on a hard first-frame overload: %s", async source => {
-    const cfg = comboConfig();
-    for (const target of cfg.combos!.overload!.targets) target.model = "gpt-6-luna";
-    cfg.providers.fallback!.baseUrl = "https://combo-fixture.invalid/backend-api/codex";
-    cfg.codexAccounts![0]!.plan = "pro";
-    const resetAt = Math.floor(Date.now() / 1000) + 3600;
-    setAccountQuotaFromParsed(WORK, { weeklyPercent: 100, weeklyResetAt: resetAt,
-      customWindows: [{ label: "Luna Reserve", percent: 10, observedAt: Date.now(), resetAt }] });
+    const cfg = strictReserveConfig();
     const stop = { code: "origin_rejected" };
     FakeWebSocket.plan = source === "held-hard-failure" ? [source] : [{ status: 503, ...(source === "root" && stop), error: { code: "server_is_overloaded",
       message: "Our servers are currently overloaded.", ...(source === "innererror" && { innererror: stop }) } }];
@@ -321,8 +377,11 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect(FakeWebSocket.instances.flatMap(ws => ws.sent).map(frame => JSON.parse(frame).model)).toEqual(["gpt-reserve"]);
     expect(fallbackSends).toBe(0);
     expect(logCtx.attempts?.map(a => a.status)).toEqual([503]);
-    expect(body).toContain("server_is_overloaded");
+    const terminals = body.split("\n").filter(line => line.startsWith("data: {")).map(line => JSON.parse(line.slice(6)))
+      .filter(event => event.type === "error" || event.type === "response.failed");
+    expect(terminals.map(event => [event.type, event.response?.error?.code])).toEqual([["response.failed", "invalid_prompt"]]);
     expect(body).not.toContain("origin_rejected");
+    expect(body).not.toContain("server_is_overloaded");
   });
 
   test.each(["wrapped-quota", "conflicting-wrapper", "foreign-wrapper", "missing-status", "unknown-status"] as const)(
@@ -447,9 +506,29 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect(isAccountNeedsReauth(WORK)).toBe(true);
   });
 
+  test("a restored strict refusal writes one final HTTP request row and settles spend", async () => {
+    FakeWebSocket.plan = ["held-hard-failure"];
+    const config = strictReserveConfig();
+    config.spend = { pool: { maxTokens: 1_000_000 } };
+    configureSharedSpendLedger(spendPolicyFromConfig(config.spend, undefined, Object.keys(config.providers)));
+    const options = createServeOptions({ config, deps: {}, managementApiDeps: {},
+      ingressForServer: () => "public", packageTreeIntegrity: { status: () => ({ ok: true }) },
+      runAdmittedHttpTurn: (_request: Request, _policy: unknown, run: () => Promise<Response>) => run(),
+    } as unknown as Parameters<typeof createServeOptions>[0]);
+    const response = await options.fetch(new Request("http://localhost/v1/responses", { method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "chain/overload", input: "hello", stream: true }),
+    }), { timeout() {} } as unknown as Parameters<typeof options.fetch>[1]);
+    expect(await response.text()).toContain("Reserve refused");
+    const rows = getRequestLogEntries().filter(row => row.requestId === response.headers.get("x-opencodex-request-id"));
+    expect(rows.map(row => row.status)).toEqual([503]);
+    expect(rows[0]?.spend).toMatchObject({ sends: 1, settled: 1, unresolved: 0 });
+    expect(sharedSpendLedger().snapshot("pool", "openai")).toMatchObject({ reserved: 0, settled: 7, unresolved: 0 });
+  });
+
   test("a direct held error keeps the client fatal code on its terminal", async () => {
-    FakeWebSocket.plan = [{ status: 503, code: "invalid_prompt", error: { message: "Fixture refusal" } }];
-    const { body } = await send(comboConfig(), "hello", undefined, "openai/gpt-5.5");
+    FakeWebSocket.plan = [{ status: 503, code: "invalid_prompt", error: { code: "overloaded_error", message: "Fixture refusal" } }];
+    const { body, logCtx } = await send(comboConfig(), "hello", undefined, "openai/gpt-5.5");
+    expect(logCtx.terminalHttpStatus).toBe(503);
     const terminal = body.split("event: response.failed\n")[1]?.split("\n")[0]?.replace(/^data: /, "");
     expect(JSON.parse(terminal ?? "null")?.response).toMatchObject({ error: { code: "invalid_prompt", message: "Fixture refusal" }, retryable: false });
   });

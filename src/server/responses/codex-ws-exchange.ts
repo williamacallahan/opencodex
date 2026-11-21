@@ -331,7 +331,8 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         const restoredHeaders = new Headers(prelude);
         restoredHeaders.set("content-type", "text/event-stream; charset=utf-8");
         const restored = new Response(stream, { status: 200, headers: restoredHeaders });
-        markCodexWsResponse(restored, observed);
+        const evidence = markCodexWsResponse(restored, observed);
+        if (hardStop) evidence.hardStopStatus = status;
         // The same record object, so the attempt that adopted it keeps reading one stage.
         markCodexWsStage(restored, stage);
         return restored;
@@ -658,6 +659,8 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       if (quotaVerdict === undefined) quotaPrelude = undefined;
       if (!controlFrame && !type.startsWith("response.") && type !== "error") return;
       let steeringEnded = false;
+      const transientStatus = !nativeControl && (type === "error" || type === "response.failed")
+        ? codexWsPreOutputRefusalStatus(normalized.payload) : undefined;
       let refusalStatus: number | undefined;
       let refusalHeaders: Headers | undefined;
       let refusalPrelude: Headers | undefined;
@@ -709,7 +712,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         }
         let holdFrame = false;
         if (holdOpen && refusalEligible) {
-          refusalStatus = typeof quotaVerdict === "number" ? quotaVerdict : codexWsPreOutputRefusalStatus(normalized.payload);
+          refusalStatus = typeof quotaVerdict === "number" ? quotaVerdict : transientStatus;
           if (refusalStatus !== undefined) {
             // Built before anything settles: a refusal whose metadata cannot be projected within the
             // header bounds is delivered the way it was before, in the committed body.
@@ -732,22 +735,30 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
           terminalErrorStatus = wrapperStatus ?? null;
         }
       }
-      const hardStop = refusalStatus !== undefined && hasHardRefusalInEnvelope(normalized.payload, { source: "ws-frame" });
+      const originalStatus = refusalStatus ?? transientStatus;
+      const hardStop = originalStatus !== undefined && hasHardRefusalInEnvelope(normalized.payload, { source: "ws-frame" });
+      const publicType = hardStop ? "response.failed" : type;
       if (hardStop) {
-        // Classify the original payload, but never relay its private headers or routing envelope.
-        const { code, response_id, sequence_number, status, status_code, response, error, message, param } = normalized.payload;
-        const clientCode = typeof code === "string" && (isTerminalRefusalCode(code) || recognizedUpstreamError({ code })) ? code : undefined;
-        encodedText = encoder.encode(JSON.stringify({ type, response_id, sequence_number, status, status_code, code: clientCode,
-          ...(typeof message === "string" && { message }), ...(typeof param === "string" && { param }),
-          ...(record(error) && { error: refusalErrorBody(error) }),
-          ...(record(response) && { response: { id: response.id, model: response.model, status: response.status,
-            output: response.output, usage: response.usage, retryable: response.retryable, error: refusalErrorBody(response.error) } }),
+        // Codex retries an unknown response.error.code regardless of the wrapper's verdict.
+        const frame = normalized.payload;
+        const response = record(frame.response) ? frame.response : undefined;
+        const source = type === "error" ? frame.error : response?.error;
+        const error = refusalErrorBody(record(source) ? source : frame);
+        if (responseEvidence) responseEvidence.hardStopStatus = originalStatus;
+        const code = typeof frame.code === "string" && isTerminalRefusalCode(frame.code) ? frame.code
+          : isTerminalRefusalCode(error.code) ? error.code : "invalid_prompt";
+        const param = error.param ?? frame.param;
+        encodedText = encoder.encode(JSON.stringify({ type: publicType, sequence_number: frame.sequence_number,
+          response: { id: response?.id ?? frame.response_id ?? refusalResponseId ?? undefined, model: response?.model,
+            status: "failed", output: response?.output, usage: response?.usage, retryable: false,
+            error: { type: "invalid_request_error", code, message: error.message,
+              ...(typeof param === "string" && { param }) } },
         }));
       } else if (refusalStatus !== undefined && normalized.payload.code !== undefined && (record(normalized.payload.error) || record(normalized.payload.response))) {
         const { code, ...clientFrame } = normalized.payload;
         if (typeof code !== "string" || !recognizedUpstreamError({ code })) encodedText = encoder.encode(JSON.stringify(clientFrame));
       }
-      const prefix = encoder.encode(`event: ${type}\ndata: `);
+      const prefix = encoder.encode(`event: ${publicType}\ndata: `);
       const suffix = encoder.encode("\n\n");
       const frameBytes = prefix.byteLength + encodedText.byteLength + suffix.byteLength;
       if (frameBytes > MAX_CLIENT_SSE_FRAME_BYTES) {

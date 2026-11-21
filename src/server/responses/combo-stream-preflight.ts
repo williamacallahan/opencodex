@@ -26,7 +26,7 @@ import { attachComboFailureEvidence, isPausedTurn } from "../../lib/client-error
 import { requiredToolReasoningPrelude } from "./combo-required-tool-stream";
 import { ProtocolPreOutputEof, isNonReplayableResponse } from "../../lib/upstream-retry";
 import { CodexWsMetadata } from "./codex-ws-metadata";
-import { codexWsFrameResponseIds, codexWsWrapperStatus, isCodexWsUpstreamResponse, markCodexWsPreOutputRefusal, type CodexWsPreOutputRefusalHold } from "./codex-ws-wire";
+import { codexWsFrameResponseIds, codexWsWrapperStatus, isCodexWsUpstreamResponse, readCodexWsResponseEvidence, markCodexWsPreOutputRefusal, type CodexWsPreOutputRefusalHold } from "./codex-ws-wire";
 import { NATIVE_RESERVE_MODEL } from "../../codex/catalog/native-models";
 
 const COMBO_STREAM_PREFLIGHT_MAX_BYTES = MAX_CLIENT_SSE_FRAME_BYTES;
@@ -658,6 +658,7 @@ export function preflightReserveFirstResponse(
 
 export type ComboStreamPreflightResult =
   | { kind: "accepted"; response: Response }
+  | { kind: "hard-stop"; response: Response; status: number }
   | { kind: "failed"; response: Response; codexModelRefusal?: CodexAccountModelRefusal }
   /**
    * The body errored mid-stream and `replayReadErrors` asked for the prefix back rather than
@@ -846,6 +847,11 @@ export async function preflightComboStreamResponse(
       if ((terminalStatus === "failed" || terminalStatus === "incomplete"
         || retryableTerminalPayload?.type === "error")
         && !outputCommitted && retryableTerminalPayload) {
+        const hardStatus = readCodexWsResponseEvidence(response)?.hardStopStatus;
+        if (hardStatus !== undefined) {
+          logCtx.terminalHttpStatus = hardStatus;
+          return { kind: "hard-stop", status: hardStatus, response: replayBufferedResponse(response, reader, buffered) };
+        }
         await reader.cancel("retrying zero-output combo stream terminal").catch(() => undefined);
         if (quotaStatus !== undefined) logCtx.terminalHttpStatus = quotaStatus;
         const failed = failedTerminalResponse(response, retryableTerminalPayload, logCtx);

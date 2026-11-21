@@ -263,10 +263,8 @@ function boundedBareUpstreamError(payload: unknown): {
   if (!root || root.type !== "error") return undefined;
   const message = boundedBareUpstreamErrorMessage(payload);
   const response = asJsonRecord(root.response);
-  // Precedence is {@link upstreamErrorMessageFromPayload}'s, so the envelope
-  // that supplied the message also supplies the verdict. Taking the FIRST code
-  // rather than searching for a refusal is what stops a refusal nested below a
-  // transient one from overruling it.
+  // A fatal root verdict binds the turn. Otherwise use the message carrier order;
+  // do not promote a refusal from an unrelated nested response.
   const candidates = [
     asJsonRecord(root.error),
     asJsonRecord(root.last_error),
@@ -274,7 +272,8 @@ function boundedBareUpstreamError(payload: unknown): {
     asJsonRecord(response?.incomplete_details),
     root,
   ];
-  const code = candidates.map(candidate => stringField(candidate, "code"))
+  const rootCode = stringField(root, "code");
+  const code = isTerminalRefusalCode(rootCode) ? rootCode : candidates.map(candidate => stringField(candidate, "code"))
     .find(candidate => candidate !== undefined)?.slice(0, 128);
   // Root `type` is the SSE event discriminator (`"error"`), not an error class. Only nested
   // error records can authoritatively name classes such as rate_limit_error or server_error.

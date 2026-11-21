@@ -109,7 +109,7 @@ import {
 } from "./core-codex-account";
 import { settlePoolResponse } from "./pool-response-alternate";
 import { consumeComboFailure } from "./core-combo-failure";
-import { codexWsCredentialRejected, codexWsPreludeVerdict, isCodexWsPreOutputRefusal, codexWsSocketDeathStage, isCodexWsUpstreamResponse } from "./codex-ws-wire";
+import { readCodexWsResponseEvidence, codexWsCredentialRejected, codexWsPreludeVerdict, isCodexWsPreOutputRefusal, codexWsSocketDeathStage, isCodexWsUpstreamResponse } from "./codex-ws-wire";
 import { linkAbortSignal } from "./core-lifetime";
 import { checkOutboundBodySize, describeOutboundBodyRefusal } from "./outbound-body-guard";
 import { streamingContextOverflowResponse } from "./context-overflow";
@@ -563,6 +563,9 @@ export async function preparePassthroughExchange(
       const terminal = terminalStatusFromParsed(payload);
       if (inspectedTerminal === null && terminal !== null) {
         inspectedTerminal = terminal;
+        // Public fatal codes stop Codex retries; account health and HTTP logs use the origin status.
+        const hardStatus = terminal === "failed" ? readCodexWsResponseEvidence(upstreamResponse)?.hardStopStatus : undefined;
+        if (hardStatus !== undefined) logCtx.terminalHttpStatus = hardStatus;
         if (terminal !== "completed" && usesCodexForwardPoolAuth(admissionState.authCtx, route.provider)) {
           terminalCapacityStatus = terminalOwnerCapacityStatus(payload);
         }
@@ -1616,6 +1619,7 @@ export async function preparePassthroughExchange(
     recordDistributedResponseFailure(lastDistributedResponse ?? upstreamResponse, config, route.providerName, options.abortSignal);
     captureAffinityResponse(upstreamResponse);
     if (usesCodexForwardPoolAuth(admissionState.authCtx, route.provider)) {
+      const authBeforeWalk = admissionState.authCtx;
       const settled = await settlePoolResponse({ callerAuthHeaders, config, route, parsed, logCtx,
         options: { ...options, workflowRootId }, firstAuthCtx: admissionState.authCtx, firstResponse: upstreamResponse,
         reserveWalk: options.reserveWalk, reserveDeadline, firstPlacement: admissionState.authCtx === firstPoolContext,
@@ -1634,6 +1638,9 @@ export async function preparePassthroughExchange(
       });
       if (settled.kind === "transport") { admissionState.authCtx = settled.authCtx; return transportFailureResponse(settled.error); }
       upstreamResponse = settled.response;
+      // The alternate owns this rejection. Re-enter the hard-401 disposition above, not a send.
+      if (admissionState.authCtx !== authBeforeWalk && codexWsPreludeVerdict(upstreamResponse) === "hard-stop"
+        && codexWsCredentialRejected(upstreamResponse) && upstreamResponse.status === 401) continue passthroughRecovery;
     }
     // Give the parent the original verdict before delivery restores the public stream.
     const hardStop = codexWsPreludeVerdict(upstreamResponse) === "hard-stop";

@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { clearComboSelectionState } from "../../src/combos/resolve";
 import { advanceComboAfterFailure, pickComboTarget } from "../../src/combos/resolve";
 import { clearComboTargetCooldowns, coolComboTarget, isComboTargetInCooldown, reconcileComboTargetCooldowns } from "../../src/combos/failover";
-import { createRequestExecutionBudget } from "../../src/lib/request-execution-budget";
+import { createInferenceSendBudget } from "../../src/server/inference/context";
+import { configureSharedSpendLedger, spendPolicyFromConfig, parseSpendJournalRecord, SPEND_LEDGER_JOURNAL_FILENAME } from "../../src/lib/spend-reservation-ledger";
 import { captureConfigGeneration, reconcileStateGeneration, type GenerationContext } from "../../src/lib/state-store-sweeper";
 import { listLiveComboTargetKeys } from "../../src/combos/types";
 import "../../src/lib/state-store-registrations";
@@ -354,7 +355,7 @@ for (const phase of ["cooldown", "queued", "provider removal while queued", "red
   expect(sends).toBe(replaced ? 1 : 2);
 });
 
-test.each([false, true])("Mistral rechecks the failed target after its transport wait (replaced: %s)", async replaced => {
+test.each([[false, false], [false, true], [true, false], [true, true]])("Mistral charges only dispatched sends after its transport wait (enforced: %s, replaced: %s)", async (enforced, replaced) => {
   const cfg = config("https://api.mistral.ai/v1");
   const live = () => ({ ...removalContext(), comboTargets: listLiveComboTargetKeys(cfg) });
   reconcileStateGeneration(live());
@@ -369,9 +370,17 @@ test.each([false, true])("Mistral rechecks the failed target after its transport
     ? Response.json({ error: { message: "first target unavailable" } }, { status: 503, headers: {
       "x-should-retry": "false", "x-ratelimit-remaining-tokens-minute": "0", "retry-after": "0.1",
     } }) : chatSuccess("retry served", "m1"), { preconnect: fetch.preconnect }) }, pacer);
-  const sendBudget = createRequestExecutionBudget();
+  takeSpendHome();
+  if (enforced) cfg.spend = { pool: { maxTokens: 1_000_000 } };
+  configureSharedSpendLedger(spendPolicyFromConfig(cfg.spend, undefined, ["a"]));
+  const sendBudget = createInferenceSendBudget(new Request("http://localhost"), { provider: "a", model: "m1" });
   const response = await post(cfg, {}, { sendBudget });
+  expect(sendBudget.spendEnforced).toBe(enforced);
   expect(sendBudget.used).toBe(sends);
+  if (enforced) {
+    const journal = await Bun.file(join(home, SPEND_LEDGER_JOURNAL_FILENAME)).text();
+    expect(journal.trim().split("\n").map(parseSpendJournalRecord).filter(row => row?.kind === "dispatch")).toHaveLength(sends);
+  }
   expect(waited).toBe(true);
   expect(sends).toBe(replaced ? 1 : 2);
   expect(response.status).toBe(replaced ? 503 : 200);
