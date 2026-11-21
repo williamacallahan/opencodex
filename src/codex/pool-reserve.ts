@@ -94,6 +94,25 @@ export function poolReserveHoldResetAt(accountId: string, now = Date.now()): num
 // back to the unchanged selection; a wait here was rejected twice in review for delaying or
 // desynchronizing bursts.
 
+function reserveSeatEvidence(account: NonNullable<OcxConfig["codexAccounts"]>[number], now: number, pinned: boolean) {
+  const { id } = account;
+  if (codexUsageLimitResetAt(getAccountQuota(id), account.plan, now) === undefined
+    || scopedHealthFor(id, "reserve")?.probeLeaseId !== undefined) return;
+  if (pinned ? hasFreshPoolReserve(id, now) : hasVerifiedPoolReserve(id, now)) return "verified";
+  if (!pinned && !holdsPoolReserveWindow(id) && canTryUnknownCodexReserve(id, now)) return "unknown";
+}
+
+/** Freeze membership, not entitlement: the picker rechecks these seats before every move. */
+export function poolReserveWalkSeats(config: OcxConfig, now = Date.now()): Set<string> {
+  const seats = new Set<string>();
+  for (const account of config.codexAccounts ?? []) {
+    if (reserveSeatEvidence(account, now, false)) seats.add(account.id);
+  }
+  const options: CodexAccountUsabilityOptions = { poolCapacity: "reserve", modelEligibleAccountIds: seats };
+  for (const id of seats) if (!isCodexAccountSelectable(config, id, now, "reserve", options)) seats.delete(id);
+  return seats;
+}
+
 /**
  * Every Luna request goes first to Reserve on a seat whose included usage is spent. Only when no
  * such seat can serve Reserve does it use Luna on a seat that still has included usage. A soft
@@ -104,7 +123,7 @@ export function poolReserveHoldResetAt(accountId: string, now = Date.now()): num
 export function poolLunaReserveSelection(
   config: OcxConfig, modelId: string | undefined, quotaScope: CodexQuotaScope | undefined,
   options: CodexAccountUsabilityOptions, excludeId?: string, affinityKey?: string, now = Date.now(),
-  pinnedAccountId?: string, verifiedOnly = false, intent?: PoolCapacityIntent,
+  pinnedAccountId?: string, verifiedOnly = false, intent?: PoolCapacityIntent, remainingReserveSeats?: ReadonlySet<string>,
 ): { options: CodexAccountUsabilityOptions; quotaScope: CodexQuotaScope | undefined; reserve: boolean; discovery?: boolean; servingAccountId?: string } {
   if (options.retainAccountForUploadedFiles && affinityKey && modelHasPoolReserve(modelId)) {
     const issuer = peekConversationStateIssuer(affinityKey, now);
@@ -120,14 +139,12 @@ export function poolLunaReserveSelection(
   const unknown = new Set<string>();
   for (const account of config.codexAccounts ?? []) {
     const { id } = account;
-    if (id === excludeId || (pinnedAccountId !== undefined && id !== pinnedAccountId)
-      || (options.modelEligibleAccountIds && !options.modelEligibleAccountIds.has(id))
-      || codexUsageLimitResetAt(getAccountQuota(id), account.plan, now) === undefined) continue;
-    const health = scopedHealthFor(id, "reserve");
-    if (health?.probeLeaseId !== undefined) continue;
-    if (pinnedAccountId === undefined ? hasVerifiedPoolReserve(id, now) : hasFreshPoolReserve(id, now)) verified.add(id);
-    else if (pinnedAccountId === undefined && !verifiedOnly && !holdsPoolReserveWindow(id)
-      && canTryUnknownCodexReserve(id, now)) unknown.add(id);
+    if (id === excludeId || (remainingReserveSeats && !remainingReserveSeats.has(id))
+      || (pinnedAccountId !== undefined && id !== pinnedAccountId)
+      || (options.modelEligibleAccountIds && !options.modelEligibleAccountIds.has(id))) continue;
+    const evidence = reserveSeatEvidence(account, now, pinnedAccountId !== undefined);
+    if (evidence === "verified") verified.add(id);
+    else if (!verifiedOnly && evidence === "unknown") unknown.add(id);
   }
   if (verified.size === 0 && unknown.size === 0 && !verifiedOnly) return unchanged;
   const reserveOptions: CodexAccountUsabilityOptions = { ...options, modelEligibleAccountIds: verified, poolCapacity: "reserve" };

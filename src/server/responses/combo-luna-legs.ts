@@ -1,4 +1,6 @@
-import { targetKey, type getCombo } from "../../combos";
+import { comboFailureCooldownScope, targetKey, type getCombo } from "../../combos";
+import type { ConsumedComboFailure } from "./core-options";
+import { isReserveQuotaCode } from "./combo-stream-preflight";
 import { modelHasPoolReserve } from "../../codex/pool-reserve";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { isCodexLbProvider } from "../../providers/quota/codex-lb-url";
@@ -6,6 +8,14 @@ import type { RouteResult } from "../../router";
 
 type Combo = NonNullable<ReturnType<typeof getCombo>>;
 type ComboTarget = Combo["targets"][number];
+
+export function isReserveSeatQuotaRefusal(failure: ConsumedComboFailure, scope = comboFailureCooldownScope(
+  failure.response.status, failure.classificationText, { code: failure.upstreamCode },
+)): boolean {
+  return (failure.response.status === 429 && scope === "target")
+    || (failure.response.status === 402 && isReserveQuotaCode(failure.upstreamCode ?? failure.upstreamType)
+      && !failure.upstreamRootCode && (!failure.upstreamType || isReserveQuotaCode(failure.upstreamType)));
+}
 
 const notStarted = new WeakSet<object>();
 /** The transport proved this attempt's request never reached the host: a connect failure before any byte. */

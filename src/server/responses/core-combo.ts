@@ -125,11 +125,11 @@ import {
   markNativePassthroughSseResponse,
   markEagerRelaySseResponse,
 } from "../relay";
-import { isReserveQuotaCode, preflightComboStreamResponse } from "./combo-stream-preflight";
-import { planLunaReserveLegs, relayProvedNotStarted } from "./combo-luna-legs";
+import { preflightComboStreamResponse } from "./combo-stream-preflight";
+import { isReserveSeatQuotaRefusal, planLunaReserveLegs, relayProvedNotStarted } from "./combo-luna-legs";
 import { CODEX_TURN_STATE_HEADER } from "../../codex/forward-transport-headers";
 import { canPortConversationState, collectConversationStateCarriers } from "./account-change-state";
-import type { PoolCapacityIntent } from "../../codex/pool-reserve";
+import { poolReserveWalkSeats, type PoolCapacityIntent } from "../../codex/pool-reserve";
 import { requiredToolContractOf } from "./combo-required-tool-contract";
 import {
   streamingContextOverflowResponse,
@@ -282,11 +282,11 @@ export function isAnthropicPoolLocalRefusal(
  * profile exactly, and a three-target combo whose every target fails hard reaches upstream six
  * times instead of the twelve #4546 measured.
  */
-export function comboExecutionBudgetPolicy(declaredTargets: number): RequestExecutionBudgetPolicy {
+export function comboExecutionBudgetPolicy(declaredTargets: number, extraReserveSends = 0): RequestExecutionBudgetPolicy {
   const targets = Math.max(1, Math.trunc(declaredTargets));
   const hops = targets - 1;
   const reserve = CODEX_TEXT_GUARDED_BUDGET_POLICY.finalRecoveryAllowance;
-  const total = COMBO_TARGET_BASE_SENDS + hops + reserve;
+  const total = COMBO_TARGET_BASE_SENDS + hops + reserve + extraReserveSends;
   return {
     maxTotalModelSends: total,
     baseSendAllowance: total - reserve,
@@ -336,10 +336,17 @@ export function deriveSendBudgetScope(
 export function comboTargetSendBudget(
   comboScope: RequestExecutionBudget,
   targetsDeclaredAfterThisOne: number,
+  reserveSeats?: number,
 ): RequestExecutionBudget {
   const policy = comboScope.policy;
   const heldForLaterTargets = Math.max(0, targetsDeclaredAfterThisOne);
   const ceiling = Math.max(1, policy.maxTotalModelSends - heldForLaterTargets);
+  if (reserveSeats !== undefined) {
+    const total = Math.min(ceiling, comboScope.used + reserveSeats);
+    const moves = Math.max(0, reserveSeats - 1);
+    return deriveSendBudgetScope(comboScope, { maxTotalModelSends: total, baseSendAllowance: total,
+      finalRecoveryAllowance: 0, maxAlternateTargetSends: moves, maxTargetTransitions: moves });
+  }
   return deriveSendBudgetScope(comboScope, {
     maxTotalModelSends: policy.maxTotalModelSends,
     baseSendAllowance: Math.min(ceiling, comboScope.used + COMBO_TARGET_BASE_SENDS),
@@ -687,9 +694,6 @@ export async function executeComboResponses(
     ? portableLunaLegs : undefined;
   let lunaStage: "off" | "reserve" | "relay" | "done" = "off";
   const comboLegCount = lunaLegs?.legCount ?? combo.targets.length;
-  const comboSendScope = isRequestExecutionBudget(options.sendBudget)
-    ? deriveSendBudgetScope(options.sendBudget, comboExecutionBudgetPolicy(comboLegCount))
-    : undefined;
   const onlyReplayIncompatibleTargetsRemain = (excluded: Iterable<string> = []): boolean => {
     const excludedKeys = new Set(excluded);
     const remaining = combo.targets.filter(target => {
@@ -1065,6 +1069,13 @@ export async function executeComboResponses(
   const callerOutputCeilingTokens = logCtx.spendOutputCeilingTokens
     ?? (typeof callerBudget === "number" && Number.isFinite(callerBudget) && callerBudget > 0
       ? Math.trunc(callerBudget) : undefined);
+  const remainingReserveSeats = isRequestExecutionBudget(options.sendBudget) && options.sendBudget.used === 0
+    && pick && lunaLegs && targetKey(pick.target) === lunaLegs.nativeKey
+    ? poolReserveWalkSeats(config) : undefined;
+  const ordinaryPoolSends = 1 + CODEX_TEXT_GUARDED_BUDGET_POLICY.maxAlternateTargetSends;
+  const walkHeadroom = Math.max(0, (remainingReserveSeats?.size ?? 0) - ordinaryPoolSends);
+  let comboSendScope = isRequestExecutionBudget(options.sendBudget)
+    ? deriveSendBudgetScope(options.sendBudget, comboExecutionBudgetPolicy(comboLegCount, walkHeadroom)) : undefined;
   while (pick) {
     if (options.abortSignal?.aborted) return clientCancelledResponse();
     const firstComboTarget = comboTargetsDispatched === 0;
@@ -1126,8 +1137,10 @@ export async function executeComboResponses(
       logCtx.spendOutputCeilingTokens = callerOutputCeilingTokens;
     }
     // Derive the target's allowance before booking its initial send; the booking occupies it.
+    const walkSeats = legIntent === "reserve-only" ? remainingReserveSeats : undefined;
+    const spentBeforeLeg = comboSendScope?.used ?? 0;
     const targetSendBudget = comboSendScope
-      ? comboTargetSendBudget(comboSendScope, comboLegCount - 1 - comboTargetsDispatched)
+      ? comboTargetSendBudget(comboSendScope, comboLegCount - 1 - comboTargetsDispatched, walkSeats?.size)
       : options.sendBudget;
     // Every target prepays one send. Only its child may consume that booking; later targets
     // remain bounded by the shared total, transition ledger and per-target holdback.
@@ -1347,6 +1360,7 @@ export async function executeComboResponses(
         comboReplaySnapshot,
         deferCodexResetDerivedCooldown,
         poolCapacityIntent: legIntent,
+        remainingReserveSeats: walkSeats,
         onBridgeUsageBound: () => {
           childUsageBound = true;
           forwardChildUsage();
@@ -1640,9 +1654,7 @@ export async function executeComboResponses(
     });
     // A Reserve-window rejection is narrower than explicit provider-wide evidence.
     const reserveCapacityRefused = legIntent === "reserve-only" && (attempt.sendCount === 0
-      || (failure.response.status === 429 && classifiedScope === "target")
-      || (failure.response.status === 402 && isReserveQuotaCode(failure.upstreamCode ?? failure.upstreamType)
-        && !failure.upstreamRootCode && (!failure.upstreamType || isReserveQuotaCode(failure.upstreamType))));
+      || isReserveSeatQuotaRefusal(failure, classifiedScope));
     const failureCooldownScope = reserveCapacityRefused || isPolicyCandidateRefusal(failure.response) ? "none" : classifiedScope;
     const failedTargetKey = targetKey(pick.target);
     let failedTargetCooldownRecorded = false;
@@ -1768,6 +1780,17 @@ export async function executeComboResponses(
       // External receipts make release a no-op after real work. runTurn owns its asynchronous
       // producer; core transfers cleanup there before returning a streaming response.
       if (!initialSend?.producerOwned) initialSend?.permit.release();
+      if (walkSeats && walkHeadroom && comboSendScope && lastFailure) {
+        // Untried seats cannot buy extra relay retries. Keep the same physical ledger and
+        // carry only extra sends that actually left the first leg into the ordinary policy.
+        const legSends = comboSendScope.used - spentBeforeLeg;
+        const spentExtra = Math.max(0, legSends - ordinaryPoolSends);
+        if (spentExtra < walkHeadroom) {
+          const lastTarget = comboSendScope.lastTargetKey;
+          comboSendScope = deriveSendBudgetScope(comboSendScope, comboExecutionBudgetPolicy(comboLegCount, spentExtra));
+          if (lastTarget !== undefined) comboSendScope.bindPrepaidTarget?.(lastTarget);
+        }
+      }
     }
   }
     const failure = exhaustedFailure(true);

@@ -31,7 +31,8 @@ import { classifyPoolRecoveryDispatch } from "../../routing/probe-lease";
 import { formatErrorResponse } from "../../bridge";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { upstreamErrorMessageFromPayload, isRateLimitOrQuotaFailureMessage } from "../../lib/errors";
-import { isNonReplayableResponse, isTransientUpstreamStatus, SendBudgetExhaustedError } from "../../lib/upstream-retry";
+import { isNonReplayableResponse, isTransientUpstreamStatus, SendBudgetExhaustedError, sleepWithAbort } from "../../lib/upstream-retry";
+import { clearableDeadline } from "../../lib/abort";
 import { applyClaudeBridgePoolSession } from "../claude-bridge-pool-session";
 import {
   codexWsPreOutputRefusalHold,
@@ -153,11 +154,13 @@ export function recordCodexPreOutputRefusalOutcome(
   provider: OcxProviderConfig,
   response: Response,
   modelId: string,
+  reserveQuotaStatus?: 402 | 429,
 ): void {
-  if (!isCodexWsPreOutputRefusal(response) || codexWsPreOutputRefusalOutcomeRecorded(response)) return;
+  if ((!reserveQuotaStatus && !isCodexWsPreOutputRefusal(response)) || codexWsPreOutputRefusalOutcomeRecorded(response)) return;
   if (!usesCodexForwardPoolAuth(authCtx, provider) || wasPermanentAccountRefusal(response)) return;
   noteCodexWsPreOutputRefusalOutcome(response);
-  recordCodexUpstreamOutcome(config, authCtx.accountId, response.status, {
+  recordCodexUpstreamOutcome(config, authCtx.accountId, reserveQuotaStatus ?? response.status, {
+    ...(reserveQuotaStatus ? codexQuotaOutcomeMeta(response) : {}),
     ...codexFailureWindowOutcomeMeta(authCtx),
     threadId: authCtx.affinityKey,
     fixedAccount: authCtx.fixedAccount,
@@ -207,6 +210,14 @@ export function poolPreOutputRefusalHold(
  */
 export class PoolPreOutputRefusals {
   private last: Response | undefined;
+  private recordedReserveQuota?: Response;
+
+  recordReserveQuota(config: OcxConfig, authCtx: CodexAuthContext, provider: OcxProviderConfig, response: Response, model: string, status: 402 | 429): void {
+    if (this.recordedReserveQuota === response || isNonReplayableResponse(response) || wasPermanentAccountRefusal(response)) return;
+    recordCodexPreOutputRefusalOutcome(config, authCtx, provider, response, model, status);
+    this.recordedReserveQuota = response;
+  }
+
   /** True when the response handed to delivery is a restored projection already recorded. */
   outcomeRecorded = false;
 
@@ -237,7 +248,7 @@ export class PoolPreOutputRefusals {
    * and the account move becomes the original event stream before any later reader sees it.
    */
   restore(response: Response): Response {
-    this.outcomeRecorded = isCodexWsPreOutputRefusal(response) && codexWsPreOutputRefusalOutcomeRecorded(response);
+    this.outcomeRecorded = this.recordedReserveQuota === response || codexWsPreOutputRefusalOutcomeRecorded(response);
     return restoreCodexWsPreOutputRefusal(response);
   }
 }
@@ -555,6 +566,9 @@ export interface CodexPoolAccountRetryArgs {
    * out of budget.
    */
   sameAccountOnly?: boolean;
+  /** Strict first placement only: membership shrinks after each physical Reserve refusal. */
+  remainingReserveSeats?: ReadonlySet<string>;
+  reserveDeadline?: number;
   upstream: AbortController;
   connectMs: number;
   passthroughEstimate?: number;
@@ -702,9 +716,18 @@ export function shouldDeferCodexResetDerivedCooldown(response: Response, enabled
 export async function retryCodexPoolOnAlternateAccount(
   args: CodexPoolAccountRetryArgs,
 ): Promise<CodexPoolAccountRetryResult> {
+  if (args.reserveDeadline === undefined) return dispatchCodexAccountRetry(args, args.upstream.signal);
+  const remainingMs = args.reserveDeadline - Date.now();
+  if (remainingMs <= 0) return { kind: "no-alternate" };
+  const deadline = clearableDeadline(remainingMs, args.upstream.signal);
+  try { return await dispatchCodexAccountRetry(args, deadline.signal); }
+  finally { deadline.clear(); }
+}
+
+async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal: AbortSignal): Promise<CodexPoolAccountRetryResult> {
   const {
     callerAuthHeaders, config, route, parsed, logCtx, options, firstAuthCtx, firstResponse,
-    outcomeStatus, upstream, connectMs, passthroughEstimate, stream, httpOnly,
+    outcomeStatus, connectMs, passthroughEstimate, stream, httpOnly,
   } = args;
   const inboundWire = options.inboundWire ?? "responses";
   const entitlementResolver = options.resolveCodexModelEntitlements ?? resolveCodexModelEntitlements;
@@ -735,7 +758,7 @@ export async function retryCodexPoolOnAlternateAccount(
   // terminal recorder sees only that wire status and would misclassify it as transient,
   // leaving the exhausted account immediately selectable next turn.
   const recordWrappedQuotaOutcome = (): void => {
-    if (outcomeStatus === firstResponse.status || (outcomeStatus !== 429 && outcomeStatus !== 402)) return;
+    if (args.remainingReserveSeats || outcomeStatus === firstResponse.status || (outcomeStatus !== 429 && outcomeStatus !== 402)) return;
     recordCodexUpstreamOutcome(config, firstAuthCtx.accountId, outcomeStatus, {
       ...codexQuotaOutcomeMeta(firstResponse),
       ...codexFailureWindowOutcomeMeta(firstAuthCtx),
@@ -788,7 +811,7 @@ export async function retryCodexPoolOnAlternateAccount(
   if (!retryAuthCtx && executionBudget) {
     const decision = executionBudget.reserveDispatch({
       sendClass: "account-failover",
-      targetKey: `${route.providerName}|${route.modelId}|alternate-account`,
+      targetKey: `${route.providerName}|${route.modelId}|alternate-account${args.remainingReserveSeats ? `:${args.remainingReserveSeats.size}` : ""}`,
     });
     if (!decision.allowed) {
       recordUnmovedTransientOutcome();
@@ -805,10 +828,11 @@ export async function retryCodexPoolOnAlternateAccount(
         "pool",
         {
           excludeAccountId: firstAuthCtx.accountId,
-          // Spend the one move on verified Reserve or ordinary Luna, not another discovery attempt.
-          verifiedPoolReserveOnly: firstAuthCtx.kind === "pool" && firstAuthCtx.poolReserve === true,
+          // Outside a strict placement walk the ordinary single move still requires verified Reserve.
+          verifiedPoolReserveOnly: !args.remainingReserveSeats && firstAuthCtx.kind === "pool" && firstAuthCtx.poolReserve === true,
+          remainingReserveSeats: args.remainingReserveSeats,
           poolCapacityIntent: options.poolCapacityIntent,
-          signal: options.abortSignal,
+          signal,
           admission: options.admission,
           codexAuthPolicy: options.codexAuthPolicy,
           modelId: route.modelId,
@@ -825,7 +849,7 @@ export async function retryCodexPoolOnAlternateAccount(
       && !(error instanceof CodexAuthContextError)
       && !(error instanceof CodexAccountCooldownError)
       && !(error instanceof CodexMainProfileDrainingError);
-    if (unexpectedRetryError) {
+    if (unexpectedRetryError && !(args.reserveDeadline !== undefined && signal.aborted && !args.upstream.signal.aborted)) {
       // The reservation is the charge now, so an abandoned move has to hand its send back.
       accountMovePermit?.release();
       await firstResponse.body?.cancel().catch(() => undefined);
@@ -858,7 +882,7 @@ export async function retryCodexPoolOnAlternateAccount(
         // A request-owned `main` alternate has no stored account id; its workspace
         // identity is what the caller's own credential materializes upstream.
         : callerCodexWorkspaceAccountId(callerAuthHeaders),
-      options.abortSignal,
+      signal,
     )
   ) {
     // Suppressing the move is not suppressing the evidence: a same-workspace refusal
@@ -872,7 +896,7 @@ export async function retryCodexPoolOnAlternateAccount(
   // The scope classification above reads the rejection body asynchronously, so the
   // request may have been cancelled while it ran. Re-check before the send below
   // mutates routing state or spends the alternate on a caller that is gone.
-  if (options.abortSignal?.aborted) {
+  if (options.abortSignal?.aborted || signal.aborted) {
     recordWrappedQuotaOutcome();
     recordUnmovedTransientOutcome();
     accountMovePermit?.release();
@@ -917,7 +941,7 @@ export async function retryCodexPoolOnAlternateAccount(
   };
   // Only a combo reset-derived outcome is deferred. Retry-After, defaults, and
   // ordinary requests must block the first account before the alternate send.
-  if (!deferFirstOutcome) recordFirstOutcome();
+  if (!deferFirstOutcome && !args.remainingReserveSeats) recordFirstOutcome();
   let retryHeaders: Headers;
   let retryProvider: ReturnType<typeof applyCodexAuthContextToProvider>;
   try {
@@ -1049,7 +1073,15 @@ export async function retryCodexPoolOnAlternateAccount(
         //
         // A refusal here is not a new failure mode: "no alternate was available" is already the
         // outcome when the pool has nowhere to move this request to, and it is handled.
-        if (!classifyPoolRecoveryDispatch("retry").admitted) {
+        let window = classifyPoolRecoveryDispatch("retry");
+        // Strict placement can wait for this shared window, but never replenish the turn's deadline.
+        while (!window.admitted && args.reserveDeadline !== undefined && window.retryAt < args.reserveDeadline && !signal.aborted) {
+          try { await sleepWithAbort(Math.max(1, window.retryAt - Date.now()), signal); }
+          catch (error) { if (!signal.aborted) throw error; }
+          if (!signal.aborted && Date.now() < args.reserveDeadline) window = classifyPoolRecoveryDispatch("retry");
+          else break;
+        }
+        if (!window.admitted) {
           accountMovePermit.release();
           accountMovePermit = undefined;
           // The alternate context was resolved and will not send. Hand back whatever recovery
@@ -1074,42 +1106,59 @@ export async function retryCodexPoolOnAlternateAccount(
           const priorAccountLabel = logCtx.accountLogLabel;
           logCtx.accountLogLabel = codexAuthContextLogLabel(retryAuthCtx, config);
           let admitted = false;
-          try {
-            if (!claimRetrySend(permit)) return undefined;
+          const admit = (): boolean => {
+            if (signal.aborted || (args.reserveDeadline !== undefined && Date.now() >= args.reserveDeadline)
+              || !claimRetrySend(permit)) return false;
             admitted = true;
-            await upstreamResponse.body?.cancel().catch(() => undefined);
             if (retrySendCount === 0) {
               options.onCodexAuthContextResolved?.(retryAuthCtx);
               route.provider = retryProvider;
               logCtx.provider = formatCodexProviderForLog(route.providerName, retryAuthCtx.accountId, config);
             }
-            // A move seals the first account's attempt with the answer that account returned.
             if (logCtx.activeAttempt && logCtx.activeAttempt.status < 100) logCtx.activeAttempt.status = firstResponse.status;
-            return await fetchWithHeaderTimeout(
+            return true;
+          };
+          const withheld = new Error("Reserve seat dispatch was not admitted");
+          try {
+            if (!args.remainingReserveSeats) {
+              if (!admit()) return undefined;
+              await upstreamResponse.body?.cancel().catch(() => undefined);
+            }
+            const response = await fetchWithHeaderTimeout(
               request.url,
               { method: request.method, headers: request.headers, body: request.body },
-              upstream.signal,
+              signal,
               connectMs,
               stream,
-              providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+              providerFetch(retryProvider, options.codexWsRuntimeIdentity, {
                 httpOnly,
                 providerName: route.providerName,
                 modelId: route.modelId,
                 onPhysicalDispatch: body => {
+                  if (args.remainingReserveSeats) {
+                    if (!admit()) throw withheld;
+                    void upstreamResponse.body?.cancel().catch(() => undefined);
+                  }
                   args.onPhysicalSend?.(request, body);
                   noteProviderAttemptSend(logCtx, route.providerName, route.provider, passthroughEstimate, moveRecovery,
                     { adapter: retryAdapter.name, wireModel: request.outboundModelId });
                 },
                 preOutputRefusalHold: args.preOutputRefusalHold,
                 accountAutoPause: (name, provider, headers) => captureAccountAutoPauseAttempt(name, provider, { config, codex: retryAuthCtx }, headers),
-                onCodexWsQuota: codexWsQuotaObserver(retryAuthCtx, route.provider, route.modelId),
-                beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
+                onCodexWsQuota: codexWsQuotaObserver(retryAuthCtx, retryProvider, route.modelId),
+                beforeDispatch: isCanonicalOpenAiForwardProvider(retryProvider)
                   ? createCodexAuthDispatchGuard(retryAuthCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
               }),
               // Credential-bearing forward send: never follow a redirect into a
               // dead-host rejection after the credential was seen (#914).
-              route.provider.authMode === "forward",
+              retryProvider.authMode === "forward",
             );
+            if (admitted) return response;
+            void response.body?.cancel().catch(() => undefined);
+            return undefined;
+          } catch (error) {
+            if (error === withheld || (!admitted && signal.aborted && !args.upstream.signal.aborted)) return undefined;
+            throw error;
           } finally {
             if (!admitted) logCtx.accountLogLabel = priorAccountLabel;
           }

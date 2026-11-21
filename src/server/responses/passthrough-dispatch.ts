@@ -137,7 +137,7 @@ import { classifyTransportFailureKind, transportErrorCode } from "../../lib/upst
 import { captureAccountAutoPauseAttempt, wasAccountAutoPaused, wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
 import { codexFailureWindowOutcomeMeta, recordCodexUpstreamOutcome } from "../../codex/routing";
 import { describeUpstreamConnectFailure } from "./upstream-error";
-import { markUpstreamNotStarted } from "./combo-luna-legs";
+import { isReserveSeatQuotaRefusal, markUpstreamNotStarted } from "./combo-luna-legs";
 import {
   rateLimitRetryPolicyFor,
   rateLimitRetryDelayMs,
@@ -983,6 +983,8 @@ export async function preparePassthroughExchange(
     // #6969: Pool sends hold empty lifecycle frames so a pre-output refusal reaches the ladder below.
     const preOutputRefusals = new PoolPreOutputRefusals();
     const firstPoolContext = admissionState.authCtx;
+    const reserveSeats = options.poolCapacityIntent === "reserve-only" ? options.remainingReserveSeats : undefined;
+    const reserveDeadline = reserveSeats ? Date.now() + (connectMs || resolveConnectTimeoutMs(undefined)) : undefined;
     const preOutputRefusalHold = poolPreOutputRefusalHold(firstPoolContext, route.provider, connectMs, options.comboAttempt, parsed, req.headers);
     const onContinuationDispatch = createNativeContinuationDispatch(sendBudgetState, logCtx);
     try {
@@ -1603,8 +1605,9 @@ export async function preparePassthroughExchange(
     };
     recordDistributedResponseFailure(lastDistributedResponse ?? upstreamResponse, config, route.providerName, options.abortSignal);
     captureAffinityResponse(upstreamResponse);
-    if (usesCodexForwardPoolAuth(admissionState.authCtx, route.provider)) {
-      const reservePreflight = preflightReserveFirstResponse(upstreamResponse, admissionState.authCtx === firstPoolContext,
+    let movedReserveSeat = false;
+    while (usesCodexForwardPoolAuth(admissionState.authCtx, route.provider)) {
+      const reservePreflight = preflightReserveFirstResponse(upstreamResponse, movedReserveSeat || admissionState.authCtx === firstPoolContext,
         preOutputRefusalHold, logCtx, upstream.signal, upstreamRequestsStream);
       if (reservePreflight) upstreamResponse = (await reservePreflight).response;
       let poolRetryOutcome: number | undefined;
@@ -1657,15 +1660,22 @@ export async function preparePassthroughExchange(
       }
 
       if (poolRetryOutcome !== undefined) {
-        // A stored Pool 401 spent this request's account budget on its own refresh and replay, so
-        // nothing afterwards may be paid for out of a DIFFERENT account. One flag carries that,
-        // rather than a status check here as well: a quota failure has no same-account move, so
-        // `sameAccountOnly` makes it terminal by refusing the alternate; the gated-model 400
-        // ladder does have one — retrying the account the refreshed roster still grants — and
-        // keeps it. An earlier revision also broke here on a non-400 outcome, which no test could
-        // justify because this flag already produced the identical result.
+        // A stored 401 replay precludes an account move, but not the gated-model same-account retry.
         const storedReplaySpent = codex401ReplayKind === "stored" && !wasAccountAutoPaused(upstreamResponse);
+        let walkSeats: ReadonlySet<string> | undefined;
+        if (reserveSeats && admissionState.authCtx.kind === "pool" && admissionState.authCtx.poolReserve
+          && (poolRetryOutcome === 429 || poolRetryOutcome === 402)) {
+          preOutputRefusals.recordReserveQuota(config, admissionState.authCtx, route.provider, upstreamResponse, route.modelId, poolRetryOutcome);
+          if (!reserveSeats.delete(admissionState.authCtx.accountId) || !reserveSeats.size || storedReplaySpent
+            || sendBudgetState.ambiguousResendSpent || wasAccountAutoPaused(upstreamResponse) || isNonReplayableResponse(upstreamResponse)
+            || upstream.signal.aborted || (reserveDeadline !== undefined && Date.now() >= reserveDeadline)) break;
+          if (upstreamResponse.status < 500 && !isReserveSeatQuotaRefusal(await consumeComboFailure(upstreamResponse.clone(), upstream.signal))) break;
+          walkSeats = reserveSeats;
+        }
+        if (movedReserveSeat && !walkSeats) break;
         const retry = await retryCodexPoolOnAlternateAccount({
+          remainingReserveSeats: walkSeats,
+          reserveDeadline: walkSeats ? reserveDeadline : undefined,
           callerAuthHeaders,
           config,
           route,
@@ -1681,7 +1691,7 @@ export async function preparePassthroughExchange(
           passthroughEstimate,
           stream: upstreamRequestsStream,
           httpOnly: streamOnlyBufferedJson,
-          preOutputRefusalHold: preOutputRefusalHold && { ...preOutputRefusalHold, reserveFirstPlacement: false },
+          preOutputRefusalHold: walkSeats ? preOutputRefusalHold : preOutputRefusalHold && { ...preOutputRefusalHold, reserveFirstPlacement: false },
           onPhysicalSend: replayGuard.record,
           onResponse: (response, retryAuthCtx, retryRequest) => {
             adoptCodexWsStage(response, logCtx);
@@ -1706,8 +1716,10 @@ export async function preparePassthroughExchange(
           requestState.selectedForwardHeaders = retry.selectedForwardHeaders;
           // Keep subagent quota-failure health keyed to the account that actually served.
           requestState.subagentFallbackAccountId = retry.authCtx.accountId;
+          if (walkSeats) { movedReserveSeat = true; continue; }
         }
       }
+      break;
     }
     // The strict child's native pool is exhausted, not the parent combo. Give it the verified
     // refusal; ordinary delivery still builds the client-safe stream if no hop is admitted.

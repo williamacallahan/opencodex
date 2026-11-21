@@ -38,9 +38,8 @@ That cool ignores the refusal's announced reset, which names the seat's spent pl
 Reserve: ChatGPT never discloses Reserve capacity and its refusals come and go per seat, so only an
 explicit Retry-After holds the scope past the default minute, and the seat is asked again once the
 5-minute probe interval passes (`src/codex/routing.ts`).
-The request's single safe account move (`maxAlternateTargetSends: 1`) prefers another verified Reserve
-seat, then included Luna. It never tries an unknown Reserve seat on that retry.
-A combo leg can set a request-local `PoolCapacityIntent` (`HandleResponsesOptions.poolCapacityIntent`; never config or env). `reserve-only` makes `resolveCodexAuthContext` throw `CodexReserveUnavailableError` (a 429 that sent nothing) unless a seat can serve Reserve, and its bounded alternate takes only a verified Reserve seat; `ordinary-only` never consults Reserve. Without an intent nothing above changes. Coverage: `tests/codex-integration/codex-pool-reserve.test.ts`.
+Ordinary Luna has one account move: another verified Reserve seat, then included Luna. It never probes an unknown seat on that retry.
+A portable Luna combo's `reserve-only` leg snapshots the spent seats it may try. Before output, a seat-specific quota refusal can move the turn to another untried seat, including a leased unreported seat. Each move rechecks live eligibility and shares the combo's physical-send and spend ledger. Later legs retain their ordinary allowance; unused Reserve seats cannot fund relay retries. The walk honors cancellation and a single header deadline rather than starting a new clock per seat. A local `CodexReserveUnavailableError` means no seat was selected; refused sends are not evidence that the provider has no Reserve capacity. The `ordinary-only` leg never consults Reserve. Coverage: `tests/server/server-combo-luna-reserve-order.test.ts` and `tests/codex-integration/codex-pool-reserve.test.ts`.
 Before the selector changes scope, `src/codex/auth-context.ts` still adopts a live legacy parent binding onto the current cohort key in the existing quota scope; it decides the seat only when no seat is offerable for Reserve.
 The existing selector still enforces pause, plan, credential, failure-window and account-wide holds.
 Reserve uses its independent quota scope; shared Responses serialization changes only the wire model

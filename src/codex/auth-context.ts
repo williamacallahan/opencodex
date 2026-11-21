@@ -947,6 +947,7 @@ export interface ResolveCodexAuthContextOptions {
   excludeAccountId?: string;
   /** The one account retry may use verified Reserve, but cannot discover an unknown seat. */
   verifiedPoolReserveOnly?: boolean;
+  remainingReserveSeats?: ReadonlySet<string>;
   /** Set per combo leg: `reserve-only` refuses before any send when no seat can serve Reserve. */
   poolCapacityIntent?: PoolCapacityIntent;
   /** Account-bound state narrows the ordinary roster; it never confers an explicit selector's privileges. */
@@ -1387,7 +1388,7 @@ async function resolveCodexAuthContextUnannotated(
     // The native main login keeps its own per-request Reserve authorization, so only stored seats take part here.
     const reserveModelId = !requestScopedMainCredential && fixedAccountId !== MAIN_CODEX_ACCOUNT_ID ? options.modelId : undefined;
     const poolSelection = poolLunaReserveSelection(config, reserveModelId,
-      quotaScope, selectionOptions, options.excludeAccountId, affinityKey, Date.now(), fixedAccountId, options.verifiedPoolReserveOnly, options.poolCapacityIntent);
+      quotaScope, selectionOptions, options.excludeAccountId, affinityKey, Date.now(), fixedAccountId, options.verifiedPoolReserveOnly, options.poolCapacityIntent, options.remainingReserveSeats);
     selectionOptions = poolSelection.options;
     quotaScope = poolSelection.quotaScope;
     poolReserve = poolSelection.reserve;

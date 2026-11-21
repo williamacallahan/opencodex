@@ -313,6 +313,7 @@ export async function resolveResponsesCodexAuth(
         retainAccountForUploadedFiles,
         turnStateOwner: owner,
         poolCapacityIntent: options.poolCapacityIntent,
+        remainingReserveSeats: options.remainingReserveSeats,
       });
       if (!owner) options.onCodexAuthContextResolved?.(authCtx);
     } else {

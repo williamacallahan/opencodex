@@ -179,6 +179,7 @@ export interface HandleResponsesOptions {
   onCodexAuthContextResolved?: (context: CodexAuthContext | undefined) => void;
   /** Request-local native Luna capacity; a combo sets it per leg, never config or env. */
   poolCapacityIntent?: PoolCapacityIntent;
+  remainingReserveSeats?: Set<string>;
   /** Internal deterministic seam for account-gated native fallback tests. */
   resolveCodexModelEntitlements?: typeof resolveCodexModelEntitlements;
   /** Internal: validated final client-visible model, after completed terminal success only. */

@@ -572,7 +572,7 @@ export async function deliverPassthroughResponse(
           }
           options.onNativePassthroughTerminal?.(status);
         });
-      } else if (!(upstreamResponse.ok && nativeExchange.request.outboundModelId === NATIVE_RESERVE_MODEL
+      } else if (!nativeExchange.terminalOutcomeRecorded && !(upstreamResponse.ok && nativeExchange.request.outboundModelId === NATIVE_RESERVE_MODEL
         && hasResponseMediaType(headers, "application/json")) && !shouldDeferCodexResetDerivedCooldown(
         upstreamResponse,
         options.deferCodexResetDerivedCooldown && nativeExchange.request.outboundModelId !== NATIVE_RESERVE_MODEL,

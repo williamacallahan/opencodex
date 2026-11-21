@@ -243,8 +243,7 @@ booking, and a combo child's sends would go missing from the ledger. `permit.ass
 closes its booking on the same shared ledger, so the adapter handoff above and the combo
 derivation agree rather than each settling against a counter the other cannot see.
 
-What stays per-scope is deliberate: the reserve, alternate-target and transition ledgers are each
-target's own recovery decision, while the physical-send total is what binds every target together.
+The alternate-target and transition limits belong to each target; all targets share the physical-send ledger. The [strict Luna Reserve leg](../quota-snapshots.md#automatic-pool-luna-reserve) sizes its allowance before the first booking freezes the physical limit. Beyond the ordinary two pool sends it can use one slot per additional seat, without adding combo target transitions. The next leg inherits only the extra slots actually spent, never the unused portion of the walk.
 
 ## Durable spend reservations
 

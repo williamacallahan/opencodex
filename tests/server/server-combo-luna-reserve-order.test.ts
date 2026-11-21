@@ -30,6 +30,9 @@ import { saveConfig } from "../../src/config";
 import { startServer } from "../../src/server";
 import { createProtocolEnvelope } from "../../src/protocols/envelope";
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
+import { createRequestExecutionBudget } from "../../src/lib/request-execution-budget";
+import { createSpendReservationLedger, DEFAULT_SPEND_RESERVATION_POLICY } from "../../src/lib/spend-reservation-ledger";
+import { createRequestSpendTracker } from "../../src/server/responses/request-spend";
 
 const A = "luna-order-a";
 const B = "luna-order-b";
@@ -43,17 +46,19 @@ let now = 0;
 type Call = string;
 let calls: Call[] = [];
 let nativeHints: (string | null)[] = [];
+let nativeAccounts: (string | null)[] = [];
 let relay: (request: Request, body: { model: string }) => Response | Promise<Response>;
 let native: (body: { model: string }) => Response | Promise<Response>;
 let metered: () => Response;
 
-function sse(model: string, frames: "ok" | "created-then-fail" | "created-then-quota"): Response {
+function sse(model: string, frames: "ok" | "created-then-fail" | "created-then-quota" | "output-then-quota"): Response {
   const created = { type: "response.created", response: { id: "resp_1", object: "response", status: "in_progress", model, output: [] } };
-  const body = frames === "ok" ? [created,
-    { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: "hi" },
+  const delta = { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: "hi" };
+  const body = frames === "ok" ? [created, delta,
     { type: "response.completed", response: { ...created.response, status: "completed", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
       output: [{ id: "msg_1", type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "hi", annotations: [] }] }] } }]
-    : [created, { type: "response.failed", response: { ...created.response, status: "failed", error: frames === "created-then-quota" ? { code: "usage_limit_reached", message: "Limit reached" } : { code: "server_error", message: "boom" } } }];
+    : [created, ...(frames === "output-then-quota" ? [delta] : []), { type: "response.failed", response: { ...created.response, status: "failed",
+      error: frames === "created-then-fail" ? { code: "server_error", message: "boom" } : { code: "usage_limit_reached", message: "Limit reached" } } }];
   return new Response(body.map(frame => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
 }
 const reserveRefused = () => Response.json({ error: { code: "usage_limit_reached", message: "Limit reached" } }, { status: 429, headers: { "retry-after": "3600" } });
@@ -105,14 +110,14 @@ beforeEach(() => {
       chatgptAccountId: `fixture-workspace-${id}`, expiresAt: now + 86_400_000 });
   }
   clearAccountNeedsReauth("__main__");
-  calls = []; nativeHints = [];
+  calls = []; nativeHints = []; nativeAccounts = [];
   native = body => sse(body.model, "ok");
   relay = () => sse("gpt-6-luna", "ok");
   metered = () => sse("gpt-6-luna", "ok");
   spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(input, init);
     const body = await request.clone().json() as { model: string };
-    if (request.url === CODEX_RESPONSES_HTTP_URL) { calls.push(`native:${body.model}`); nativeHints.push(request.headers.get("x-codex-routing-hint")); return native(body); }
+    if (request.url === CODEX_RESPONSES_HTTP_URL) { calls.push(`native:${body.model}`); nativeHints.push(request.headers.get("x-codex-routing-hint")); nativeAccounts.push(request.headers.get("chatgpt-account-id")); return native(body); }
     if (request.url.startsWith("https://relay.example.test")) { calls.push(`relay:${body.model}`); return relay(request, body); }
     if (request.url.startsWith("https://metered.example.test")) { calls.push(`metered:${body.model}`); return metered(); }
     throw new Error(`unexpected upstream ${request.url}`);
@@ -129,6 +134,106 @@ afterEach(async () => {
 });
 
 describe("combo Luna leg order: native Reserve, relay, native ordinary, metered", () => {
+  function threeSpentSeats(): OcxConfig {
+    const cfg = config();
+    const third = "luna-order-c";
+    cfg.codexAccounts!.push({ id: third, email: `${third}@example.test`, isMain: false, plan: "pro" });
+    clearAccountNeedsReauth(third);
+    saveCodexAccountCredential(third, { accessToken: `fixture-access-${third}`, refreshToken: `fixture-refresh-${third}`,
+      chatgptAccountId: `fixture-workspace-${third}`, expiresAt: now + 86_400_000 });
+    for (const id of [A, B, third]) {
+      updateAccountQuota(id, 100, now + 86_400_000);
+      setAccountQuotaFromParsed(id, { customWindows: [{ label: "Luna Reserve", percent: 25, resetAt: now + 604_800_000, observedAt: now }] });
+    }
+    return cfg;
+  }
+
+  test("a third Reserve seat serves after two seats refuse", async () => {
+    const cfg = threeSpentSeats();
+    native = body => nativeAccounts.length < 3 ? reserveRefused() : sse(body.model, "ok");
+    const result = await post(cfg);
+    expect(result.text).toContain("response.completed");
+    expect(calls).toEqual(["native:gpt-reserve", "native:gpt-reserve", "native:gpt-reserve"]);
+    expect(new Set(nativeAccounts).size).toBe(3);
+  });
+
+  test("an alternate's empty SSE quota refusal can move to the third seat", async () => {
+    const cfg = threeSpentSeats();
+    native = body => nativeAccounts.length === 1 ? reserveRefused() : nativeAccounts.length === 2
+      ? sse(body.model, "created-then-quota") : sse(body.model, "ok");
+    const result = await post(cfg);
+    expect(result.text).toContain("response.completed");
+    expect(result.text).not.toContain("usage_limit_reached");
+    expect(calls).toEqual(["native:gpt-reserve", "native:gpt-reserve", "native:gpt-reserve"]);
+  });
+
+  test("a quota terminal after alternate-seat output stays on that seat", async () => {
+    const cfg = threeSpentSeats();
+    native = body => nativeAccounts.length === 1 ? reserveRefused() : sse(body.model, "output-then-quota");
+    const result = await post(cfg);
+    expect(result.text).toContain("response.output_text.delta");
+    expect(result.text).toContain("response.failed");
+    expect(calls).toEqual(["native:gpt-reserve", "native:gpt-reserve"]);
+  });
+
+  test("a Reserve refusal at the leg deadline goes to the relay", async () => {
+    const cfg = threeSpentSeats();
+    cfg.connectTimeoutMs = 2_000;
+    native = () => { now += 2_000; return reserveRefused(); };
+    expect((await post(cfg)).text).toContain("response.completed");
+    expect(calls).toEqual(["native:gpt-reserve", "relay:gpt-6-luna"]);
+  });
+
+  test("all refused Reserve seats are tried before the relay", async () => {
+    const cfg = threeSpentSeats();
+    native = reserveRefused;
+    const result = await post(cfg);
+    expect(result.text).toContain("response.completed");
+    expect(calls).toEqual(["native:gpt-reserve", "native:gpt-reserve", "native:gpt-reserve", "relay:gpt-6-luna"]);
+    expect(new Set(nativeAccounts).size).toBe(3);
+  });
+
+  test.each([false, true])("a long Reserve walk books each physical send once (enforced: %s)", async enforced => {
+    const cfg = threeSpentSeats();
+    // Unreported Reserve seats follow the verified seats. Earlier one-minute holds expire mid-walk.
+    for (const id of ["walk-d", "walk-e", "walk-f", "walk-g", "walk-h"]) {
+      cfg.codexAccounts!.push({ id, email: `${id}@example.test`, isMain: false, plan: "pro" });
+      saveCodexAccountCredential(id, { accessToken: `fixture-${id}`, refreshToken: `fixture-refresh-${id}`,
+        chatgptAccountId: `fixture-workspace-${id}`, expiresAt: now + 86_400_000 });
+      updateAccountQuota(id, 100, now + 86_400_000);
+    }
+    native = () => { now += 11_000; return Response.json({ error: { code: "usage_limit_reached" } }, { status: 429 }); };
+    const lines: string[] = [];
+    const ledger = createSpendReservationLedger({
+      journal: { read: () => [...lines], append: line => { lines.push(line); }, rewrite: next => { lines.splice(0, lines.length, ...next); } },
+      policy: { ...DEFAULT_SPEND_RESERVATION_POLICY, root: enforced ? { maxTokens: 1_000_000 } : {} },
+    });
+    const logCtx: RequestLogContext = { model: "combo/luna", provider: "combo", spendInputEstimateTokens: 1 };
+    const tracker = createRequestSpendTracker(logCtx, "reserve-walk", ledger);
+    const budget = createRequestExecutionBudget(undefined, undefined, tracker);
+    try {
+      const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
+        headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "combo/luna", input: "ping", stream: true }),
+      }), cfg, logCtx, { admission: local, sendBudget: budget });
+      expect(await response.text()).toContain("response.completed");
+      expect(calls).toEqual([...Array(8).fill("native:gpt-reserve"), "relay:gpt-6-luna"]);
+      expect(new Set(nativeAccounts).size).toBe(8);
+      expect(budget.used).toBe(9);
+      if (enforced) expect(budget.physicalStarted).toBe(9);
+    } finally { tracker.settle(logCtx.usage); }
+    expect(lines.filter(line => JSON.parse(line).kind === "dispatch")).toHaveLength(9);
+  });
+
+  test("a live Reserve cooldown skips that seat before the relay", async () => {
+    const cfg = threeSpentSeats();
+    recordCodexUpstreamOutcome(cfg, B, 429, { now, modelId: "gpt-6-luna", poolReserve: true, retryAfter: "3600" });
+    native = reserveRefused;
+    const result = await post(cfg);
+    expect(result.text).toContain("response.completed");
+    expect(calls).toEqual(["native:gpt-reserve", "native:gpt-reserve", "relay:gpt-6-luna"]);
+    expect(new Set(nativeAccounts).size).toBe(2);
+    expect(nativeAccounts).not.toContain(`fixture-workspace-${B}`);
+  });
   test.each([false, true])("a cooled pool target reaches Reserve on the wire (redirected: %s)", async redirected => {
     const target = { provider: "openai", model: redirected ? "gpt-6.2-sol" : "gpt-6-luna" };
     const cfg: OcxConfig = {
