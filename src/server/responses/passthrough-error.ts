@@ -1,5 +1,6 @@
 import { formatErrorResponse } from "../../bridge";
-import { cyberPolicyTerminalError, isCyberPolicyMessage } from "../../lib/errors";
+import { isUnsafeJsonDocument } from "../../codex/quota-rejection";
+import { isCyberPolicyMessage, terminalPolicyError } from "../../lib/errors";
 import {
   applyReplayRefusalClientHeaders,
   isReplayRefusalCode,
@@ -17,11 +18,17 @@ function maskErrorBody(body: string, mask: (text: string) => string): string {
   let parsed: unknown;
   try { parsed = JSON.parse(body); }
   catch { return mask(body); }
-  return maskDiagnosticJson(parsed, mask);
+  const safe = maskDiagnosticJson(parsed, mask);
+  if (safe === body.trim()) return body;
+  // A protocol tag may match the key. Ignore only JSON whitespace, never characters inside a string.
+  const compact = body.replace(/"(?:\\.|[^"\\])*"|[ \t\r\n]+/g, token => token[0] === '"' ? token : "");
+  if (safe === compact) return body;
+  // Noncanonical escapes and numbers need an extra check: JSON.parse can also discard duplicate fields.
+  return safe === JSON.stringify(parsed) && mask(body) === body && !isUnsafeJsonDocument(body) ? body : safe;
 }
 
-function isCyberPolicyBody(body: string): boolean {
-  try { return cyberPolicyTerminalError(JSON.parse(body)) !== undefined; }
+function isPolicyRefusalBody(body: string): boolean {
+  try { return terminalPolicyError(JSON.parse(body)) !== undefined; }
   catch { return isCyberPolicyMessage(body); }
 }
 
@@ -109,11 +116,11 @@ export function formatPassthroughUpstreamError(
     });
   }
   const upstreamRetryAfter = options?.headers?.get("retry-after")?.trim() || undefined;
-  const cyberPolicyFailure = isCyberPolicyBody(trimmed);
+  const policyFailure = isPolicyRefusalBody(trimmed);
   const replayRefusal = options?.replayRefusal === true || isReplayRefusalBody(trimmed);
   // Two different reasons to answer with no wait at all, handled the same way: a hard policy
   // block will not become servable, and a refusal we made was never a rate limit.
-  const suppressRetryAfter = options?.suppressRetryAfter === true || cyberPolicyFailure || replayRefusal;
+  const suppressRetryAfter = options?.suppressRetryAfter === true || policyFailure || replayRefusal;
   const resolved = suppressRetryAfter
     ? undefined
     : resolveClientRetryAfter({

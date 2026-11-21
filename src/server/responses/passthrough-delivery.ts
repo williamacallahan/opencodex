@@ -695,13 +695,15 @@ export async function deliverPassthroughResponse(
       if (policyRefusal) return policyRefusal;
       // Meta's Muse Code refusal is a plan restriction, not a rejected credential (#8352).
       stampMetaMusePlanRefusal(logCtx, upstreamResponse.status, errorText);
-      return carryPolicyCandidateRefusal(upstreamResponse, carryProxyError(upstreamResponse, formatPassthroughUpstreamError(upstreamResponse.status, errorText, {
+      // Without sent headers we cannot safely publish an upstream diagnostic that might echo the selected key.
+      const sentHeaders = nativeExchange.request?.headers;
+      return carryPolicyCandidateRefusal(upstreamResponse, carryProxyError(upstreamResponse, formatPassthroughUpstreamError(upstreamResponse.status, sentHeaders ? errorText : "", {
         statusText: upstreamResponse.statusText,
         headers,
         // Provenance, not inference: `errorText` is empty when the bounded read finds nothing
         // display-safe, and an empty body is exactly what the retryable-429 default fires on.
         replayRefusal: isReplayRefusalResponse(upstreamResponse),
-        maskCredential: createOutboundCredentialMask(nativeExchange.request.headers),
+        maskCredential: sentHeaders ? createOutboundCredentialMask(sentHeaders) : undefined,
       })));
     }
 

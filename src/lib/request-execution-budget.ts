@@ -78,6 +78,8 @@ export interface DispatchIntent {
   /** Auxiliary inference uses its own provider scopes without rebasing the routed target. */
   readonly spendScopes?: Pick<SpendScopes, "identityId" | "poolId">;
   readonly spendEstimate?: { inputTokens: number; outputCeilingTokens: number };
+  /** Hold the send slot now; book tokens only once the child has selected its physical key. */
+  readonly selectedSpendScopes?: () => Pick<SpendScopes, "identityId" | "poolId">;
   /**
    * False refuses the dispatch outright. A request whose execution state upstream is unknown
    * is not replayable just because budget remains (RFC 9110 9.2.2).
@@ -593,13 +595,14 @@ function createRequestExecutionBudgetWithLedger(
       const spendTargetKey = recovery
         ? `${recovery.reservationPrefix}:${++recovery.reservationSequence}` : intent.targetKey;
       const spendTarget = { ...(auxiliary ? { ...intent.spendScopes, estimate: intent.spendEstimate, auxiliary: true } : {}), targetKey: spendTargetKey };
-      budget.startRequest?.(spendTarget);
       let spendProof: SpendReservationProof | undefined;
-      if (observer && !observer.charge({ targetKey: spendTargetKey,
-        ...(auxiliary ? { scopes: intent.spendScopes, estimate: intent.spendEstimate, auxiliary: true } : {}),
-        deferDispatch: true, onReserved: proof => { spendProof = proof; } })) {
-        return { allowed: false, reason: "spend-exhausted" };
-      }
+      const bookSpend = (scopes = intent.spendScopes): boolean => {
+        budget.startRequest?.({ ...spendTarget, ...scopes });
+        return !observer || observer.charge({ targetKey: spendTargetKey, scopes,
+          ...(auxiliary ? { estimate: intent.spendEstimate, auxiliary: true } : {}),
+          deferDispatch: true, onReserved: proof => { spendProof = proof; } });
+      };
+      if (!intent.selectedSpendScopes && !bookSpend()) return { allowed: false, reason: "spend-exhausted" };
 
       // THE RESERVATION IS THE CHARGE. Deciding here and charging in `use()` left a window in
       // which two legs read the same remainder, both received a permit, and both dispatched:
@@ -619,8 +622,10 @@ function createRequestExecutionBudgetWithLedger(
       let executing = false;
       let physicalOrdinal: number | undefined;
       const startPhysical = (): boolean => {
+        const selected = intent.selectedSpendScopes?.();
+        if (selected && !bookSpend(selected)) return false;
         if (observer?.enforced !== true) return auxiliary ? budget.claimWorkflowSend!(true) : budget.claimWorkflowSend!();
-        const seed = observer.ensureSeed?.(spendTarget, spendProof);
+        const seed = observer.ensureSeed?.({ ...spendTarget, ...selected }, spendProof);
         if (!seed) return false;
         const ordinal = auxiliary ? budget.claimPhysicalSend?.(true) : budget.claimPhysicalSend?.();
         if (ordinal === undefined) { observer.releaseSeed?.(seed); return false; }
@@ -685,6 +690,9 @@ function createRequestExecutionBudgetWithLedger(
       let preflightClaimed = false;
       dispatchSpendProofs.set(permit, { owner: counter, report: () => {
         if (!counter.pendingExternalSends.has(receipt)) return false;
+        // Native Chat reports the external receipt instead of assuming the permit. Its
+        // enforced reporter already has a seed; the observe-only path still owes one booking.
+        if (intent.selectedSpendScopes && !observer?.enforced && !spendProof) bookSpend(intent.selectedSpendScopes());
         if (spendProof) observer?.dispatch?.(spendProof);
         counter.pendingExternalSends.delete(receipt);
         // Reset-only helpers report just BEFORE calling the dispatch thunk. Its one use()

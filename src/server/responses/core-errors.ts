@@ -5,7 +5,7 @@ import { inspectedReserveRefusal } from "./reserve-refusal-body";
 import { cancelResponseBodyBestEffort } from "../../lib/upstream-retry";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { redactSecretString } from "../../lib/redact";
-import { CYBER_POLICY_ERROR_CODE, cyberPolicyTerminalError, isCyberPolicyMessage } from "../../lib/errors";
+import { isCyberPolicyCode, isCyberPolicyMessage, terminalPolicyError } from "../../lib/errors";
 import { isTranslatorBudgetExceededError } from "../../lib/translator-budget";
 import { formatErrorResponse, formatUsageLimitReachedResponse } from "../../bridge";
 import {
@@ -60,9 +60,9 @@ export function normalizeUpstreamErrorText(text: string, fallback: string): Norm
   let code: string | undefined;
   try {
     const parsed = JSON.parse(text) as Record<string, unknown>;
-    const policy = cyberPolicyTerminalError(parsed);
-    if (policy) return { safeText, code: CYBER_POLICY_ERROR_CODE, type: policy.type,
-      message: redactSecretString(policy.message).slice(0, 500), cyberPolicy: true };
+    const policy = terminalPolicyError(parsed);
+    if (policy) return { safeText, code: policy.code, type: policy.type,
+      message: redactSecretString(policy.message).slice(0, 500), cyberPolicy: isCyberPolicyCode(policy.code) };
     const response = parsed?.response && typeof parsed.response === "object" && !Array.isArray(parsed.response)
       ? parsed.response as Record<string, unknown>
       : undefined;

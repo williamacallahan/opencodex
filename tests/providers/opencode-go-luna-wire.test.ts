@@ -70,6 +70,12 @@ describe("OpenCode Go stateless Responses", () => {
     expect(providerConfigSeed(getProviderRegistryEntry("cerebras")!).statelessResponses).toBeUndefined();
   });
 
+  test("omits a stored conversation reference on the stateless wire", () => {
+    const adapter = withTestTranslatorBudget(createResponsesPassthroughAdapter(opencodeGo({ adapter: "openai-responses" })));
+    const parsed = parseRequest({ model: MODEL, input: "ping", conversation: "conversation_fixture" });
+    expect(JSON.parse(adapter.buildRequest(parsed).body).conversation).toBeUndefined();
+  });
+
   test.each(GO_RESPONSES_MODELS)("%s repairs orphan calls/results and preserves paired results", model => {
     const input = [
       { type: "function_call", call_id: "call_done", name: "probe", arguments: "{}" },
@@ -188,11 +194,11 @@ describe("OpenCode Go stateless reasoning and continuation routes", () => {
       const nextBody = {
         input: continuation.fullHistory ? [initial, ...first.document.output, result] : [result],
         previous_response_id: first.document.id, store: true,
-        conversation: "conversation_fixture", background: true, metadata: { fixture: "go" }, prompt: { id: "prompt_fixture" },
+        background: true, metadata: { fixture: "go" }, prompt: { id: "prompt_fixture" },
       };
       const originalHistory = structuredClone(nextBody);
       const second = await drive(nextBody);
-      for (const field of ["previous_response_id", "conversation", "background", "metadata", "prompt"]) {
+      for (const field of ["previous_response_id", "background", "metadata", "prompt"]) {
         expect(requests[1]!.body[field]).toBeUndefined();
       }
       expect(nextBody).toEqual(originalHistory);

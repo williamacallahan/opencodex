@@ -1,7 +1,7 @@
 import { isRevokedChatgptCredentialCode } from "../../codex/chatgpt-refresh-failure";
 import { NativeSteeringError } from "./native-steering";
 import { envelopeRecordCode } from "../../combos/failover";
-import { CYBER_POLICY_ERROR_CODE, cyberPolicyTerminalError, isTerminalRefusalCode, recognizedUpstreamError, safetyRefusalCodeFromMessage } from "../../lib/errors";
+import { isTerminalRefusalCode, recognizedUpstreamError, safetyRefusalCodeFromMessage, terminalPolicyError } from "../../lib/errors";
 import { hasHardRefusalInEnvelope } from "../../lib/hard-refusal";
 import { terminalOwnerCapacityStatus } from "./owner-capacity-refusal";
 import { reserveQuotaPrelude, safeSnapshotUsage } from "./combo-stream-preflight";
@@ -679,6 +679,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       let refusalHeaders: Headers | undefined;
       let refusalPrelude: Headers | undefined;
       let terminalQuota: CodexWsTerminalQuota | undefined;
+      let acceptedCredentialRejection = false;
       if (!controlFrame) {
         firstResponseAt ??= Date.now();
         try {
@@ -695,7 +696,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         const wrapperStatus = codexWsWrapperStatus(normalized.payload);
         const beforeAcceptance = !responseCommitted && !deferredCommit;
         if (metadata && sent && type === "error" && (beforeAcceptance
-          || (!nativeControl && (wrapperStatus === 402 || wrapperStatus === 429)))) {
+          || (!nativeControl && (wrapperStatus === 401 || wrapperStatus === 402 || wrapperStatus === 403 || wrapperStatus === 429)))) {
           let rejection: ReturnType<typeof wrappedRejection>;
           try { rejection = wrappedRejection(normalized.payload, wrapperStatus, metadata.snapshot(), metadataContext); }
           catch (error) {
@@ -711,6 +712,8 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
             terminalQuota = { status: rejection.status, headers: rejection.headers, confirmedCapacity: refusalEligible && correlated
               && terminalOwnerCapacityStatus(normalized.payload, rejection.status) === rejection.status };
           }
+          acceptedCredentialRejection = !beforeAcceptance && refusalEligible && rejection !== undefined
+            && frameRejectsCredential(rejection.status, normalized.payload);
           if (rejection && projectCreateRefusal) {
             const projection = new Response(JSON.stringify({
               error: rejection.error ?? { type: "upstream_error", message: "Upstream rejected the request" },
@@ -750,7 +753,8 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
           terminalErrorStatus = wrapperStatus ?? null;
         }
       }
-      const hardStop = failureFrame && !normalized.ambiguousTerminal && hasHardRefusalInEnvelope(normalized.payload, { source: "ws-frame" });
+      const hardStop = failureFrame && !normalized.ambiguousTerminal
+        && (acceptedCredentialRejection || hasHardRefusalInEnvelope(normalized.payload, { source: "ws-frame" }));
       const publicType = hardStop ? "response.failed" : type;
       if (hardStop) {
         // Codex retries an unknown response.error.code regardless of the wrapper's verdict.
@@ -758,14 +762,15 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         const response = record(frame.response) ? frame.response : undefined;
         const source = type === "error" ? frame.error : response?.error;
         const error = refusalErrorBody(record(source) ? source : frame);
+        const policy = terminalPolicyError(frame);
+        if (policy) error.message = policy.message;
         if (responseEvidence) {
           const stated = codexWsWrapperStatus(frame);
           responseEvidence.hardStopStatus = refusalStatus ?? transientStatus ?? (stated !== undefined && stated >= 400 ? stated : 400);
           responseEvidence.credentialRejected = frameRejectsCredential(responseEvidence.hardStopStatus, frame);
         }
         const code = typeof frame.code === "string" && isTerminalRefusalCode(frame.code) ? frame.code
-          : isTerminalRefusalCode(error.code) ? error.code : cyberPolicyTerminalError(frame) ? CYBER_POLICY_ERROR_CODE
-          : safetyRefusalCodeFromMessage(error.message ?? "") ?? "invalid_prompt";
+          : isTerminalRefusalCode(error.code) ? error.code : policy?.code ?? safetyRefusalCodeFromMessage(error.message ?? "") ?? "invalid_prompt";
         const param = error.param ?? frame.param;
         encodedText = encoder.encode(JSON.stringify({ type: publicType, sequence_number: frame.sequence_number,
           response: { id: response?.id ?? frame.response_id ?? refusalResponseId ?? undefined, model: response?.model,

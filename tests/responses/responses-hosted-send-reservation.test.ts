@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { ADAPTER_REGISTRY } from "../../src/adapters/registry";
 import { createAdapterPhysicalSend } from "../../src/adapters/physical-send";
 import { getActiveTurnCount } from "../../src/server/lifecycle";
+import { comboExecutionBudgetPolicy } from "../../src/server/responses/core-combo";
 import { hostedSendFixture } from "../helpers/hosted-send-fixture";
 import { chatStream } from "../helpers/combo-failover-upstream";
 import * as keyFailover from "../../src/providers/key-failover";
@@ -100,5 +101,5 @@ for (const kind of ["search", "image", "video"] as const) {
     expect(f.budget.used).toBe(6); expect(f.charges).toBe(6); expect(f.refunds).toBe(0);
     expect(f.settle()).toMatchObject({ settled: 3, reserved: 0, unresolved: 15 });
     expect(getActiveTurnCount()).toBe(0);
-  }));
+  }, comboExecutionBudgetPolicy(3)));
 }

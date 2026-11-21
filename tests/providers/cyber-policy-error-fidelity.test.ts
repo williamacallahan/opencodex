@@ -172,6 +172,30 @@ describe("cyber_policy error fidelity", () => {
     expect(await response.text()).toBe(body);
   });
 
+  test.each([
+    ["detail", CODEX_FALLBACK_MESSAGE, CYBER_POLICY_ERROR_CODE], ["error", CODEX_FALLBACK_MESSAGE, CYBER_POLICY_ERROR_CODE],
+    ["detail", "This request was blocked by our safety systems.", "invalid_prompt"],
+    ["error", "This request was flagged for possible biological risk.", "bio_policy"],
+  ] as const)("policy precedence: top-level string %s is fatal policy evidence: %s", async (field, message, code) => {
+    const body = JSON.stringify({ [field]: message });
+    const headers = { "retry-after": "120" };
+    const direct = formatPassthroughUpstreamError(503, body, { headers: new Headers(headers) });
+    expect(direct.headers.get("retry-after")).toBeNull();
+    const failure = await consumeComboFailure(new Response(body, { status: 503, headers }));
+    expect(failure.response.status).toBe(400);
+    await expect(failure.response.json()).resolves.toMatchObject({ error: { code, message } });
+  });
+
+  test.each([
+    { request: { detail: CODEX_FALLBACK_MESSAGE }, description: CODEX_FALLBACK_MESSAGE },
+    { detail: CODEX_FALLBACK_MESSAGE, error: { type: "overloaded_error" } },
+  ])("policy precedence: echoes and a superseded detail keep the upstream wait: %j", async envelope => {
+    const body = JSON.stringify(envelope);
+    const direct = formatPassthroughUpstreamError(503, body, { headers: new Headers({ "retry-after": "120" }) });
+    expect(direct.headers.get("retry-after")).toBe("120");
+    expect((await consumeComboFailure(new Response(body, { status: 503 }))).response.status).toBe(503);
+  });
+
   test("a generic wrapper cannot turn a nested overload into a policy stop", () => {
     expect(comboFailureDecision(503, `Queue full while recording "${CODEX_FALLBACK_MESSAGE}"`, {
       code: "server_is_overloaded", rootCode: "invalid_request_error",

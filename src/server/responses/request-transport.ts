@@ -88,8 +88,7 @@ import {
 } from "../../providers/api-key-selection";
 import { isProviderApiKeyPaused, ProviderApiKeyPausedError } from "../../providers/api-key-pause";
 import { resolveAdapter, resolveWireProtocolOverride } from "../adapter-resolve";
-import { ownsMistralDispatchReceipt } from "../../providers/mistral-transport";
-import { settlePhysicalDispatch } from "../../lib/provider-admission-wait";
+import { ownsDispatchReceipt, settlePhysicalDispatch } from "../../lib/provider-admission-wait";
 import { codexWsExecutorBinding, fetchWithHeaderTimeout, physicalSendCommitInit, physicalSendGuardInit, physicalSendObserverInit, providerFetch, sendWithConnectionPolicy } from "./fetch-helpers";
 import { resolveConnectTimeoutMs } from "../../stall-timeout";
 import { isLocalUpstream } from "../../lib/local-upstream";
@@ -989,7 +988,7 @@ export async function prepareResponsesTransport(
             // Copilot's local negotiation may refuse before this point, and spend admission
             // may still refuse at the HTTP executor. Its note follows that final admission.
             const deferredCopilotNote = route.providerName === "github-copilot" && route.provider.authMode !== "forward";
-            const deferredMistralNote = ownsMistralDispatchReceipt(route.provider);
+            const deferredMistralNote = ownsDispatchReceipt(route.provider);
             if (!deferredCopilotNote && !deferredMistralNote) commitKeyAttemptSend();
             // The WS executor dials its own socket: HTTP connection policy and body coding do not apply.
             // WS eligibility (egress, pacing, URL) was checked for the provider it was built for; a
@@ -1340,7 +1339,7 @@ export async function prepareResponsesTransport(
       ? resolveCopilotApiBaseUrl(servingOAuthSnapshot?.apiBaseUrl)
       : undefined,
   );
-  if (ownsMistralDispatchReceipt(route.provider)) bindResponsesSpendTarget(logCtx, () => {
+  if (ownsDispatchReceipt(route.provider)) bindResponsesSpendTarget(logCtx, () => {
     const selected: { accountLogLabel?: string } = {};
     stampApiKeyAccountLabel(selected, route.providerName, route.provider);
     return { poolId: logCtx.spendPoolId ?? route.providerName, identityId: selected.accountLogLabel ?? "" };

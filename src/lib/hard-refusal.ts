@@ -4,6 +4,7 @@ import {
   isCyberPolicyMessage,
   isTerminalRefusalCode,
   safetyRefusalCodeFromMessage,
+  topLevelPolicyDiagnostic,
 } from "./errors";
 import { isNonReplayableUpstreamCode } from "./upstream-retry";
 
@@ -195,6 +196,7 @@ export function hasHardRefusalInEnvelope(parsed: unknown, evidence: { source: "w
 
       if (evidence.source === "ws-frame") {
         structuredVerdict ||= hasStructuredErrorVerdict(rec);
+        if (candidate === parsed && !structuredVerdict) refusalCopy ||= topLevelPolicyDiagnostic(rec) !== undefined;
         if (!structuredVerdict && typeof rec.message === "string") {
           refusalCopy ||= isCyberPolicyMessage(rec.message) || !!safetyRefusalCodeFromMessage(rec.message);
         }

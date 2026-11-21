@@ -24,6 +24,7 @@ import { codexQuotaFailureMessage, codexQuotaOutcomeMeta, isWrappedReserveQuota 
 import {
   isRateLimitOrQuotaFailureMessage,
   isCyberPolicyCode,
+  isTerminalRefusalCode,
   CYBER_POLICY_ERROR_CODE,
   CYBER_POLICY_FALLBACK_MESSAGE,
   isModelNotInPlanRefusal,
@@ -177,16 +178,18 @@ export async function consumeComboFailure(
     now,
     includeDefault: false,
   });
+  const fatalPolicy = isTerminalRefusalCode(normalizedUpstreamCode);
   const failureResponse = scopeRefusalBody !== undefined
     ? new Response(scopeRefusalBody, { status: 403, headers: { "Content-Type": "application/json" } })
     : formatErrorResponse(
-    response.status,
-    cyberFailure ? (upstreamType ?? CYBER_POLICY_ERROR_CODE) : "upstream_error",
-    message,
+    fatalPolicy ? 400 : response.status,
+    cyberFailure ? (upstreamType ?? CYBER_POLICY_ERROR_CODE) : fatalPolicy ? "invalid_request_error" : "upstream_error",
+    fatalPolicy ? upstreamMessage ?? message : message,
     {
+      classified: fatalPolicy,
       cyberPolicy: cyberFailure,
       ...(normalizedUpstreamCode !== undefined ? { code: normalizedUpstreamCode } : {}),
-      ...(clientRetryAfter !== undefined ? { retryAfter: clientRetryAfter } : {}),
+      ...(!fatalPolicy && clientRetryAfter !== undefined ? { retryAfter: clientRetryAfter } : {}),
     },
   );
   if (nonReplayable) markResponseNonReplayable(failureResponse);
@@ -203,6 +206,7 @@ export async function consumeComboFailure(
   return {
     response: carryCodexWsPreludeVerdict(response, failureResponse),
     wsPreludeVerdict: codexWsPreludeVerdict(response),
+    cyberPolicy: cyberFailure,
     ...(nonReplayable ? { nonReplayable: true } : {}),
     ...(verifiedPlanRefusal ? { verifiedPlanRefusal: true } : {}),
     classificationText,
@@ -217,14 +221,14 @@ export async function consumeComboFailure(
     ...(!cyberFailure && !replayRefusal && upstreamRootCode !== undefined ? { upstreamRootCode } : {}),
     ...(upstreamMessage !== undefined ? { upstreamMessage } : {}),
     ...(upstreamType !== undefined ? { upstreamType } : {}),
-    ...(!cyberFailure && cooldownRetryAfter !== undefined ? { retryAfter: cooldownRetryAfter } : {}),
-    ...(!cyberFailure && !replayRefusal && (relayQuota || serverError)
+    ...(!fatalPolicy && cooldownRetryAfter !== undefined ? { retryAfter: cooldownRetryAfter } : {}),
+    ...(!fatalPolicy && !replayRefusal && (relayQuota || serverError)
       ? { relayRetryAfterHeader: validateClientRetryAfterHeader(effectiveRetryAfter, now) ?? (relayQuota ? null : undefined) } : {}),
     // The EFFECTIVE classification decides, not the raw status. An upstream that wraps a quota
     // refusal in a 5xx still carries `x-codex-*-reset-at`, and gating on 402/429 alone threw
     // those away, so the combo target came back up immediately instead of waiting for the
     // window it was told about. `cyberFailure` stays excluded: a policy block is not a quota.
-    ...(!cyberFailure && !replayRefusal && quotaStatusOrMessage
+    ...(!fatalPolicy && !replayRefusal && quotaStatusOrMessage
       ? { resetAt: codexQuotaOutcomeMeta(response).resetAt }
       : {}),
     ...(usage ? { usage } : {}),

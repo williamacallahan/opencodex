@@ -1507,6 +1507,8 @@ export function comboFailureDecision(
     code?: string | number | null;
     /** The transport inspected the original frame before formatting mixed type, code and prose. */
     hardRefusal?: boolean;
+    /** Resolved from the complete diagnostic envelope before truncation or projection. */
+    cyberPolicy?: boolean;
     /** The envelope root's own code when it differs from `code`; absent or blank states none. */
     rootCode?: string | number | null;
     codexModelRefusal?: CodexAccountModelRefusal;
@@ -1524,10 +1526,9 @@ export function comboFailureDecision(
   const nestedRawCode = typeof options?.code === "number" ? String(options.code) : options?.code;
   const rootCode = normalizedFailureCode(rootRawCode);
   const nestedCode = normalizedFailureCode(nestedRawCode);
-  const cyberPolicy = isCyberPolicyCode(rootCode) || isCyberPolicyCode(nestedCode) || (
-    !hasStructuredErrorVerdict({ code: rootCode }) && !hasStructuredErrorVerdict({ code: nestedCode }) && isCyberPolicyMessage(message)
-  );
-  if (cyberPolicy) return "stop";
+  if (isTerminalRefusalCode(rootCode) || isTerminalRefusalCode(nestedCode)) return "stop";
+  if (options?.cyberPolicy ?? (!hasStructuredErrorVerdict({ code: rootCode })
+    && !hasStructuredErrorVerdict({ code: nestedCode }) && isCyberPolicyMessage(message))) return "stop";
   if (rootCode !== "" && rootCode !== nestedCode) {
     const rootDecision = decideComboFailure(status, message, { ...options, code: rootRawCode });
     if (rootDecision === "stop" || nestedCode === "") return rootDecision;

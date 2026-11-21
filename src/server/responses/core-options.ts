@@ -36,6 +36,7 @@ export interface ConsumedComboFailure {
   classificationText: string;
   wrappedReserveQuota?: boolean;
   wsPreludeVerdict?: CodexWsPreludeVerdict;
+  cyberPolicy?: boolean;
   /** Complete bounded-envelope evidence captured before display truncation; never serialized. */
   codexModelRefusal?: CodexAccountModelRefusal;
   /** Complete bounded-envelope malformed response_format diagnostic verdict captured before display truncation. */

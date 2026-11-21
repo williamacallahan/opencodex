@@ -8,7 +8,7 @@ import { codexAdapterBuildRefusal } from "./passthrough-build-error";
 import { createAutoPauseRefreshErrorMapper, recoverAutoPausedAccount } from "./account-auto-pause-recovery";
 import { wasAccountAutoPaused, wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
 import { bindAnthropicRejectionResponse } from "../../adapters/anthropic-rejection-memo";
-import { ownsMistralDispatchReceipt } from "../../providers/mistral-transport";
+import { ownsDispatchReceipt } from "../../lib/provider-admission-wait";
 import { deferPhysicalSendReporter } from "./deferred-send-reporter";
 import { usesApiKeyAccount } from "../../providers/label";
 import { spendLedgerStorageErrorResponse } from "./spend-storage-error";
@@ -407,7 +407,7 @@ export async function prepareAdapterExchange(
   const autoPauseEnabled = config.providers[route.providerName]?.accountAutoPause?.enabled === true;
   const billingPoolRequest = isAnthropicBillingKeyPool(route.provider);
   const deferTransportSpend = () => billingPoolRequest || (route.providerName === "github-copilot" && route.provider.authMode !== "forward")
-    || ((adapterSendBudget?.spendEnforced || sendBudgetState.workflowRootId) && ownsMistralDispatchReceipt(route.provider));
+    || ((adapterSendBudget?.spendEnforced || sendBudgetState.workflowRootId) && ownsDispatchReceipt(route.provider));
   let billingRecoveryActive = false;
   const genericRefetchCountsSends = () => !!sendBudgetState.workflowRootId || options.comboAttempt === true || sendBudgetState.adapterSendBudget?.spendEnforced === true
     || transientRetryPolicyFor(route.provider) !== null || resetReplayPolicyFor(route.provider) !== null
@@ -469,9 +469,9 @@ export async function prepareAdapterExchange(
       // A combo-owned or compaction-prepaid send is settled by the physical-dispatch receipt
       // when spend enforcement is off. Enforced spend and direct requests keep the shared
       // physical-send reporter, which already owns the permit lifecycle there.
-      // Stable per request: a Combo or compaction permit comes from `reserveDispatch`, which starts
-      // (and freezes) the spend policy first, so `spendEnforced` cannot change before dispatch.
-      if (ownsMistralDispatchReceipt(route.provider)) adapterSendBudget?.startRequest?.(responsesSpendTarget(logCtx, route.providerName));
+      // A Mistral combo holds a send slot without booking tokens. Choose the accounting path
+      // with the selected key, not the parent combo's still-unattributed spend preview.
+      if (ownsDispatchReceipt(route.provider)) adapterSendBudget?.startRequest?.(responsesSpendTarget(logCtx, route.providerName));
       const receiptMode = !sendBudgetState.adapterSendBudget?.spendEnforced
         && Boolean(options.comboInitialSend || compactPrepaid);
       // Combo and emergency compaction admission already book this target's first send.

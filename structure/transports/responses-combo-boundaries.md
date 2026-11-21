@@ -231,8 +231,7 @@ inspecting (below its byte and chunk caps) therefore advances to the next target
 
 The buffered bytes are replayed unchanged before the reader continues. Native passthrough and eager
 relay identity markers are restored on the wrapped response so Windows/Bun stream paths and deferred
-logging retain their existing owners. A failed child keeps its physical attempt receipt and usage,
-while the successful child remains the logical request result.
+logging retain their existing owners. Each failed child keeps its own usage. When the combo ends in a refusal, the spend ledger settles only the last physical send, using its reported counts even if the client receives a rebuilt error or an earlier quota refusal. Without counts for that send, its spend stays unresolved.
 
 `src/server/responses/core.ts` holds the admitted turn lease across the whole combo ladder.
 Refused child relays can unbind without settling the parent; the accepted stream keeps its binding

@@ -8,6 +8,14 @@ export function withPhysicalSendAdmission<T>(check: CheckPhysicalAdmission | und
 }
 
 /** Shared by the executor and transports whose own admission queue precedes the wire. */
+const dispatchReceiptOwners = new WeakSet<object>();
+export function markDispatchReceiptOwner(executor: typeof fetch): void {
+  dispatchReceiptOwners.add(executor);
+}
+export function ownsDispatchReceipt(provider?: object): boolean {
+  return !!provider && "fetch" in provider && typeof provider.fetch === "function" && dispatchReceiptOwners.has(provider.fetch);
+}
+
 export const PHYSICAL_DISPATCH = Symbol.for("opencodex.physical-dispatch");
 export function settlePhysicalDispatch(init?: RequestInit & { [PHYSICAL_DISPATCH]?: (body?: BodyInit | null) => void }): void {
   init?.[PHYSICAL_DISPATCH]?.(init.body);

@@ -2,7 +2,7 @@ import { comboFailureDecision } from "../combos";
 import { isProviderModerationRefusal } from "../combos/failover";
 import { attachComboFailureEvidence } from "../lib/client-error-body";
 import { explicitErrorEventStatus } from "./responses/combo-stream-preflight";
-import { httpStatusFromTerminalError } from "../lib/errors";
+import { cyberPolicyTerminalError, httpStatusFromTerminalError } from "../lib/errors";
 import { redactSecretString } from "../lib/redact";
 import { sseFieldValue } from "../lib/sse-decoder";
 import type { TranslatorBudget } from "../lib/translator-budget";
@@ -112,7 +112,7 @@ export async function preflightNativeMessagesResponse(
         const status = moderation && mapped !== 400 && mapped !== 422 ? 400 : mapped;
         if (logCtx.terminalSource !== "synthetic" && logCtx.errorCode !== UNDECLARED_TOOL_CALL_ERROR_CODE
           && comboFailureDecision(status, typeof error.message === "string" ? error.message : "", {
-          code: typeof error.code === "string" ? error.code : undefined,
+          code: typeof error.code === "string" ? error.code : undefined, cyberPolicy: cyberPolicyTerminalError(payload) !== undefined,
           rootCode: typeof payload.code === "string" ? payload.code : undefined,
           // The whole event, as the HTTP and stream readers judge it, so transports cannot disagree.
           providerModerationRefusal: status === 400 || status === 422

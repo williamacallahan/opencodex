@@ -150,8 +150,10 @@ describe("combo path encrypted agent task recovery", () => {
     if (reason === "protected file") input.unshift({ role: "user", content: [{ type: "input_file", file_id: "file_owner" }] });
     const result = await post(cfg, "combo/routed", input, headers);
     await result.text();
-    if (reason === "protected file" || reason === "protected handle") { expect(result.status).toBe(409); expect(wires).toEqual([]); expect(assignments).toEqual([]); }
-    else {
+    if (reason === "protected file" || reason === "protected handle") {
+      expect(result.status).toBe(reason === "protected file" ? 503 : 409);
+      expect(wires).toEqual([]); expect(assignments).toEqual([]);
+    } else {
       expect(result.status).toBe(200); expect(wires).toHaveLength(1);
       expect(assignments).toHaveLength(1); expect(assignments[0]).toContain(FERNET_TASK);
       expect(wires[0]).toContain("count the rows"); expect(wires[0]).not.toContain(FERNET_TASK);

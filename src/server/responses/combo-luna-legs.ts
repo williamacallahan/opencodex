@@ -38,7 +38,7 @@ export async function reserveQuotaPermitsMove(response: Response, signal: AbortS
   const evidence = inspection ? new Response(inspection.text, { status: response.status, headers: response.headers }) : response.clone();
   const failure = await consumeComboFailure(evidence, signal);
   return response.status >= 500 ? comboFailureDecision(response.status, failure.classificationText,
-    { code: failure.upstreamCode, rootCode: failure.upstreamRootCode }) === "hop" : isReserveSeatQuotaRefusal(failure);
+    { code: failure.upstreamCode, rootCode: failure.upstreamRootCode, cyberPolicy: failure.cyberPolicy }) === "hop" : isReserveSeatQuotaRefusal(failure);
 }
 
 const notStarted = new WeakSet<object>();

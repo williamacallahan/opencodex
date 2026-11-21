@@ -222,20 +222,38 @@ export function hasStructuredErrorVerdict(error: { code?: unknown; type?: unknow
   return (!!code && !GENERIC_ERROR_CODES.has(code)) || error.type === "overloaded_error" || error.type === "rate_limit_error";
 }
 
+/** String diagnostics are supported only on the envelope itself, not on arbitrary nested records. */
+export function topLevelPolicyDiagnostic(root: { error?: unknown; detail?: unknown }): { message: string; code: string } | undefined {
+  for (const message of [root.error, root.detail]) {
+    if (typeof message !== "string") continue;
+    const code = isCyberPolicyMessage(message) ? CYBER_POLICY_ERROR_CODE : safetyRefusalCodeFromMessage(message);
+    if (code) return { message, code };
+  }
+  return undefined;
+}
+
 /** Inspect protocol error carriers, never arbitrary echoed content. Codes precede wording across carriers. */
-export function cyberPolicyTerminalError(payload: unknown): { message: string; type?: string } | undefined {
+export function terminalPolicyError(payload: unknown): { message: string; code: string; type?: string } | undefined {
   type Diagnostic = { code?: unknown; type?: unknown; message?: unknown };
   if (!payload || typeof payload !== "object") return undefined;
-  const root = payload as Diagnostic & { error?: Diagnostic; last_error?: Diagnostic;
+  const root = payload as Diagnostic & { error?: Diagnostic | string; detail?: unknown; last_error?: Diagnostic;
     response?: Diagnostic & { error?: Diagnostic; last_error?: Diagnostic; incomplete_details?: Diagnostic } };
-  const candidates = [root.error, root.last_error, root.response?.error, root.response?.last_error, root.response?.incomplete_details, root, root.response];
-  const policy = candidates.find(error => typeof error?.code === "string" && isCyberPolicyCode(error.code.trim()))
-    ?? (!candidates.some(error => error && hasStructuredErrorVerdict(error))
-      ? candidates.find(error => typeof error?.message === "string" && isCyberPolicyMessage(error.message)) : undefined);
+  const candidates = [typeof root.error === "string" ? undefined : root.error, root.last_error, root.response?.error,
+    root.response?.last_error, root.response?.incomplete_details, root, root.response];
+  let policy = candidates.find(error => typeof error?.code === "string" && isCyberPolicyCode(error.code.trim()));
+  if (!policy && !candidates.some(error => error && hasStructuredErrorVerdict(error))) {
+    policy = candidates.find(error => typeof error?.message === "string" && isCyberPolicyMessage(error.message));
+    if (!policy) return topLevelPolicyDiagnostic(root);
+  }
   if (!policy) return undefined;
   const message = typeof policy.message === "string" && policy.message.trim() || CYBER_POLICY_FALLBACK_MESSAGE;
   const type = typeof policy.type === "string" && policy.type.trim();
-  return type ? { message, type } : { message };
+  return { message, code: CYBER_POLICY_ERROR_CODE, ...(type && { type }) };
+}
+
+export function cyberPolicyTerminalError(payload: unknown): { message: string; type?: string } | undefined {
+  const policy = terminalPolicyError(payload);
+  return policy?.code === CYBER_POLICY_ERROR_CODE ? policy : undefined;
 }
 
 export function isSubscriptionGateMessage(text: string): boolean {

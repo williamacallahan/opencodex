@@ -12,7 +12,7 @@ import {
 } from "../../combos/failover";
 import type { ResponsesTerminalStatus } from "../../bridge";
 import { comboFailureDecision } from "../../combos";
-import { httpStatusFromTerminalError } from "../../lib/errors";
+import { cyberPolicyTerminalError, httpStatusFromTerminalError } from "../../lib/errors";
 import { hasResponseMediaType } from "../../lib/http-response-semantics";
 import type { RequestFailureStage } from "../../lib/request-failure-model";
 import type { RequestLogContext } from "../request-log";
@@ -336,7 +336,7 @@ function bareErrorIsRetryable(payload: unknown): boolean {
   // A conflicting root and record code hop only when each would hop on its own, so a root hard
   // stop is never hidden behind a retryable record code (and a retryable pair keeps dev's hop).
   return comboFailureDecision(status, message, {
-    code: recordCode ?? rootCode, rootCode,
+    code: recordCode ?? rootCode, rootCode, cyberPolicy: cyberPolicyTerminalError(event) !== undefined,
     codexModelRefusal: terminalModelRefusal(status, event),
     malformedResponseFormat, openRouterOpaque400, providerModerationRefusal,
   }) === "hop";

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { clearAccountNeedsReauth, isAccountNeedsReauth } from "../../src/codex/auth-api";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import { clearAccountQuota, setAccountQuotaFromParsed } from "../../src/codex/quota";
@@ -36,7 +37,7 @@ const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "h
 type Listener = (event: unknown) => void;
 const reasoning = { type: "reasoning", id: "rs_inspected", encrypted_content: "fixture-owner-cipher", summary: [] };
 type TokenCounts = { input_tokens: number; output_tokens: number };
-type FirstFrame = { afterCreated?: boolean; usage?: TokenCounts; response?: { id: string; usage?: TokenCounts }; status: number; code?: string | number; request?: { innererror: { code: string } }; error: { code?: string; message: string; innererror?: { code: string } } };
+type FirstFrame = { afterCreated?: boolean; beforeError?: () => void; usage?: TokenCounts; response?: { id: string; usage?: TokenCounts }; status: number; code?: string | number; request?: { innererror: { code: string } }; detail?: string; error?: string | { code?: string; type?: string; message: string; innererror?: { code: string } } };
 type Step = FirstFrame | "generic-hard-failure" | "held-hard-failure" | "issue-reasoning" | "first-quota" | "first-conflict" | "quota-then-refuse" | "quota-output-then-refuse" | "reserve-started-then-refuse"
   | "first-model-missing" | "first-model-missing-underscore" | "wrapped-quota" | "conflicting-wrapper" | "foreign-wrapper" | "missing-status" | "unknown-status";
 
@@ -59,8 +60,9 @@ class FakeWebSocket {
     this.emit("open", {});
     const id = `resp_${FakeWebSocket.instances.indexOf(this)}`;
     if (typeof step === "object") {
-      const { afterCreated, ...error } = step;
+      const { afterCreated, beforeError, ...error } = step;
       if (afterCreated) this.frame({ type: "response.created", response: { id, status: "in_progress", output: [] } });
+      beforeError?.();
       this.frame({ type: "error", ...error });
       return;
     }
@@ -252,6 +254,18 @@ async function send(config = comboConfig(), input: unknown = "hello", thread?: s
   return { response, body, logCtx };
 }
 
+function sendWithSpendLedger(config: OcxConfig) {
+  config.spend = { pool: { maxTokens: 1_000_000 } };
+  configureSharedSpendLedger(spendPolicyFromConfig(config.spend, undefined, Object.keys(config.providers)));
+  const options = createServeOptions({ config, deps: {}, managementApiDeps: {},
+    ingressForServer: () => "public", packageTreeIntegrity: { status: () => ({ ok: true }) },
+    runAdmittedHttpTurn: (_request: Request, _policy: unknown, run: () => Promise<Response>) => run(),
+  } as unknown as Parameters<typeof createServeOptions>[0]);
+  return options.fetch(new Request("http://localhost/v1/responses", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "chain/overload", input: "hello", stream: true, max_output_tokens: 32 }),
+  }), { timeout() {} } as unknown as Parameters<typeof options.fetch>[1]);
+}
+
 function strictReserveConfig() {
   const cfg = comboConfig();
   for (const target of cfg.combos!.overload!.targets) target.model = "gpt-6-luna";
@@ -273,9 +287,9 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect(body.includes(marker)).toBe(false);
   });
 
-  test("policy precedence: a zero-output overload quoting a refusal reaches the combo fallback", async () => {
+  test.each([{ code: "server_is_overloaded" }, { type: "overloaded_error" }])("policy precedence: a zero-output overload %j quoting a refusal reaches the combo fallback", async verdict => {
     const message = 'Queue full while recording "This request was flagged for possible cybersecurity risk."';
-    FakeWebSocket.plan = [{ status: 503, error: { code: "server_is_overloaded", message } }];
+    FakeWebSocket.plan = [{ status: 503, error: { ...verdict, message } }];
     const { response, body, logCtx } = await send();
     expect(response.status).toBe(200);
     expect(body).toContain("resp_fallback");
@@ -533,21 +547,33 @@ describe("a failover combo moves past a native Codex overload that preceded any 
 
   test("a restored strict refusal writes one final HTTP request row and settles spend", async () => {
     FakeWebSocket.plan = ["held-hard-failure"];
-    const config = strictReserveConfig();
-    config.spend = { pool: { maxTokens: 1_000_000 } };
-    configureSharedSpendLedger(spendPolicyFromConfig(config.spend, undefined, Object.keys(config.providers)));
-    const options = createServeOptions({ config, deps: {}, managementApiDeps: {},
-      ingressForServer: () => "public", packageTreeIntegrity: { status: () => ({ ok: true }) },
-      runAdmittedHttpTurn: (_request: Request, _policy: unknown, run: () => Promise<Response>) => run(),
-    } as unknown as Parameters<typeof createServeOptions>[0]);
-    const response = await options.fetch(new Request("http://localhost/v1/responses", { method: "POST",
-      headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "chain/overload", input: "hello", stream: true }),
-    }), { timeout() {} } as unknown as Parameters<typeof options.fetch>[1]);
+    const response = await sendWithSpendLedger(strictReserveConfig());
     expect(await response.text()).toContain("Reserve refused");
     const rows = getRequestLogEntries().filter(row => row.requestId === response.headers.get("x-opencodex-request-id"));
     expect(rows.map(row => row.status)).toEqual([503]);
     expect(rows[0]?.spend).toMatchObject({ sends: 1, settled: 1, unresolved: 0 });
     expect(sharedSpendLedger().snapshot("pool", "openai")).toMatchObject({ reserved: 0, settled: 7, unresolved: 0 });
+  });
+
+  test.each([
+    [401, "invalid_authentication", "openai/gpt-5.5", false],
+    [403, "token_invalidated", "chain/overload", false],
+    [403, "token_invalidated", "chain/overload", true],
+  ] as const)("committed credential rejection: %i %s on %s (replaced=%s)", async (status, code, model, replaced) => {
+    FakeWebSocket.plan = [{ afterCreated: true, status, error: { code, message: "Fixture bearer rejected" },
+      beforeError: () => {
+        if (replaced) saveCodexAccountCredential(WORK, { accessToken: "fixture-new-access", refreshToken: "fixture-new-grant",
+          expiresAt: Date.now() + 3_600_000, chatgptAccountId: `acc-${WORK}` });
+      },
+    }];
+    const { body, logCtx } = await send(comboConfig(), "hello", undefined, model);
+    expect(isAccountNeedsReauth(WORK)).toBe(!replaced);
+    expect(FakeWebSocket.instances.flatMap(ws => ws.sent)).toHaveLength(1);
+    expect(fallbackSends).toBe(0);
+    expect(logCtx.terminalHttpStatus).toBe(status);
+    expect(body).toContain("event: response.created");
+    expect(body).toContain("event: response.failed");
+    expect(body).toContain('"retryable":false');
   });
 
   test.each([401, 403])("a committed origin %i without credential evidence leaves the seat selectable", async status => {
@@ -578,6 +604,18 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect(FakeWebSocket.instances.flatMap(socket => socket.sent)).toHaveLength(1);
   });
 
+  test.each([
+    ["detail", "This request was flagged for possible cybersecurity risk.", "cyber_policy"],
+    ["error", "This request was blocked by our safety systems.", "invalid_prompt"],
+  ] as const)("policy precedence: a WebSocket string %s stops the turn", async (field, message, code) => {
+    FakeWebSocket.plan = [{ status: 503, [field]: message }, "issue-reasoning"];
+    const { body } = await send();
+    const terminal = body.split("event: response.failed\n")[1]?.split("\n")[0]?.replace(/^data: /, "");
+    expect(JSON.parse(terminal ?? "null")?.response).toMatchObject({ error: { code, message }, retryable: false });
+    expect(FakeWebSocket.instances.flatMap(socket => socket.sent)).toHaveLength(1);
+    expect(fallbackSends).toBe(0);
+  });
+
   test("a direct wrapped 503 carrying only safety refusal copy is never resent", async () => {
     const message = "This request was blocked by our safety systems. Reason: Potentially unintended activity.";
     FakeWebSocket.plan = [{ status: 503, error: { message } }, "issue-reasoning"];
@@ -600,6 +638,55 @@ describe("a failover combo moves past a native Codex overload that preceded any 
       expect(result.response.status).toBe(403);
       expect(JSON.parse(result.body).usage).toEqual(expected);
     }
+  });
+
+  test("terminal send accounting settles a first-frame hard 403 from its reported usage", async () => {
+    FakeWebSocket.plan = [{ status: 403, code: "origin_rejected", usage: { input_tokens: 13, output_tokens: 2 }, error: { message: "Turn declined" } }];
+    const response = await sendWithSpendLedger(comboConfig());
+    expect(response.status).toBe(403);
+    expect(await response.text()).toContain("Turn declined");
+    const row = getRequestLogEntries().find(row => row.requestId === response.headers.get("x-opencodex-request-id"));
+    expect(row?.attempts).toMatchObject([{ status: 403, sendCount: 1, usage: { inputTokens: 13, outputTokens: 2 } }]);
+    expect(fallbackSends).toBe(0);
+    expect(sharedSpendLedger().snapshot("pool", "openai")).toMatchObject({ reserved: 0, settled: 15, unresolved: 0 });
+  });
+
+  test("terminal send accounting leaves a same-key retry unresolved when only the first send reported usage", async () => {
+    const config = comboConfig();
+    config.combos!.overload!.targets.shift();
+    config.providers.fallback!.retryOn429 = { attempts: 1, intervalMs: 1 };
+    let sends = 0;
+    globalThis.fetch = (async () => ++sends === 1
+      ? Response.json({ error: { message: "busy" }, usage: { input_tokens: 13, output_tokens: 2 } }, { status: 429, headers: { "retry-after": "0" } })
+      : Response.json({ error: { message: "forbidden" } }, { status: 403 })) as typeof fetch;
+    const response = await sendWithSpendLedger(config);
+    expect(response.status).toBe(403);
+    expect(await response.text()).toContain("forbidden");
+    expect(sends).toBe(2);
+    expect(sharedSpendLedger().snapshot("pool", "fallback").settled).toBe(0);
+  });
+
+  test.each([false, true])("terminal send accounting does not charge a fallback for the returned quota refusal (fallback reports usage=%s)", async reportsUsage => {
+    const config = comboConfig();
+    config.providers.primary = { ...config.providers.fallback!, baseUrl: "https://primary.invalid/v1" };
+    config.combos!.overload!.targets[0]!.provider = "primary";
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const host = new URL(input instanceof Request ? input.url : String(input)).hostname;
+      if (host === "primary.invalid") return Response.json({ error: { message: "weekly usage limit reached" }, usage: { input_tokens: 13, output_tokens: 2 } }, { status: 429 });
+      if (host !== "combo-fixture.invalid") throw new Error(`unexpected host ${host}`);
+      return Response.json({ error: { message: "forbidden" }, ...(reportsUsage && { usage: { input_tokens: 3, output_tokens: 1 } }) }, { status: 403 });
+    }) as typeof fetch;
+    const response = await sendWithSpendLedger(config);
+    expect(response.status).toBe(429);
+    expect(await response.text()).toContain("weekly usage limit reached");
+    const row = getRequestLogEntries().find(row => row.requestId === response.headers.get("x-opencodex-request-id"));
+    expect(row?.attempts).toMatchObject([{ status: 429, sendCount: 1, usage: { inputTokens: 13, outputTokens: 2 } }, { status: 403, sendCount: 1 }]);
+    const primary = sharedSpendLedger().snapshot("pool", "primary");
+    expect(primary.settled).toBe(0);
+    expect(primary.unresolved).toBeGreaterThan(0);
+    const fallback = sharedSpendLedger().snapshot("pool", "fallback");
+    expect(fallback.settled).toBe(reportsUsage ? 4 : 0);
+    expect(fallback.unresolved > 0).toBe(!reportsUsage);
   });
 
   test("a first-frame refusal omits malformed usage instead of reporting a charge", async () => {

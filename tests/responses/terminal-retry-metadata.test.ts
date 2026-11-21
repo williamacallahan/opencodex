@@ -12,6 +12,14 @@ function payload(block: string): unknown {
 }
 
 describe("terminal retry metadata", () => {
+  test("a key matching a protocol field name does not rewrite a clean HTTP error", async () => {
+    const body = '{\n  "error": { "type": "invalid_request_error", "message": "bad input" }\n}\n';
+    const headers = new Headers({ "content-length": String(Buffer.byteLength(body)) });
+    const response = formatPassthroughUpstreamError(400, body, { headers, maskCredential: createOutboundCredentialMask({ "x-api-key": "type" }) });
+    expect(await response.text()).toBe(body);
+    expect(response.headers.get("content-length")).toBe(headers.get("content-length"));
+  });
+
   test("incomplete metadata stays typed without exempting matching diagnostic fields", () => {
     const rewrite = createTerminalErrorRedactionBlockRewrite({
       authorization: "Bearer false", "x-api-key": "retry", "x-goog-api-key": "tokens",
@@ -30,12 +38,17 @@ describe("terminal retry metadata", () => {
   });
 
   test("terminal diagnostics cannot rename output fields or change response timestamps", () => {
-    const rewrite = createTerminalErrorRedactionBlockRewrite({ "x-api-key": "id", authorization: "Bearer 314" });
-    const response = { id: "resp_id_314", status: "failed", created_at: 314,
-      output: [{ id: "msg_id_314", type: "message", content: [] }], error: { message: "id 314" } };
+    const rewrite = createTerminalErrorRedactionBlockRewrite({ "x-api-key": "id", authorization: "Bearer 314", "x-goog-api-key": "ess" });
+    const response = { id: "resp_314", response_id: "314", model: "model_314", status: "failed", created_at: 314,
+      output: [{ id: "msg_314", type: "message", role: "assistant", status: "completed", content: [
+        { type: "unexpected_314", role: "314", status: "314", id: "314", text: "314", extra_314: 1 },
+      ] }], error: { message: "id 314" } };
     const event = { type: "response.failed", response };
     const [block] = rewrite(`event: response.failed\ndata: ${JSON.stringify(event)}`);
-    expect(payload(block!)).toEqual({ ...event, response: { ...response, error: { message: "[REDACTED] [REDACTED]" } } });
+    expect(payload(block!)).toEqual({ ...event, response: { ...response, id: "resp_[REDACTED]", response_id: "[REDACTED]", model: "model_[REDACTED]",
+      output: [{ id: "msg_[REDACTED]", type: "message", role: "assistant", status: "completed", content: [
+        { type: "unexpected_[REDACTED]", role: "[REDACTED]", status: "[REDACTED]", id: "[REDACTED]", text: "[REDACTED]" },
+      ] }], error: { message: "[REDACTED] [REDACTED]" } } });
   });
 
   test.each(["status", "status_code"])("wrapped %s and error.retryable keep their wire types", statusField => {
@@ -52,14 +65,14 @@ describe("terminal retry metadata", () => {
     } });
   });
 
-  test("the quota bridge reset remains numeric and its error type still identifies a spent window", async () => {
+  test("a matching quota reset is masked without changing the quota verdict or retry header", async () => {
     const quota = formatUsageLimitReachedResponse("fixture 314", 2_000_000_314_000, 314);
     const maskCredential = createOutboundCredentialMask({ authorization: "Bearer 314", "x-api-key": "usage" });
     const outgoing = formatPassthroughUpstreamError(quota.status, await quota.text(), { headers: quota.headers, maskCredential });
     expect(outgoing.status).toBe(429);
     expect(outgoing.headers.get("retry-after")).toBe("314");
     expect(await outgoing.json()).toEqual({ error: {
-      type: "usage_limit_reached", code: "usage_limit_reached", resets_at: 2_000_000_314, message: "fixture [REDACTED]",
+      type: "usage_limit_reached", code: "usage_limit_reached", resets_at: "[REDACTED]", message: "fixture [REDACTED]",
     } });
   });
 

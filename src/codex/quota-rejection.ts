@@ -242,7 +242,7 @@ function scanJsonArray(text: string, index: number): JsonScanResult {
   throw new SyntaxError("unterminated JSON array");
 }
 
-function isUnsafeJsonDocument(text: string): boolean {
+export function isUnsafeJsonDocument(text: string): boolean {
   try {
     const result = scanJsonValue(text, 0);
     return result.duplicate || skipJsonWhitespace(text, result.next) !== text.length;

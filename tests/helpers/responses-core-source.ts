@@ -41,6 +41,11 @@ export const RESPONSES_CORE_MODULES = [
   "combo-conversation-pin.ts",
   // Reached from core-combo.ts: the Luna Reserve leg order across the native pool and codex-lb.
   "combo-luna-legs.ts",
+  "owner-capacity-refusal.ts",
+  "pool-response-alternate.ts",
+  "reserve-compaction.ts",
+  "reserve-refusal-body.ts",
+  "reserve-seat-dispatch.ts",
   // Reached from core-combo.ts: opt-in JEV session pin keeps a session on its decided target (#7525).
   "jev-session-pin.ts",
   // Reached from core-combo.ts: the JEV model backend's internal decision turn.

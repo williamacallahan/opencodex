@@ -7,6 +7,8 @@ import { withPhysicalSendAdmission } from "../../lib/provider-admission-wait";
 import { carryProxyErrorContext, hasProxyErrorMessage, markProxyError } from "../../lib/client-error-body";
 import { classifyUpstreamCondition } from "../../lib/upstream-condition";
 import { effectiveAzureOutputBudget } from "../../adapters/azure";
+import { isCanonicalMistralChat } from "../../providers/mistral-transport";
+import { responsesSpendTarget } from "./request-spend-target";
 import { buildResponsesTransport } from "../../adapters/openai-responses/transport";
 import { isMetaAiResponsesDestination } from "../../responses/muse-tool-name-alias";
 import { chatCanPreserveMandatoryToolChoice, hasMandatoryToolChoice } from "./combo-required-tool-contract";
@@ -596,6 +598,8 @@ export async function executeComboResponses(
       comboId,
       routeDecision: logCtx.routeDecision,
       attempts: logCtx.attempts,
+      // Exhaustion can return an earlier refusal; spend still belongs to the last physical send.
+      usage: lastFailedSendUsage,
       activeAttempt: undefined,
       activeAttemptStartedAt: undefined,
     });
@@ -1071,6 +1075,7 @@ export async function executeComboResponses(
   // no-more-targets branch; a budget refusal ends the ladder one iteration later, where that
   // iteration's own `childLog` is already out of scope.
   let lastFailedChildLog: RequestLogContext | undefined;
+  let lastFailedSendUsage: OcxUsage | undefined;
   // The target behind `lastFailure`, so the next dispatch can tell a hop from a same-target retry.
   let lastFailedTarget: { provider: string; model: string } | undefined;
   let lastFailedRetryAfter: string | undefined;
@@ -1225,8 +1230,15 @@ export async function executeComboResponses(
     // remain bounded by the shared total, transition ledger and per-target holdback.
     // `countedExternally` is required: the child charges its own physical sends against this
     // booking through the exact permit, and charging here as well would halve the cap.
+    const childLog: RequestLogContext = {
+      model: pick.target.model,
+      provider: pick.target.provider,
+      ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
+      ...(logCtx.surface ? { surface: logCtx.surface } : {}),
+    };
     const hopDecision = comboSendScope?.reserveDispatch({
       sendClass: firstComboTarget ? "initial" : "combo-failover",
+      ...(isCanonicalMistralChat(spendProvider) ? { selectedSpendScopes: () => responsesSpendTarget(childLog, targetRoute.providerName) } : {}),
       targetKey: `${pick.target.provider}/${pick.target.model}`,
       countedExternally: true,
     });
@@ -1251,12 +1263,6 @@ export async function executeComboResponses(
     const initialSend = hopDecision?.allowed ? { permit: hopDecision.permit, producerOwned: false } : undefined;
     try {
     comboTargetsDispatched += 1;
-    const childLog: RequestLogContext = {
-      model: pick.target.model,
-      provider: pick.target.provider,
-      ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
-      ...(logCtx.surface ? { surface: logCtx.surface } : {}),
-    };
     const targetReasoningEfforts = supportedLadderFor({
       provider: targetRoute.provider,
       modelId: targetRoute.modelId,
@@ -1629,12 +1635,11 @@ export async function executeComboResponses(
       childLog.providerAdapter ?? attempt.adapter,
       childLog.accountLogLabel,
     );
-    finishRequestAttempt(
-      attempt,
-      failure.response.status,
-      Date.now() - started,
-      failure.usage ?? childLog.usage,
-    );
+    if (attempt.sendCount > 0) {
+      // A same-key retry shares its child log with the prior send; only the final response isolates its counts.
+      lastFailedSendUsage = failure.usage ?? (attempt.sendCount === 1 ? childLog.usage : undefined);
+    }
+    finishRequestAttempt(attempt, failure.response.status, Date.now() - started, failure.usage ?? childLog.usage);
     if (recorded?.idIssuer && attempt.sendCount === 0 && failure.upstreamCode === "previous_response_not_found") return missingPrevious();
     if (isReplayRefusalResponse(failure.response)) {
       // Numeric 429 is a client replay policy here, not an upstream quota observation.
@@ -1685,7 +1690,7 @@ export async function executeComboResponses(
       ? "stop"
       : isPolicyCandidateRefusal(failure.response) ? "hop"
       : comboFailureDecision(failure.response.status, failure.classificationText, {
-        hardRefusal,
+        hardRefusal, cyberPolicy: failure.cyberPolicy,
         code: failure.upstreamCode,
         rootCode: failure.upstreamRootCode,
         codexModelRefusal: failure.codexModelRefusal,

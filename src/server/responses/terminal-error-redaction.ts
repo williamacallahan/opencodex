@@ -35,20 +35,20 @@ export function maskDiagnosticJson(parsed: unknown, mask: (text: string) => stri
     const counter = role === "usage" ? /^(?:input|output|total|prompt|completion)_tokens$/.test(key)
       : role === "tokenDetails" && /^(?:cached|reasoning|cache_write|cache_write_1h|audio|accepted_prediction|rejected_prediction)_tokens$/.test(key);
     const carrier = role === "envelope" || role === "error" || role === "incomplete";
-    if (role === "output") {
-      if (SENSITIVE_KEY_PATTERN.test(key)) return REDACTED_SECRET;
-      return typeof field === "string" && !/^(?:id|type|status|role)$/.test(key) ? mask(redactSecretString(field)) : field;
-    }
-    if (role === "envelope" && /^(?:id|response_id|model)$/.test(key) && typeof field === "string") return field;
+    const outputField = role === "output" && /^(?:id|type|status|role|content|text|annotations|call_id|name|arguments|summary|encrypted_content)$/.test(key);
+    if (outputField && typeof field === "string" && (
+      (key === "role" && /^(?:assistant|user|system|developer)$/.test(field)) ||
+      (key === "status" && /^(?:in_progress|completed|incomplete|failed|queued|cancelled)$/.test(field)) ||
+      (key === "type" && /^(?:message|output_text|refusal|reasoning|reasoning_text|summary_text|function_call|custom_tool_call|web_search_call|file_search_call|computer_call|image_generation_call|code_interpreter_call|mcp_call)$/.test(field))
+    )) return field;
     if (role === "envelope" && /^(?:created_at|completed_at)$/.test(key) && (typeof field === "number" || field === null)) return field;
     if (counter && typeof field === "number") return field;
     if (carrier && key === "retryable" && typeof field === "boolean") return field;
     if (role === "envelope" && ((key === "end_turn" && typeof field === "boolean") || (key === "sequence_number" && typeof field === "number"))) return field;
     if (this === parsed && this.type === "error" && (key === "status" || key === "status_code")
       && typeof field === "number" && Number.isInteger(field) && field >= 100 && field <= 599) return field;
-    if (role === "error" && key === "resets_at" && typeof field === "number" && Number.isSafeInteger(field) && field >= 0) return field;
     if (role === "incomplete" && key === "reason" && typeof field === "string" && truncationReasonFor(field) === field) return field;
-    const protocol = childRole || counter || (carrier && /^(?:type|code|message|param|retryable)$/.test(key))
+    const protocol = (childRole && role !== "output") || outputField || counter || (role === "error" && key === "resets_at") || (carrier && /^(?:type|code|message|param|retryable)$/.test(key))
       || (role === "envelope" && /^(?:id|model|status|sequence_number|response_id|output)$/.test(key));
     if (!protocol && key && !Array.isArray(this) && mask(key) !== key) return undefined;
     if (carrier && typeof field === "string" && (

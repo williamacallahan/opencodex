@@ -183,7 +183,7 @@ async function comboRequest(count: number, stream = false) {
 
 for (const streamError of [false, true]) test(`Combo signature repairs count every physical send (streamError=${streamError})`, async () => {
   const { cfg, req } = await comboRequest(4, streamError);
-  const budget = createRequestExecutionBudget();
+  const budget = createRequestExecutionBudget(comboExecutionBudgetPolicy(4));
   const sends: Array<{ host: string; body: string }> = [];
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const host = new URL(String(input)).host;

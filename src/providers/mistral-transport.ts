@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { OcxProviderConfig } from "../types";
 import { isEgressTransparentExecutor, markEgressTransparentExecutor } from "../lib/provider-egress";
 import { configuredOutboundFetch } from "../lib/proxy-env";
-import { physicalAdmission, settlePhysicalDispatch, waitOutsideProviderHeaderDeadline } from "../lib/provider-admission-wait";
+import { markDispatchReceiptOwner, ownsDispatchReceipt, physicalAdmission, settlePhysicalDispatch, waitOutsideProviderHeaderDeadline } from "../lib/provider-admission-wait";
 import { markSameTargetRetryHold, sleepWithAbort } from "../lib/upstream-retry";
 import { RequestPacingQueueOverloadError } from "./request-pacing";
 import type { OcxProviderTransport } from "./xai-transport";
@@ -188,18 +188,13 @@ export class MistralBudgetPacer {
 }
 
 const pacer = new MistralBudgetPacer();
-const wrapped = new WeakSet<object>();
-
-export function ownsMistralDispatchReceipt(provider?: object): boolean {
-  return !!provider && "fetch" in provider && typeof provider.fetch === "function" && wrapped.has(provider.fetch);
-}
 
 /** Wrap canonical Mistral Chat sends with bounded admission and server-delay protection. */
 export function resolveMistralTransport(
   provider: OcxProviderTransport,
   budgetPacer = pacer,
 ): OcxProviderTransport {
-  if (!isCanonicalMistralChat(provider) || (provider.fetch && wrapped.has(provider.fetch))) return provider;
+  if (!isCanonicalMistralChat(provider) || ownsDispatchReceipt(provider)) return provider;
   const baseFetch = provider.fetch
     ?? markEgressTransparentExecutor(((input, init) => configuredOutboundFetch(input, init)) as typeof globalThis.fetch);
   const attemptFetch = (async (input, init) => {
@@ -244,6 +239,6 @@ export function resolveMistralTransport(
     return response;
   }) as typeof globalThis.fetch;
   if (isEgressTransparentExecutor(baseFetch)) markEgressTransparentExecutor(attemptFetch);
-  wrapped.add(attemptFetch);
+  markDispatchReceiptOwner(attemptFetch);
   return { ...provider, fetch: attemptFetch };
 }

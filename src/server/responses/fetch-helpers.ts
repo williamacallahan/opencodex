@@ -1,6 +1,5 @@
 import type { NativeResponseControl } from "./native-response-control";
-import { ownsMistralDispatchReceipt } from "../../providers/mistral-transport";
-import { physicalAdmission, PHYSICAL_DISPATCH, settlePhysicalDispatch, PROVIDER_HEADER_DEADLINE as HEADER_DEADLINE, type ProviderHeaderDeadline as HeaderDeadline } from "../../lib/provider-admission-wait";
+import { ownsDispatchReceipt, physicalAdmission, PHYSICAL_DISPATCH, settlePhysicalDispatch, PROVIDER_HEADER_DEADLINE as HEADER_DEADLINE, type ProviderHeaderDeadline as HeaderDeadline } from "../../lib/provider-admission-wait";
 import type { CodexWsPreOutputRefusalHold } from "./codex-ws-wire";
 import type { Server } from "bun";
 import {
@@ -268,7 +267,7 @@ export function sendWithConnectionPolicy(
   (init as Record<symbol, ((destination: string, headers: Headers) => void) | undefined> | undefined)?.[PHYSICAL_SEND_GUARD]?.(target, headers);
   (init as Record<symbol, ((url: string, init: RequestInit) => void) | undefined> | undefined)?.[PHYSICAL_SEND_INTEGRITY]?.(target, physicalInit);
   // A strict override returning to providerFetch's executor still has its final check ahead.
-  if (!deferDispatchReceipt && !ownsMistralDispatchReceipt(egress?.provider)) settlePhysicalDispatch(init);
+  if (!deferDispatchReceipt && !ownsDispatchReceipt(egress?.provider)) settlePhysicalDispatch(init);
   (init as Record<symbol, ((destination: string, headers: Headers) => void) | undefined> | undefined)?.[PHYSICAL_SEND_OBSERVER]?.(target, headers);
   // Remember only credentials that passed the final dispatch invariant.
   outboundCredentials().remember(headers);

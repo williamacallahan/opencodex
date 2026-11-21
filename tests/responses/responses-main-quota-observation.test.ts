@@ -845,8 +845,8 @@ describe("credential-bound plain-main Responses quota", () => {
       expect(sockets).toHaveLength(1);
       const sentOutput = JSON.parse(sockets[0]!.sent[0]!).input.find((item: { type?: string }) => item.type === "function_call_output");
       expect(sentOutput.output[0].type).toBe("encrypted_content");
-      // The preflight replay is a fresh Response; no response-object marker survives.
-      expect(isCodexWsUpstreamResponse(response)).toBe(false);
+      // Delivery preserves the successful upgrade, not a pre-response refusal projection.
+      expect(isCodexWsUpstreamResponse(response)).toBe(true);
       expect(isCodexWsPreludeProjection(response)).toBe(false);
       const text = await response.text();
       expect(text).toContain("fixture answer");
