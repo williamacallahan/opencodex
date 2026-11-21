@@ -376,7 +376,7 @@ export function restoreCodexWsPreOutputRefusal(response: Response): Response {
   const restore = record?.restore;
   if (!record || !restore) return response;
   record.restore = null;
-  return restore();
+  return carryCodexWsPreludeVerdict(response, restore());
 }
 
 const codexWsStageByResponse = new WeakMap<Response, CodexWsStageRecord>();

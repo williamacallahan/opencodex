@@ -1,6 +1,7 @@
 import type { OcxProviderConfig, RequestPacingRule } from "../types";
 import { createHash } from "node:crypto";
 import type { GenerationContext } from "../lib/state-store-sweeper";
+import { physicalAdmission } from "../lib/provider-admission-wait";
 import { carryReplayRefusal, isNonReplayableResponse, isSameTargetRetryHold, markResponseNonReplayable, markSameTargetRetryHold } from "../lib/upstream-retry";
 import { redactSecretString } from "../lib/redact";
 import { errorDestinationText, providerErrorDestinationLabel } from "../lib/error-destination";
@@ -504,6 +505,11 @@ export async function waitForProviderRequestSlot(
       state.timer = undefined;
     }
     runQueue(providerName, state);
+  }).catch(error => {
+    // Run in the waiting request's scope, not the configuration writer's. A removed
+    // cooldown target keeps its original refusal; other callers retain the pacing error.
+    if (error instanceof RequestPacingProviderRemovedError) physicalAdmission.getStore()?.();
+    throw error;
   });
 }
 

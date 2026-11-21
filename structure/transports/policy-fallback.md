@@ -52,7 +52,7 @@ The initial decision remains the selection evidence while physical attempts reco
 When every observed refusal is specifically a mandatory-tool incompatibility, exhausted policy traversal returns the direct 400 diagnostic. Generic local skips and upstream failures permanently exclude that projection; cancellation and replay boundaries retain precedence. Discarded local bodies and replaced upstream failure bodies are cancelled to settle their lifetime owners; a refused fallback guard also cancels the retained failure.
 
 Cancellation, non-replayable responses and committed output keep the
-[shared replay boundaries](responses-failover.md). Native WebSocket routing retains the frame’s root code privately: both it and the nested error code must permit another candidate, even when the client receives only the nested error. A local policy refusal is identified by its
+[shared replay boundaries](responses-failover.md). Native WebSocket routing retains the frame’s root code privately: a symbolic root verdict and the nested error must both permit another candidate. A numeric root code repeating the explicit wrapper status is framing, not a second verdict. A local policy refusal is identified by its
 in-process response identity; matching upstream prose or error codes cannot authorize another attempt.
 The translator-budget and account-lease wrappers in `src/server/responses/core-lifetime.ts` carry
 that identity from their source response without deriving it from serialized error contents.

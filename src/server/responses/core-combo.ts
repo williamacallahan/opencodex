@@ -3,7 +3,7 @@ import { comboTurnStateOwner, withComboTurnStateOwner, CodexTurnStateOwnerUnavai
 import { comboLogLabel, comboTargetLogLabel } from "../../combos/resolve";
 import { clientFacingModelLabel, clientFacingModelText } from "../../lib/error-destination";
 import { projectLocalModelRefusalLog } from "../request-log-failure-detail";
-import { withPhysicalSendAdmission } from "./fetch-helpers";
+import { withPhysicalSendAdmission } from "../../lib/provider-admission-wait";
 import { carryProxyErrorContext, hasProxyErrorMessage, markProxyError } from "../../lib/client-error-body";
 import { classifyUpstreamCondition } from "../../lib/upstream-condition";
 import { effectiveAzureOutputBudget } from "../../adapters/azure";
@@ -1508,11 +1508,13 @@ export async function executeComboResponses(
     }
 
     if (legIntent === "reserve-only" && consumedChildFailure && response.ok) {
-      // A bounded native preflight already correlated the quota terminal. Do not infer it again
-      // from the sanitized stream, whose created event otherwise (correctly) counts as acceptance.
-      originalReserveRefusal = response;
+      // The child classified the original frame. Keep the restored stream only when a
+      // quota hop could still be declined; a hard stop delivers the classified failure.
+      const restored = response;
       response = consumedChildFailure.response;
       terminalRecorder?.("failed", response.status);
+      if (consumedChildFailure.wsPreludeVerdict === "hard-stop") void restored.body?.cancel().catch(() => undefined);
+      else originalReserveRefusal = restored;
     }
     // A native Chat child reports a pre-stream failure by status before any byte, so its body
     // is never peeked; a non-OK one takes the ordinary failure path below.

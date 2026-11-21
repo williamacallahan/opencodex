@@ -1634,11 +1634,11 @@ export async function preparePassthroughExchange(
     }
     // The strict child's native pool is exhausted, not the parent combo. Give it the verified
     // refusal; ordinary delivery still builds the client-safe stream if no hop is admitted.
+    const hardStop = codexWsPreludeVerdict(upstreamResponse) === "hard-stop";
     if (options.poolCapacityIntent === "reserve-only" && options.onConsumedComboFailure
-      && isCodexWsPreOutputRefusal(upstreamResponse) && (upstreamResponse.status === 429 || upstreamResponse.status === 402)) {
+      && isCodexWsPreOutputRefusal(upstreamResponse) && (hardStop || upstreamResponse.status === 429 || upstreamResponse.status === 402)) {
       options.onConsumedComboFailure(await consumeComboFailure(upstreamResponse, options.abortSignal));
     }
-    const hardStop = codexWsPreludeVerdict(upstreamResponse) === "hard-stop";
     upstreamResponse = preOutputRefusals.restore(upstreamResponse);
     if (hardStop) break;
     // The deterministic route record cannot classify history it never observed (restart, expiry,

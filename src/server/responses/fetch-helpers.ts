@@ -1,6 +1,5 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import type { NativeResponseControl } from "./native-response-control";
-import { PROVIDER_HEADER_DEADLINE as HEADER_DEADLINE, type ProviderHeaderDeadline as HeaderDeadline } from "../../lib/provider-admission-wait";
+import { physicalAdmission, PROVIDER_HEADER_DEADLINE as HEADER_DEADLINE, type ProviderHeaderDeadline as HeaderDeadline } from "../../lib/provider-admission-wait";
 import type { CodexWsPreOutputRefusalHold } from "./codex-ws-wire";
 import type { Server } from "bun";
 import {
@@ -37,12 +36,6 @@ import { compressUpstreamRequestBody, isCanonicalCodexResponsesUrl } from "./req
 import { requiredComboSendOwner, redeemOutboundTurnState, TURN_STATE_BINDING_INIT, TURN_STATE_OWNER, type TurnStateConstrained, turnStateBinding } from "../turn-state-handles";
 
 export { withUpstreamHttpVersion };
-
-// A queued child may rebuild its credentials or switch from WebSocket to HTTP before sending.
-const physicalAdmission = new AsyncLocalStorage<() => void>();
-export function withPhysicalSendAdmission<T>(check: (() => void) | undefined, dispatch: () => T): T {
-  return check ? physicalAdmission.run(check, dispatch) : dispatch();
-}
 
 const egressWebsocketDowngradeWarned = new Set<string>();
 /** A provider name is configuration-controlled, so the notice set is bounded like any cache. */

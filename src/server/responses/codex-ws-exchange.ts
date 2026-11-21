@@ -643,7 +643,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
           return;
         }
       }
-      const encodedText = relayText === text ? rawEncodedText : encoder.encode(relayText);
+      let encodedText = relayText === text ? rawEncodedText : encoder.encode(relayText);
       if (encodedText.byteLength > MAX_CODEX_WS_FRAME_BYTES) {
         failStream("codex websocket frame exceeds the response size limit");
         return;
@@ -725,6 +725,11 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
           terminalEvent = type;
           terminalErrorStatus = wrapperStatus ?? null;
         }
+      }
+      if (refusalStatus !== undefined && normalized.payload.code !== undefined && (record(normalized.payload.error) || record(normalized.payload.response))) {
+        // Only the original frame is routing evidence. The nested error is the client's diagnostic.
+        const { code: _routingCode, ...clientFrame } = normalized.payload;
+        encodedText = encoder.encode(JSON.stringify(clientFrame));
       }
       const prefix = encoder.encode(`event: ${type}\ndata: `);
       const suffix = encoder.encode("\n\n");

@@ -466,6 +466,10 @@ export function envelopeRecordCode(record: Record<string, unknown> | undefined):
   if (!record) return undefined;
   const code = record.code;
   if (typeof code === "number") {
+    // A numeric copy of the wrapper status frames its nested error, not a second verdict.
+    if (record.error && typeof record.error === "object" && !Array.isArray(record.error)
+      && Object.hasOwn(record, "status") !== Object.hasOwn(record, "status_code")
+      && code === (record.status ?? record.status_code) && Number.isInteger(code) && code >= 400 && code <= 599) return undefined;
     return Number.isFinite(code) ? String(code) : undefined;
   }
   return typeof code === "string" && code.trim() !== "" ? code : undefined;

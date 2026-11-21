@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { OcxProviderConfig } from "../types";
 import { isEgressTransparentExecutor, markEgressTransparentExecutor } from "../lib/provider-egress";
 import { configuredOutboundFetch } from "../lib/proxy-env";
-import { waitOutsideProviderHeaderDeadline } from "../lib/provider-admission-wait";
+import { physicalAdmission, waitOutsideProviderHeaderDeadline } from "../lib/provider-admission-wait";
 import { markSameTargetRetryHold, sleepWithAbort } from "../lib/upstream-retry";
 import { RequestPacingQueueOverloadError } from "./request-pacing";
 import type { OcxProviderTransport } from "./xai-transport";
@@ -219,6 +219,7 @@ export function resolveMistralTransport(
     let response: Response;
     try {
       init.signal?.throwIfAborted();
+      physicalAdmission.getStore()?.();
       response = await baseFetch(input, init);
       if (pacing) budgetPacer.observe(identity, response.headers, response.status);
     } catch (error) { release?.(); throw error; }

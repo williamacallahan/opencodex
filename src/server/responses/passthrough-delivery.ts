@@ -579,6 +579,9 @@ export async function deliverPassthroughResponse(
           }
           options.onNativePassthroughTerminal?.(status);
         });
+      } else if ((upstreamResponse.status === 401 || upstreamResponse.status === 403) && codexWsPreludeVerdict(upstreamResponse) === "hard-stop") {
+        // The request was rejected, not the account. Retire only this attempt's probe.
+        releaseCodexAuthContextProbeLease(admissionState.authCtx);
       } else if (!nativeExchange.terminalOutcomeRecorded && !(upstreamResponse.ok && nativeExchange.request.outboundModelId === NATIVE_RESERVE_MODEL
         && hasResponseMediaType(headers, "application/json")) && !shouldDeferCodexResetDerivedCooldown(
         upstreamResponse,
