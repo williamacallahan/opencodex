@@ -1,9 +1,16 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 // A queued child may rebuild its credentials or switch from WebSocket to HTTP before sending.
-export const physicalAdmission = new AsyncLocalStorage<() => void>();
-export function withPhysicalSendAdmission<T>(check: (() => void) | undefined, dispatch: () => T): T {
+type CheckPhysicalAdmission = (removedSlot?: Error) => void;
+export const physicalAdmission = new AsyncLocalStorage<CheckPhysicalAdmission>();
+export function withPhysicalSendAdmission<T>(check: CheckPhysicalAdmission | undefined, dispatch: () => T): T {
   return check ? physicalAdmission.run(check, dispatch) : dispatch();
+}
+
+/** Shared by the executor and transports whose own admission queue precedes the wire. */
+export const PHYSICAL_DISPATCH = Symbol.for("opencodex.physical-dispatch");
+export function settlePhysicalDispatch(init?: RequestInit & { [PHYSICAL_DISPATCH]?: (body?: BodyInit | null) => void }): void {
+  init?.[PHYSICAL_DISPATCH]?.(init.body);
 }
 
 /** Internal RequestInit metadata; never serialized into headers or upstream JSON. */

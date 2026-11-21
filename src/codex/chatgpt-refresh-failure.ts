@@ -10,6 +10,10 @@ export type ChatgptRefreshFailure = {
   code?: ChatgptRefreshDiagnosticCode;
 };
 
+export function isRevokedChatgptCredentialCode(code: unknown): boolean {
+  return typeof code === "string" && ["invalid_grant", "refresh_token_invalidated", "token_invalidated", "refresh_token_reused", "account_deactivated", "deactivated_workspace"].includes(code);
+}
+
 /** HTTP availability failures cannot establish that a refresh grant was revoked. */
 export function classifyChatgptRefreshFailure(status: number, body: string): ChatgptRefreshFailure {
   if (body.length > 16_384) return { reason: "unknown" };
@@ -32,7 +36,7 @@ export function classifyChatgptRefreshFailure(status: number, body: string): Cha
     ? exactCode as ChatgptRefreshDiagnosticCode : undefined;
   let reason: ChatgptRefreshFailure["reason"] = "unknown";
   if (status === 400 || status === 401 || status === 403) {
-    if (["invalid_grant", "refresh_token_invalidated", "token_invalidated", "refresh_token_reused", "account_deactivated", "deactivated_workspace"].includes(exactCode ?? "")) {
+    if (isRevokedChatgptCredentialCode(exactCode)) {
       reason = "revoked";
     } else if (exactCode === "refresh_token_expired") {
       reason = "expired";

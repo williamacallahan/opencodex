@@ -71,7 +71,7 @@ interface CodexWsResponseEvidence {
 const codexWsUpstreamResponses = new WeakMap<Response, CodexWsResponseEvidence>();
 const quotaObservedResponses = new WeakMap<Response, true>();
 export type CodexWsPreludeVerdict = "hard-stop" | "confirmed-capacity" | "unconfirmed-capacity" | "ordinary-refusal";
-interface PreludeEvidence { verdict: CodexWsPreludeVerdict; rootCode?: string }
+interface PreludeEvidence { verdict: CodexWsPreludeVerdict; rootCode?: string; credentialRejected?: boolean }
 const codexWsPreludeProjections = new WeakMap<Response, PreludeEvidence | undefined>();
 registerProviderResponseProvenance(codexWsUpstreamResponses);
 registerProviderResponseProvenance(quotaObservedResponses);
@@ -96,6 +96,10 @@ export function markCodexWsPreludeProjection(response: Response, evidence?: Prel
 /** The original frame decides whether a refusal stops the request or confirms seat capacity. */
 export function codexWsPreludeVerdict(response: Response): CodexWsPreludeVerdict | undefined {
   return codexWsPreludeProjections.get(response)?.verdict;
+}
+
+export function codexWsCredentialRejected(response: Response): boolean {
+  return codexWsPreludeProjections.get(response)?.credentialRejected === true;
 }
 
 export function codexWsPreludeRootCode(response: Response): string | undefined {

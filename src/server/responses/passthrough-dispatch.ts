@@ -109,7 +109,7 @@ import {
 } from "./core-codex-account";
 import { settlePoolResponse } from "./pool-response-alternate";
 import { consumeComboFailure } from "./core-combo-failure";
-import { codexWsPreludeVerdict, isCodexWsPreOutputRefusal, codexWsSocketDeathStage, isCodexWsUpstreamResponse } from "./codex-ws-wire";
+import { codexWsCredentialRejected, codexWsPreludeVerdict, isCodexWsPreOutputRefusal, codexWsSocketDeathStage, isCodexWsUpstreamResponse } from "./codex-ws-wire";
 import { linkAbortSignal } from "./core-lifetime";
 import { checkOutboundBodySize, describeOutboundBodyRefusal } from "./outbound-body-guard";
 import { streamingContextOverflowResponse } from "./context-overflow";
@@ -1197,14 +1197,14 @@ export async function preparePassthroughExchange(
       }
 
 
+    const stop401 = upstreamResponse.status === 401 && codexWsPreludeVerdict(upstreamResponse) === "hard-stop";
     if (
-      upstreamResponse.status === 401 && codexWsPreludeVerdict(upstreamResponse) !== "hard-stop" && !wasPermanentAccountRefusal(upstreamResponse)
+      upstreamResponse.status === 401 && (!stop401 || codexWsCredentialRejected(upstreamResponse)) && !wasPermanentAccountRefusal(upstreamResponse)
       && (admissionState.authCtx.kind === "main-pool" || admissionState.authCtx.kind === "pool")
       && usesCodexForwardPoolAuth(admissionState.authCtx, route.provider)
       && codex401ReplayKind === null
     ) {
-      codex401ReplayKind = admissionState.authCtx.kind === "pool" ? "stored" : "main";
-      try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed */ }
+      if (!stop401) void upstreamResponse.body?.cancel().catch(() => {});
       const poolAuthCtx = admissionState.authCtx.kind === "pool" ? admissionState.authCtx : undefined;
       const poolReplay = poolAuthCtx
         ? await refreshPoolForwardAuth({ req, config, route, authCtx: poolAuthCtx, substituteMainCredential, options, logCtx })
@@ -1224,10 +1224,13 @@ export async function preparePassthroughExchange(
             credentialGeneration: poolReplay.quarantineGeneration ?? poolAuthCtx.generation,
           });
         }
+        if (stop401) break; // Deliver the original refusal even when refresh quarantined the seat.
         upstream.abort();
         releaseCodexAuthContextProbeLease(admissionState.authCtx);
         return replay.response;
       }
+      if (stop401) break; // The replacement credential belongs to future turns.
+      codex401ReplayKind = poolAuthCtx ? "stored" : "main";
       admissionState.authCtx = replay.authCtx;
       route.provider = replay.provider;
       requestState.selectedForwardHeaders = withClaudeNativeSession(replay.headers, replay.provider, options.claudeNativeSessionId);
@@ -1632,11 +1635,10 @@ export async function preparePassthroughExchange(
       if (settled.kind === "transport") { admissionState.authCtx = settled.authCtx; return transportFailureResponse(settled.error); }
       upstreamResponse = settled.response;
     }
-    // The strict child's native pool is exhausted, not the parent combo. Give it the verified
-    // refusal; ordinary delivery still builds the client-safe stream if no hop is admitted.
+    // Give the parent the original verdict before delivery restores the public stream.
     const hardStop = codexWsPreludeVerdict(upstreamResponse) === "hard-stop";
-    if (options.poolCapacityIntent === "reserve-only" && options.onConsumedComboFailure
-      && isCodexWsPreOutputRefusal(upstreamResponse) && (hardStop || upstreamResponse.status === 429 || upstreamResponse.status === 402)) {
+    if (options.onConsumedComboFailure && isCodexWsPreOutputRefusal(upstreamResponse)
+      && (hardStop || (options.poolCapacityIntent === "reserve-only" && (upstreamResponse.status === 429 || upstreamResponse.status === 402)))) {
       options.onConsumedComboFailure(await consumeComboFailure(upstreamResponse, options.abortSignal));
     }
     upstreamResponse = preOutputRefusals.restore(upstreamResponse);
@@ -1904,6 +1906,7 @@ export async function preparePassthroughExchange(
     localUpstream,
     upstreamResponse,
     terminalOutcomeRecorded: preOutputRefusals.outcomeRecorded,
+    rejectedReplacementBearer: codex401ReplayKind !== null && codexWsCredentialRejected(upstreamResponse),
   };
 }
 

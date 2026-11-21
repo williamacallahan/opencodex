@@ -508,7 +508,7 @@ export async function waitForProviderRequestSlot(
   }).catch(error => {
     // Run in the waiting request's scope, not the configuration writer's. A removed
     // cooldown target keeps its original refusal; other callers retain the pacing error.
-    if (error instanceof RequestPacingProviderRemovedError) physicalAdmission.getStore()?.();
+    if (error instanceof RequestPacingProviderRemovedError) physicalAdmission.getStore()?.(error);
     throw error;
   });
 }

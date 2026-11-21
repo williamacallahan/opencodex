@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { clearAccountNeedsReauth } from "../../src/codex/auth-api";
+import { clearAccountNeedsReauth, isAccountNeedsReauth } from "../../src/codex/auth-api";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import { clearAccountQuota, setAccountQuotaFromParsed } from "../../src/codex/quota";
 import { clearCodexUpstreamHealth, clearThreadAccountMap, getCodexQuotaHealthSnapshot } from "../../src/codex/routing";
@@ -33,8 +33,8 @@ const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "h
 
 type Listener = (event: unknown) => void;
 const reasoning = { type: "reasoning", id: "rs_inspected", encrypted_content: "fixture-owner-cipher", summary: [] };
-type FirstFrame = { status: number; code?: string | number; request?: { innererror: { code: string } }; error: { code: string; message: string; innererror?: { code: string } } };
-type Step = FirstFrame | "issue-reasoning" | "first-quota" | "first-conflict" | "quota-then-refuse" | "quota-output-then-refuse" | "reserve-started-then-refuse"
+type FirstFrame = { status: number; code?: string | number; request?: { innererror: { code: string } }; error: { code?: string; message: string; innererror?: { code: string } } };
+type Step = FirstFrame | "held-hard-failure" | "issue-reasoning" | "first-quota" | "first-conflict" | "quota-then-refuse" | "quota-output-then-refuse" | "reserve-started-then-refuse"
   | "first-model-missing" | "first-model-missing-underscore" | "wrapped-quota" | "conflicting-wrapper" | "foreign-wrapper" | "missing-status" | "unknown-status";
 
 class FakeWebSocket {
@@ -57,6 +57,11 @@ class FakeWebSocket {
     const id = `resp_${FakeWebSocket.instances.indexOf(this)}`;
     if (typeof step === "object") {
       this.frame({ type: "error", ...step });
+      return;
+    }
+    if (step === "held-hard-failure") {
+      this.frame({ type: "response.failed", code: "origin_rejected", headers: { "x-fixture-private": "not-for-client" }, response: { id, status: "failed", output: [],
+        error: { code: "server_is_overloaded", message: "Reserve refused", param: "input" } } });
       return;
     }
     if (step === "first-model-missing" || step === "first-model-missing-underscore") {
@@ -280,7 +285,21 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect(isComboTargetInCooldown("overload", target)).toBe(true);
   });
 
-  test.each(["root", "innererror"])("strict Reserve stops before the relay on a hard first-frame overload: %s", async source => {
+  test("non-strict Reserve stops before an ordinary fallback on a hard first frame", async () => {
+    const cfg = comboConfig();
+    cfg.combos!.overload!.targets[0]!.model = "gpt-6-luna";
+    cfg.codexAccounts![0]!.plan = "pro";
+    const resetAt = Math.floor(Date.now() / 1000) + 3600;
+    setAccountQuotaFromParsed(WORK, { weeklyPercent: 100, weeklyResetAt: resetAt,
+      customWindows: [{ label: "Luna Reserve", percent: 10, observedAt: Date.now(), resetAt }] });
+    FakeWebSocket.plan = [{ status: 503, code: "origin_rejected", error: { code: "server_is_overloaded", message: "Reserve refused" } }];
+    const { body } = await send(cfg);
+    expect(FakeWebSocket.instances.flatMap(ws => ws.sent).map(frame => JSON.parse(frame).model)).toEqual(["gpt-reserve"]);
+    expect(fallbackSends).toBe(0);
+    expect(body).toContain("Reserve refused");
+  });
+
+  test.each(["root", "innererror", "held-hard-failure"])("strict Reserve stops before the relay on a hard first-frame overload: %s", async source => {
     const cfg = comboConfig();
     for (const target of cfg.combos!.overload!.targets) target.model = "gpt-6-luna";
     cfg.providers.fallback!.baseUrl = "https://combo-fixture.invalid/backend-api/codex";
@@ -289,9 +308,15 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     setAccountQuotaFromParsed(WORK, { weeklyPercent: 100, weeklyResetAt: resetAt,
       customWindows: [{ label: "Luna Reserve", percent: 10, observedAt: Date.now(), resetAt }] });
     const stop = { code: "origin_rejected" };
-    FakeWebSocket.plan = [{ status: 503, ...(source === "root" && stop), error: { code: "server_is_overloaded",
+    FakeWebSocket.plan = source === "held-hard-failure" ? [source] : [{ status: 503, ...(source === "root" && stop), error: { code: "server_is_overloaded",
       message: "Our servers are currently overloaded.", ...(source === "innererror" && { innererror: stop }) } }];
-    const { body, logCtx } = await send(cfg);
+    const { response, body, logCtx } = await send(cfg);
+    expect(response.status).toBe(200);
+    if (source === "held-hard-failure") {
+      expect(body).toContain('"id":"resp_0"');
+      expect(body).toContain('"param":"input"');
+      expect(body).not.toContain("not-for-client");
+    }
     expect(logCtx.routeDecision?.selected.reason).toBe("luna-reserve-first");
     expect(FakeWebSocket.instances.flatMap(ws => ws.sent).map(frame => JSON.parse(frame).model)).toEqual(["gpt-reserve"]);
     expect(fallbackSends).toBe(0);
@@ -386,6 +411,47 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect(fallbackSends).toBe(terminal === "first-conflict" ? 0 : 1);
     expect(response.status).toBe(terminal === "first-conflict" ? 429 : 200);
     expect(body).toContain(terminal === "first-conflict" ? "Limit reached" : "resp_fallback");
+  });
+
+  test.each(["token_invalidated", "invalid_api_key", "refresh_token_reused"])('a hard 401 maintains a rejected credential without replaying: %s', async code => {
+    FakeWebSocket.plan = [{ status: 401, code: "origin_rejected", error: { code, message: "Fixture refusal" } }];
+    const fixtureFetch = globalThis.fetch;
+    globalThis.fetch = (async (input, init) => {
+      if (new URL(input instanceof Request ? input.url : String(input)).hostname !== "auth.openai.com") return fixtureFetch(input, init);
+      return code === "invalid_api_key"
+        ? Response.json({ access_token: "fixture-replacement", refresh_token: "fixture-grant", expires_in: 3600 })
+        : Response.json({ error: "invalid_grant" }, { status: 400 });
+    }) as typeof fetch;
+    const { body, response } = await send();
+    expect(response.status).toBe(401);
+    expect(body).toContain("Fixture refusal");
+    expect(fallbackSends).toBe(0);
+    expect(FakeWebSocket.instances.flatMap(ws => ws.sent)).toHaveLength(1);
+    if (code === "invalid_api_key") {
+      expect((await Bun.file(join(home, "codex-accounts.json")).json())[WORK].credential.accessToken).toBe("fixture-replacement");
+    } else expect(isAccountNeedsReauth(WORK)).toBe(true);
+  });
+
+  test("a replay whose replacement bearer is explicitly rejected retires that bearer", async () => {
+    const error = { code: "token_invalidated", message: "Replacement rejected" };
+    FakeWebSocket.plan = [{ status: 401, error }, { status: 401, code: "origin_rejected", error }];
+    const fixtureFetch = globalThis.fetch;
+    globalThis.fetch = (async (input, init) => new URL(input instanceof Request ? input.url : String(input)).hostname === "auth.openai.com"
+      ? Response.json({ access_token: "fixture-replacement", refresh_token: "fixture-grant", expires_in: 3600 })
+      : fixtureFetch(input, init)) as typeof fetch;
+    const { response, body } = await send();
+    expect(response.status).toBe(401);
+    expect(body).toContain("Replacement rejected");
+    expect(FakeWebSocket.instances.flatMap(ws => ws.sent)).toHaveLength(2);
+    expect(fallbackSends).toBe(0);
+    expect(isAccountNeedsReauth(WORK)).toBe(true);
+  });
+
+  test("a direct held error keeps the client fatal code on its terminal", async () => {
+    FakeWebSocket.plan = [{ status: 503, code: "invalid_prompt", error: { message: "Fixture refusal" } }];
+    const { body } = await send(comboConfig(), "hello", undefined, "openai/gpt-5.5");
+    const terminal = body.split("event: response.failed\n")[1]?.split("\n")[0]?.replace(/^data: /, "");
+    expect(JSON.parse(terminal ?? "null")?.response).toMatchObject({ error: { code: "invalid_prompt", message: "Fixture refusal" }, retryable: false });
   });
 
   test.each([401, 503])("native dispatch returns a first-frame hard refusal without resending: %i", async status => {

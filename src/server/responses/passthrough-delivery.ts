@@ -441,6 +441,7 @@ export async function deliverPassthroughResponse(
     | "normalizeFunctionCompletionJson"
     | "localUpstream"
     | "terminalOutcomeRecorded"
+    | "rejectedReplacementBearer"
     | "terminalCapacityStatus"
   >,
   dispatchSidecarSend?: AuxiliaryModelSend,
@@ -579,8 +580,8 @@ export async function deliverPassthroughResponse(
           }
           options.onNativePassthroughTerminal?.(status);
         });
-      } else if ((upstreamResponse.status === 401 || upstreamResponse.status === 403) && codexWsPreludeVerdict(upstreamResponse) === "hard-stop") {
-        // The request was rejected, not the account. Retire only this attempt's probe.
+      } else if ((upstreamResponse.status === 401 || upstreamResponse.status === 403) && codexWsPreludeVerdict(upstreamResponse) === "hard-stop" && !nativeExchange.rejectedReplacementBearer) {
+        // Dispatch settled any explicit credential rejection independently of the refused turn.
         releaseCodexAuthContextProbeLease(admissionState.authCtx);
       } else if (!nativeExchange.terminalOutcomeRecorded && !(upstreamResponse.ok && nativeExchange.request.outboundModelId === NATIVE_RESERVE_MODEL
         && hasResponseMediaType(headers, "application/json")) && !shouldDeferCodexResetDerivedCooldown(

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { OcxProviderConfig } from "../types";
 import { isEgressTransparentExecutor, markEgressTransparentExecutor } from "../lib/provider-egress";
 import { configuredOutboundFetch } from "../lib/proxy-env";
-import { physicalAdmission, waitOutsideProviderHeaderDeadline } from "../lib/provider-admission-wait";
+import { physicalAdmission, settlePhysicalDispatch, waitOutsideProviderHeaderDeadline } from "../lib/provider-admission-wait";
 import { markSameTargetRetryHold, sleepWithAbort } from "../lib/upstream-retry";
 import { RequestPacingQueueOverloadError } from "./request-pacing";
 import type { OcxProviderTransport } from "./xai-transport";
@@ -188,7 +188,11 @@ export class MistralBudgetPacer {
 }
 
 const pacer = new MistralBudgetPacer();
-const wrapped = new WeakSet<typeof globalThis.fetch>();
+const wrapped = new WeakSet<object>();
+
+export function ownsMistralDispatchReceipt(provider?: object): boolean {
+  return !!provider && "fetch" in provider && typeof provider.fetch === "function" && wrapped.has(provider.fetch);
+}
 
 /** Wrap canonical Mistral Chat sends with bounded admission and server-delay protection. */
 export function resolveMistralTransport(
@@ -199,18 +203,24 @@ export function resolveMistralTransport(
   const baseFetch = provider.fetch
     ?? markEgressTransparentExecutor(((input, init) => configuredOutboundFetch(input, init)) as typeof globalThis.fetch);
   const attemptFetch = (async (input, init) => {
+    const dispatch = () => {
+      init?.signal?.throwIfAborted();
+      physicalAdmission.getStore()?.();
+      settlePhysicalDispatch(init);
+      return baseFetch(input, init);
+    };
     const url = new URL(input instanceof Request ? input.url : String(input));
     if (url.origin !== "https://api.mistral.ai" || url.pathname !== "/v1/chat/completions"
       || url.search || url.hash || init?.method?.toUpperCase() !== "POST" || typeof init.body !== "string") {
-      return baseFetch(input, init);
+      return dispatch();
     }
     // The Chat adapter serializes model first. Read only that bounded prefix rather
     // than parsing/copying a potentially million-token conversation a second time.
     const encodedModel = /^\s*\{\s*"model"\s*:\s*("(?:[^"\\]|\\.)*")\s*[,}]/.exec(init.body.slice(0, 4096))?.[1];
     let model: unknown;
-    try { model = encodedModel === undefined ? undefined : JSON.parse(encodedModel); } catch { return baseFetch(input, init); }
+    try { model = encodedModel === undefined ? undefined : JSON.parse(encodedModel); } catch { return dispatch(); }
     const authorization = new Headers(init.headers).get("authorization");
-    if (!authorization || typeof model !== "string" || !model || model.length > 256) return baseFetch(input, init);
+    if (!authorization || typeof model !== "string" || !model || model.length > 256) return dispatch();
     // Bind to the actual send credential, including after pool rotation; keep no raw key.
     const identity = createHash("sha256").update(JSON.stringify([authorization, model])).digest("hex");
     const pacing = provider.requestPacing?.enabled !== false && provider.retryOn429?.respectRetryAfter !== false;
@@ -218,9 +228,7 @@ export function resolveMistralTransport(
       signal => budgetPacer.acquire(identity, signal, provider.retryOn429?.maxIntervalMs)) : undefined;
     let response: Response;
     try {
-      init.signal?.throwIfAborted();
-      physicalAdmission.getStore()?.();
-      response = await baseFetch(input, init);
+      response = await dispatch();
       if (pacing) budgetPacer.observe(identity, response.headers, response.status);
     } catch (error) { release?.(); throw error; }
     release?.(response.ok);

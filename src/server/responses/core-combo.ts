@@ -1063,7 +1063,7 @@ export async function executeComboResponses(
 
   let lastFailure: Response | null = null;
   let cooldownRetryGeneration: number | undefined;
-  let originalReserveRefusal: Response | undefined;
+  let restoredRefusal: Response | undefined;
   // Dispatched targets, not attempted picks: it indexes the declared target list so the clamp
   // below can tell how many targets are still entitled to a send.
   let comboTargetsDispatched = 0;
@@ -1110,7 +1110,7 @@ export async function executeComboResponses(
     const failedChildLog = returnsQuota ? quotaFailedChildLog : lastFailedChildLog;
     if (failedChildLog) adoptFailedChildLog(failedChildLog);
     if (targetsExhausted && toolChoiceRefusalsOnly === true) return comboUnavailableResponse("No available targets for combo; attempted targets cannot preserve mandatory tool_choice");
-    if (!lastFailure || ![400, 401, 403].includes(lastFailure.status)) return originalReserveRefusal ?? lastFailure!;
+    if (!lastFailure || ![400, 401, 403].includes(lastFailure.status)) return restoredRefusal ?? lastFailure!;
     if (quotaFailure) return quotaFailure;
     // The quota-refused target was cooled before this request picked, so the ladder never saw
     // its refusal. The cooldown, with its Retry-After, is still the honest answer.
@@ -1195,7 +1195,7 @@ export async function executeComboResponses(
       });
       if (!hop.ok) {
         if (lastFailedChildLog) adoptFailedChildLog(lastFailedChildLog);
-        return originalReserveRefusal ?? hop.response;
+        return restoredRefusal ?? hop.response;
       }
       pendingHopCommit = hop.commit;
     }
@@ -1241,9 +1241,9 @@ export async function executeComboResponses(
       // an earlier one already recorded one.
       return exhaustedFailure();
     }
-    if (originalReserveRefusal) {
-      void originalReserveRefusal.body?.cancel().catch(() => undefined);
-      originalReserveRefusal = undefined;
+    if (restoredRefusal) {
+      void restoredRefusal.body?.cancel().catch(() => undefined);
+      restoredRefusal = undefined;
     }
     // Admitted: only now is a guarded hop to this target recorded as taken.
     pendingHopCommit?.();
@@ -1402,10 +1402,10 @@ export async function executeComboResponses(
     let response: Response;
     let retryWithheld = false;
     const failedGeneration = cooldownRetryGeneration;
-    const checkRetry = failedGeneration === undefined ? undefined : () => {
-      if (comboTargetContinuousSince(comboId, legTargetKey, failedGeneration)) return;
+    const checkRetry = failedGeneration === undefined ? undefined : (removedSlot?: Error) => {
+      if (!removedSlot && comboTargetContinuousSince(comboId, legTargetKey, failedGeneration)) return;
       retryWithheld = true;
-      throw new Error("Combo target membership ended before the cooldown retry could send");
+      throw removedSlot ?? new Error("Combo target membership ended before the cooldown retry could send");
     };
     const withheldFailure = () => {
       childLog.attempts?.splice(childLog.attempts.indexOf(attempt), 1);
@@ -1507,14 +1507,11 @@ export async function executeComboResponses(
       return withheldFailure();
     }
 
-    if (legIntent === "reserve-only" && consumedChildFailure && response.ok) {
-      // The child classified the original frame. Keep the restored stream only when a
-      // quota hop could still be declined; a hard stop delivers the classified failure.
-      const restored = response;
+    if (consumedChildFailure && response.ok && (consumedChildFailure.wsPreludeVerdict === "hard-stop" || legIntent === "reserve-only")) {
+      // Classify the original refusal, but deliver the restored client stream if the turn stops.
+      restoredRefusal = response;
       response = consumedChildFailure.response;
       terminalRecorder?.("failed", response.status);
-      if (consumedChildFailure.wsPreludeVerdict === "hard-stop") void restored.body?.cancel().catch(() => undefined);
-      else originalReserveRefusal = restored;
     }
     // A native Chat child reports a pre-stream failure by status before any byte, so its body
     // is never peeked; a non-OK one takes the ordinary failure path below.
@@ -1657,6 +1654,11 @@ export async function executeComboResponses(
     // The failed child's resolved destination, so the next hop compares physical targets.
     lastFailedTarget = { provider: targetRoute.providerName, model: targetRoute.modelId };
     lastFailedRetryAfter = failure.retryAfter;
+    const hardRefusal = failure.wsPreludeVerdict && failure.wsPreludeVerdict === "hard-stop";
+    if (hardRefusal && restoredRefusal) {
+      adoptFailedChildLog(childLog);
+      return restoredRefusal;
+    }
     // A replacement that answers 200 is unmarked, and its zero-output failure only exists once
     // preflight has rebuilt the stream as a fresh Response. A spent grant never hops: a status the
     // client would resend becomes the refusal, and anything else reaches the client as it is.
@@ -1670,7 +1672,6 @@ export async function executeComboResponses(
     }
     // A non-replayable failure (the answer to a spent ambiguous-reset replacement) may follow a
     // send that already ran the turn, so no later target may receive it, whatever its status says.
-    const hardRefusal = failure.wsPreludeVerdict && failure.wsPreludeVerdict === "hard-stop";
     const failureDecision = boundTargetKey !== undefined || hardRefusal || failure.nonReplayable || spentReplacement
       ? "stop"
       : isPolicyCandidateRefusal(failure.response) ? "hop"

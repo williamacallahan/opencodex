@@ -1,5 +1,6 @@
 import type { NativeResponseControl } from "./native-response-control";
-import { physicalAdmission, PROVIDER_HEADER_DEADLINE as HEADER_DEADLINE, type ProviderHeaderDeadline as HeaderDeadline } from "../../lib/provider-admission-wait";
+import { ownsMistralDispatchReceipt } from "../../providers/mistral-transport";
+import { physicalAdmission, PHYSICAL_DISPATCH, settlePhysicalDispatch, PROVIDER_HEADER_DEADLINE as HEADER_DEADLINE, type ProviderHeaderDeadline as HeaderDeadline } from "../../lib/provider-admission-wait";
 import type { CodexWsPreOutputRefusalHold } from "./codex-ws-wire";
 import type { Server } from "bun";
 import {
@@ -49,8 +50,6 @@ const pacingWebsocketDowngradeWarned = new Set<string>();
  */
 const EGRESS_DECIDED = Symbol.for("opencodex.provider-egress.decided");
 const UPSTREAM_REWRITTEN = Symbol.for("opencodex.plugins.upstream-rewritten");
-// Survives queued credential rebuilds and executor replacement without importing budget owners.
-const PHYSICAL_DISPATCH = Symbol.for("opencodex.physical-dispatch");
 // Final destination and headers after plugin rewrites and queued rebuilds, for observers that
 // must attribute a response to the credential that actually reached the wire.
 const PHYSICAL_SEND_OBSERVER = Symbol.for("opencodex.physical-send-observer");
@@ -269,7 +268,7 @@ export function sendWithConnectionPolicy(
   (init as Record<symbol, ((destination: string, headers: Headers) => void) | undefined> | undefined)?.[PHYSICAL_SEND_GUARD]?.(target, headers);
   (init as Record<symbol, ((url: string, init: RequestInit) => void) | undefined> | undefined)?.[PHYSICAL_SEND_INTEGRITY]?.(target, physicalInit);
   // A strict override returning to providerFetch's executor still has its final check ahead.
-  if (!deferDispatchReceipt) (init as Record<symbol, ((body: BodyInit | null | undefined) => void) | undefined> | undefined)?.[PHYSICAL_DISPATCH]?.(body);
+  if (!deferDispatchReceipt && !ownsMistralDispatchReceipt(egress?.provider)) settlePhysicalDispatch(init);
   (init as Record<symbol, ((destination: string, headers: Headers) => void) | undefined> | undefined)?.[PHYSICAL_SEND_OBSERVER]?.(target, headers);
   // Remember only credentials that passed the final dispatch invariant.
   outboundCredentials().remember(headers);

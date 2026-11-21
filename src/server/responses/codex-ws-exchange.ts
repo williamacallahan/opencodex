@@ -1,5 +1,7 @@
+import { isRevokedChatgptCredentialCode } from "../../codex/chatgpt-refresh-failure";
 import { NativeSteeringError } from "./native-steering";
 import { envelopeRecordCode } from "../../combos/failover";
+import { isTerminalRefusalCode, recognizedUpstreamError } from "../../lib/errors";
 import { hasHardRefusalInEnvelope } from "../../lib/hard-refusal";
 import { terminalOwnerCapacityStatus } from "./owner-capacity-refusal";
 import { reserveQuotaPrelude } from "./combo-stream-preflight";
@@ -104,13 +106,17 @@ function refusalErrorBody(source: unknown): Record<string, string> {
   return {
     type: typeof error.type === "string" ? error.type : "server_error",
     ...(typeof error.code === "string" ? { code: error.code } : {}),
+    ...(typeof error.param === "string" ? { param: error.param } : {}),
     message: typeof error.message === "string" ? error.message : "Upstream declined the request before any output",
   };
 }
 
-function markFrameRefusal(response: Response, frame: Record<string, unknown>, confirmedCapacity?: boolean): void {
+function markFrameRefusal(response: Response, frame: Record<string, unknown>, confirmedCapacity?: boolean,
+  hardStop = hasHardRefusalInEnvelope(frame, { source: "ws-frame" })): void {
+  const rejectsCredential = (code: unknown) => code === "invalid_api_key" || isRevokedChatgptCredentialCode(code);
   markCodexWsPreludeProjection(response, { rootCode: envelopeRecordCode(frame),
-    verdict: hasHardRefusalInEnvelope(frame, { source: "ws-frame" }) ? "hard-stop"
+    credentialRejected: response.status === 401 && (rejectsCredential(frame.code) || (record(frame.error) && rejectsCredential(frame.error.code))),
+    verdict: hardStop ? "hard-stop"
       : confirmedCapacity === undefined ? "ordinary-refusal" : confirmedCapacity ? "confirmed-capacity" : "unconfirmed-capacity" });
 }
 
@@ -307,7 +313,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
      * turn again; if neither does, the registered restore hands the client the original stream,
      * which is already complete on `stream`.
      */
-    const resolveRefusal = (status: number, payload: Record<string, unknown>, headers: Headers, prelude: Headers) => {
+    const resolveRefusal = (status: number, payload: Record<string, unknown>, headers: Headers, prelude: Headers, hardStop: boolean) => {
       responseCommitted = true;
       deferredCommit = false;
       clearTimeout(holdTimer);
@@ -318,7 +324,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       const projection = new Response(JSON.stringify({ error: refusalErrorBody(source) }), { status, headers });
       const capacity = status === 429 || status === 402
         ? terminalOwnerCapacityStatus(payload, payload.type === "error" ? status : undefined) === status : undefined;
-      markFrameRefusal(projection, payload, capacity);
+      markFrameRefusal(projection, payload, capacity, hardStop);
       markCodexWsStage(projection, stage);
       const observed = Boolean(metadata && onQuota);
       markCodexWsPreOutputRefusal(projection, () => {
@@ -726,10 +732,20 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
           terminalErrorStatus = wrapperStatus ?? null;
         }
       }
-      if (refusalStatus !== undefined && normalized.payload.code !== undefined && (record(normalized.payload.error) || record(normalized.payload.response))) {
-        // Only the original frame is routing evidence. The nested error is the client's diagnostic.
-        const { code: _routingCode, ...clientFrame } = normalized.payload;
-        encodedText = encoder.encode(JSON.stringify(clientFrame));
+      const hardStop = refusalStatus !== undefined && hasHardRefusalInEnvelope(normalized.payload, { source: "ws-frame" });
+      if (hardStop) {
+        // Classify the original payload, but never relay its private headers or routing envelope.
+        const { code, response_id, sequence_number, status, status_code, response, error, message, param } = normalized.payload;
+        const clientCode = typeof code === "string" && (isTerminalRefusalCode(code) || recognizedUpstreamError({ code })) ? code : undefined;
+        encodedText = encoder.encode(JSON.stringify({ type, response_id, sequence_number, status, status_code, code: clientCode,
+          ...(typeof message === "string" && { message }), ...(typeof param === "string" && { param }),
+          ...(record(error) && { error: refusalErrorBody(error) }),
+          ...(record(response) && { response: { id: response.id, model: response.model, status: response.status,
+            output: response.output, usage: response.usage, retryable: response.retryable, error: refusalErrorBody(response.error) } }),
+        }));
+      } else if (refusalStatus !== undefined && normalized.payload.code !== undefined && (record(normalized.payload.error) || record(normalized.payload.response))) {
+        const { code, ...clientFrame } = normalized.payload;
+        if (typeof code !== "string" || !recognizedUpstreamError({ code })) encodedText = encoder.encode(JSON.stringify(clientFrame));
       }
       const prefix = encoder.encode(`event: ${type}\ndata: `);
       const suffix = encoder.encode("\n\n");
@@ -772,7 +788,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         }
         session.release(completedId);
         if (refusalStatus !== undefined && refusalHeaders && refusalPrelude && !responseCommitted) {
-          resolveRefusal(refusalStatus, normalized.payload, refusalHeaders, refusalPrelude);
+          resolveRefusal(refusalStatus, normalized.payload, refusalHeaders, refusalPrelude, hardStop);
         }
       }
     };
