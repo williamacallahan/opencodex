@@ -1268,13 +1268,13 @@ export function resolveCodexAccountForThreadDetailed(
   return { status: "selected", accountId: active, affinity: affinityAfterRelease(threadId, releaseReason) };
 }
 
-
+/** A quota write returns a callback that confirms only this entry when its body supplies capacity evidence. */
 export function recordCodexUpstreamOutcome(
   config: OcxConfig,
   accountId: string | null,
   outcome: CodexUpstreamOutcome,
   meta: CodexUpstreamOutcomeMeta = {},
-): void {
+): (() => void) | void {
   // Host-level evidence is account-independent (#914): a pre-connection
   // reachability failure is recorded in the (provider, host) ledger even when
   // there is no account to attribute, or the account's writer generation is
@@ -1452,15 +1452,12 @@ export function recordCodexUpstreamOutcome(
     // discloses Reserve and it comes and goes per seat, so only Retry-After holds it past the default
     // (honoring that reset kept every seat off Reserve for hours after one refusal each, 2026-11-20).
     const { until, source } = computeQuotaCooldown(meta.poolReserve ? { ...meta, resetAt: undefined } : meta);
-    // Otherwise a reset is an advisory quota-window announcement kept on a confirmed independent
-    // group (Reserve versus the shared native quota) so the other group still reaches upstream.
-    // Explicit Retry-After/default 429s remain account-wide, except an automatic pool Reserve
-    // attempt: its refusal speaks only for Reserve, and included Luna depends on the shared scope.
+    // Explicit Retry-After/default 429s remain account-wide unless this attempt used only Reserve.
     if (quotaScope && (source === "reset-derived" || meta.poolReserve)) {
       const prior = scopedHealthFor(accountId, quotaScope);
       const cooldownGeneration = (prior?.cooldownGeneration ?? 0) + 1;
       const ownsLease = meta.probeQuotaScope === quotaScope && ownsProbeLease(prior, meta);
-      setScopedHealth(accountId, quotaScope, {
+      const cooldown: CodexUpstreamHealth = {
         consecutiveFailures: 0,
         lastFailureStatus,
         lastFailureAt: now,
@@ -1476,7 +1473,8 @@ export function recordCodexUpstreamOutcome(
             ...(prior?.probeLeaseGeneration !== undefined ? { probeLeaseGeneration: prior.probeLeaseGeneration } : {}),
             ...(prior?.lastProbeAt !== undefined ? { lastProbeAt: prior.lastProbeAt } : {}),
         }),
-      });
+      };
+      setScopedHealth(accountId, quotaScope, cooldown);
       if (meta.poolReserve && ownsLease && meta.threadId && getThreadAffinity(meta.threadId, quotaScope)?.accountId === accountId) {
         deleteThreadAffinity(meta.threadId, quotaScope);
       }
@@ -1493,7 +1491,7 @@ export function recordCodexUpstreamOutcome(
           if (fallback) promoteActiveCodexAccount(config, fallback);
         }
       }
-      return;
+      return () => { cooldown.confirmedCapacity = true; };
     }
 
     // A scoped probe that received an account-wide throttle is no longer live.
@@ -1509,7 +1507,7 @@ export function recordCodexUpstreamOutcome(
     const cooldownGeneration = (prior?.cooldownGeneration ?? 0) + 1;
     // A failed probe concludes its lease; an unrelated 429 leaves the live probe alone.
     const ownsLease = ownsProbeLease(prior, meta);
-    setAccountHealth(accountId, {
+    const cooldown: CodexUpstreamHealth = {
       consecutiveFailures: 0,
       lastFailureStatus,
       lastFailureAt: now,
@@ -1525,7 +1523,8 @@ export function recordCodexUpstreamOutcome(
           ...(prior?.probeLeaseGeneration !== undefined ? { probeLeaseGeneration: prior.probeLeaseGeneration } : {}),
           ...(prior?.lastProbeAt !== undefined ? { lastProbeAt: prior.lastProbeAt } : {}),
         }),
-    });
+    };
+    setAccountHealth(accountId, cooldown);
     if (!meta.fixedAccount) {
       clearThreadAccountMapForAccount(accountId, "quota_refusal");
       // An independent native quota request may discover an account-wide throttle,
@@ -1545,7 +1544,7 @@ export function recordCodexUpstreamOutcome(
         }
       }
     }
-    return;
+    return () => { cooldown.confirmedCapacity = true; };
   }
 
   // transient (connect_error / timeout / 5xx)

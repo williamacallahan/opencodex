@@ -54,8 +54,10 @@ import { recordSubagentQuotaFailureForThreadSpawn } from "../../codex/subagent-m
 import { recordCodexUpstreamOutcome } from "../../codex/routing";
 import { codexFailureWindowOutcomeMeta } from "../../codex/routing/failure-window";
 import { codexProbeLeaseId, codexProbeQuotaScope, codexTransientProbeGrant, releaseCodexAuthContextProbeLease } from "../../codex/auth-context";
+import { isOwnerCapacityRefusal } from "./combo-luna-legs";
+import { upstreamEnvelopeRootCode } from "../../combos/failover";
 import { consumeComboFailure } from "./core-combo-failure";
-import { clientCancelledResponse, readDisplaySafeErrorText } from "./core-errors";
+import { clientCancelledResponse, normalizeUpstreamErrorText, readDisplaySafeErrorText } from "./core-errors";
 import { streamingContextOverflowResponse, jsonContextOverflowResponse } from "./context-overflow";
 import { formatPassthroughUpstreamError } from "./passthrough-error";
 import { rewriteUpstreamPolicyRefusal } from "./policy-refusal";
@@ -542,6 +544,8 @@ export async function deliverPassthroughResponse(
       }
       : undefined;
     const terminalBodyWillRecord = !!terminalRecorder && upstreamResponse.ok && isEventStream;
+    // Headers impose the cooldown immediately. The bounded body can confirm only that exact entry.
+    let confirmCapacity: ReturnType<typeof recordCodexUpstreamOutcome> = undefined;
     // Capture quota from upstream response for multi-account tracking
    if (usesCodexForwardPoolAuth(admissionState.authCtx, route.provider)) {
       // primary was the 5h window; it now carries weekly data for GPT plans.
@@ -582,7 +586,7 @@ export async function deliverPassthroughResponse(
         // a credential the request may never have reached, and that false signal outlives the
         // request. The sibling recorders on this path already decline: the terminal recorder
         // needs an ok streaming body, and the quota-header snapshot finds no quota headers.
-        recordCodexUpstreamOutcome(config, admissionState.authCtx.accountId, upstreamResponse.status, {
+        confirmCapacity = recordCodexUpstreamOutcome(config, admissionState.authCtx.accountId, upstreamResponse.status, {
           ...codexFailureWindowOutcomeMeta(admissionState.authCtx),
           ...quotaMeta,
           threadId: admissionState.authCtx.affinityKey,
@@ -646,23 +650,21 @@ export async function deliverPassthroughResponse(
     }
     if (!upstreamResponse.ok) {
       if (options.comboAttempt) {
-        // No pre-read guard here: `consumeComboFailure` -> `readBoundedResponseBody` reads
-        // `response.body` itself and already threads the abort signal through its own read,
-        // and the combo contract is that this body's getter is touched exactly once (pinned by
-        // "captures passthrough failed usage from its original bounded body exactly once").
-        // Attaching a guard would be a second `.body` access and break that contract for no
-        // gain, since the bounded reader owns settlement on this path.
-        // Only the plan-refusal cause is carried to this leg's row (#8352); a throwaway holder
-        // keeps the other diagnostics this path has never recorded off it.
         const comboCause: Pick<typeof logCtx, "causeHint"> = {};
         const failure = await consumeComboFailure(upstreamResponse, options.abortSignal, undefined, comboCause);
         if (comboCause.causeHint) logCtx.causeHint = comboCause.causeHint;
+        if (confirmCapacity && !failure.nonReplayable && isOwnerCapacityRefusal(failure)) confirmCapacity();
         options.onConsumedComboFailure?.(failure);
         return failure.response;
       }
       // The bounded reader owns the original body, deadline, abort settlement, and lock.
       // Unsafe partial data falls back to #452's non-empty status-only JSON.
       const errorText = await readDisplaySafeErrorText(upstreamResponse, upstream.signal, "");
+      if (confirmCapacity) {
+        const { code, type, safeText } = normalizeUpstreamErrorText(errorText, "");
+        if (isOwnerCapacityRefusal({ response: upstreamResponse, classificationText: safeText, upstreamCode: code,
+          upstreamType: type, upstreamRootCode: upstreamEnvelopeRootCode(errorText) })) confirmCapacity();
+      }
       if (upstreamResponse.status === 413) {
         if (options.clientModelLabel) projectLocalModelRefusalLog(logCtx, options.clientModelLabel);
         return clientRequestedStream

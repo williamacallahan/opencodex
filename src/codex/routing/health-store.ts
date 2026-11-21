@@ -12,6 +12,7 @@ export type CodexUpstreamHealth = {
   consecutiveSuccesses?: number;
   /** A completed Reserve turn is routing evidence, not a quota reading. */
   reserveSuccess?: { at: number; credentialGeneration: number };
+  confirmedCapacity?: true;
   lastFailureStatus?: number;
   lastFailureAt?: number;
   /** Hard cooldown (quota 429). Survives a later 2xx; blocks auth + selection. */
@@ -200,7 +201,7 @@ export function preservedCooldownFields(health: CodexUpstreamHealth | undefined)
   // when the old credential dies, deleting evidence that was never about it (#2892 gap 4 review).
   const {
     consecutiveFailures: _f, consecutiveSuccesses: _s, lastFailureStatus: _st, lastFailureAt: _at,
-    softAvoidUntil: _sa, credentialFailureGeneration: _cg, ...cooldownFields
+    confirmedCapacity: _capacity, softAvoidUntil: _sa, credentialFailureGeneration: _cg, ...cooldownFields
   } = health;
   return cooldownFields;
 }
@@ -214,13 +215,15 @@ export function getCodexAccountCooldownUntil(accountId: string, now = Date.now()
 export function getCodexAccountHealthSnapshot(accountId: string, now = Date.now()): {
   cooldownUntil?: number;
   cooldownSource?: CodexCooldownSource;
+  confirmedCapacity?: true;
 } | null {
   const cooldownUntil = getCodexAccountCooldownUntil(accountId, now);
   if (cooldownUntil === null) return null;
-  const source = upstreamHealth.get(accountId)?.cooldownSource;
+  const health = upstreamHealth.get(accountId);
   return {
     cooldownUntil,
-    ...(source ? { cooldownSource: source } : {}),
+    ...(health?.cooldownSource ? { cooldownSource: health.cooldownSource } : {}),
+    ...(health?.confirmedCapacity && { confirmedCapacity: true }),
   };
 }
 
@@ -236,6 +239,7 @@ export function getCodexQuotaHealthSnapshot(
 ): {
   cooldownUntil?: number;
   cooldownSource?: CodexCooldownSource;
+  confirmedCapacity?: true;
   quotaScope?: CodexQuotaScope;
 } | null {
   const account = getCodexAccountHealthSnapshot(accountId, now);
@@ -247,6 +251,7 @@ export function getCodexQuotaHealthSnapshot(
   return {
     cooldownUntil,
     ...(scoped?.cooldownSource ? { cooldownSource: scoped.cooldownSource } : {}),
+    ...(scoped?.confirmedCapacity && { confirmedCapacity: true }),
     quotaScope,
   };
 }
@@ -286,7 +291,7 @@ export function clearCodexAccountCooldown(accountId: string, now = Date.now()): 
     const liveAvoidance = typeof avoidUntil === "number" && Number.isFinite(avoidUntil) && avoidUntil > now;
     if (!liveCooldown && !liveAvoidance) return null;
     const {
-      cooldownUntil: _until,
+      confirmedCapacity: _capacity, cooldownUntil: _until,
       cooldownSince: _since,
       cooldownSource: _source,
       probeLeaseId: _leaseId,
@@ -364,7 +369,7 @@ export function noteScopedCodexSuccess(
   const reserveSuccess = scope === "reserve" && reserveGeneration !== undefined
     && isCodexAccountGenerationLive(accountId, reserveGeneration) ? { at: now, credentialGeneration: reserveGeneration } : undefined;
   if (!reserveSuccess && (!current || !carriesQuotaRefusal(current))) return;
-  const { lastFailureStatus: _refusal, lastFailureAt: _refusedAt, quotaAvoidUntil: _avoid, ...retained } =
+  const { confirmedCapacity: _capacity, lastFailureStatus: _refusal, lastFailureAt: _refusedAt, quotaAvoidUntil: _avoid, ...retained } =
     current ?? { consecutiveFailures: 0 };
   if (reserveSuccess) setScopedHealth(accountId, scope, { ...retained, reserveSuccess });
   else if (Object.keys(retained).length > 1) setScopedHealth(accountId, scope, retained);

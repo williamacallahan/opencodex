@@ -74,7 +74,7 @@ function fixture(strategy: "jev" | "failover" | "direct", status = 200, attempts
     fetch: (async () => { judgeCalls++; return Response.json({ answers: { route: { choice: "a/m:low" } } }); }) as unknown as typeof fetch });
   let charges = 0, refunds = 0;
   const observer: RequestSendObserver = { charge: () => { charges++; return true; }, refund: () => { refunds++; } };
-  const budget = createRequestExecutionBudget(undefined, undefined, observer);
+  const budget = createRequestExecutionBudget(comboExecutionBudgetPolicy(3), undefined, observer);
   return { config, inference, budget, get judgeCalls() { return judgeCalls; }, get charges() { return charges; }, get refunds() { return refunds; } };
 }
 /** Dispatch and consume one synthetic request through the real Responses handler. */

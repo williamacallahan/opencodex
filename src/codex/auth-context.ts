@@ -63,7 +63,7 @@ import {
 // ./routing above -- different module, different domain, and a request never holds both.
 import { releaseTransientProbe } from "../routing/probe-lease";
 import { codexAccountBlockReason } from "./routing/selection";
-import { hasUnrecoveredCodexQuotaRefusal, scopedHealthFor } from "./routing/health-store";
+import { scopedHealthFor } from "./routing/health-store";
 import { trackBackgroundWork } from "../lib/background-work";
 import {
   codexConversationIdentity,
@@ -461,6 +461,7 @@ export class CodexAccountCooldownError extends Error {
     cooldownUntil: number,
     cooldownSource?: CodexCooldownSource,
     quotaScope?: CodexQuotaScope,
+    readonly confirmedCapacity = false,
   ) {
     super("Selected Codex account is cooling down");
     this.name = "CodexAccountCooldownError";
@@ -640,7 +641,7 @@ function assertReserveAdmission(config: CodexAuthPolicyConfig): void {
   assertMainAccountPolicy(config);
   const cooldown = getCodexQuotaHealthSnapshot(MAIN_CODEX_ACCOUNT_ID, "reserve");
   if (cooldown?.cooldownUntil) {
-    throw new CodexAccountCooldownError(MAIN_CODEX_ACCOUNT_ID, cooldown.cooldownUntil, cooldown.cooldownSource, cooldown.quotaScope);
+    throw new CodexAccountCooldownError(MAIN_CODEX_ACCOUNT_ID, cooldown.cooldownUntil, cooldown.cooldownSource, cooldown.quotaScope, cooldown.confirmedCapacity);
   }
 }
 
@@ -766,7 +767,7 @@ export function createCodexAuthDispatchGuard(
       const verified = ctx.fixedAccount ? hasFreshPoolReserve(ctx.accountId, now) : hasVerifiedPoolReserve(ctx.accountId, now);
       if (hold || (trial?.quotaAvoidUntil ?? 0) > now
         || (!ownsTrial && (trial?.probeLeaseId !== undefined || !verified))) {
-        throw new CodexAccountCooldownError(ctx.accountId, hold?.cooldownUntil ?? trial?.quotaAvoidUntil ?? 0, hold?.cooldownSource, "reserve");
+        throw new CodexAccountCooldownError(ctx.accountId, hold?.cooldownUntil ?? trial?.quotaAvoidUntil ?? 0, hold?.cooldownSource, "reserve", hold?.confirmedCapacity);
       }
     }
     reserveGuard?.(headers);
@@ -1114,7 +1115,7 @@ async function resolveCodexAuthContextUnannotated(
     const cooldown = callerOwnedMainPoolCooldown();
     if (cooldown?.cooldownUntil) {
       throw new CodexAccountCooldownError(
-        MAIN_CODEX_ACCOUNT_ID, cooldown.cooldownUntil, cooldown.cooldownSource, cooldown.quotaScope,
+        MAIN_CODEX_ACCOUNT_ID, cooldown.cooldownUntil, cooldown.cooldownSource, cooldown.quotaScope, cooldown.confirmedCapacity,
       );
     }
   };
@@ -1525,7 +1526,7 @@ async function resolveCodexAuthContextUnannotated(
           unsupported
             ? "No eligible Codex account supports this model"
             : "Codex accounts that support this model are currently unavailable",
-          block === "credits_off" || block === "cooldown" && !!owner && hasUnrecoveredCodexQuotaRefusal(owner, quotaScope),
+          block === "credits_off" || block === "cooldown" && !!owner && getCodexQuotaHealthSnapshot(owner, quotaScope)?.confirmedCapacity === true,
         );
       }
       const mainCandidate = !nativeMainReadsForbidden
@@ -1652,7 +1653,7 @@ async function resolveCodexAuthContextUnannotated(
     // Exact bindings are not Pool recovery traffic. Fail closed instead of consuming the Pool's
     // one probe lease or selecting another account.
     if (fixedAccountId !== undefined) {
-      throw new CodexAccountCooldownError(accountId, cooldownUntil, cooldown?.cooldownSource, cooldown?.quotaScope);
+      throw new CodexAccountCooldownError(accountId, cooldownUntil, cooldown?.cooldownSource, cooldown?.quotaScope, cooldown?.confirmedCapacity);
     }
     probeQuotaScope = cooldown?.quotaScope;
     probeLeaseId = probeQuotaScope
@@ -1670,7 +1671,7 @@ async function resolveCodexAuthContextUnannotated(
         console.info("[codex] Pool used caller-owned main credential: stored account cooldown.");
         return context;
       }
-      throw new CodexAccountCooldownError(accountId, cooldownUntil, cooldown?.cooldownSource, cooldown?.quotaScope);
+      throw new CodexAccountCooldownError(accountId, cooldownUntil, cooldown?.cooldownSource, cooldown?.quotaScope, cooldown?.confirmedCapacity);
     }
   } else if (reserveDiscovery) {
     probeQuotaScope = "reserve";
@@ -1779,7 +1780,7 @@ export function assertCodexAuthContextNotCooled(ctx: CodexAuthContext | undefine
   if (ctx.probeLeaseId) return;
   const cooldown = getCodexQuotaHealthSnapshot(ctx.accountId, ctx.quotaScope);
   if (cooldown?.cooldownUntil) {
-    throw new CodexAccountCooldownError(ctx.accountId, cooldown.cooldownUntil, cooldown.cooldownSource, cooldown.quotaScope);
+    throw new CodexAccountCooldownError(ctx.accountId, cooldown.cooldownUntil, cooldown.cooldownSource, cooldown.quotaScope, cooldown.confirmedCapacity);
   }
 }
 

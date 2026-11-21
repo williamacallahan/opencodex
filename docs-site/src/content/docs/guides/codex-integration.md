@@ -505,7 +505,9 @@ later requests using the existing continuation handling. This happens only under
 pressure, needs no setting, and does not change voice connections or upstream connection reuse.
 
 If a canonical ChatGPT forward continuation references expired or missing local replay state,
-opencodex returns `previous_response_not_found` before sending anything upstream. Codex's
+opencodex returns `previous_response_not_found` before sending anything upstream. A combo also
+returns this error when it cannot restore the conversation and has only an old provider/model pin,
+not a record of which store issued the response ID. Codex's
 WebSocket client recognizes this error and can reconnect with its full retained context,
 including completed tool calls and their results, within its normal stream retry budget. An
 idle task therefore does not need a new task solely because the proxy's replay cache expired.

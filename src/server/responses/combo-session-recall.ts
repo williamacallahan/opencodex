@@ -115,10 +115,10 @@ function livePin(pin: ComboPin | undefined): ComboPin | undefined {
   if (pin) remove(pinKey(pin.lane, pin.comboId), pin);
 }
 function recordedTarget(config: OcxConfig, pin: Pick<ComboPin, "provider" | "model" | "comboId" | "store">) {
+  const store = pin.store;
+  if (!store) return;
   const targets = getCombo(config, pin.comboId)?.targets ?? [];
   const named = targets.find(target => targetKey(target) === targetKey(pin));
-  const store = pin.store;
-  if (!store) return named && Object.hasOwn(config.providers, named.provider) ? named : undefined;
   const matches = (target: typeof targets[number]) => {
     if (target.model !== pin.model || config.providers[target.provider]?.disabled) return false;
     try {
@@ -160,7 +160,7 @@ export function recallComboOwnerForLane(config: OcxConfig, lane: string | undefi
   return { target, preference, store: pin.store ?? undefined, proofs: hasProof, idIssuer: false };
 }
 export function recallComboTargetForLane(config: OcxConfig, lane: string | undefined, comboId: string): Pick<OcxComboTarget, "provider" | "model"> | undefined {
-  const target = recallComboOwnerForLane(config, lane, comboId)?.target;
+  const target = recallComboOwnerForLane(config, lane, comboId)?.preference;
   return target && { provider: target.provider, model: target.model };
 }
 export function sweepExpiredComboRecall(now: number): number {

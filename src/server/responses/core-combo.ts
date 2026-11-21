@@ -93,6 +93,7 @@ import {
   recoverEncryptedAgentTaskWithResult,
 } from "./agent-task-recovery";
 import { isThreadSpawnRequest, supportedLadderFor } from "../effort-policy";
+import { expandInferenceSendBudget } from "../inference/context";
 import { jevChoiceEfforts } from "./jev-combo-choice";
 import { applyDroidResponsesReasoningDefault } from "../droid-reasoning-default";
 import { isPlainObject } from "../../lib/plain-data";
@@ -139,7 +140,7 @@ import {
   jsonIncompleteResponse,
   streamingIncompleteResponse,
 } from "./context-overflow";
-import { legacyPinnedResponsesStore, legacyResponseOwnerMatches, mandatoryResponsesReasoningReplayUnavailable } from "./core-replay";
+import { legacyResponseOwnerMatches, mandatoryResponsesReasoningReplayUnavailable } from "./core-replay";
 import { anthropicSessionKeyFromParts } from "../../oauth/anthropic-routing";
 import { agentServingThreadKey } from "../../oauth/session-affinity-key";
 import { markResponseNonReplayable, isReplayRefusalResponse, settleOperatorReplacement, UPSTREAM_RESET_REPLAY_REFUSED_CODE } from "../../lib/upstream-retry";
@@ -321,7 +322,9 @@ export function deriveSendBudgetScope(
   parent: RequestExecutionBudget,
   policy: RequestExecutionBudgetPolicy,
 ): RequestExecutionBudget {
-  return deriveRequestExecutionBudget(parent, policy);
+  const maxTotalModelSends = Math.min(policy.maxTotalModelSends, parent.policy.maxTotalModelSends);
+  return deriveRequestExecutionBudget(parent, { ...policy, maxTotalModelSends,
+    baseSendAllowance: Math.min(policy.baseSendAllowance, maxTotalModelSends) });
 }
 
 
@@ -729,20 +732,13 @@ export async function executeComboResponses(
   replayEligibilityBody = body;
   let lunaLegs = lunaReplay?.kind === "portable" ? lunaPair : undefined;
   let dispatchBody = lunaReplay?.kind === "portable" ? lunaReplay.body : body;
-  // A migrated pin may route the ID, not other bound state. Check the delta with the ID removed.
-  const legacyDelta = !handleOwner && !legacyTarget && recorded?.target && !recorded.store && !recorded.idIssuer
-    && lunaReplay?.kind === "bound" && lunaReplay.reason === "previous-response-id"
-    ? prepareLunaReplay(body, true, req.headers) : undefined;
-  const legacyBody = legacyDelta?.kind === "portable" ? legacyDelta.body : undefined;
-  const legacyIdPin = isPlainObject(legacyBody);
-  if (legacyIdPin) dispatchBody = { ...legacyBody, previous_response_id: requestedPreviousId };
-  if (unresolvedPrevious && !handleOwner && !recorded?.idIssuer && !legacyIdPin) return unavailableOwner();
+  if (unresolvedPrevious && !handleOwner && !recorded?.idIssuer) return unavailableOwner();
   if (lunaReplay?.kind === "bound") {
     const owner = legacyTarget ? combo.targets.find(target => targetKey(target) === legacyTarget) : recorded?.target;
     if (handleOwner) {
       const match = combo.targets.find(target => owner && targetKey(target) === targetKey(owner) && pinEligible(target)) ?? combo.targets.find(pinEligible);
       boundTargetKey = match && targetKey(match);
-    } else if (owner && (legacyTarget || recorded?.store || legacyIdPin)) {
+    } else if (owner && (legacyTarget || recorded?.store)) {
       if (!pinEligible(owner)) return unavailableOwner();
       boundTargetKey = targetKey(owner);
     }
@@ -1139,14 +1135,15 @@ export async function executeComboResponses(
   const callerOutputCeilingTokens = logCtx.spendOutputCeilingTokens
     ?? (typeof callerBudget === "number" && Number.isFinite(callerBudget) && callerBudget > 0
       ? Math.trunc(callerBudget) : undefined);
-  const reserveWalk = isRequestExecutionBudget(options.sendBudget)
+  let reserveWalk = isRequestExecutionBudget(options.sendBudget)
     && (lunaLegs || ported !== undefined && lunaPair)
     ? createPoolReserveWalk(config) : undefined;
   const ordinaryPoolSends = 1 + CODEX_TEXT_GUARDED_BUDGET_POLICY.maxAlternateTargetSends;
   // A previously charged ledger can still visit unreported seats, but cannot grow its send limit.
   const walkHeadroom = options.sendBudget?.used === 0 ? Math.max(0, (reserveWalk?.remaining.size ?? 0) - ordinaryPoolSends) : 0;
-  let comboSendScope = isRequestExecutionBudget(options.sendBudget)
-    ? deriveSendBudgetScope(options.sendBudget, comboExecutionBudgetPolicy(comboLegCount, walkHeadroom)) : undefined;
+  const ladderPolicy = comboExecutionBudgetPolicy(comboLegCount, walkHeadroom);
+  expandInferenceSendBudget(options.sendBudget, ladderPolicy.maxTotalModelSends, ladderPolicy.baseSendAllowance);
+  let comboSendScope = isRequestExecutionBudget(options.sendBudget) ? deriveSendBudgetScope(options.sendBudget, ladderPolicy) : undefined;
   while (pick) {
     if (options.abortSignal?.aborted) return clientCancelledResponse();
     const firstComboTarget = comboTargetsDispatched === 0;
@@ -1205,9 +1202,7 @@ export async function executeComboResponses(
     const spendProvider = resolveWireProtocolOverride(targetRoute.providerName, targetRoute.modelId,
       targetRoute.provider, options.inboundWire ?? "responses", targetRoute.staticPolicy);
     const responsesWire = spendProvider.adapter === "openai-responses";
-    const legacyStore = legacyIdPin && responsesWire ? legacyPinnedResponsesStore(targetRoute.providerName, spendProvider, targetRoute.modelId) : undefined;
-    if ((legacyIdPin || recorded?.idIssuer) && (!responsesWire || spendProvider.authMode === "forward" || spendProvider.statelessResponses
-      || (legacyIdPin && (!legacyStore || targetRoute.providerName !== pick.target.provider || targetRoute.modelId !== pick.target.model)))) return missingPrevious();
+    if (recorded?.idIssuer && (!responsesWire || spendProvider.authMode === "forward" || spendProvider.statelessResponses)) return missingPrevious();
     if (boundTargetKey && !localExpansion && recorded?.store && !responsesWire) return unavailableOwner();
     const outputBudget = effectiveAzureOutputBudget(spendProvider, callerBudget);
     if (outputBudget !== callerBudget && typeof outputBudget === "number" && outputBudget > 0) {
@@ -1268,10 +1263,10 @@ export async function executeComboResponses(
     // re-tiered mid-session and its prompt cache survives the turn.
     const jevEffortApplies = initialJevDecision !== undefined && combo.jevEffortMode !== "client";
     // Native Responses can decide from the final credential; other wires get only the proven cross-owner copy.
-    const lateReasoningProjection = responsesWire && (((projectStore || legacyIdPin || recorded?.idIssuer) && lunaReplay?.kind === "bound") || (localExpansion && recorded?.store)) ? "owner"
+    const lateReasoningProjection = responsesWire && (((projectStore || recorded?.idIssuer) && lunaReplay?.kind === "bound") || (localExpansion && recorded?.store)) ? "owner"
       : responsesWire && lunaReplay?.kind === "portable" && lunaReplay.ownerBody !== undefined ? "portable" : undefined;
     // A verified handle owns its physical send even when lane recall names another account.
-    const recordedResponsesStore = handleOwner || localExpansion ? undefined : legacyStore ?? recorded?.store;
+    const recordedResponsesStore = handleOwner || localExpansion ? undefined : recorded?.store;
     const targetBody = lateReasoningProjection === "portable" && lunaReplay?.kind === "portable" ? lunaReplay.ownerBody : dispatchBody;
     const childInput = options.droidDefaultEffort && isPlainObject(targetBody) ? { ...targetBody } : targetBody;
     applyDroidResponsesReasoningDefault(childInput, options.droidDefaultEffort, {
@@ -1711,6 +1706,7 @@ export async function executeComboResponses(
       const next = plan ? await pickWithWait({ eligible: target => targetKey(target) === plan.nativeKey && targetEligible(target) }) : null;
       if (options.abortSignal?.aborted || req.signal.aborted) return clientCancelledResponse();
       if (plan && next) {
+        if (reserveWalk) reserveWalk = createPoolReserveWalk(config);
         dispatchBody = ported; lunaReplay = { kind: "portable", body: ported }; lunaLegs = plan;
         logCtx.routeDecision = { ...logCtx.routeDecision!, selected: { ...logCtx.routeDecision!.selected, reason: "luna-owner-spent-ported" } };
         pick = next;
