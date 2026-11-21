@@ -252,10 +252,12 @@ is interpolated into those local messages. No serialized flag, code or header mi
 The shared builders live in `src/combos/resolve.ts`, `src/server/admission-model-scope.ts`,
 `src/server/responses/input-admission.ts` and `src/oauth/generic-account-failover.ts`.
 `src/lib/upstream-retry.ts` owns the retry constructors. For a transient 5xx, `fetchWithTransientRetry`
-does not resend a response whose bounded body prefix proves context overflow. It reads at most 16,384
-bytes from a clone within 250ms or until cancellation, leaving the returned body intact. Event streams
-and bodies without an observed verdict retain the normal retry; a verdict observed before a slow or
-endless body stalls still stops retry. Hypothetical, negated, question-form and configuration-failure
+inspects one bounded body before another send. A context overflow in the first 16,384 bytes or a policy
+refusal in a complete error document of up to 65,536 bytes stops the retry. Direct Responses delivery
+returns the latter as HTTP 400 with its refusal code and no retry instruction. The inspection uses the
+retained bytes or a clone, finishes within 250ms or on cancellation, and leaves the original body intact.
+Event streams and bodies without an observed verdict retain the normal retry; a context overflow in a
+slow or endless body's prefix still stops retry. Hypothetical, negated, question-form and configuration-failure
 mentions are excluded per sentence in the unwrapped provider message, so they cannot hide a definite
 overflow in another sentence. A throttle worded only as "too many tokens" is not a verdict, while an
 explicit "prompt is too long" remains a verdict when no throughput signal is present.

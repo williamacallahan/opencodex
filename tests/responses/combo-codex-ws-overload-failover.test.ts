@@ -651,19 +651,44 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect(sharedSpendLedger().snapshot("pool", "openai")).toMatchObject({ reserved: 0, settled: 15, unresolved: 0 });
   });
 
+  test.each([
+    ["fallback/fallback-model", "openai-responses"], ["chain/overload", "openai-responses"], ["chain/overload", "openai-chat"],
+  ] as const)("HTTP error diagnostics mask the sending credential on %s (%s)", async (model, adapter) => {
+    const config = comboConfig();
+    config.providers.fallback!.adapter = adapter;
+    config.combos!.overload!.targets.shift();
+    const synthetic = "orchard-sample";
+    config.providers.fallback!.apiKey = synthetic;
+    globalThis.fetch = (async () => Response.json({ error: { message: `Fixture diagnosis: ${synthetic}` } }, {
+      status: 403, statusText: `Denied ${synthetic}`, headers: { "x-fixture-note": `From ${synthetic}`, "x-trace": "trace-42" },
+    })) as typeof fetch;
+    const { response, body } = await send(config, "hello", undefined, model);
+    expect(response.status).toBe(403);
+    expect(body).toContain("Fixture diagnosis:");
+    expect({ body: body.includes(synthetic), statusText: response.statusText.includes(synthetic),
+      headers: [...response.headers.values()].some(header => header.includes(synthetic)) }).toEqual({ body: false, statusText: false, headers: false });
+    if (model === "fallback/fallback-model") expect(response.headers.get("x-trace")).toBe("trace-42");
+  });
+
   test("terminal send accounting leaves a same-key retry unresolved when only the first send reported usage", async () => {
     const config = comboConfig();
     config.combos!.overload!.targets.shift();
     config.providers.fallback!.retryOn429 = { attempts: 1, intervalMs: 1 };
     let sends = 0;
-    globalThis.fetch = (async () => ++sends === 1
-      ? Response.json({ error: { message: "busy" }, usage: { input_tokens: 13, output_tokens: 2 } }, { status: 429, headers: { "retry-after": "0" } })
-      : Response.json({ error: { message: "forbidden" } }, { status: 403 })) as typeof fetch;
+    let firstBooking = 0;
+    globalThis.fetch = (async () => {
+      if (++sends === 1) {
+        firstBooking = sharedSpendLedger().snapshot("pool", "fallback").reserved;
+        return Response.json({ error: { message: "busy" }, usage: { input_tokens: 13, output_tokens: 2 } }, { status: 429, headers: { "retry-after": "0" } });
+      }
+      return Response.json({ error: { message: "forbidden" } }, { status: 403 });
+    }) as typeof fetch;
     const response = await sendWithSpendLedger(config);
     expect(response.status).toBe(403);
     expect(await response.text()).toContain("forbidden");
     expect(sends).toBe(2);
-    expect(sharedSpendLedger().snapshot("pool", "fallback").settled).toBe(0);
+    expect(firstBooking).toBeGreaterThan(0);
+    expect(sharedSpendLedger().snapshot("pool", "fallback")).toMatchObject({ reserved: 0, settled: 0, unresolved: 2 * firstBooking });
   });
 
   test.each([false, true])("terminal send accounting does not charge a fallback for the returned quota refusal (fallback reports usage=%s)", async reportsUsage => {

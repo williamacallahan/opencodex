@@ -63,9 +63,11 @@ export interface CodexWsTerminalQuota {
   headers: Headers;
 }
 
+export type CodexWsAuthRejection = "credential" | NonNullable<import("../../codex/quota-rejection").CodexPreStreamRejection["denial"]>;
+
 interface CodexWsResponseEvidence {
   hardStopStatus?: number;
-  credentialRejected?: boolean;
+  authRejection?: CodexWsAuthRejection;
   ambiguousTerminal?: true;
   terminalQuota?: CodexWsTerminalQuota;
 }

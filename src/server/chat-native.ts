@@ -74,7 +74,7 @@ import { providerApiKeySelectionIsCurrent, resolveCurrentProviderApiKeyTransport
 import type { OcxProviderTransport } from "../providers/xai-transport";
 import type { RouteResult } from "../router";
 import type { OcxConfig, OcxProviderConfig } from "../types";
-import { fetchWithHeaderTimeout, physicalSendObserverInit, providerFetch, safeHostLabel, sendWithConnectionPolicy } from "./responses/fetch-helpers";
+import { fetchWithHeaderTimeout, physicalSendCommitInit, physicalSendObserverInit, providerFetch, safeHostLabel, sendWithConnectionPolicy } from "./responses/fetch-helpers";
 import { isLocalUpstream } from "../lib/local-upstream";
 import { resolveConnectTimeoutMs, resolveJsonBodyReadTimeoutMs } from "../stall-timeout";
 import { linkAbortSignal } from "./responses";
@@ -475,7 +475,6 @@ export async function runNativeChatAttempt(
   );
 
   // Non-enforced accounting for one physical send. Enforced spend is owned by the reporter.
-  const comboReceipt = Boolean(sendBudget && execution.comboDispatchPermit);
   const settleNonEnforcedSend = (url: string): void => {
     if (sendBudget) {
       // Backstop for sends the helper cannot see coming (a reset replay). The first
@@ -519,9 +518,6 @@ export async function runNativeChatAttempt(
           providerFetch(activeProvider, undefined, {
             providerName: route.providerName,
             modelId: route.modelId,
-            onPhysicalDispatch: comboReceipt
-              ? () => { if (!physicalBudget.spendEnforced) settleNonEnforcedSend(request.url); }
-              : undefined,
             dispatchOverride: async (_input, init, execute, reacquirePacing) => {
               for (let attempt = 0; !providerApiKeySelectionIsCurrent(config, route.providerName, activeProvider); attempt++) {
                 if (outputDelivered) throw new Error("Provider key selection is unavailable during the native Chat turn");
@@ -563,18 +559,6 @@ export async function runNativeChatAttempt(
               const observeAutoPause = captureAccountAutoPauseAttempt(route.providerName, activeProvider, { config, oauth: undefined }, headers);
               let dispatched: Response;
               try {
-                // Capture this request's spend policy at its first physical boundary, including
-                // observe-only starts; later configuration changes belong to later requests.
-                if (spendReport.beforeSend && !spendReport.beforeSend()) {
-                  if ((logCtx.spendTracker as { refusals?: number } | undefined)?.refusals) throw new NativeChatSpendRefusal();
-                  throw new SendBudgetExhaustedError();
-                }
-                // Enforced spend started this send at `beforeSend`. A Combo child's non-enforced
-                // send is booked by the physical-dispatch receipt instead, so a local refusal
-                // before the wire refunds the booking rather than charging it.
-                if (physicalBudget.spendEnforced) initialSendStarted = true;
-                else if (!comboReceipt) settleNonEnforcedSend(request.url);
-                noteProviderAttemptSend(logCtx, route.providerName, activeProvider, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
                 // A reselected provider transport is still a physical send: the connection policy
                 // and manual-redirect ownership wrap the selected implementation (#4992).
                 const physicalFetch = ((input, physicalInit) => sendWithConnectionPolicy(
@@ -588,14 +572,23 @@ export async function runNativeChatAttempt(
                   applyUpstreamRecoveryInit({
                     ...init, method: request.method, headers, body: request.body,
                     ...physicalSendObserverInit(observeAutoPause, request.url),
+                    ...physicalSendCommitInit(() => {
+                      if (spendReport.beforeSend?.() === false) {
+                        if (spendTracker?.refusals) throw new NativeChatSpendRefusal();
+                        throw new SendBudgetExhaustedError();
+                      }
+                      if (physicalBudget.spendEnforced) {
+                        initialSendStarted = true;
+                      } else settleNonEnforcedSend(request.url);
+                      noteProviderAttemptSend(logCtx, route.providerName, activeProvider, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
+                    }),
                   }, transportRecovery),
                   init.signal ?? upstream.signal,
                   resolveConnectTimeoutMs(config.connectTimeoutMs, { localUpstream }),
                   requestedStream, physicalFetch,
                 );
               } finally {
-                try { if (physicalBudget.spendEnforced) spendReport(1); }
-                finally { spendReport.close?.(); }
+                spendReport.close?.();
               }
               responseOwnsDistributedKey = !activeProvider._apiKeyAttempt?.distributed
                 || distributedKeyResponseOwner(dispatched, config, route.providerName) !== null;

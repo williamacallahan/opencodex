@@ -11,7 +11,7 @@ import {
   REASONING_LOOP_ERROR_CODE,
 } from "../lib/upstream-retry";
 import { formatClientRetryAfter } from "../lib/client-retry-after";
-import { clientErrorCodeMessage } from "../lib/client-error-body";
+import { clientErrorCodeMessage, OPENAI_ERROR_TYPES } from "../lib/client-error-body";
 import {
   adapterFailureFromMessage,
   classifyError,
@@ -51,7 +51,7 @@ export function formatErrorResponse(
   status: number,
   type: string,
   message: string,
-  options?: { code?: string | null; retryAfter?: string | null; classified?: boolean; upstreamCode?: string | null; cyberPolicy?: boolean },
+  options?: { code?: string | null; retryAfter?: string | null; classified?: boolean; upstreamCode?: string | null; cyberPolicy?: boolean; maskCredential?: (text: string) => string },
 ): Response {
   const validationStatus = status === 400 || status === 422;
   const error = classifyError(status, type, message, options?.cyberPolicy);
@@ -122,6 +122,10 @@ export function formatErrorResponse(
   const refusal = isReplayRefusalCode(error.code) && replayBlocked;
   if (refusal) applyReplayRefusalClientHeaders(headers);
   if (error.code === REQUIRED_TOOL_CONTRACT_CODE && finalStatus === 400) applyReplayRefusalClientHeaders(headers);
+  if (options?.maskCredential) {
+    error.message = options.maskCredential(error.message);
+    if (!OPENAI_ERROR_TYPES.has(error.type)) error.type = options.maskCredential(error.type);
+  }
   const response = new Response(JSON.stringify({ error }), {
     status: finalStatus,
     headers,

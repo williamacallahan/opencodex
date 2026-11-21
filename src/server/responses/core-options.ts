@@ -34,6 +34,8 @@ import type { PolicyRequestEvidence } from "../../routing/evaluator";
 export interface ConsumedComboFailure {
   response: Response;
   classificationText: string;
+  /** Applied only if the parent must present another diagnostic from this send. */
+  maskCredential?: (text: string) => string;
   wrappedReserveQuota?: boolean;
   wsPreludeVerdict?: CodexWsPreludeVerdict;
   cyberPolicy?: boolean;

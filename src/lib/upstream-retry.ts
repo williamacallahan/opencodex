@@ -16,6 +16,8 @@
  * the shared abort helpers from here).
  */
 import { clearableDeadline } from "./abort";
+import { BOUNDED_BODY_MAX_BYTES } from "./bounded-body";
+import { terminalPolicyErrorFromBody } from "./errors";
 import { isDefiniteContextOverflow } from "./context-overflow-verdict";
 import { errorDestinationLabel, errorDestinationText, type ErrorDestinationLabel } from "./error-destination";
 export { errorDestinationLabel, providerErrorDestinationLabel, errorDestinationText } from "./error-destination";
@@ -761,13 +763,29 @@ function retryContextOverflowMessage(message: string): boolean {
   });
 }
 
-/** Up to `maxBytes` of a clone of the body, or what arrived before the deadline. */
-async function peekBodyText(res: Response, maxBytes: number, deadlineMs: number, signal?: AbortSignal): Promise<string> {
-  const reader = res.clone().body?.getReader();
-  if (!reader) return "";
+type PolicyRefusal = NonNullable<ReturnType<typeof terminalPolicyErrorFromBody>>;
+const policyRefusals = new WeakMap<Response, PolicyRefusal>();
+export function inspectedPolicyRefusal(response: Response): PolicyRefusal | undefined {
+  return policyRefusals.get(response);
+}
+
+function preventsTransientResend(res: Response, bytes: Uint8Array, complete: boolean): boolean {
   const decoder = new TextDecoder();
-  let text = "";
+  const prefix = decoder.decode(bytes.subarray(0, CONTEXT_OVERFLOW_PEEK_BYTES));
+  if (complete) {
+    const refusal = terminalPolicyErrorFromBody(bytes.length <= CONTEXT_OVERFLOW_PEEK_BYTES ? prefix : decoder.decode(bytes));
+    if (refusal) { policyRefusals.set(res, refusal); return true; }
+  }
+  return isDefiniteContextOverflow(res.status, prefix, retryContextOverflowMessage);
+}
+
+/** Inspect one bounded clone. Context verdicts can use a prefix; policy requires the complete document. */
+async function bodyPreventsTransientResend(res: Response, deadlineMs: number, signal?: AbortSignal): Promise<boolean> {
+  const reader = res.clone().body?.getReader();
+  if (!reader) return false;
+  let buffer: Uint8Array = new Uint8Array(0);
   let bytes = 0;
+  let complete = false;
   let emptyChunks = 0;
   const deadlineAt = performance.now() + deadlineMs;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -779,41 +797,30 @@ async function peekBodyText(res: Response, maxBytes: number, deadlineMs: number,
     if (signal?.aborted) stop();
   });
   try {
-    while (bytes < maxBytes) {
-      if (signal?.aborted || performance.now() >= deadlineAt) break;
+    while (!signal?.aborted && performance.now() < deadlineAt) {
       const chunk = await Promise.race([reader.read(), timedOut]);
-      if (!chunk || chunk.done) break;
+      if (!chunk) break;
+      if (chunk.done) { complete = true; break; }
       if (chunk.value.byteLength === 0) {
         if (++emptyChunks % 64 === 0) await new Promise<void>(resolve => setTimeout(resolve, 0));
         continue;
       }
       emptyChunks = 0;
-      const bounded = chunk.value.subarray(0, maxBytes - bytes);
-      bytes += bounded.byteLength;
-      text += decoder.decode(bounded, { stream: true });
+      const bounded = chunk.value.subarray(0, BOUNDED_BODY_MAX_BYTES - bytes);
+      if (bytes + bounded.length > buffer.length) {
+        const grown = new Uint8Array(Math.min(BOUNDED_BODY_MAX_BYTES, Math.max(bytes + bounded.length, buffer.length * 2)));
+        grown.set(buffer); buffer = grown;
+      }
+      buffer.set(bounded, bytes); bytes += bounded.length;
+      if (bounded.length < chunk.value.length) break;
     }
-    return text;
+    return preventsTransientResend(res, buffer.subarray(0, bytes), complete);
+  } catch {
+    return false;
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", stop);
     reader.cancel().catch(() => {});
-  }
-}
-
-/**
- * True when a transient-status response's body is a definite context-overflow verdict. Peeks a
- * clone within a byte and time bound, so the caller still receives the untouched body. A slow
- * or endless body keeps the normal retry unless its observed prefix already proves overflow.
- * "Too many tokens" alone is not enough here: a 5xx
- * "Too many tokens, please wait" is a throttle that the retry exists for.
- */
-async function isContextOverflowResponse(res: Response, signal?: AbortSignal): Promise<boolean> {
-  if ((res.headers.get("content-type") ?? "").includes("text/event-stream")) return false;
-  try {
-    const text = await peekBodyText(res, CONTEXT_OVERFLOW_PEEK_BYTES, CONTEXT_OVERFLOW_PEEK_MS, signal);
-    return text.length > 0 && isDefiniteContextOverflow(res.status, text, retryContextOverflowMessage);
-  } catch {
-    return false;
   }
 }
 
@@ -892,13 +899,12 @@ export async function fetchWithTransientRetry(
       // Retry-After intact and applies its own policy, exactly as on the direct path.
       return res;
     }
+    const inspectDiagnostic = !(res.headers.get("content-type") ?? "").includes("text/event-stream");
     if (opts.retainBeforeTransientRetry) {
       const retained = await opts.retainBeforeTransientRetry(res, CONTEXT_OVERFLOW_PEEK_MS);
       res = retained.response;
-      if (!retained.bytes) return res;
-      if (!(res.headers.get("content-type") ?? "").includes("text/event-stream") && isDefiniteContextOverflow(res.status,
-        new TextDecoder().decode(retained.bytes.subarray(0, CONTEXT_OVERFLOW_PEEK_BYTES)), retryContextOverflowMessage)) return res;
-    } else if (await isContextOverflowResponse(res, opts.abortSignal)) return res;
+      if (!retained.bytes || (inspectDiagnostic && preventsTransientResend(res, retained.bytes, true))) return res;
+    } else if (inspectDiagnostic && await bodyPreventsTransientResend(res, CONTEXT_OVERFLOW_PEEK_MS, opts.abortSignal)) return res;
     if (opts.abortSignal?.aborted) return res;
     console.warn(
       `[upstream-retry] transient ${res.status}${opts.label ? ` (${opts.label})` : ""} — retrying (${sent + 1}/${budget})`,

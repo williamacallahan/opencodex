@@ -1,5 +1,5 @@
 import { parseResetCooldownMs } from "../codex/routing";
-import { CYBER_POLICY_FALLBACK_MESSAGE, TERMINAL_REFUSAL_FALLBACK_MESSAGE, classifyError, hasStructuredErrorVerdict, isCyberPolicyCode, isCyberPolicyMessage, isRateLimitOrQuotaFailureMessage, isSubscriptionGateMessage, isTerminalRefusalCode, safetyRefusalCodeFromMessage } from "../lib/errors";
+import { CYBER_POLICY_FALLBACK_MESSAGE, TERMINAL_REFUSAL_FALLBACK_MESSAGE, classifyError, hasStructuredErrorVerdict, isCyberPolicyCode, isCyberPolicyMessage, isRateLimitOrQuotaFailureMessage, isSubscriptionGateMessage, isTerminalRefusalCode, recognizedUpstreamError, safetyRefusalCodeFromMessage } from "../lib/errors";
 import { isHardPolicyOrOriginRefusal } from "../lib/hard-refusal";
 import { isNonReplayableUpstreamCode } from "../lib/upstream-retry";
 import { isAnthropicBillingFailure } from "../providers/anthropic-billing-refusal";
@@ -1569,6 +1569,7 @@ function decideComboFailure(
     ? options?.codexModelRefusal ?? codexAccountModelRefusal(status, message) : "other";
   // Competing envelopes cannot grant a hop through an earlier structured-code rule either.
   if (modelRefusal === "ambiguous") return "stop";
+  if (recognizedUpstreamError({ code: rawCode })?.httpStatus === 503) return "hop";
   // HTTP 410 is normally terminal. A model-specific lifecycle verdict is target-local,
   // however: another provider/model in the declared combo can still serve the request.
   // Require structured lifecycle code or explicit model+lifecycle prose so unrelated

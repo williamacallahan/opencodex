@@ -26,6 +26,7 @@ async function* policyRefusalEvents(message: string): AsyncGenerator<AdapterEven
 export function rewriteUpstreamPolicyRefusal(args: {
   status: number;
   errorText: string;
+  maskCredential?: (text: string) => string;
   stream: boolean;
   modelId: string;
   /** `isXaiResponsesDestination(route.provider)`: api.x.ai or the Grok CLI proxy. */
@@ -34,7 +35,8 @@ export function rewriteUpstreamPolicyRefusal(args: {
   turnAdmissionLease?: AdmissionLease;
 }): Response | null {
   if (!args.destinationIsXai || !isUpstreamPolicyRefusal(args.status, args.errorText)) return null;
-  const message = extractPolicyRefusalText(args.errorText);
+  const diagnostic = extractPolicyRefusalText(args.errorText);
+  const message = args.maskCredential ? args.maskCredential(diagnostic) : diagnostic;
   if (!args.stream) {
     const json = buildResponseJSON(
       [

@@ -1770,7 +1770,7 @@ export async function executeComboResponses(
     // Hard stops above still return their own verdict, and every attempt keeps its own usage.
     if (!contextFailure && failure.response.status === 400 && isDefiniteContextOverflow(400, failure.classificationText)) {
       contextFailure = { childLog, response: formatErrorResponse(400, "invalid_request_error",
-        failure.upstreamMessage ?? failure.classificationText, { code: "context_length_exceeded", classified: true }) };
+        failure.upstreamMessage ?? failure.classificationText, { code: "context_length_exceeded", classified: true, maskCredential: failure.maskCredential }) };
     }
     if (failure.upstreamCode === "zero_output_token_limit") {
       zeroOutputLimitFailure = {

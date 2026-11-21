@@ -30,7 +30,7 @@ const HOME_KEYS = ["HOME", "OPENCODEX_HOME", "CODEX_HOME"] as const;
 const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"] as const;
 
 type Listener = (event: unknown) => void;
-type Step = "reserve-quota" | "refuse" | "ok" | "output-then-refuse" | "refuse-then-abort" | "transport-error" | "silent"
+type Step = { denialCode: string } | "reserve-quota" | "refuse" | "ok" | "output-then-refuse" | "refuse-then-abort" | "transport-error" | "silent"
   | "heartbeat-then-refuse" | "heartbeat-output-then-refuse" | "unsafe-heartbeat-then-refuse"
   | "heartbeat-bare-then-refuse" | "heartbeat-then-abort";
 
@@ -63,6 +63,11 @@ class FakeWebSocket {
     const id = `resp_${FakeWebSocket.instances.indexOf(this)}`;
     if (step === "reserve-quota") this.frame({ type: "codex.rate_limits", rate_limits: { primary: { used_percent: 25, window_minutes: 10080 } } });
     this.frame({ type: "response.created", response: { id, status: "in_progress", output: [] } });
+    if (typeof step === "object") {
+      this.frame({ type: "error", status: 403, code: "invalid_authentication",
+        error: { code: step.denialCode, message: "Fixture grant denied" } });
+      return;
+    }
     if (step === "heartbeat-then-refuse" || step === "heartbeat-output-then-refuse"
       || step === "unsafe-heartbeat-then-refuse" || step === "heartbeat-bare-then-refuse"
       || step === "heartbeat-then-abort") {
@@ -234,6 +239,16 @@ function failures(accountId: string): number {
 }
 
 describe("pooled native Codex recovers a pre-output upstream refusal (#6969)", () => {
+  test.each(["codex_workspace_access_denied", "codex_entitlement_missing"])("a committed 403 naming %s stops the turn but keeps the account usable", async denialCode => {
+    FakeWebSocket.plan = [{ denialCode }, "ok"];
+    const config = poolConfig([WORK]);
+    const refused = await send(config);
+    expect(refused.body).toContain("event: response.created");
+    expect(refused.body).toContain("event: response.failed");
+    expect(refused.logCtx.terminalHttpStatus).toBe(403);
+    expect((await send(config)).body).toContain("event: response.completed");
+  });
+
   test("a correlated zero-output Reserve refusal spends one alternate WebSocket send", async () => {
     setAccountQuotaFromParsed(WORK, { weeklyPercent: 100, weeklyResetAt: Date.now() + 3_600_000 });
     FakeWebSocket.plan = ["reserve-quota", "ok"];

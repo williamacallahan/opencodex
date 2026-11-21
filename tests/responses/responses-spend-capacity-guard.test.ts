@@ -81,14 +81,15 @@ describe("configured spend cannot dispatch without a capacity booking", () => {
     expect(next.charge()).toBe(false);
   });
 
-  test("a newly resolved identity does not change a request that already started observe-only", () => {
+  test("a newly resolved identity must obtain normal tracking capacity before sending", () => {
     const f = fixture({ identity: { maxTokens: 1000 }, maxTrackedScopes: 1 });
     delete f.context.accountLogLabel;
     expect(f.attempt().allowed).toBe(true);
     f.context.accountLogLabel = "newly-resolved-account";
-    expect(f.attempt().allowed).toBe(true);
-    expect(f.dispatched()).toBe(2);
-    expect(f.budget.used).toBe(2);
+    expect(f.attempt().allowed).toBe(false);
+    expect(f.context.localTerminalReason).toBe("workflow_tracking_exhausted");
+    expect(f.dispatched()).toBe(1);
+    expect(f.budget.used).toBe(1);
     const next = createRequestSpendTracker(f.context, "fixture-root", f.ledger);
     expect(next.charge()).toBe(false);
   });

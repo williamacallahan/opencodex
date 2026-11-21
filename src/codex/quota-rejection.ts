@@ -97,12 +97,7 @@ async function denialFromResponse(
     const body = await readBoundedResponseBody(response.clone(), { signal, fatalUtf8: true });
     if (!body.displaySafe || body.truncated || !body.text.trim()) return undefined;
     if (isUnsafeJsonDocument(body.text)) return undefined;
-    const payload = JSON.parse(body.text) as unknown;
-    const code = structuredDenialCode(payload);
-    if (code === undefined) return undefined;
-    if (WORKSPACE_DENIAL_CODES.has(code)) return "workspace";
-    if (ENTITLEMENT_DENIAL_CODES.has(code)) return "entitlement";
-    return undefined;
+    return codexAccessDenial(JSON.parse(body.text));
   } catch {
     // Same fail-closed rule as the exhaustion classifier: an unreadable body must not
     // downgrade a credential failure into a workspace one.
@@ -117,20 +112,15 @@ function ownStringField(container: Record<string, unknown>, field: string): stri
     : undefined;
 }
 
-/** Own-property `code` lookup at the top level or under `error` / `detail`. No coercion or accessors. */
-function structuredDenialCode(payload: unknown): string | undefined {
+/** A specific grant denial is evidence about access even when its wrapper has a generic auth code. */
+export function codexAccessDenial(payload: unknown): CodexPreStreamRejection["denial"] {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
-  const record = payload as Record<string, unknown>;
-  const direct = ownStringField(record, "code");
-  if (direct !== undefined) return direct;
-
-  for (const field of ["error", "detail"] as const) {
-    const descriptor = Object.getOwnPropertyDescriptor(record, field);
-    if (!descriptor || !("value" in descriptor)) continue;
-    const nested = descriptor.value;
-    if (nested === null || typeof nested !== "object" || Array.isArray(nested)) continue;
-    const code = ownStringField(nested as Record<string, unknown>, "code");
-    if (code !== undefined) return code;
+  for (const field of [undefined, "error", "detail"] as const) {
+    const diagnostic: unknown = field === undefined ? payload : Object.getOwnPropertyDescriptor(payload, field)?.value;
+    if (diagnostic === null || typeof diagnostic !== "object" || Array.isArray(diagnostic)) continue;
+    const code = ownStringField(diagnostic as Record<string, unknown>, "code");
+    if (code !== undefined && WORKSPACE_DENIAL_CODES.has(code)) return "workspace";
+    if (code !== undefined && ENTITLEMENT_DENIAL_CODES.has(code)) return "entitlement";
   }
   return undefined;
 }
