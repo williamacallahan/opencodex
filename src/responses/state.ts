@@ -135,7 +135,7 @@ export type ResidentInput = Omit<ResidentResponseState, "kind" | "sizeBytes">;
 
 export type PreviousResponseReplayFailure = {
   code: "previous_response_not_found";
-  reason: "spill_missing" | "spill_corrupt" | "spill_failed" | "spill_too_large" | "scope_mismatch" | "upstream_history";
+  reason: "spill_missing" | "spill_corrupt" | "spill_failed" | "spill_too_large" | "scope_mismatch";
 };
 
 const states = new Map<string, StoredResponseState>();
@@ -473,6 +473,12 @@ function replaceSpillEntryAtomically(
   }
 }
 
+function exceedsSpillCap(id: string, candidate: ResidentResponseState, cap: number): boolean {
+  // selfContained is snapshot metadata, not part of the versioned spill envelope.
+  const payloadBase = candidate.sizeBytes - (candidate.selfContained ? Buffer.byteLength(',"selfContained":true') : 0);
+  return payloadBase > cap || (payloadBase + 16 > cap && (prospectiveResponseSpillBytes(id, candidate) ?? Infinity) > cap);
+}
+
 function setResidentEntry(id: string, entry: ResidentInput): void {
   const expected = states.get(id);
   const candidate = measureResidentEntry(id, entry);
@@ -485,8 +491,7 @@ function setResidentEntry(id: string, entry: ResidentInput): void {
     return;
   }
   const spillCap = responseSpillPayloadCap();
-  if (candidate.sizeBytes > byteCap()
-    || (candidate.sizeBytes + 16 > spillCap && (prospectiveResponseSpillBytes(id, candidate) ?? Infinity) > spillCap)) {
+  if (candidate.sizeBytes > byteCap() || exceedsSpillCap(id, candidate, spillCap)) {
     admitOversizedCandidate(id, candidate, expected);
     pruneResponses();
     return;
@@ -520,8 +525,7 @@ function admitOversizedCandidate(
   expected?: StoredResponseState,
 ): void {
   const spillCap = responseSpillPayloadCap();
-  if (candidate.sizeBytes > spillCap
-    || (candidate.sizeBytes + 16 > spillCap && (prospectiveResponseSpillBytes(id, candidate) ?? Infinity) > spillCap)) {
+  if (exceedsSpillCap(id, candidate, spillCap)) {
     admissionCounters.oversizedDrops += 1;
     replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
     return;
@@ -1117,12 +1121,9 @@ export function expandPreviousResponseInput(body: unknown, clientThreadId?: stri
     replayScopeMismatchDrops += 1;
     return body;
   }
-  // A cache hit may contain only the append to a server-owned conversation. Legacy rows
-  // carry no proof either. Never turn either into a self-contained cold replay.
-  if (!materialized.state.selfContained || request.conversation != null) {
-    replayFailures.set(request, { code: "previous_response_not_found", reason: "upstream_history" });
-    return body;
-  }
+  // Lack of local proof leaves the ID and delta intact. Route admission, not lookup,
+  // decides whether the upstream owns omitted history. Actual read/scope failures stay fatal.
+  if (!materialized.state.selfContained || request.conversation != null) return body;
   const clientInput = inputItems(request.input);
   const stored = materialized.state.items;
   const carried = clientCarriedPrefixLength(stored, clientInput);

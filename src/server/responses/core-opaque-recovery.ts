@@ -1,3 +1,4 @@
+import { copyPreviousResponseReplayProvenance } from "../../responses/state/body-policy";
 import { ENCRYPTED_FUNCTION_OUTPUT_REJECTION, upstreamErrorMessageFromPayload } from "../../lib/errors";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { isHardPolicyOrOriginRefusal } from "../../lib/hard-refusal";
@@ -104,6 +105,7 @@ export function withRawBodyReasoningEffort(rawBody: unknown, effort: string): un
   const next: Record<string, unknown> = { ...rawBody };
   if (isPlainObject(rawBody.reasoning)) next.reasoning = { ...rawBody.reasoning, effort };
   if ("reasoning_effort" in rawBody) next.reasoning_effort = effort;
+  copyPreviousResponseReplayProvenance(rawBody, next);
   return next;
 }
 

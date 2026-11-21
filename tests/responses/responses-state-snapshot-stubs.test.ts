@@ -1,5 +1,7 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { handleResponses } from "../../src/server/responses";
+import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -63,7 +65,59 @@ describe("Responses snapshot spill stub retention", () => {
     await flushResponseState(); clearResponseStateMemoryForTests();
     const delta = { previous_response_id: "resp_append", input: "next" };
     expect(expandPreviousResponseInput(delta)).toBe(delta);
-    expect(previousResponseReplayFailure(delta)?.reason).toBe("upstream_history");
+    expect(previousResponseReplayFailure(delta)).toBeUndefined();
+  });
+
+  test.each(["legacy resident", "legacy spill", "stored prompt"])("%s continues by ID on a non-Luna stateful Responses route", async kind => {
+    const spill = kind === "legacy spill", legacy = kind !== "stored prompt";
+    setResponseStateByteCapForTests(spill ? 1_024 : 1_000_000);
+    rememberResponseState({ input: "historical".repeat(500), ...(!legacy ? { prompt: { id: "pmpt_fixture" } } : {}) }, fixedResponse("resp_owned", []));
+    expect(responseStateMetrics().spillStubCount).toBe(spill ? 1 : 0);
+    await flushResponseState(); clearResponseStateMemoryForTests();
+    if (legacy) {
+      const path = join(home, "responses-state.json");
+      const snapshot = JSON.parse(readFileSync(path, "utf8"));
+      for (const [, entry] of snapshot.states) delete entry.selfContained;
+      writeFileSync(path, JSON.stringify(snapshot));
+    }
+    const release = acquireOwnedSpendHome();
+    const sent: { previous_response_id?: string; input?: unknown }[] = [];
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      sent.push(await new Request(url, init).json());
+      return Response.json({ id: "resp_next", object: "response", model: "other-model", status: "completed", output: [] });
+    }, { preconnect() {} }));
+    try {
+      const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gateway/other-model", input: "next", previous_response_id: "resp_owned", stream: false }) }),
+        { port: 0, defaultProvider: "gateway", providers: { gateway: { adapter: "openai-responses", authMode: "key", apiKey: "fixture", baseUrl: "https://state.example.test/v1" } } },
+        { model: "", provider: "" });
+      expect(response.status).toBe(200); await response.text(); expect(sent).toHaveLength(1);
+      expect(sent[0]?.previous_response_id).toBe("resp_owned"); expect(JSON.stringify(sent[0]?.input)).toContain("next");
+      expect(JSON.stringify(sent[0]?.input)).not.toContain("historical");
+    } finally { fetchSpy.mockRestore(); release(); }
+  });
+
+  test("an effort downgrade preserves complete history for the third turn", async () => {
+    const release = acquireOwnedSpendHome();
+    const sent: Record<string, unknown>[] = [];
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      sent.push(await new Request(url, init).json());
+      if (sent.length === 2) return Response.json({ error: { param: "reasoning_effort", message: "reasoning_effort max is not supported for this model" } }, { status: 400 });
+      return Response.json({ id: sent.length === 1 ? "resp_first" : sent.length === 3 ? "resp_second" : "resp_third", object: "response", model: "reasoner", status: "completed", output: [] });
+    }, { preconnect() {} }));
+    const cfg = { port: 0, defaultProvider: "gateway", providers: { gateway: { adapter: "openai-responses" as const, authMode: "key" as const,
+      apiKey: "fixture", baseUrl: "https://state.example.test/v1", reasoningEfforts: ["low", "high", "max"] } } };
+    const turn = async (input: string, previous_response_id?: string, reasoning?: { effort: string }) => {
+      const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gateway/reasoner", input, previous_response_id, reasoning, store: true, stream: false }) }), cfg, { model: "", provider: "" });
+      expect(response.status).toBe(200); await response.text();
+    };
+    try {
+      await turn("first"); await turn("second", "resp_first", { effort: "max" }); await turn("third", "resp_second");
+      expect(sent).toHaveLength(4);
+      const finalInput = JSON.stringify(sent[3]?.input);
+      expect(finalInput).toContain("first"); expect(finalInput).toContain("second"); expect(finalInput).toContain("third");
+    } finally { fetchSpy.mockRestore(); release(); }
   });
 
   test("a restart keeps spilled continuations replayable when residents fill the snapshot budget", async () => {
