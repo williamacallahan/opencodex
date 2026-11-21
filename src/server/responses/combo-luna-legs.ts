@@ -1,4 +1,5 @@
-import { comboFailureCooldownScope, targetKey, type getCombo } from "../../combos";
+import { inspectedReserveRefusal } from "./reserve-refusal-body";
+import { comboFailureDecision, comboFailureCooldownScope, targetKey, type getCombo } from "../../combos";
 import type { ConsumedComboFailure } from "./core-options";
 import { consumeComboFailure } from "./core-combo-failure";
 import { isNonReplayableResponse } from "../../lib/upstream-retry";
@@ -32,7 +33,13 @@ export function isReserveSeatQuotaRefusal(failure: ConsumedComboFailure, scope =
 /** The pool already classified this response as quota (including body-confirmed 5xx). */
 export async function reserveQuotaPermitsMove(response: Response, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted || wasAccountAutoPaused(response) || isNonReplayableResponse(response)) return false;
-  return response.status >= 500 || isReserveSeatQuotaRefusal(await consumeComboFailure(response.clone(), signal));
+  const inspection = inspectedReserveRefusal(response);
+  if (response.status >= 500 && !inspection) return true;
+  // Reuse the completed bounded read, never tee the stream the walker may have to return.
+  const evidence = inspection ? new Response(inspection.text, { status: response.status, headers: response.headers }) : response.clone();
+  const failure = await consumeComboFailure(evidence, signal);
+  return response.status >= 500 ? comboFailureDecision(response.status, failure.classificationText,
+    { code: failure.upstreamCode, rootCode: failure.upstreamRootCode }) === "hop" : isReserveSeatQuotaRefusal(failure);
 }
 
 const notStarted = new WeakSet<object>();

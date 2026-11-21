@@ -29,6 +29,10 @@ export function closedReasoningPrefix(input: readonly unknown[]): number {
 /** Run on the original input, before destination-specific transforms can erase a required item. */
 export function projectLunaReasoning(parsed: OcxParsedRequest, stripsReasoning: boolean): unknown {
   const body = parsed._rawBody;
+  const bound = parsed._lunaProjectForeignReasoning === "owner";
+  // Owner mode without a recorded store is admitted only under a verified turn-state handle.
+  const sameStore = parsed._recordedResponsesStore ? parsed._responsesStore === parsed._recordedResponsesStore : bound;
+  if (bound && !sameStore) throw new LunaReasoningOwnerError();
   if (!isPlainObject(body) || !Array.isArray(body.input)) return body;
   let issued: ReturnType<typeof issuedReasoningMatcher> | undefined;
   let boundary: number | undefined;
@@ -38,8 +42,9 @@ export function projectLunaReasoning(parsed: OcxParsedRequest, stripsReasoning: 
     const id = typeof item.id === "string" ? item.id : "";
     const blob = typeof item.encrypted_content === "string" ? item.encrypted_content : "";
     if (!id && !blob) continue;
-    issued ??= issuedReasoningMatcher(parsed._reasoningReplayScope);
-    if (issued(id, blob) && !stripsReasoning && !(blob && parsed._stripReasoningEncryptedContent)
+    issued ??= issuedReasoningMatcher(parsed._reasoningReplayScope, parsed._issuedReasoningProofs);
+    const matches = issued(id, blob);
+    if (matches && !stripsReasoning && !(blob && parsed._stripReasoningEncryptedContent)
       && !(id && parsed._dropForeignReasoningItemIds)) continue;
     // Other state may pin this request (a handle, for example) without making an older
     // summarized item from another issuer indispensable. Check the item, not the pin.

@@ -143,6 +143,8 @@ import { injectionDebugLog } from "../../lib/injection-debug-log";
 import { slugsEquivalent } from "../../providers/slug-codec";
 import type { AgentTaskRecoveryFailureReason } from "./agent-task-recovery";
 import { resolveWireProtocolOverride } from "../adapter-resolve";
+import { legacyResponseOwnerMatches } from "./core-replay";
+import { isLegacyResponseExpansion } from "../../responses/state/body-policy";
 import { hasUnmappedRoutedCustomToolOutput } from "../../responses/custom-tool-compat";
 import { PROVIDER_OWNED_CONTINUATION_WIRES, resolvedAdapterWire } from "../../responses/continuation-ownership";
 import {
@@ -461,7 +463,9 @@ export async function prepareResponsesRequest(
   if (options.comboReplaySnapshot) {
     copyPreviousResponseReplayProvenance(options.comboReplaySnapshot.sourceBody, body);
   } else {
-    body = expandPreviousResponseInput(body, inboundClientThreadId);
+    body = expandPreviousResponseInput(body, inboundClientThreadId, owner =>
+      !options.policyFallbackCandidate && !options.compactionRoutingOverride && !options.mainHardLockFallbackOverride
+      && legacyResponseOwnerMatches(owner, config, originalSelector, req.headers));
     const replayFailure = previousResponseReplayFailure(body);
     if (replayFailure?.reason === "scope_mismatch") {
       // Bounded and content-free: no task scope and nothing about the retained entry.
@@ -593,6 +597,8 @@ export async function prepareResponsesRequest(
     }
     toolBridgeMaps = buildToolBridgeMaps(parsed, translatorBudget);
     if (options.comboReplaySnapshot?.projectForeignReasoning) parsed._lunaProjectForeignReasoning = options.comboReplaySnapshot.projectForeignReasoning;
+    parsed._issuedReasoningProofs = options.comboReplaySnapshot?.issuedReasoningProofs;
+    parsed._recordedResponsesStore = options.comboReplaySnapshot?.recordedResponsesStore;
     if (previousResponseInputExpanded) parsed._previousResponseInputExpanded = true;
     const providerContinuationCandidate = options.comboReplaySnapshot
       ? options.comboReplaySnapshot.providerContinuation
@@ -1217,7 +1223,7 @@ export async function prepareResponsesRequest(
         try {
           const reparsed = parseRequest(body);
           const kept: Array<keyof OcxParsedRequest> = [
-            "_previousResponseInputExpanded", "_lunaProjectForeignReasoning",
+            "_previousResponseInputExpanded", "_lunaProjectForeignReasoning", "_recordedResponsesStore", "_issuedReasoningProofs",
             "_providerContinuation",
             "_providerContinuationCandidate",
             "_providerContinuationOwner",
@@ -1474,8 +1480,8 @@ export async function prepareResponsesRequest(
   // Codex recognizes previous_response_not_found on WebSocket errors and reconnects with its
   // full input. A generic invalid_request_error instead terminates the task after cache expiry.
   if (
-    hasUnexpandedPreviousResponse
-    && isCanonicalOpenAiForwardProvider(route.provider)
+    (hasUnexpandedPreviousResponse && isCanonicalOpenAiForwardProvider(route.provider))
+    || ((credentialDomainWasRewritten || route.credentialDomainRewrite) && isLegacyResponseExpansion(body))
   ) {
     return markProxyError(formatErrorResponse(
       400,

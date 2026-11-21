@@ -42,6 +42,8 @@ export type StoredComboPin = {
   lane: string; comboId: string; provider: string; model: string; at: number;
   /** Only the last completion on a lane may resolve a bare compaction selector. */
   responseDigest: string | null;
+  store?: string | null;
+  proofs?: string | null;
 };
 type ComboSnapshot = {
   restore(rows: Iterable<StoredComboPin>): void;
@@ -198,7 +200,9 @@ function prepareAffinityFile(home: string, token: SpendLedgerStorage): FileIdent
   return before;
 }
 
-const comboSchema = "CREATE TABLE combo_pins(generation TEXT, lane TEXT, comboId TEXT, provider TEXT, model TEXT, at INTEGER, responseDigest TEXT)";
+const oldComboSchema = "CREATE TABLE combo_pins(generation TEXT, lane TEXT, comboId TEXT, provider TEXT, model TEXT, at INTEGER, responseDigest TEXT)";
+
+const comboSchema = oldComboSchema.replace("responseDigest TEXT)", "responseDigest TEXT, store TEXT, proofs TEXT)");
 
 /** v1 rejects extra tables in the native database. The companion has the same lease and file protections. */
 function withComboTable<T>(s: Scope, create: boolean, work: (db: Database) => T): T | undefined {
@@ -212,6 +216,7 @@ function withComboTable<T>(s: Scope, create: boolean, work: (db: Database) => T)
     db.exec("PRAGMA busy_timeout=0; PRAGMA secure_delete=ON; BEGIN IMMEDIATE");
     const schema = db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master LIMIT 2").all();
     if (!schema.length) db.exec(comboSchema);
+    else if (schema.length === 1 && schema[0]?.sql === oldComboSchema) db.exec("ALTER TABLE combo_pins ADD COLUMN store TEXT; ALTER TABLE combo_pins ADD COLUMN proofs TEXT");
     else if (schema.length !== 1 || schema[0]?.sql !== comboSchema) throw new Error("shape");
     limitDatabaseSize(db);
     const result = work(db);
@@ -625,8 +630,8 @@ function flush(s: Scope, clean: boolean): boolean {
       const pins = Array.from(comboSnapshot?.rows() ?? servingIdentity.unclaimedComboPins ?? []).filter(pin => pin.at <= now && pin.at >= now - TTL);
       if (pins.length) withComboTable(s, true, table => {
         table.exec("DELETE FROM combo_pins");
-        const insert = table.query("INSERT INTO combo_pins VALUES (?,?,?,?,?,?,?)");
-        for (const pin of pins) insert.run(shutdown.generation, pin.lane, pin.comboId, pin.provider, pin.model, pin.at, pin.responseDigest);
+        const insert = table.query("INSERT INTO combo_pins VALUES (?,?,?,?,?,?,?,?,?)");
+        for (const pin of pins) insert.run(shutdown.generation, pin.lane, pin.comboId, pin.provider, pin.model, pin.at, pin.responseDigest, pin.store ?? null, pin.proofs ?? null);
       });
     }
     s.log = [];
@@ -657,7 +662,7 @@ onSpendLedgerOwnerAcquired(home => {
   const pins = s?.db ? withComboTable(s, false, table => {
     const now = Date.now();
     const rows = s.snapshotGeneration === undefined ? [] : table.query<StoredComboPin, [string, number, number]>(
-      `SELECT lane, comboId, provider, model, at, responseDigest FROM combo_pins WHERE generation=? AND at BETWEEN ? AND ? ORDER BY rowid DESC LIMIT ${COMBO_PIN_LIMIT}`,
+      `SELECT lane, comboId, provider, model, at, responseDigest, store, proofs FROM combo_pins WHERE generation=? AND at BETWEEN ? AND ? ORDER BY rowid DESC LIMIT ${COMBO_PIN_LIMIT}`,
     ).all(s.snapshotGeneration, now - TTL, now).reverse();
     table.exec("DELETE FROM combo_pins");
     return rows;

@@ -86,7 +86,7 @@ export async function consumeComboFailure(
   let verifiedPlanRefusal = false;
   try {
     const legacy = comboFailureEvidence(response);
-    const inspected = legacy === undefined ? inspectedReserveRefusal(response) : undefined;
+    const inspected = legacy === undefined ? inspectedReserveRefusal(response, "final") : undefined;
     if (legacy !== undefined || inspected) void response.body?.cancel().catch(() => undefined);
     if (inspected) signal?.throwIfAborted();
     const body = inspected ?? await readBoundedResponseBody(legacy === undefined ? response : new Response(legacy), { signal, reportUtf8Validity: serverError });
@@ -247,7 +247,7 @@ export function createChildPassthroughCallbackGate(options: HandleResponsesOptio
   let state: "pending" | "committed" | "discarded" = "pending";
   let pending: Pending | undefined;
   let accepted = false;
-  let pendingModel: string | undefined;
+  let pendingCompletion: Parameters<NonNullable<HandleResponsesOptions["onResponseComplete"]>> | undefined;
   let completionAccepted = false;
   let completionRejected = false;
   const publish = (value: Pending): void => {
@@ -255,17 +255,17 @@ export function createChildPassthroughCallbackGate(options: HandleResponsesOptio
     else options.onNativePassthroughCancel?.();
   };
   const publishCompletion = (): void => {
-    if (state !== "committed" || completionRejected || pendingModel === undefined) return;
-    const model = pendingModel;
-    pendingModel = undefined;
-    options.onResponseComplete?.(model);
+    if (state !== "committed" || completionRejected || pendingCompletion === undefined) return;
+    const completion = pendingCompletion;
+    pendingCompletion = undefined;
+    options.onResponseComplete?.(...completion);
   };
   const receive = (value: Pending): void => {
     if (state === "discarded" || accepted) return;
     accepted = true;
     if (value.kind === "cancel" || value.status !== "completed") {
       completionRejected = true;
-      pendingModel = undefined;
+      pendingCompletion = undefined;
     }
     if (state === "committed") return publish(value);
     pending ??= value;
@@ -273,10 +273,10 @@ export function createChildPassthroughCallbackGate(options: HandleResponsesOptio
   return {
     onTerminal: (status: ResponsesTerminalStatus) => receive({ kind: "terminal", status }),
     onCancel: () => receive({ kind: "cancel" }),
-    onResponseComplete: (model: string) => {
+    onResponseComplete: (model: string, store?: string, proofs?: readonly string[]) => {
       if (state === "discarded" || completionRejected || completionAccepted || !model.trim()) return;
       completionAccepted = true;
-      pendingModel = model;
+      pendingCompletion = [model, store, proofs];
       publishCompletion();
     },
     commit: () => {
@@ -289,7 +289,7 @@ export function createChildPassthroughCallbackGate(options: HandleResponsesOptio
     discard: () => {
       state = "discarded";
       pending = undefined;
-      pendingModel = undefined;
+      pendingCompletion = undefined;
     },
   };
 }

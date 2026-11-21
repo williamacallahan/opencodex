@@ -1,11 +1,12 @@
-import { noteUpstreamHistory, recordExpandedHistory, isCompleteResponseTranscript } from "./state/body-policy";
+import { noteUpstreamHistory, recordExpandedHistory, isCompleteResponseTranscript, legacyResponseIssuer } from "./state/body-policy";
 export { previousResponseReplayPrefixLength, previousResponseRestoredPrefixLength, copyPreviousResponseReplayProvenance } from "./state/body-policy";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { atomicWriteFileAsync, getConfigDir, resolveWriteTarget } from "../config";
 import { configuredAppOwnedMemoryBudgetBytes, enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
 import { windowsSecretAclApplies } from "../lib/windows-secret-acl";
-import type { OcxProviderContinuationState } from "../types";
+import { isValidProviderContinuationOwner } from "./provider-continuation";
+import type { OcxProviderContinuationOwner, OcxProviderContinuationState } from "../types";
 import {
   deleteResponseSpill, inspectResponseSpillDir, noteStubSwapForTest, prospectiveResponseSpillBytes,
   readResponseSpill, recoverOrphanedResponseSpills, resetPeriodicSpillSweepCursorForTests,
@@ -106,7 +107,7 @@ export interface ResidentResponseState {
   /** Index in `items` where provider output begins; see clientCarriedPrefixLength. */
   providerOutputStart?: number;
   providers?: OcxProviderContinuationState;
-  selfContained?: true;
+  selfContained?: boolean;
   unforcedStoreFalse?: boolean;
   sizeBytes: number;
 }
@@ -118,7 +119,7 @@ export interface SpilledResponseState {
   /** Mirrors the spilled payload boundary so a spilled entry keeps its anchor. */
   providerOutputStart?: number;
   providers?: OcxProviderContinuationState;
-  selfContained?: true;
+  selfContained?: boolean;
   unforcedStoreFalse?: boolean;
   spill: ResponseSpillRef;
   sizeBytes: number;
@@ -135,7 +136,7 @@ export type ResidentInput = Omit<ResidentResponseState, "kind" | "sizeBytes">;
 
 export type PreviousResponseReplayFailure = {
   code: "previous_response_not_found";
-  reason: "spill_missing" | "spill_corrupt" | "spill_failed" | "spill_too_large" | "scope_mismatch";
+  reason: "spill_missing" | "spill_corrupt" | "spill_failed" | "spill_too_large" | "scope_mismatch" | "owner_mismatch";
 };
 
 const states = new Map<string, StoredResponseState>();
@@ -305,7 +306,7 @@ function measureResidentEntry(id: string, entry: ResidentInput): ResidentRespons
     createdAt: entry.createdAt,
     ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
     items: entry.items,
-    ...(entry.selfContained ? { selfContained: true } : {}),
+    selfContained: entry.selfContained,
     ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
     ...(entry.providers ? { providers: entry.providers } : {}),
     ...(entry.unforcedStoreFalse ? { unforcedStoreFalse: entry.unforcedStoreFalse } : {}),
@@ -413,7 +414,7 @@ function swapResidentForSpill(id: string, expected: ResidentResponseState, ref: 
     ...(expected.clientThreadId ? { clientThreadId: expected.clientThreadId } : {}),
     ...(expected.providerOutputStart !== undefined ? { providerOutputStart: expected.providerOutputStart } : {}),
     ...(expected.providers ? { providers: expected.providers } : {}),
-    ...(expected.selfContained ? { selfContained: true as const } : {}),
+    selfContained: expected.selfContained,
     ...(expected.unforcedStoreFalse ? { unforcedStoreFalse: expected.unforcedStoreFalse } : {}),
     spill: ref,
   };
@@ -446,7 +447,7 @@ function replaceSpillEntryAtomically(
       ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
       ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
       ...(candidate.providers ? { providers: candidate.providers } : {}),
-      ...(candidate.selfContained ? { selfContained: true as const } : {}),
+      selfContained: candidate.selfContained,
       ...(candidate.unforcedStoreFalse ? { unforcedStoreFalse: candidate.unforcedStoreFalse } : {}),
       spill: ref,
     };
@@ -475,7 +476,7 @@ function replaceSpillEntryAtomically(
 
 function exceedsSpillCap(id: string, candidate: ResidentResponseState, cap: number): boolean {
   // selfContained is snapshot metadata, not part of the versioned spill envelope.
-  const payloadBase = candidate.sizeBytes - (candidate.selfContained ? Buffer.byteLength(',"selfContained":true') : 0);
+  const payloadBase = candidate.sizeBytes - (candidate.selfContained === undefined ? 0 : Buffer.byteLength(`,"selfContained":${candidate.selfContained}`));
   return payloadBase > cap || (payloadBase + 16 > cap && (prospectiveResponseSpillBytes(id, candidate) ?? Infinity) > cap);
 }
 
@@ -558,7 +559,7 @@ function admitOversizedCandidate(
       ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
       ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
       ...(candidate.providers ? { providers: candidate.providers } : {}),
-      ...(candidate.selfContained ? { selfContained: true as const } : {}),
+      selfContained: candidate.selfContained,
       ...(candidate.unforcedStoreFalse ? { unforcedStoreFalse: candidate.unforcedStoreFalse } : {}),
       spill: ref,
     };
@@ -1075,7 +1076,7 @@ function materializeEntry(
   }
   const state = measureResidentEntry(id, {
     createdAt: result.payload.createdAt,
-    ...(entry.selfContained ? { selfContained: true } : {}),
+    selfContained: entry.selfContained,
     ...(result.payload.clientThreadId ? { clientThreadId: result.payload.clientThreadId } : {}),
     items: result.payload.items,
     ...(result.payload.providerOutputStart !== undefined
@@ -1097,7 +1098,7 @@ function normalizedClientThreadId(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-export function expandPreviousResponseInput(body: unknown, clientThreadId?: string): unknown {
+export function expandPreviousResponseInput(body: unknown, clientThreadId?: string, acceptsLegacyOwner?: (owner: OcxProviderContinuationOwner) => boolean): unknown {
   if (!body || typeof body !== "object" || Array.isArray(body)) return body;
   const request = body as Record<string, unknown>;
   const previousId = typeof request.previous_response_id === "string" ? request.previous_response_id : undefined;
@@ -1121,9 +1122,17 @@ export function expandPreviousResponseInput(body: unknown, clientThreadId?: stri
     replayScopeMismatchDrops += 1;
     return body;
   }
-  // Lack of local proof leaves the ID and delta intact. Route admission, not lookup,
-  // decides whether the upstream owns omitted history. Actual read/scope failures stay fatal.
-  if (!materialized.state.selfContained || request.conversation != null) return body;
+  // Known deltas stay upstream-owned. Older snapshots lack this field; expand them for
+  // their original route without converting the cache hit to cross-store replay evidence.
+  if (materialized.state.selfContained === false || request.conversation != null) return body;
+  const owner = materialized.state.selfContained === undefined ? materialized.state.providers?.__ocxOwner : undefined;
+  if (materialized.state.selfContained === undefined) {
+    if (!owner) return body; // Unresolved ID only: never expose this prefix to a guessed route.
+    if (!isValidProviderContinuationOwner(owner) || !acceptsLegacyOwner?.(owner)) {
+      replayFailures.set(request, { code: "previous_response_not_found", reason: "owner_mismatch" });
+      return body;
+    }
+  }
   const clientInput = inputItems(request.input);
   const stored = materialized.state.items;
   const carried = clientCarriedPrefixLength(stored, clientInput);
@@ -1159,7 +1168,7 @@ export function expandPreviousResponseInput(body: unknown, clientThreadId?: stri
       // Same provenance boundary a real expansion would record, so the replayed prefix does
       // not re-acknowledge historical compaction markers (parser.ts) and stays visible to
       // guidance de-duplication (collaboration.ts).
-      recordExpandedHistory(unchanged, carried, true);
+      recordExpandedHistory(unchanged, carried, true, owner);
       return unchanged;
     }
   }
@@ -1167,7 +1176,7 @@ export function expandPreviousResponseInput(body: unknown, clientThreadId?: stri
     ...request,
     input: [...stored, ...clientInput],
   };
-  recordExpandedHistory(expanded, stored.length);
+  recordExpandedHistory(expanded, stored.length, false, owner);
   return expanded;
 }
 
@@ -1268,6 +1277,8 @@ export function rememberResponseState(
   const normalizedProviderState: OcxProviderContinuationState = typeof providerState === "string"
     ? { cursor: { conversationId: providerState } }
     : structuredClone(providerState ?? {});
+  const legacyIssuer = legacyResponseIssuer(request);
+  if (legacyIssuer) normalizedProviderState.__ocxOwner = legacyIssuer;
   if (normalizedProviderState.cursor?.conversationId) {
     normalizedProviderState.cursor.checkpointUsable = !response.output.some(item => {
       return !!item && typeof item === "object" && (item as { type?: unknown }).type === "function_call";
@@ -1281,7 +1292,7 @@ export function rememberResponseState(
     createdAt: now(),
     ...(clientThreadId ? { clientThreadId } : {}),
     items: [...requestItems, ...response.output],
-    ...(isCompleteResponseTranscript(request) ? { selfContained: true as const } : {}),
+    selfContained: legacyIssuer ? undefined : isCompleteResponseTranscript(request),
     // Where response.output begins. A replay skip requires a matched item at or past this
     // index that also carries a provider-issued id — position alone proves only that an item
     // sits on the provider side, not that the provider authored it.
