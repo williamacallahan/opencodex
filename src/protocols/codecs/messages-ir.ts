@@ -42,7 +42,7 @@ import { hasRoutedIdentity, nameRoutedIdentity } from "../../adapters/identity";
 import type { TranslatorBudget } from "../../lib/translator-budget";
 import { inlineDocumentFromDataUrl, inlineDocumentMarker } from "../../responses/inline-document";
 import { functionCallArgumentsFromText } from "../../responses/parser";
-import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../../responses/reasoning-envelope";
+import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX, replayableNativeReasoningBlocks } from "../../responses/reasoning-envelope";
 import { normalizeVisualizationContext } from "../../responses/visualization-directives";
 import type { PolicyRequestEvidence } from "../../routing/evaluator";
 import { createToolChoiceResolver, namespacedToolName } from "../../types";
@@ -182,6 +182,7 @@ export function messagesConversationToIr(
   const nativeReasoningReplay = new Map<string, string>();
   const blockedNames = effectiveBlockedSkillNames(cc);
   const blockedCalls = blockedSkillCallIds(raw.messages, blockedNames);
+  const replayable = replayableNativeReasoningBlocks(raw.messages);
   // The parser's pending reasoning: it belongs to the next assistant turn, and turn boundaries
   // clear it after keeping any signed or redacted replay.
   const pending: Array<{ part: OcxThinkingContent; envelopeSigned: boolean }> = [];
@@ -394,7 +395,7 @@ export function messagesConversationToIr(
             }
             if (owned.nat) {
               // The provider's own blob goes back only to the model that minted it.
-              const nat = owned.nat.model === requestedModel ? owned.nat : undefined;
+              const nat = owned.nat.model === requestedModel && replayable.has(block) ? owned.nat : undefined;
               if (nat) {
                 const previous = nativeReasoningReplay.get(nat.enc);
                 nativeReasoningReplay.set(nat.enc, previous === undefined || previous === nat.tag ? nat.tag : "");

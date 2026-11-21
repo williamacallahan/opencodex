@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { sanitizeReasoningInputContent } from "../../src/adapters/openai-responses/reasoning";
 import { anthropicToResponsesBody } from "../../src/claude/inbound";
 import { responsesJsonToAnthropicMessage, responsesSseToAnthropicSse } from "../../src/claude/outbound";
-import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../../src/responses/reasoning-envelope";
+import { decodeReasoningEnvelope, encodeReasoningEnvelope, NATIVE_REASONING_REPLAY_MAX_SIGNATURE_CHARS, OCX_REASONING_PREFIX } from "../../src/responses/reasoning-envelope";
 import { responsesRequestSchema } from "../../src/responses/schema";
 import { createTestTranslatorBudget } from "../helpers/translator-budget";
 
@@ -140,6 +140,29 @@ describe("Claude route carries a provider's own encrypted reasoning", () => {
     expect(reasoning[0]).not.toHaveProperty("encrypted_content");
     expect(reasoning[0]!.summary).toEqual([{ type: "summary_text", text: "Plan." }]);
     expect(JSON.stringify(body)).not.toContain(BLOB);
+  });
+
+  test("a long session replays only the newest native blobs and keeps older visible text", () => {
+    const blobChars = 100_000;
+    const turns = 40;
+    const messages: Record<string, unknown>[] = [{ role: "user", content: "Start." }];
+    for (let turn = 0; turn < turns; turn++) {
+      const enc = `${String(turn).padStart(4, "0")}${"x".repeat(blobChars)}`;
+      const signature = encodeReasoningEnvelope({ txt: `Plan ${turn}.`, nat: { enc, model: MODEL, id: `rs_${turn}`, tag: TAG } });
+      messages.push({ role: "assistant", content: [{ type: "thinking", thinking: `Plan ${turn}.`, signature }, { type: "text", text: `Step ${turn}.` }] });
+      messages.push({ role: "user", content: "Continue." });
+    }
+    const body = anthropicToResponsesBody({ model: MODEL, max_tokens: 1024, thinking: { type: "adaptive" }, messages });
+    const reasoning = (body.input as Record<string, unknown>[]).filter(item => item.type === "reasoning");
+    expect(reasoning).toHaveLength(turns);
+    const withBlob = reasoning.filter(item => typeof item.encrypted_content === "string");
+    const replayedChars = withBlob.reduce((sum, item) => sum + (item.encrypted_content as string).length, 0);
+    expect(withBlob.length).toBeGreaterThan(0);
+    expect(withBlob.length).toBeLessThan(turns);
+    expect(replayedChars).toBeLessThan(NATIVE_REASONING_REPLAY_MAX_SIGNATURE_CHARS);
+    // The kept blobs are the newest ones; every older item still carries its visible summary.
+    expect(reasoning.slice(turns - withBlob.length).every(item => typeof item.encrypted_content === "string")).toBe(true);
+    expect(reasoning.slice(0, turns - withBlob.length).every(item => !("encrypted_content" in item) && Array.isArray(item.summary))).toBe(true);
   });
 
   test("an empty thinking block for a different model leaves no reasoning item", () => {

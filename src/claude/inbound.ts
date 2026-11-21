@@ -21,7 +21,7 @@ import { AnthropicRequestError, isRec, type Rec } from "./inbound-records";
 import { resolveInboundModel, effortForThinkingBudget, effortFromOutputConfig, formatFromOutputConfig } from "./inbound-model-options";
 import { systemToInstructions, toolsToResponses, toolChoiceToResponses } from "./inbound-content-options";
 import { stabilizeClaudeInstructionsForPromptCache } from "./inbound-cache-stabilize";
-import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../responses/reasoning-envelope";
+import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX, replayableNativeReasoningBlocks } from "../responses/reasoning-envelope";
 import { inlineDocumentMarker } from "../responses/inline-document";
 import { createTranslatorBudget, type TranslatorBudget } from "../lib/translator-budget";
 import { collectAnthropicCacheTtls } from "../adapters/anthropic/cache-retention";
@@ -302,7 +302,7 @@ function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionC
   pushUserMessage(input, pending);
 }
 
-function assistantMessageToItems(content: unknown, input: Rec[], budget: TranslatorBudget, requestedModel: string, nativeReasoningReplay: Map<string, string>): void {
+function assistantMessageToItems(content: unknown, input: Rec[], budget: TranslatorBudget, requestedModel: string, nativeReasoningReplay: Map<string, string>, replayable: ReadonlySet<object>): void {
   if (typeof content === "string") {
     if (content.length > 0) input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: content }] });
     return;
@@ -338,7 +338,7 @@ function assistantMessageToItems(content: unknown, input: Rec[], budget: Transla
           if (owned.nat) {
             // The provider's own blob goes back only to the model that minted it; any other
             // model gets the visible text alone, as before this envelope field existed.
-            const nat = owned.nat.model === requestedModel ? owned.nat : undefined;
+            const nat = owned.nat.model === requestedModel && replayable.has(raw) ? owned.nat : undefined;
             if (nat) {
               const previous = nativeReasoningReplay.get(nat.enc);
               nativeReasoningReplay.set(nat.enc, previous === undefined || previous === nat.tag ? nat.tag : "");
@@ -490,10 +490,11 @@ function translateAnthropicRequest(
     callIds: blockedSkillCallIds(raw.messages, blockedNames),
     names: blockedNames,
   };
+  const replayable = replayableNativeReasoningBlocks(raw.messages);
   for (const msg of raw.messages) {
     if (!isRec(msg)) throw markProxyError(new AnthropicRequestError("each message must be an object"));
     if (msg.role === "user") userMessageToItems(msg.content, input, elide);
-    else if (msg.role === "assistant") assistantMessageToItems(msg.content, input, budget, raw.model, nativeReasoningReplay);
+    else if (msg.role === "assistant") assistantMessageToItems(msg.content, input, budget, raw.model, nativeReasoningReplay, replayable);
     else if (msg.role === "system") {
       const text = systemMessageText(msg.content);
       // Keep it where the client put it. `developer` is first-class in the Responses

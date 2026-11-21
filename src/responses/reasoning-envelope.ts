@@ -135,6 +135,39 @@ export function isLikelyRealAnthropicThinkingSignature(signature: string | undef
   return /^[A-Za-z0-9+/_=-]+$/.test(signature);
 }
 
+/**
+ * Ceiling on the `ocxr1:` signature characters of provider-native reasoning one Claude Messages
+ * request may hand back to its provider. Each native blob is charged about five times its size
+ * against the 32 MiB translator turn budget (once in the translated body's three coexisting
+ * copies, twice as retained input), so an uncapped long session (a 2,150-message gpt-6.2-sol
+ * session replayed 556 blobs, 3.4 MB of ciphertext) used most of the budget on ciphertext and
+ * the hub answered 413 until the session died. The newest blobs are kept; older ones fall back to
+ * their visible text, exactly as a blob minted by another model does.
+ */
+export const NATIVE_REASONING_REPLAY_MAX_SIGNATURE_CHARS = 2.5 * 1024 * 1024;
+
+/** The assistant thinking blocks (by identity) whose native reasoning stays within the replay cap, newest first. */
+export function replayableNativeReasoningBlocks(messages: readonly unknown[]): ReadonlySet<object> {
+  const kept = new Set<object>();
+  let total = 0;
+  for (let m = messages.length - 1; m >= 0; m--) {
+    const message = messages[m];
+    if (!message || typeof message !== "object" || (message as { role?: unknown }).role !== "assistant") continue;
+    const content = (message as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+    for (let b = content.length - 1; b >= 0; b--) {
+      const block: unknown = content[b];
+      if (!block || typeof block !== "object" || (block as { type?: unknown }).type !== "thinking") continue;
+      const signature = (block as { signature?: unknown }).signature;
+      if (typeof signature !== "string" || !signature.startsWith(OCX_REASONING_PREFIX)) continue;
+      total += signature.length;
+      if (total > NATIVE_REASONING_REPLAY_MAX_SIGNATURE_CHARS) return kept;
+      kept.add(block);
+    }
+  }
+  return kept;
+}
+
 /** Decode an ocxr1 envelope; returns null for native (OpenAI-encrypted) blobs or garbage. */
 export function decodeReasoningEnvelope(encryptedContent: string, budget?: TranslatorBudget): ReasoningEnvelope | null {
   if (!encryptedContent.startsWith(OCX_REASONING_PREFIX)) return null;
