@@ -13,6 +13,7 @@ import type { RouteResult } from "../../router";
 import { stripPreviousResponseId } from "../../adapters/openai-responses/canonical-forward";
 import { closedReasoningPrefix, hasReasoningSummary } from "../../adapters/openai-responses/luna-reasoning";
 import { sanitizeReasoningInputContent } from "../../adapters/openai-responses/reasoning";
+import { stripItemIdsWhenUnstored } from "../../adapters/openai-responses/request-strips";
 import { CODEX_TURN_STATE_HEADER } from "../../codex/forward-transport-headers";
 import { isPlainObject } from "../../lib/plain-data";
 import { canPortConversationState, collectConversationStateCarriers, type PortabilityDenial } from "./account-change-state";
@@ -82,6 +83,19 @@ export function prepareLunaReplay(body: unknown, expanded: boolean, headers: Hea
   const scrubbed = sanitizeReasoningInputContent(full, { stripEncryptedContent: true, dropForeignItemId: true, preserveRawReasoningContent: true });
   return canPortConversationState(collectConversationStateCarriers(scrubbed, assignment)).portable
     ? { kind: "portable", body: scrubbed, ownerBody: full } : { kind: "bound", reason: "encrypted-reasoning" };
+}
+
+export function portSpentLunaReasoning(body: unknown, expanded: boolean, headers: Headers): unknown | undefined {
+  const full = stripPreviousResponseId(body, expanded);
+  if (!isPlainObject(full) || !Array.isArray(full.input)) return undefined;
+  const boundary = closedReasoningPrefix(full.input);
+  const input = full.input.filter((item, index) => !isPlainObject(item) || item.type !== "reasoning"
+    || (!(item.id || item.encrypted_content) || index < boundary && hasReasoningSummary(item)));
+  const scrubbed = stripItemIdsWhenUnstored(sanitizeReasoningInputContent({ ...full, input }, {
+    stripEncryptedContent: true, dropForeignItemId: true, preserveRawReasoningContent: true,
+  }));
+  const replay = prepareLunaReplay(scrubbed, false, headers);
+  return replay.kind === "portable" ? replay.body : undefined;
 }
 
 export function nativeLunaTarget(combo: Combo, resolve: (target: ComboTarget) => RouteResult | undefined) {

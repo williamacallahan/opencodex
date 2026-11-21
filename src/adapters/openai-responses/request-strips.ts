@@ -366,6 +366,7 @@ export function stripItemIdsWhenUnstored(
   body: unknown,
   requireCustomCallIds = false,
   preserveIds = false,
+  preserveReasoningIds = false,
 ): unknown {
   const repairCustomCallIds = requireCustomCallIds === true;
   if (!isPlainObject(body) || (body.store !== false && !repairCustomCallIds)) return body;
@@ -396,7 +397,7 @@ export function stripItemIdsWhenUnstored(
         return item;
       }
     }
-    if (preserveIds || body.store !== false || !("id" in item)) return item;
+    if (preserveIds || preserveReasoningIds && item.type === "reasoning" || body.store !== false || !("id" in item)) return item;
     changed = true;
     const next = { ...item };
     delete next.id;

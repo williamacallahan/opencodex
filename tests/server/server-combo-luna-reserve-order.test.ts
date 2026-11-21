@@ -760,6 +760,56 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(nativeReplay).not.toContain(second.encrypted_content); expect(nativeReplay).toContain("second plan");
   });
 
+  test.each([false, true])("a spent reasoning issuer ports after its capacity refusal (local: %s)", async localRefusal => {
+    const cfg = config(), lane = { "thread-id": "spent-reasoning-owner" }; seats(false);
+    relay = refusedConnect;
+    const item = { type: "reasoning", id: "rs_spent_private", encrypted_content: "spent-private-cipher", summary: [] };
+    native = body => issuedReasoning(body.model, item);
+    expect((await post(cfg, {}, lane)).text).toContain(item.encrypted_content);
+    clearComboTargetCooldowns("luna", ["relay/gpt-6-luna"]);
+    calls.length = 0; nativeAccounts.length = 0;
+    updateAccountQuota(A, 100, now + 86_400_000);
+    if (localRefusal) setAccountQuotaFromParsed(A, { customWindows: [{ label: "Luna Reserve", percent: 100, resetAt: now + 604_800_000, observedAt: now }] });
+    native = reserveRefused;
+    let wire = "";
+    relay = (_request, body) => { wire = JSON.stringify(body); return sse(body.model, "ok"); };
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const input = [{ type: "reasoning", id: "rs_readable", encrypted_content: "readable-cipher", summary: [{ type: "summary_text", text: "retained summary" }] },
+      { role: "user", content: "earlier" }, item, { type: "function_call", id: "fc_one", call_id: "call_one", name: "lookup", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_one", output: "result" }, { role: "user", content: "continue" }];
+    const result = await post(cfg, { input }, lane, undefined, { logCtx });
+    expect(result.status).toBe(200);
+    expect(result.text).toContain("response.completed");
+    expect(wire).not.toContain(item.id); expect(wire).not.toContain(item.encrypted_content);
+    expect(wire).not.toContain("rs_readable"); expect(wire).not.toContain("readable-cipher");
+    expect(wire).toContain("retained summary");
+    expect(JSON.parse(wire).input.filter((entry: { call_id?: string }) => entry.call_id === "call_one")).toHaveLength(2);
+    expect(logCtx.routeDecision?.selected.reason).toBe("luna-owner-spent-ported");
+    expect(logCtx.attempts?.[0]).toMatchObject({ status: 429, sendCount: localRefusal ? 0 : 1 });
+    if (!localRefusal) {
+      expect(logCtx.attempts?.[0]?.wireModel).toBe("gpt-reserve");
+      expect(nativeAccounts[0]).toBe(`fixture-workspace-${A}`);
+    }
+    expect(logCtx.attempts?.at(-1)?.provider).toBe("relay");
+  });
+
+  test("a healthy reasoning issuer receives the original opaque item", async () => {
+    const cfg = config(), lane = { "thread-id": "healthy-reasoning-owner" }; seats(false);
+    relay = refusedConnect;
+    const item = { type: "reasoning", id: "rs_healthy_private", encrypted_content: "healthy-private-cipher", summary: [] };
+    native = body => issuedReasoning(body.model, item);
+    expect((await post(cfg, {}, lane)).text).toContain(item.encrypted_content);
+    calls.length = 0;
+    let wire = "";
+    native = body => { wire = JSON.stringify(body); return sse(body.model, "ok"); };
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const result = await post(cfg, { input: [item, { role: "user", content: "continue" }] }, lane, undefined, { logCtx });
+    expect(result.status).toBe(200);
+    expect(calls).toEqual(["native:gpt-6-luna"]);
+    expect(JSON.parse(wire).input[0]).toEqual(item);
+    expect(logCtx.routeDecision?.selected.reason).toBe("luna-owner-encrypted-reasoning");
+  });
+
   test("mixed history after restart restores only the items issued by the serving store", async () => {
     const cfg = config(), lane = { "thread-id": "mixed-after-restart" }; seats();
     const foreign = { type: "reasoning", id: "rs_native", encrypted_content: "native-cipher", summary: [{ type: "summary_text", text: "earlier plan" }] };

@@ -3,7 +3,7 @@ import { comboTurnStateOwner, withComboTurnStateOwner, CodexTurnStateOwnerUnavai
 import { comboLogLabel, comboTargetLogLabel } from "../../combos/resolve";
 import { clientFacingModelLabel, clientFacingModelText } from "../../lib/error-destination";
 import { projectLocalModelRefusalLog } from "../request-log-failure-detail";
-import { carryProxyErrorContext, hasProxyErrorMessage, markProxyError } from "../../lib/client-error-body";
+import { carryProxyErrorContext, hasProxyErrorMessage, markProxyError, proxyErrorPresentation } from "../../lib/client-error-body";
 import { classifyUpstreamCondition } from "../../lib/upstream-condition";
 import { effectiveAzureOutputBudget } from "../../adapters/azure";
 import { buildResponsesTransport } from "../../adapters/openai-responses/transport";
@@ -129,7 +129,7 @@ import {
   markEagerRelaySseResponse,
 } from "../relay";
 import { preflightComboStreamResponse } from "./combo-stream-preflight";
-import { isReserveSeatQuotaRefusal, nativeLunaTarget, planLunaReserveLegs, prepareLunaReplay, relayProvedNotStarted } from "./combo-luna-legs";
+import { isReserveSeatQuotaRefusal, nativeLunaTarget, planLunaReserveLegs, portSpentLunaReasoning, prepareLunaReplay, relayProvedNotStarted } from "./combo-luna-legs";
 import { createPoolReserveWalk, modelHasPoolReserve, type PoolCapacityIntent } from "../../codex/pool-reserve";
 import { requiredToolContractOf } from "./combo-required-tool-contract";
 import {
@@ -544,11 +544,12 @@ export async function executeComboResponses(
       threadIdHeader: req.headers.get("thread-id"),
       sessionIdHeader: sessionIdHeaderFromRequest(req.headers),
     });
+  let replayEligibilityBody = body;
   const reasoningReplayEligible = (target: (typeof combo.targets)[number]): boolean => {
     try {
       const route = routeConcreteModel(config, `${target.provider}/${target.model}`);
       const unavailable = mandatoryResponsesReasoningReplayUnavailable({
-        body,
+        body: replayEligibilityBody,
         clientThreadId: reasoningReplayConversationId,
         servingThreadId,
         clientPrincipalId: replayPrincipal.clientPrincipalId,
@@ -715,10 +716,10 @@ export async function executeComboResponses(
   const lunaPair = native && !unreadableEncryptedAgentTask ? planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed, native) : undefined;
   const lunaCandidate = native !== undefined || combo.strategy === "failover" && combo.targets.some(target =>
     modelHasPoolReserve(target.model) && config.providers[target.provider] && isCanonicalOpenAiForwardProvider(config.providers[target.provider]!));
-  const lunaReplay = handleOwner || lunaCandidate ? prepareLunaReplay(body, comboReplaySnapshot.previousResponseInputExpanded && !localExpansion,
+  let lunaReplay = handleOwner || lunaCandidate ? prepareLunaReplay(body, comboReplaySnapshot.previousResponseInputExpanded && !localExpansion,
     req.headers, unreadableEncryptedAgentTask && encryptedTaskRecoveryAdmitted) : undefined;
-  const lunaLegs = lunaReplay?.kind === "portable" ? lunaPair : undefined;
-  const dispatchBody = lunaReplay?.kind === "portable" ? lunaReplay.body : body;
+  let lunaLegs = lunaReplay?.kind === "portable" ? lunaPair : undefined;
+  let dispatchBody = lunaReplay?.kind === "portable" ? lunaReplay.body : body;
   if (lunaReplay?.kind === "bound") {
     const owner = legacyTarget ? combo.targets.find(target => targetKey(target) === legacyTarget) : recorded?.target;
     if (handleOwner) {
@@ -743,7 +744,7 @@ export async function executeComboResponses(
     && (!lunaLegs || targetKey(recalledPick.target) === lunaLegs.nativeKey) ? recalledPick : undefined;
   let evaluatedStrictReserve = false;
   let lunaStage: "off" | "reserve" | "relay" | "done" = "off";
-  const comboLegCount = lunaLegs?.legCount ?? combo.targets.length;
+  let comboLegCount = lunaLegs?.legCount ?? combo.targets.length;
   const onlyReplayIncompatibleTargetsRemain = (excluded: Iterable<string> = []): boolean => {
     const excludedKeys = new Set(excluded);
     const remaining = combo.targets.filter(target => {
@@ -1121,7 +1122,7 @@ export async function executeComboResponses(
   const callerOutputCeilingTokens = logCtx.spendOutputCeilingTokens
     ?? (typeof callerBudget === "number" && Number.isFinite(callerBudget) && callerBudget > 0
       ? Math.trunc(callerBudget) : undefined);
-  const reserveWalk = isRequestExecutionBudget(options.sendBudget)
+  let reserveWalk = isRequestExecutionBudget(options.sendBudget)
     && lunaLegs
     ? createPoolReserveWalk(config) : undefined;
   const ordinaryPoolSends = 1 + CODEX_TEXT_GUARDED_BUDGET_POLICY.maxAlternateTargetSends;
@@ -1423,7 +1424,8 @@ export async function executeComboResponses(
         comboInitialSend: initialSend,
         comboDispatchPermit: hopDecision?.allowed ? hopDecision.permit : undefined,
         comboReplaySnapshot: lateReasoningProjection ? { ...comboReplaySnapshot, projectForeignReasoning: lateReasoningProjection,
-          recordedResponsesStore, issuedReasoningProofs: recorded?.proofs } : comboReplaySnapshot,
+          recordedResponsesStore, issuedReasoningProofs: recorded?.proofs } : dispatchBody !== body
+          ? { ...comboReplaySnapshot, sourceBody: dispatchBody } : comboReplaySnapshot,
         deferCodexResetDerivedCooldown,
         poolCapacityIntent: legIntent,
         reserveWalk: walkSeats,
@@ -1625,6 +1627,31 @@ export async function executeComboResponses(
         return settled;
       }
     }
+    const ownerCapacity = failure.response.status === 429 && (attempt.sendCount === 0
+      ? proxyErrorPresentation(failure.response) === "model_availability" || isCodexAccountCooldownResponse(failure.response)
+      : ["usage_limit_reached", "usage_not_included", "rate_limit_exceeded"].includes(failure.upstreamCode ?? ""));
+    if (lunaReplay?.kind === "bound" && lunaReplay.reason === "encrypted-reasoning"
+      && boundTargetKey === nativeKey && ownerCapacity && !failure.nonReplayable && !spentReplacement && native) {
+      const ported = portSpentLunaReasoning(body, comboReplaySnapshot.previousResponseInputExpanded && !localExpansion, req.headers);
+      if (ported !== undefined) {
+        replayEligibilityBody = ported;
+        boundTargetKey = undefined;
+        const plan = planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed, native);
+        const next = plan ? await pickWithWait({ eligible: target => targetKey(target) === plan.nativeKey && targetEligible(target) }) : null;
+        if (plan && next) {
+          dispatchBody = ported; lunaReplay = { kind: "portable", body: ported }; lunaLegs = plan;
+          evaluatedStrictReserve = false; lunaStage = "off";
+          comboLegCount = plan.legCount + 1;
+          reserveWalk = isRequestExecutionBudget(options.sendBudget) ? createPoolReserveWalk(config) : undefined;
+          if (isRequestExecutionBudget(options.sendBudget)) comboSendScope = deriveSendBudgetScope(options.sendBudget, comboExecutionBudgetPolicy(comboLegCount, 0));
+          logCtx.routeDecision = { ...logCtx.routeDecision!, selected: { ...logCtx.routeDecision!.selected, reason: "luna-owner-spent-ported" } };
+          pick = next;
+          continue;
+        }
+        boundTargetKey = nativeKey;
+        replayEligibilityBody = body;
+      }
+    }
     // A non-replayable failure (the answer to a spent ambiguous-reset replacement) may follow a
     // send that already ran the turn, so no later target may receive it, whatever its status says.
     const failureDecision = boundTargetKey !== undefined || failure.nonReplayable || spentReplacement
@@ -1745,6 +1772,7 @@ export async function executeComboResponses(
       && !relayProvedNotStarted(childLog, attempt.sendCount) && (failedInPreflight || ![401, 402, 403, 429].includes(failure.response.status))) {
       unavailableOrdinaryTarget = lunaLegs.nativeKey;
     }
+    const activeLunaLegs = lunaLegs;
     const nextPick = advanceComboAfterFailure(config, pick, {
       routeConcreteModel,
       retryAfter: poolLocalRefusal || codexLocalRefusal ? undefined : failure.retryAfter,
@@ -1753,8 +1781,8 @@ export async function executeComboResponses(
       now: failureNow,
       cooldownScope: failureCooldownScope,
       // A pin may start in the middle. Ask its planned relay before resuming configured order.
-      eligible: legIntent === "reserve-only" && lunaLegs
-        ? target => targetKey(target) === lunaLegs.relayKey && targetEligible(target)
+      eligible: legIntent === "reserve-only" && activeLunaLegs
+        ? target => targetKey(target) === activeLunaLegs.relayKey && targetEligible(target)
         : targetEligible,
       status: failure.response.status,
       code: failure.upstreamCode,
@@ -1810,16 +1838,16 @@ export async function executeComboResponses(
         pick = await retryAfterCooldown();
       }
     }
-    if (lunaLegs && failureDecision === "hop"
-      && (lunaStage === "reserve" && failedTargetKey === lunaLegs.nativeKey || lunaStage === "relay" && failedTargetKey === lunaLegs.relayKey)) {
+    if (activeLunaLegs && failureDecision === "hop"
+      && (lunaStage === "reserve" && failedTargetKey === activeLunaLegs.nativeKey || lunaStage === "relay" && failedTargetKey === activeLunaLegs.relayKey)) {
       // After the strict Reserve leg the relay is next; after the relay, native ordinary Luna is next only on proof the relay never got the turn.
       const afterReserve: boolean = lunaStage === "reserve";
-      const ordinaryNext = afterReserve ? !pick || targetKey(pick.target) !== lunaLegs.relayKey
-        : unavailableOrdinaryTarget !== lunaLegs.nativeKey;
-      lunaStage = afterReserve && pick && targetKey(pick.target) === lunaLegs.relayKey ? "relay" : "done";
+      const ordinaryNext = afterReserve ? !pick || targetKey(pick.target) !== activeLunaLegs.relayKey
+        : unavailableOrdinaryTarget !== activeLunaLegs.nativeKey;
+      lunaStage = afterReserve && pick && targetKey(pick.target) === activeLunaLegs.relayKey ? "relay" : "done";
       const ordinaryPick: ComboPick | null = ordinaryNext && !options.abortSignal?.aborted ? await pickWithWait({
-        exclude: attemptedTargets.filter(key => key !== lunaLegs.nativeKey),
-        eligible: target => targetKey(target) === lunaLegs.nativeKey && targetEligible(target),
+        exclude: attemptedTargets.filter(key => key !== activeLunaLegs.nativeKey),
+        eligible: target => targetKey(target) === activeLunaLegs.nativeKey && targetEligible(target),
         now: failureNow,
       }) : null;
       if (ordinaryPick) pick = ordinaryPick;
