@@ -69,7 +69,8 @@ interface CodexWsResponseEvidence {
 
 const codexWsUpstreamResponses = new WeakMap<Response, CodexWsResponseEvidence>();
 const quotaObservedResponses = new WeakMap<Response, true>();
-const codexWsPreludeProjections = new WeakMap<Response, boolean | undefined>();
+export type CodexWsPreludeVerdict = "hard-stop" | "confirmed-capacity" | "unconfirmed-capacity";
+const codexWsPreludeProjections = new WeakMap<Response, CodexWsPreludeVerdict | undefined>();
 registerProviderResponseProvenance(codexWsUpstreamResponses);
 registerProviderResponseProvenance(quotaObservedResponses);
 registerProviderResponseProvenance(codexWsPreludeProjections);
@@ -85,12 +86,12 @@ export function isCodexWsUpstreamResponse(response: Response): boolean {
 }
 
 /** Pre-response projection; its headers retain the exchange's prelude snapshot. */
-export function markCodexWsPreludeProjection(response: Response, confirmedCapacity?: boolean): void {
-  codexWsPreludeProjections.set(response, confirmedCapacity);
+export function markCodexWsPreludeProjection(response: Response, verdict?: CodexWsPreludeVerdict): void {
+  codexWsPreludeProjections.set(response, verdict);
 }
 
-/** False vetoes confirmation; undefined leaves non-quota projections and HTTP on their ordinary path. */
-export function codexWsProjectedCapacity(response: Response): boolean | undefined {
+/** The original frame decides whether a refusal stops the request or confirms seat capacity. */
+export function codexWsPreludeVerdict(response: Response): CodexWsPreludeVerdict | undefined {
   return codexWsPreludeProjections.get(response);
 }
 

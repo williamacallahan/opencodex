@@ -55,7 +55,8 @@ export function bindComboCooldownRelays(isRelay: (selector: string) => boolean):
 }
 registerOptionalShutdownHook("combo-target-cooldowns", () => targetCooldowns.flushForShutdown());
 let lastReconciledGeneration = 0;
-let liveComboTargets = new Set<string>();
+// Track continuous membership only for current targets, not tombstones for every former target.
+let liveTargetSince = new Map<string, number>();
 
 function cooldownMapKey(
   comboId: string,
@@ -305,7 +306,7 @@ export function coolComboTarget(
   const now = options?.now ?? Date.now();
   const writerGeneration = options?.writerGeneration ?? captureConfigGeneration();
   const ownerKey = `${comboId}::${targetKey(target)}`;
-  if (writerGeneration < lastReconciledGeneration && !liveComboTargets.has(ownerKey)) return false;
+  if (writerGeneration < (liveTargetSince.get(ownerKey) ?? lastReconciledGeneration)) return false;
   // A server-provided Retry-After is authoritative, including an immediate `0` directive.
   // A quota reset is the next-most-specific signal (#3256); configured and default cooldowns
   // are only fallbacks when upstream supplied neither usable value.
@@ -368,7 +369,11 @@ export function earliestComboCooldownExpiry(
 
 export function reconcileComboTargetCooldowns(context: GenerationContext): number {
   if (context.generation <= lastReconciledGeneration) return 0;
-  liveComboTargets = new Set(context.comboTargets);
+  const next = new Map<string, number>();
+  for (const key of context.comboTargets) {
+    next.set(key, liveTargetSince.get(key) ?? (lastReconciledGeneration === 0 ? 0 : context.generation));
+  }
+  liveTargetSince = next;
   lastReconciledGeneration = context.generation;
   return 0;
 }
@@ -387,7 +392,7 @@ export function sweepExpiredComboTargetCooldowns(now = Date.now()): number {
 export function clearComboTargetCooldowns(comboId?: string, targetKeys?: Iterable<string>): void {
   if (comboId === undefined) {
     targetCooldowns.clearAllPersisted();
-    liveComboTargets.clear();
+    liveTargetSince.clear();
     lastReconciledGeneration = 0;
     return;
   }

@@ -1,3 +1,4 @@
+import { codexWsPreludeVerdict } from "./codex-ws-wire";
 import type { CodexAuthContext } from "../../codex/auth-context";
 import { clearCodexModelDenialEvidence, recordCodexModelDenialEvidence } from "../../codex/model-entitlements";
 import { wasAccountAutoPaused } from "../../oauth/account-auto-pause";
@@ -28,6 +29,7 @@ export async function settlePoolResponse(args: Omit<CodexPoolAccountRetryArgs, "
       clearCodexModelDenialEvidence(ctx.accountId, parsed.modelId, generation);
       break;
     }
+    if (codexWsPreludeVerdict(response) === "hard-stop") break;
     if (walk && response.status >= 500 && !ctx.fixedAccount) {
       response = await finishReserveWalkInspection(response, upstream.signal);
     }

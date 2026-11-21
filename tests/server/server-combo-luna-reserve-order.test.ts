@@ -1,6 +1,6 @@
 import { clearResponseStateForTests } from "../../src/responses/state";
 import { clearReasoningReplayCacheForTests, rememberIssuedReasoning } from "../../src/responses/reasoning-replay-cache";
-import { captureConfigGeneration } from "../../src/lib/state-store-sweeper";
+import { captureConfigGeneration, reconcileStateGeneration } from "../../src/lib/state-store-sweeper";
 import { listLiveComboTargetKeys } from "../../src/combos/types";
 import { shouldRetryCodexPoolAccountQuota } from "../../src/server/responses/core-codex-account";
 import { sendReserveSeat } from "../../src/server/responses/reserve-seat-dispatch";
@@ -277,6 +277,54 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(result.text).toContain("relay attempt 2");
     expect(sends).toHaveLength(2);
     expect(sends[1]! - sends[0]!).toBeGreaterThanOrEqual(119);
+  });
+
+  test("a failed relay probe cannot spend its reservation twice on a retained hold", async () => {
+    const luna = { provider: "relay", model: "gpt-6-luna" };
+    const cfg = config({}, [luna]);
+    cfg.providers.relay!.upstreamWebsocket = false;
+    Object.assign(cfg.combos!.luna!, { cooldownReprobe: { enabled: true, intervalMs: 1_000 }, waitForCooldownMs: 1_000 });
+    coolComboTarget("luna", luna, { now, status: 503, retryAfter: "300" });
+    relay = () => calls.length === 1 ? Response.json({ error: { message: "probe declined" } }, {
+      status: 503, headers: { "x-should-retry": "false", "retry-after": "1" },
+    }) : sse(luna.model, "ok");
+    const result = await post(cfg);
+    expect(result.status).toBe(503);
+    expect(result.text).toContain("probe declined");
+    expect(calls).toEqual(["relay:gpt-6-luna"]);
+    expect(isComboTargetInCooldown("luna", luna, now + 299_999)).toBe(true);
+  });
+
+  test("a removed and re-added relay cannot lend its new hold to an older request", async () => {
+    const luna = { provider: "relay", model: "gpt-6-luna" };
+    const cfg = config({}, [luna]);
+    cfg.providers.relay!.upstreamWebsocket = false;
+    Object.assign(cfg.combos!.luna!, { cooldownMs: 10, waitForCooldownMs: 1_000 });
+    const reload = (comboTargets: ReadonlySet<string>) => reconcileStateGeneration({ generation: 0, comboTargets,
+      comboIds: new Set(["luna"]), providerNames: new Set(["relay"]), codexAccountIds: new Set(), oauthAccountKeys: new Set(), configRoots: new Set([home]) });
+    const targets = listLiveComboTargetKeys(cfg);
+    reload(targets);
+    const reading = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    relay = () => new Response(new ReadableStream({ async pull(controller) {
+      reading.resolve(); await resume.promise;
+      controller.enqueue(new TextEncoder().encode('{"error":{"message":"old refusal"}}')); controller.close();
+    } }), { status: 503, headers: { "x-should-retry": "false" } });
+    const old = post(cfg);
+    try {
+      await reading.promise;
+      reload(new Set()); reload(targets);
+      const fresh = config({}, [luna]);
+      fresh.providers.relay!.upstreamWebsocket = false;
+      Object.assign(fresh.combos!.luna!, { cooldownMs: 200, waitForCooldownMs: 0 });
+      relay = () => Response.json({ error: { message: "new refusal" } }, { status: 503, headers: { "x-should-retry": "false" } });
+      expect((await post(fresh)).text).toContain("new refusal");
+      expect(isComboTargetInCooldown("luna", luna, now + 199)).toBe(true);
+      relay = () => sse(luna.model, "ok");
+    } finally { resume.resolve(); }
+    expect((await old).status).toBe(503);
+    expect(calls).toEqual(["relay:gpt-6-luna", "relay:gpt-6-luna"]);
+    expect(isComboTargetInCooldown("luna", luna, now + 199)).toBe(true);
   });
 
   test("a third Reserve seat serves after two seats refuse", async () => {

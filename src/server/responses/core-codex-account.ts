@@ -37,6 +37,7 @@ import { inspectedReserveRefusal } from "./reserve-refusal-body";
 import { sendReserveSeat, StaleReserveSeat } from "./reserve-seat-dispatch";
 import { applyClaudeBridgePoolSession } from "../claude-bridge-pool-session";
 import {
+  codexWsPreludeVerdict,
   codexWsPreOutputRefusalHold,
   codexWsPreOutputRefusalOutcomeRecorded,
   isCodexWsPreOutputRefusal,
@@ -161,7 +162,7 @@ export function recordCodexPreOutputRefusalOutcome(
   if ((!reserveQuotaStatus && !isCodexWsPreOutputRefusal(response)) || codexWsPreOutputRefusalOutcomeRecorded(response)) return;
   if (!usesCodexForwardPoolAuth(authCtx, provider) || wasPermanentAccountRefusal(response)) return;
   noteCodexWsPreOutputRefusalOutcome(response);
-  recordCodexUpstreamOutcome(config, authCtx.accountId, reserveQuotaStatus ?? response.status, {
+  const confirmCapacity = recordCodexUpstreamOutcome(config, authCtx.accountId, reserveQuotaStatus ?? response.status, {
     ...(reserveQuotaStatus ? codexQuotaOutcomeMeta(response) : {}),
     ...codexFailureWindowOutcomeMeta(authCtx),
     threadId: authCtx.affinityKey,
@@ -172,6 +173,7 @@ export function recordCodexPreOutputRefusalOutcome(
     transientProbe: codexTransientProbeGrant(authCtx),
     writerGeneration: authCtx.writerGeneration,
   });
+  if (codexWsPreludeVerdict(response) === "confirmed-capacity") confirmCapacity?.();
 }
 
 function carriesAccountBoundTurnState(headers: Headers, body: unknown): boolean {
@@ -942,7 +944,7 @@ async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal
       noteCodexWsPreOutputRefusalOutcome(firstResponse);
       return;
     }
-    recordCodexUpstreamOutcome(config, firstAuthCtx.accountId, outcomeStatus, {
+    const confirmCapacity = recordCodexUpstreamOutcome(config, firstAuthCtx.accountId, outcomeStatus, {
       ...quotaMeta,
       ...codexFailureWindowOutcomeMeta(firstAuthCtx),
       threadId: firstAuthCtx.affinityKey,
@@ -954,6 +956,7 @@ async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal
       // Retry already advanced the RR ring via excludeAccountId — reuse for promotion.
       ...(retryAuthCtx.accountId ? { promoteAccountId: retryAuthCtx.accountId } : {}),
     });
+    if (codexWsPreludeVerdict(firstResponse) === "confirmed-capacity") confirmCapacity?.();
     noteCodexWsPreOutputRefusalOutcome(firstResponse);
   };
   // Only a combo reset-derived outcome is deferred. Retry-After, defaults, and

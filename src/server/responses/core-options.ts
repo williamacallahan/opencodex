@@ -1,3 +1,4 @@
+import type { CodexWsPreludeVerdict } from "./codex-ws-wire";
 import type { IssuedReasoningProof, LookupItemIssuer } from "../../responses/reasoning-replay-cache";
 import type { ClientFacingModelLabel } from "../../lib/error-destination";
 import type { CodexAccountModelRefusal } from "../../combos/failover";
@@ -34,7 +35,7 @@ export interface ConsumedComboFailure {
   response: Response;
   classificationText: string;
   wrappedReserveQuota?: boolean;
-  wsConfirmedCapacity?: boolean;
+  wsPreludeVerdict?: CodexWsPreludeVerdict;
   /** Complete bounded-envelope evidence captured before display truncation; never serialized. */
   codexModelRefusal?: CodexAccountModelRefusal;
   /** Complete bounded-envelope malformed response_format diagnostic verdict captured before display truncation. */

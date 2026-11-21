@@ -142,10 +142,11 @@ export function isHardPolicyOrOriginRefusal(text: string | undefined, depth = 0)
     }
   }
 
-  if (hasOuterRefusal) {
-    return true;
-  }
+  return hasOuterRefusal || hasHardRefusalInEnvelope(parsed, unescaped);
+}
 
+/** Use only diagnostic carriers in a decoded frame, never request echoes. */
+export function hasHardRefusalInEnvelope(parsed: unknown, fallbackText?: string): boolean {
   if (parsed && typeof parsed === "object") {
     const queue: unknown[] = [parsed];
     let examined = 0;
@@ -253,7 +254,5 @@ export function isHardPolicyOrOriginRefusal(text: string | undefined, depth = 0)
     return false;
   }
 
-  if (isAuthoritativeHardRefusalProse(unescaped)) return true;
-
-  return false;
+  return isAuthoritativeHardRefusalProse(fallbackText);
 }

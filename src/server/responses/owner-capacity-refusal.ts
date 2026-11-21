@@ -5,8 +5,8 @@ import { isReserveQuotaCode } from "./combo-stream-preflight";
 
 /** An owner may release opaque state only on positive quota evidence, not on every hoppable 429. */
 export function isOwnerCapacityRefusal(status: number, failure: Pick<ConsumedComboFailure,
-  "wsConfirmedCapacity" | "wrappedReserveQuota" | "upstreamCode" | "upstreamRootCode" | "upstreamType" | "classificationText">): boolean {
-  if (failure.wsConfirmedCapacity !== undefined) return failure.wsConfirmedCapacity;
+  "wsPreludeVerdict" | "wrappedReserveQuota" | "upstreamCode" | "upstreamRootCode" | "upstreamType" | "classificationText">): boolean {
+  if (failure.wsPreludeVerdict !== undefined) return failure.wsPreludeVerdict === "confirmed-capacity";
   const { upstreamCode: code, upstreamRootCode: rootCode, upstreamType } = failure;
   return (failure.wrappedReserveQuota === true || ((status === 429 || status === 402)
     && isReserveQuotaCode(code ?? upstreamType) && (!upstreamType || isReserveQuotaCode(upstreamType))))

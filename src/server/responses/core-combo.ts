@@ -1647,7 +1647,7 @@ export async function executeComboResponses(
     }
     // A non-replayable failure (the answer to a spent ambiguous-reset replacement) may follow a
     // send that already ran the turn, so no later target may receive it, whatever its status says.
-    const failureDecision = boundTargetKey !== undefined || failure.nonReplayable || spentReplacement
+    const failureDecision = boundTargetKey !== undefined || failure.wsPreludeVerdict === "hard-stop" || failure.nonReplayable || spentReplacement
       ? "stop"
       : isPolicyCandidateRefusal(failure.response) ? "hop"
       : comboFailureDecision(failure.response.status, failure.classificationText, {
@@ -1807,14 +1807,11 @@ export async function executeComboResponses(
         failedTargetCooled ||= targetKey(target) === failedTargetKey;
       },
     });
-    // Drop exclusions for the single-target retry, but wait for normal cooldown
-    // expiry: an in-flight request cannot reserve a fresh recovery pass, though the
-    // reservation it already owns still applies to entries unchanged since it was made.
+    // Only untried targets can use the original probe reservation. A same-target retry waits for expiry.
     const carriedReprobe: ComboPick["cooldownReprobeTargets"] = pick.cooldownReprobeTargets;
     const retryAfterCooldown = (): Promise<ComboPick | null> =>
       pickWithWait({
         allowCooldownReprobe: false,
-        cooldownReprobeTargets: carriedReprobe ? Object.entries(carriedReprobe) : undefined,
         eligible: targetEligible,
         now: failureNow,
       });

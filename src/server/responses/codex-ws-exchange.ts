@@ -1,4 +1,5 @@
 import { NativeSteeringError } from "./native-steering";
+import { hasHardRefusalInEnvelope } from "../../lib/hard-refusal";
 import { terminalOwnerCapacityStatus } from "./owner-capacity-refusal";
 import { reserveQuotaPrelude } from "./combo-stream-preflight";
 import { NativeContinuationRefusalError } from "./native-continuation-refusal";
@@ -686,7 +687,8 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
             cleanup();
             try { controller.close(); } catch { /* unused stream already closed */ }
             session.dispose();
-            markCodexWsPreludeProjection(projection, terminalQuota?.confirmedCapacity);
+            markCodexWsPreludeProjection(projection, hasHardRefusalInEnvelope(normalized.payload) ? "hard-stop"
+              : !terminalQuota ? undefined : terminalQuota.confirmedCapacity ? "confirmed-capacity" : "unconfirmed-capacity");
             resolve(projection);
             return;
           }

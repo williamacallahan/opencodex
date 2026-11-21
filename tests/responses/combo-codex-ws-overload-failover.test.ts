@@ -119,6 +119,15 @@ let savedProxyEnv: Record<string, string | undefined> = {};
 let releaseSpendHome: (() => void) | undefined;
 let fallbackSends = 0;
 
+function writeSeats(...ids: string[]): void {
+  writeFileSync(join(home, "codex-accounts.json"), JSON.stringify(Object.fromEntries(ids.map(id => [id, {
+    credential: { accessToken: `${id}-access`, refreshToken: `${id}-grant`,
+      expiresAt: Date.now() + 3_600_000, chatgptAccountId: `acc-${id}` },
+    generation: 1,
+    refreshGrantFingerprint: createHash("sha256").update(`codex-refresh-grant:${id}-grant`).digest("hex"),
+  }]))));
+}
+
 function clearState(): void {
   clearAccountNeedsReauth(WORK);
   clearCodexUpstreamHealth();
@@ -139,18 +148,7 @@ beforeEach(() => {
   releaseSpendHome = acquireOwnedSpendHome();
   clearState();
   setAccountQuotaFromParsed(WORK, { weeklyPercent: 10 });
-  writeFileSync(join(home, "codex-accounts.json"), JSON.stringify({
-    [WORK]: {
-      credential: {
-        accessToken: `${WORK}-access`,
-        refreshToken: `${WORK}-grant`,
-        expiresAt: Date.now() + 3_600_000,
-        chatgptAccountId: `acc-${WORK}`,
-      },
-      generation: 1,
-      refreshGrantFingerprint: createHash("sha256").update(`codex-refresh-grant:${WORK}-grant`).digest("hex"),
-    },
-  }));
+  writeSeats(WORK);
   FakeWebSocket.instances = [];
   FakeWebSocket.plan = [];
   fallbackSends = 0;
@@ -320,6 +318,32 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     const cooldown = getCodexQuotaHealthSnapshot(WORK, "shared");
     expect(cooldown?.cooldownSource).toBe("retry-after");
     expect(cooldown?.confirmedCapacity).toBe(terminal === "first-quota" ? true : undefined);
+  });
+
+  test.each([
+    ["first-conflict", false], ["first-conflict", true], ["first-quota", true],
+  ] as const)("unbound first-frame %s with alternate seat %s", async (refusal, alternate) => {
+    const cfg = comboConfig();
+    cfg.combos!.overload!.targets[0]!.model = "gpt-6-luna";
+    if (alternate) {
+      writeSeats(WORK, "backup");
+      cfg.codexAccounts!.push({ id: "backup", label: "backup" });
+      setAccountQuotaFromParsed("backup", { weeklyPercent: 50 });
+    }
+    FakeWebSocket.plan = [refusal, "issue-reasoning"];
+    const result = await send(cfg);
+    const cooldown = getCodexQuotaHealthSnapshot(WORK, "shared");
+    expect(cooldown?.cooldownSource).toBe("retry-after");
+    if (refusal === "first-conflict") {
+      expect(cooldown?.confirmedCapacity).toBeUndefined();
+      expect(result.response.status).toBe(429);
+      expect(FakeWebSocket.instances.flatMap(ws => ws.sent)).toHaveLength(1);
+    } else {
+      expect(result.body).toContain(reasoning.encrypted_content);
+      expect(FakeWebSocket.instances.flatMap(ws => ws.sent)).toHaveLength(2);
+      expect(cooldown?.confirmedCapacity).toBe(true);
+    }
+    expect(fallbackSends).toBe(0);
   });
 
   test("output after the rate-limit frame still commits the native target", async () => {

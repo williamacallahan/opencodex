@@ -1,4 +1,4 @@
-import { codexWsProjectedCapacity } from "./codex-ws-wire";
+import { codexWsPreludeVerdict } from "./codex-ws-wire";
 import { inspectedReserveRefusal } from "./reserve-refusal-body";
 import { recordUpstreamProviderErrorDetail, recordUpstreamValidationDetail, type FailureDetail } from "../request-log-failure-detail";
 import { carryProxyErrorPresentation } from "../../lib/client-error-body";
@@ -200,7 +200,7 @@ export async function consumeComboFailure(
   carryCodexAccountCooldownResponse(response, failureResponse);
   return {
     response: failureResponse,
-    wsConfirmedCapacity: codexWsProjectedCapacity(response),
+    wsPreludeVerdict: codexWsPreludeVerdict(response),
     ...(nonReplayable ? { nonReplayable: true } : {}),
     ...(verifiedPlanRefusal ? { verifiedPlanRefusal: true } : {}),
     classificationText,
