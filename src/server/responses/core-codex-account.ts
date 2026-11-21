@@ -33,6 +33,7 @@ import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { upstreamErrorMessageFromPayload, isRateLimitOrQuotaFailureMessage } from "../../lib/errors";
 import { isNonReplayableResponse, isTransientUpstreamStatus, SendBudgetExhaustedError } from "../../lib/upstream-retry";
 import { clearableDeadline } from "../../lib/abort";
+import { inspectedReserveRefusal } from "./reserve-refusal-body";
 import { sendReserveSeat, StaleReserveSeat } from "./reserve-seat-dispatch";
 import { applyClaudeBridgePoolSession } from "../claude-bridge-pool-session";
 import {
@@ -471,8 +472,8 @@ export async function shouldRetryCodexPoolAccountQuota(
   if (response.status < 500 || response.status >= 600) return false;
   try {
     // Reject malformed UTF-8 instead of matching quota words around replacement characters.
-    const body = await readBoundedResponseBody(response.clone(), { signal, fatalUtf8: true });
-    const message = body.displaySafe && !body.truncated
+    const body = inspectedReserveRefusal(response) ?? await readBoundedResponseBody(response.clone(), { signal, fatalUtf8: true });
+    const message = body.utf8Valid !== false && body.displaySafe && !body.truncated
       ? codexQuotaFailureMessage(body.text)
       : undefined;
     return message !== undefined
@@ -1084,7 +1085,7 @@ async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal
       const permit = accountMovePermit ?? (rung?.allowed ? rung.permit : undefined);
       accountMovePermit = undefined;
       try {
-        const send = async (physicalPermit: SingleUseDispatchPermit | undefined, transient = false): Promise<Response | undefined> => {
+        const send = async (physicalPermit: SingleUseDispatchPermit | undefined, transient = false, onAdmitted?: () => void): Promise<Response | undefined> => {
           const dispatch = async (): Promise<Response | undefined> => {
             // Spend admission must see the credential the retry will use. Restore the original
             // label if admission refuses, while leaving that original response readable.
@@ -1097,6 +1098,7 @@ async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal
                   ? sharedPoolBackpressure().tryPermitRetryDispatch(Date.now(), () => claimRetrySend(physicalPermit))
                   : claimRetrySend(physicalPermit))) return false;
               admitted = true;
+              onAdmitted?.();
               if (args.reserveWalk) {
                 if (transient) args.reserveWalk.transientRetries++;
                 else args.reserveWalk.movesSent++;
@@ -1167,7 +1169,7 @@ async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal
           return physicalPermit?.execute ? physicalPermit.execute(dispatch) : dispatch();
         };
         const response = args.reserveWalk && executionBudget && permit
-          ? await sendReserveSeat(args.reserveWalk, executionBudget, permit, signal, send) : await send(permit);
+          ? await sendReserveSeat(args.reserveWalk, executionBudget, permit, signal, send, args.upstream.signal) : await send(permit);
         if (!response) {
           if (retrySendCount > 0) break;
           releaseCodexAuthContextProbeLease(retryAuthCtx);

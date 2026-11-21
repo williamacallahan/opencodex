@@ -8,6 +8,7 @@ import {
   responseContinuationRetainedStoreSnapshot,
   runPendingResponseStatePersistForTests,
 } from "../../src/responses/state";
+import { issueTurnStateHandle, TURN_STATE_HEADER, turnStateBinding } from "../../src/server/turn-state-handles";
 import { resetAgentTaskRecoveryState } from "../../src/server/responses/agent-task-recovery";
 import { agentTaskRecoveryCacheSnapshotForTests } from "../../src/server/responses/agent-task-recovery-cache";
 import { clearComboTargetCooldowns, coolComboTarget, isComboTargetInCooldown } from "../../src/combos/failover";
@@ -128,6 +129,33 @@ describe("combo path encrypted agent task recovery", () => {
     const snapshot = existsSync(snapshotPath) ? readFileSync(snapshotPath, "utf8") : "";
     expect(snapshot).not.toContain(assignment);
     expect(snapshot).not.toContain(responsePayload.id!);
+  });
+
+  test.each(["disabled", "cooldown", "protected file", "protected handle"] as const)("unavailable Luna allows only the isolated spawn assignment onto a sibling (%s)", async reason => {
+    const cfg = comboConfig([{ provider: "openai", model: "gpt-6-luna" }, { provider: "xai", model: "grok-4.5" }]);
+    cfg.providers.openai!.codexAccountMode = "pool";
+    if (reason === "cooldown") coolComboTarget("routed", { provider: "openai", model: "gpt-6-luna" }, { cooldownMs: 60_000 });
+    else cfg.providers.openai!.disabled = true;
+    const wires: string[] = [], assignments: string[] = [];
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).includes("chatgpt.com")) {
+        assignments.push(String(init?.body));
+        return new Response(recoverySse("count the rows"), { headers: { "content-type": "text/event-stream" } });
+      }
+      wires.push(String(init?.body)); return providerCompletion();
+    }) as typeof fetch;
+    const input = encryptedInput();
+    const headers = codexHeaders();
+    if (reason === "protected handle") headers.set(TURN_STATE_HEADER, issueTurnStateHandle("fixture-owner", turnStateBinding("openai", headers)));
+    if (reason === "protected file") input.unshift({ role: "user", content: [{ type: "input_file", file_id: "file_owner" }] });
+    const result = await post(cfg, "combo/routed", input, headers);
+    await result.text();
+    if (reason === "protected file" || reason === "protected handle") { expect(result.status).toBe(409); expect(wires).toEqual([]); expect(assignments).toEqual([]); }
+    else {
+      expect(result.status).toBe(200); expect(wires).toHaveLength(1);
+      expect(assignments).toHaveLength(1); expect(assignments[0]).toContain(FERNET_TASK);
+      expect(wires[0]).toContain("count the rows"); expect(wires[0]).not.toContain(FERNET_TASK);
+    }
   });
 
   test.each([false, true])("encrypted recovery keeps replay-incompatible targets excluded (reprobe=%s)", async (reprobe) => {

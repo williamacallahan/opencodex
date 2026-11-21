@@ -71,22 +71,23 @@ export function rememberComboForLane(
   }
 }
 
-function livePin(config: OcxConfig, pin: ComboPin | undefined): ComboPin | undefined {
+function recordedPin(config: OcxConfig, pin: ComboPin | undefined): ComboPin | undefined {
   if (!pin) return undefined;
   const provider = config.providers[pin.provider];
-  if (!expired(pin, Date.now()) && Object.hasOwn(config.providers, pin.provider) && provider && !provider.disabled
+  if (!expired(pin, Date.now()) && Object.hasOwn(config.providers, pin.provider) && provider
     && getCombo(config, pin.comboId)?.targets.some(target => targetKey(target) === targetKey(pin))) return pin;
   remove(pinKey(pin.lane, pin.comboId), pin);
   return undefined;
 }
 export function recallComboForLane(config: OcxConfig, lane: string | undefined, model: string): string | undefined {
   if (!lane || !model || model.includes("/")) return undefined;
-  const pin = livePin(config, latest.get(affinityDigest("combo-lane", lane)));
-  return pin && pin.responseDigest === modelDigest(model) ? pin.comboId : undefined;
+  const pin = recordedPin(config, latest.get(affinityDigest("combo-lane", lane)));
+  return pin && !config.providers[pin.provider]?.disabled && pin.responseDigest === modelDigest(model) ? pin.comboId : undefined;
 }
 export function recallComboTargetForLane(config: OcxConfig, lane: string | undefined, comboId: string): Pick<OcxComboTarget, "provider" | "model"> | undefined {
   if (!lane || !comboId) return undefined;
-  const pin = livePin(config, pins.get(pinKey(affinityDigest("combo-lane", lane), comboId)));
+  // The picker checks eligibility. Disabling a member does not change who issued its state.
+  const pin = recordedPin(config, pins.get(pinKey(affinityDigest("combo-lane", lane), comboId)));
   return pin && { provider: pin.provider, model: pin.model };
 }
 export function sweepExpiredComboRecall(now: number): number {

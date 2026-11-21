@@ -320,6 +320,7 @@ interface PreOutputRefusalRecord {
 }
 
 const preOutputRefusals = new WeakMap<Response, PreOutputRefusalRecord>();
+registerProviderResponseProvenance(preOutputRefusals);
 
 /**
  * Register a pre-output refusal projection (#6969): a replayable gateway status standing in for a

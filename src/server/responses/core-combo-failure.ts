@@ -1,3 +1,4 @@
+import { inspectedReserveRefusal } from "./reserve-refusal-body";
 import { recordUpstreamProviderErrorDetail, recordUpstreamValidationDetail, type FailureDetail } from "../request-log-failure-detail";
 import { carryProxyErrorPresentation } from "../../lib/client-error-body";
 import { carryPolicyCandidateRefusal } from "./policy-request-scope";
@@ -85,8 +86,10 @@ export async function consumeComboFailure(
   let verifiedPlanRefusal = false;
   try {
     const legacy = comboFailureEvidence(response);
-    if (legacy !== undefined) void response.body?.cancel().catch(() => undefined);
-    const body = await readBoundedResponseBody(legacy === undefined ? response : new Response(legacy), { signal, reportUtf8Validity: serverError });
+    const inspected = legacy === undefined ? inspectedReserveRefusal(response) : undefined;
+    if (legacy !== undefined || inspected) void response.body?.cancel().catch(() => undefined);
+    if (inspected) signal?.throwIfAborted();
+    const body = inspected ?? await readBoundedResponseBody(legacy === undefined ? response : new Response(legacy), { signal, reportUtf8Validity: serverError });
     // A 5xx body counts as quota or classification evidence only when it decoded as valid
     // UTF-8, matching shouldRetryCodexPoolAccountQuota. A malformed byte keeps the status-only
     // fallback, with one exception: a cyber-policy refusal must still stop the combo, so the

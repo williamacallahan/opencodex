@@ -667,7 +667,7 @@ export async function preparePassthroughExchange(
         // model can seed recall; an absent model never falls back to the pick.
         if (typeof response.model === "string" && response.model.trim()) {
           notifyResponseComplete({
-            status: response.status,
+            status: response.status, output: normalizedReplayResponse.output,
             model: parsed._responseModelId !== undefined && parsed._responseModelId !== parsed.modelId
               ? parsed._responseModelId : response.model,
           });

@@ -10,10 +10,12 @@ import { isCodexLbProvider } from "../../providers/quota/codex-lb-url";
 import type { RouteResult } from "../../router";
 
 import { stripPreviousResponseId } from "../../adapters/openai-responses/canonical-forward";
+import { closedReasoningPrefix, hasReasoningSummary } from "../../adapters/openai-responses/luna-reasoning";
 import { sanitizeReasoningInputContent } from "../../adapters/openai-responses/reasoning";
 import { CODEX_TURN_STATE_HEADER } from "../../codex/forward-transport-headers";
 import { isPlainObject } from "../../lib/plain-data";
 import { canPortConversationState, collectConversationStateCarriers, type PortabilityDenial } from "./account-change-state";
+import { tailAgentMessageIndex } from "./encrypted-payload";
 
 type Combo = NonNullable<ReturnType<typeof getCombo>>;
 type ComboTarget = Combo["targets"][number];
@@ -49,38 +51,29 @@ export interface LunaReserveLegPlan {
   legCount: number;
 }
 
-/** Judge the same expanded transcript the child will send. A native compaction blob or an
- * encrypted task is not a reasoning summary: if any opaque carrier survives, keep its owner. */
-export function prepareLunaReplay(body: unknown, expanded: boolean, headers: Headers):
+/** Judge the expanded transcript the child will send. The spawn decoder alone handles its assignment. */
+export function prepareLunaReplay(body: unknown, expanded: boolean, headers: Headers, unreadableAssignment = false):
   { kind: "portable"; body: unknown; ownerBody?: unknown } | { kind: "bound"; reason: PortabilityDenial | "turn-state" | "item-reference" } {
   if (headers.has(CODEX_TURN_STATE_HEADER) || (isPlainObject(body) && isPlainObject(body.client_metadata)
     && CODEX_TURN_STATE_HEADER in body.client_metadata)) return { kind: "bound", reason: "turn-state" };
   const full = stripPreviousResponseId(body, expanded);
-  if (isPlainObject(full) && Array.isArray(full.input) && full.input.some(item => isPlainObject(item) && item.type === "item_reference")) {
+  const input: unknown[] = isPlainObject(full) && Array.isArray(full.input) ? full.input : [];
+  if (input.some(item => isPlainObject(item) && item.type === "item_reference")) {
     return { kind: "bound", reason: "item-reference" };
   }
-  const verdict = canPortConversationState(collectConversationStateCarriers(full));
+  // Only the dedicated assignment path may replace these parts; the wire body is unchanged.
+  const assignment = unreadableAssignment ? input[tailAgentMessageIndex(input)] : undefined;
+  const verdict = canPortConversationState(collectConversationStateCarriers(full, assignment));
   if (!verdict.portable && verdict.reason !== "encrypted-reasoning") return { kind: "bound", reason: verdict.reason };
-  const input = isPlainObject(full) && Array.isArray(full.input) ? full.input : [];
-  let sensitive = false, freshUserTurn = false;
-  const pending = new Set<string>();
-  for (const item of input) {
-    if (!isPlainObject(item)) continue;
-    if (item.type === "reasoning" && (item.id || item.encrypted_content)) {
-      // A pointer or ciphertext with no readable replacement is not discardable context.
-      if (!Array.isArray(item.summary) || !item.summary.some(part => isPlainObject(part)
-        && part.type === "summary_text" && typeof part.text === "string" && part.text.trim())) return { kind: "bound", reason: "encrypted-reasoning" };
-      sensitive = true; freshUserTurn = false;
-    }
-    if (sensitive && item.role === "user" && (typeof item.content === "string" ? item.content.trim().length > 0
-      : Array.isArray(item.content) && item.content.some(part => isPlainObject(part) && part.type === "input_text" && typeof part.text === "string" && part.text.trim()))) freshUserTurn = true;
-    if (item.type === "function_call" || item.type === "custom_tool_call") pending.add(typeof item.call_id === "string" ? item.call_id : "");
-    if ((item.type === "function_call_output" || item.type === "custom_tool_call_output") && typeof item.call_id === "string") pending.delete(item.call_id);
+  let boundary: number | undefined;
+  for (const [i, item] of input.entries()) {
+    if (!isPlainObject(item) || item.type !== "reasoning" || !(item.id || item.encrypted_content)) continue;
+    boundary ??= closedReasoningPrefix(input);
+    if (i >= boundary || !hasReasoningSummary(item)) return { kind: "bound", reason: "encrypted-reasoning" };
   }
-  if (!sensitive && verdict.portable) return { kind: "portable", body: full };
-  if (!sensitive || !freshUserTurn || pending.size) return { kind: "bound", reason: "encrypted-reasoning" };
+  if (boundary === undefined) return verdict.portable ? { kind: "portable", body: full } : { kind: "bound", reason: verdict.reason };
   const scrubbed = sanitizeReasoningInputContent(full, { stripEncryptedContent: true, dropForeignItemId: true, preserveRawReasoningContent: true });
-  return canPortConversationState(collectConversationStateCarriers(scrubbed)).portable
+  return canPortConversationState(collectConversationStateCarriers(scrubbed, assignment)).portable
     ? { kind: "portable", body: scrubbed, ownerBody: full } : { kind: "bound", reason: "encrypted-reasoning" };
 }
 

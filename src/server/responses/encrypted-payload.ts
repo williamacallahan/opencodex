@@ -259,9 +259,7 @@ function splitFernetParts(content: unknown[]): Set<object> {
   return protectedParts;
 }
 
-export function hasUnreadableEncryptedAgentTask(input: unknown): boolean {
-  if (!Array.isArray(input)) return false;
-
+export function tailAgentMessageIndex(input: readonly unknown[]): number {
   // codex-rs appends one agent_message (any of the four codex-rs message types) at the
   // current input tail. Historical
   // agent messages may be adjacent in full-history bodies; they must not poison the
@@ -275,9 +273,13 @@ export function hasUnreadableEncryptedAgentTask(input: unknown): boolean {
     index -= 1;
   }
   const item = input[index];
-  if (!item || typeof item !== "object" || (item as { type?: unknown }).type !== "agent_message") {
-    return false;
-  }
+  return item && typeof item === "object" && (item as { type?: unknown }).type === "agent_message" ? index : -1;
+}
+
+export function hasUnreadableEncryptedAgentTask(input: unknown): boolean {
+  if (!Array.isArray(input)) return false;
+  const item = input[tailAgentMessageIndex(input)];
+  if (!item) return false;
 
   const content = (item as { content?: unknown }).content;
   if (!Array.isArray(content)) return false;

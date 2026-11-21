@@ -593,6 +593,9 @@ export async function executeComboResponses(
   const unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
     (body as { input?: unknown } | undefined)?.input,
   );
+  const recovery = agentTaskRecoveryConfig(config);
+  const encryptedTaskRecoveryAdmitted = (options.inboundWire ?? "responses") === "responses"
+    && isThreadSpawnRequest(req.headers) && !!recovery && !options.comboAttempt;
   const canDecryptUnreadableAgentTask = (target: (typeof combo.targets)[number]): boolean => {
     const provider = config.providers[target.provider];
     if (!provider || provider.disabled === true) return false;
@@ -680,7 +683,9 @@ export async function executeComboResponses(
     });
   };
   const unavailableOwner = (): Response => {
-    const refusal = markProxyError(formatErrorResponse(409, "invalid_request_error", new CodexTurnStateOwnerUnavailableError().message));
+    const message = handleOwner ? new CodexTurnStateOwnerUnavailableError().message
+      : "The owner of this conversation state is unavailable. The request was not sent.";
+    const refusal = markProxyError(formatErrorResponse(409, "invalid_request_error", message));
     markResponseNonReplayable(refusal);
     return refusal;
   };
@@ -700,7 +705,8 @@ export async function executeComboResponses(
   const lunaPair = native && !unreadableEncryptedAgentTask ? planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed, native) : undefined;
   const lunaCandidate = native !== undefined || combo.strategy === "failover" && combo.targets.some(target =>
     modelHasPoolReserve(target.model) && config.providers[target.provider] && isCanonicalOpenAiForwardProvider(config.providers[target.provider]!));
-  const lunaReplay = handleOwner || lunaCandidate ? prepareLunaReplay(body, comboReplaySnapshot.previousResponseInputExpanded, req.headers) : undefined;
+  const lunaReplay = handleOwner || lunaCandidate ? prepareLunaReplay(body, comboReplaySnapshot.previousResponseInputExpanded,
+    req.headers, unreadableEncryptedAgentTask && encryptedTaskRecoveryAdmitted) : undefined;
   const lunaLegs = lunaReplay?.kind === "portable" ? lunaPair : undefined;
   const dispatchBody = lunaReplay?.kind === "portable" ? lunaReplay.body : body;
   if (lunaReplay?.kind === "bound") {
@@ -730,9 +736,6 @@ export async function executeComboResponses(
   let encryptedTaskRecoveryAttempted = false;
   let recoveryFailureReason: AgentTaskRecoveryFailureReason | undefined;
   let storedPool401ReplayDispatched = false;
-  const recovery = agentTaskRecoveryConfig(config);
-  const encryptedTaskRecoveryAdmitted = (options.inboundWire ?? "responses") === "responses"
-    && isThreadSpawnRequest(req.headers) && !!recovery && !options.comboAttempt;
   const recoverUnreadableEncryptedTask = async (): Promise<boolean> => {
     if (encryptedTaskRecoveryAttempted) return false;
     encryptedTaskRecoveryAttempted = true;
@@ -802,7 +805,7 @@ export async function executeComboResponses(
     ? undefined
     : jevSessionPinScope({ combo, comboId, admission: options.admission, lane: comboLane });
 
-  if (!pick && handleOwner) return unavailableOwner();
+  if (!pick && (handleOwner || boundLunaTarget && !unreadableEncryptedAgentTask)) return unavailableOwner();
   if (unreadableEncryptedAgentTask && !pick) {
     pick = await pickWithWait({
       eligible: recoveryEligible,
@@ -816,6 +819,7 @@ export async function executeComboResponses(
         config,
         { parentThreadId: inboundClientThreadId },
       );
+      if (boundLunaTarget && !options.abortSignal?.aborted) return unavailableOwner();
       if (!options.abortSignal?.aborted && onlyMuseToolIncompatible()) {
         return comboUnavailableResponse("No available targets for combo; targets cannot preserve mandatory tool_choice");
       }
@@ -1215,9 +1219,10 @@ export async function executeComboResponses(
     // re-tiered mid-session and its prompt cache survives the turn.
     const jevEffortApplies = initialJevDecision !== undefined && combo.jevEffortMode !== "client";
     // Native Responses can decide from the final credential; other wires get only the proven cross-owner copy.
-    const lateReasoningProjection = lunaReplay?.kind === "portable" && lunaReplay.ownerBody !== undefined
-      && targetRoute.staticPolicy.model.adapter === "openai-responses";
-    const targetBody = lateReasoningProjection && lunaReplay?.kind === "portable" ? lunaReplay.ownerBody : dispatchBody;
+    const responsesWire = targetRoute.staticPolicy.model.adapter === "openai-responses";
+    const lateReasoningProjection = responsesWire && lunaCandidate && lunaReplay?.kind === "bound" ? "owner"
+      : responsesWire && lunaReplay?.kind === "portable" && lunaReplay.ownerBody !== undefined ? "portable" : undefined;
+    const targetBody = lateReasoningProjection === "portable" && lunaReplay?.kind === "portable" ? lunaReplay.ownerBody : dispatchBody;
     const childInput = options.droidDefaultEffort && isPlainObject(targetBody) ? { ...targetBody } : targetBody;
     applyDroidResponsesReasoningDefault(childInput, options.droidDefaultEffort, {
       provider: targetRoute.provider,
@@ -1355,7 +1360,7 @@ export async function executeComboResponses(
           && targetEligible(target)
           && !isComboTargetInCooldown(comboId, target),
         );
-      const nativeChild = handleOwner || legIntent || dispatchBody !== body ? undefined : protocolLanes?.nativeChild(pick.target, targetRoute, targetSendBudget, initialJevDecision, jevEffortApplies);
+      const nativeChild = handleOwner || legIntent || lateReasoningProjection || dispatchBody !== body ? undefined : protocolLanes?.nativeChild(pick.target, targetRoute, targetSendBudget, initialJevDecision, jevEffortApplies);
       response = nativeChild ? await dispatchNativeComboChild({
         source: options.protocolSource!,
         plan: nativeChild,
@@ -1388,7 +1393,7 @@ export async function executeComboResponses(
         comboAttempt: true,
         comboInitialSend: initialSend,
         comboDispatchPermit: hopDecision?.allowed ? hopDecision.permit : undefined,
-        comboReplaySnapshot: lateReasoningProjection ? { ...comboReplaySnapshot, projectForeignReasoning: true } : comboReplaySnapshot,
+        comboReplaySnapshot: lateReasoningProjection ? { ...comboReplaySnapshot, projectForeignReasoning: lateReasoningProjection } : comboReplaySnapshot,
         deferCodexResetDerivedCooldown,
         poolCapacityIntent: legIntent,
         reserveWalk: walkSeats,
