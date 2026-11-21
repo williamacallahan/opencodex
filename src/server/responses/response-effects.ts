@@ -6,7 +6,7 @@ import type { OcxProviderContinuationState } from "../../types";
 import { providerContinuationPayload } from "./core-replay";
 import { codexForwardTerminalOutcomeRecorder } from "./core-codex-account";
 import { mergeProviderContinuationPayload } from "../../responses/provider-continuation";
-import { commitReasoningReplayServingIdentity } from "../../responses/reasoning-replay-cache";
+import { commitReasoningReplayServingIdentity, rememberIssuedReasoning } from "../../responses/reasoning-replay-cache";
 import { rememberServingConversationStateIssuer } from "./account-change-state";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { bindThreadAffinity } from "../../codex/routing/thread-affinity";
@@ -42,12 +42,13 @@ export function createResponsesEffects(
   let responseCompletionNotified = false;
   let responseCompletionCancelled = false;
   const cancelResponseCompletion = (): void => { responseCompletionCancelled = true; };
-  const notifyResponseComplete = (response: { status?: unknown; model?: unknown }): void => {
+  const notifyResponseComplete = (response: { status?: unknown; model?: unknown; output?: unknown }): void => {
     if (responseCompletionNotified || responseCompletionCancelled
       || options.abortSignal?.aborted || req.signal.aborted
       || response.status !== "completed"
       || typeof response.model !== "string" || !response.model.trim()) return;
     responseCompletionNotified = true;
+    rememberIssuedReasoning(parsed._reasoningReplayScope, response.output);
     const ctx = admissionState.authCtx;
     if (recordTerminalOutcomes && routedCompaction && options.poolCapacityIntent === "reserve-only" && ctx.kind === "pool" && ctx.poolReserve) {
       codexForwardTerminalOutcomeRecorder(config, ctx, route.provider, route.modelId)?.("completed", undefined, true);

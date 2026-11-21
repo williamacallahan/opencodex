@@ -1,6 +1,8 @@
 import type { ComboExclusionReasons } from "../../combos/resolve";
 import { markProxyError } from "../../lib/client-error-body";
 import { appendClientRetryIn, formatClientRetryAfter } from "../../lib/client-retry-after";
+import { inspectedReserveRefusal } from "./reserve-refusal-body";
+import { cancelResponseBodyBestEffort } from "../../lib/upstream-retry";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { redactSecretString } from "../../lib/redact";
 import { isCyberPolicyMessage, isCyberPolicyCode } from "../../lib/errors";
@@ -25,7 +27,9 @@ export async function readDisplaySafeErrorText(
   fallback: string,
 ): Promise<string> {
   try {
-    const body = await readBoundedResponseBody(response, { signal });
+    const inspected = inspectedReserveRefusal(response);
+    if (inspected) { cancelResponseBodyBestEffort(response); signal.throwIfAborted(); }
+    const body = inspected ?? await readBoundedResponseBody(response, { signal });
     return body.displaySafe ? body.text : fallback;
   } catch {
     // Preserve the former Response.text().catch(fallback) contract. Request-abort

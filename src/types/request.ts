@@ -110,7 +110,7 @@ export interface OcxParsedRequest {
    */
   _previousResponseInputExpanded?: boolean;
   /** Preserve the original reasoning only at its proven serving identity. */
-  _lunaProjectForeignReasoning?: boolean;
+  _lunaProjectForeignReasoning?: "portable" | "owner";
   /** Provider-private stable Cursor conversation id resolved from the Responses previous_response_id chain. */
   _cursorConversationId?: string;
   /** Stable upstream client thread identity, used only to derive provider-scoped continuation ids. */

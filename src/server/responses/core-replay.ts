@@ -164,6 +164,9 @@ export function bindRouteReasoningReplayScope(args: {
   if (identityChange) {
     // Reasoning retention does not establish portability of native compacted history.
     parsed._stripNativeCompactionEncryptedContent = true;
+  }
+  // A Luna item is checked against its own issuer at serialization, not the latest turn.
+  if (identityChange && !(adapterName === "openai-responses" && parsed._lunaProjectForeignReasoning)) {
     const retention = parsed._nativeReasoningRetention;
     const mayRetainReasoning = isCanonicalOpenAiForwardProvider(provider)
       && !identityChange.providerChanged

@@ -1,6 +1,9 @@
 import { releaseCodexAuthContextProbeLease, type CodexAuthContext } from "../../codex/auth-context";
 import { formatErrorResponse } from "../../bridge";
 import { redactSecretString } from "../../lib/redact";
+import { LunaReasoningOwnerError } from "../../adapters/openai-responses/luna-reasoning";
+import { markResponseNonReplayable } from "../../lib/upstream-retry";
+import { markProxyError } from "../../lib/client-error-body";
 import { NamespaceToolCollisionError } from "../../responses/namespace-tool-compat";
 import { RoutedCustomToolCompatError } from "../../responses/custom-tool-compat";
 import { XaiToolSchemaCompatibilityError } from "../../adapters/xai-tool-schema";
@@ -13,6 +16,11 @@ import { mapCodexAuthContextErrorToResponse } from "./codex-auth-error";
 export function passthroughBuildErrorResponse(error: unknown, accountSelector?: string): Response | undefined {
   const refusal = mapCodexAuthContextErrorToResponse(error, { now: Date.now(), accountSelector });
   if (refusal) return refusal;
+  if (error instanceof LunaReasoningOwnerError) {
+    const response = markProxyError(formatErrorResponse(409, "invalid_request_error", error.message));
+    markResponseNonReplayable(response);
+    return response;
+  }
   if (error instanceof NamespaceToolCollisionError
     || error instanceof XaiToolSchemaCompatibilityError
     || error instanceof RoutedCustomToolCompatError

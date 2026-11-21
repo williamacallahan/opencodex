@@ -572,8 +572,8 @@ export interface ResetRetryOptions {
 }
 
 export interface TransientRetryOptions extends ResetRetryOptions {
-  /** Takes ownership of a fully retained refusal until replacement. False keeps the original and stops. */
-  retainBeforeTransientRetry?: (response: Response) => Promise<boolean>;
+  /** One reader for retention and overflow classification. Absent bytes hand back the live body without retry. */
+  retainBeforeTransientRetry?: (response: Response, inspectionMs: number) => Promise<{ response: Response; bytes?: Uint8Array }>;
   /** Test seam: per-attempt slow budget override (defaults to TRANSIENT_RETRY_SLOW_ATTEMPT_MS). */
   slowAttemptMs?: number;
   /**
@@ -879,12 +879,6 @@ export async function fetchWithTransientRetry(
     if (res.ok || !isTransientUpstreamStatus(res.status) || isNonReplayableResponse(res)
       || res.headers.get(REPLAY_REFUSAL_NO_RETRY_HEADER) === REPLAY_REFUSAL_NO_RETRY_VALUE) return res;
     if (opts.abortSignal?.aborted || Date.now() - attemptStart > slowAttemptMs) return res;
-    // A 5xx that says the input does not fit is deterministic: resending the same body is
-    // refused the same way, so it goes back for the caller to classify (#8127).
-    if (await isContextOverflowResponse(res, opts.abortSignal)) return res;
-    // Checked before cancelResponseBodyBestEffort so an already-aborted caller never receives
-    // a response whose body we just cancelled.
-    if (opts.abortSignal?.aborted) return res;
     const instructedDelay = retryAfterDelayMs(res.headers);
     // The deadline is the CALLER'S, not this module's default. Reading the constant directly
     // broke it in both directions: a caller with a 30s budget slept the full 45s an upstream
@@ -898,6 +892,14 @@ export async function fetchWithTransientRetry(
       // Retry-After intact and applies its own policy, exactly as on the direct path.
       return res;
     }
+    if (opts.retainBeforeTransientRetry) {
+      const retained = await opts.retainBeforeTransientRetry(res, CONTEXT_OVERFLOW_PEEK_MS);
+      res = retained.response;
+      if (!retained.bytes) return res;
+      if (!(res.headers.get("content-type") ?? "").includes("text/event-stream") && isDefiniteContextOverflow(res.status,
+        new TextDecoder().decode(retained.bytes.subarray(0, CONTEXT_OVERFLOW_PEEK_BYTES)), retryContextOverflowMessage)) return res;
+    } else if (await isContextOverflowResponse(res, opts.abortSignal)) return res;
+    if (opts.abortSignal?.aborted) return res;
     console.warn(
       `[upstream-retry] transient ${res.status}${opts.label ? ` (${opts.label})` : ""} — retrying (${sent + 1}/${budget})`,
     );
@@ -907,9 +909,7 @@ export async function fetchWithTransientRetry(
       headers: res.headers,
       retryAfterIsLowerBound: true,
     });
-    if (opts.retainBeforeTransientRetry) {
-      if (!await opts.retainBeforeTransientRetry(res)) return res;
-    } else cancelResponseBodyBestEffort(res);
+    if (!opts.retainBeforeTransientRetry) cancelResponseBodyBestEffort(res);
     // Throws on abort (see sleepWithAbort): the rejection propagates, and the body we just
     // cancelled belonged to a response we were discarding anyway.
     await sleepWithAbort(delay, opts.abortSignal);

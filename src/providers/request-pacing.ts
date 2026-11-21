@@ -639,6 +639,11 @@ export function trackProviderRequestSlotBody(
     release();
     return response;
   }
+  return carryProviderResponseProvenance(response, wrapped);
+}
+
+/** Rebuilding the same response body must not change which send produced it. */
+export function carryProviderResponseProvenance(response: Response, wrapped: Response): Response {
   // Retry helpers mark the response they return from, and recovery decisions key on these
   // identity markers; the rewrap must not make a non-replayable response look replayable.
   if (isNonReplayableResponse(response)) markResponseNonReplayable(wrapped);

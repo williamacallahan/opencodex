@@ -4,7 +4,7 @@ import type { OcxConfig } from "../../types";
 import { boundedBodyDecodeFailure, readBoundedResponseBody } from "../../lib/bounded-body";
 import { isTransientUpstreamStatus, retryBackoffDelayMs, sleepWithAbort } from "../../lib/upstream-retry";
 import { isApiAuthRequired, isProxyAdmissionSecret } from "../auth-cors";
-import { MAX_AGENT_TASK_CIPHERTEXT_BYTES, MAX_AGENT_TASK_ENCRYPTED_PARTS, structurallyValidFernetTokens } from "./encrypted-payload";
+import { MAX_AGENT_TASK_CIPHERTEXT_BYTES, MAX_AGENT_TASK_ENCRYPTED_PARTS, structurallyValidFernetTokens, tailAgentMessageIndex } from "./encrypted-payload";
 import {
   cachedAgentTaskRecovery,
   discardCachedAgentTaskRecovery,
@@ -99,19 +99,9 @@ const FINAL_ANSWER_HEADER = /(?:^|\n)Message Type\s*:\s*FINAL_ANSWER\s*\n(?:Task
 
 function findEnvelope(input: unknown): AgentEnvelope | null {
   if (!Array.isArray(input)) return null;
-  let itemIndex = input.length - 1;
-  while (itemIndex >= 0) {
-    const type = input[itemIndex] && typeof input[itemIndex] === "object"
-      ? (input[itemIndex] as { type?: unknown }).type
-      : undefined;
-    if (type !== "compaction_trigger" && type !== "additional_tools" && type !== "configuration_update") break;
-    itemIndex -= 1;
-  }
-
+  const itemIndex = tailAgentMessageIndex(input);
+  if (itemIndex < 0) return null;
   const item = input[itemIndex];
-  if (!item || typeof item !== "object" || (item as { type?: unknown }).type !== "agent_message") {
-    return null;
-  }
   const content = (item as { content?: unknown }).content;
   if (!Array.isArray(content)) return null;
 

@@ -1,3 +1,4 @@
+import { shouldRetryCodexPoolAccountQuota } from "../../src/server/responses/core-codex-account";
 import { sendReserveSeat } from "../../src/server/responses/reserve-seat-dispatch";
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -36,7 +37,8 @@ import { createSpendReservationLedger, DEFAULT_SPEND_RESERVATION_POLICY } from "
 import { createRequestSpendTracker } from "../../src/server/responses/request-spend";
 import { sharedPoolBackpressure, configureSharedPoolBackpressure, DEFAULT_POOL_BACKPRESSURE_POLICY, resetSharedPoolBackpressureForTests } from "../../src/routing/probe-lease";
 
-import { providerRequestPacingStatus, resetProviderRequestPacingForTest, waitForProviderRequestSlot } from "../../src/providers/request-pacing";
+import { RequestPacingQueueOverloadError, providerRequestPacingStatus, resetProviderRequestPacingForTest, waitForProviderRequestSlot } from "../../src/providers/request-pacing";
+import { markCodexWsPreludeProjection, isCodexWsPreludeProjection } from "../../src/server/responses/codex-ws-wire";
 import { decodeCompactionSummary } from "../../src/responses/compaction";
 
 const A = "luna-order-a";
@@ -69,6 +71,11 @@ function sse(model: string, frames: "ok" | "created-then-fail" | "created-then-q
 const reserveRefused = () => Response.json({ error: { code: "usage_limit_reached", message: "Limit reached" } }, { status: 429, headers: { "retry-after": "3600" } });
 const refusedConnect = () => { throw Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) }); };
 
+function issuedReasoning(model: string, item: Record<string, unknown>): Response {
+  const response = { id: "resp_proof", object: "response", status: "completed", model, output: [item] };
+  return new Response(`data: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item })}\n\n`
+    + `data: ${JSON.stringify({ type: "response.completed", response })}\n\n`, { headers: { "content-type": "text/event-stream" } });
+}
 function config(extraProviders: OcxConfig["providers"] = {}, targets?: NonNullable<OcxConfig["combos"]>[string]["targets"]): OcxConfig {
   return {
     port: 0, defaultProvider: "openai", codexMainAccountHardLock: false, accountPoolStrategy: "quota", autoSwitchThreshold: 0,
@@ -698,25 +705,79 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(calls).toEqual(["native:gpt-6-luna"]);
   });
 
+  test("disabled relay retains ownership of opaque history after native served earlier", async () => {
+    const cfg = config(), lane = { "thread-id": "disabled-relay-owner" }; seats(false);
+    relay = refusedConnect;
+    expect((await post(cfg, {}, lane)).text).toContain("response.completed");
+    expect(nativeAccounts).toEqual([`fixture-workspace-${A}`]);
+    clearComboTargetCooldowns("luna", ["relay/gpt-6-luna"]);
+    const item = { type: "reasoning", id: "rs_relay123", encrypted_content: "relay-issued", summary: [] };
+    relay = (_req, body) => issuedReasoning(body.model, item);
+    expect((await post(cfg, {}, lane)).text).toContain(item.encrypted_content);
+    expect(calls.at(-1)).toBe("relay:gpt-6-luna");
+    calls.length = 0; cfg.providers.relay!.disabled = true;
+    const result = await post(cfg, { input: [item, { role: "user", content: "continue" }] }, lane);
+    expect(result.status).toBe(409); expect(calls).toEqual([]);
+    seats();
+    expect((await post(cfg, { input: "new plain question" }, lane)).status).toBe(200);
+    expect(calls).toEqual(["native:gpt-reserve"]);
+  });
+
+  test.each([false, true])("relay serving readable history cannot claim native reasoning (missing readable replacement: %s)", async opaque => {
+    const cfg = config(), lane = { "thread-id": "per-item-issuer" }; seats();
+    const first = { type: "reasoning", id: "rs_a123", encrypted_content: "native-issued", summary: [{ type: "summary_text", text: "first plan" }] };
+    const second = { type: "reasoning", id: "rs_b123", encrypted_content: "relay-issued", summary: [{ type: "summary_text", text: "second plan" }] };
+    native = body => issuedReasoning(body.model, first);
+    expect((await post(cfg, {}, lane)).text).toContain(first.encrypted_content);
+    seats(false);
+    const wires: string[] = [];
+    relay = (_req, body) => { wires.push(JSON.stringify(body)); return issuedReasoning(body.model, second); };
+    const user = { role: "user", content: "continue" };
+    expect((await post(cfg, { input: [first, user], store: true }, lane)).text).toContain(second.encrypted_content);
+    if (opaque) {
+      calls.length = 0;
+      expect((await post(cfg, { input: [{ ...first, summary: [] }, user], store: true }, lane)).status).toBe(409);
+      expect(calls).toEqual([]); return;
+    }
+    expect((await post(cfg, { input: [first, user, second, user], store: true }, lane)).status).toBe(200);
+    expect(wires).toHaveLength(2);
+    for (const wire of wires) {
+      expect(wire).toContain("first plan"); expect(wire).not.toContain(first.id); expect(wire).not.toContain(first.encrypted_content);
+    }
+    expect(wires[1]).toContain(second.encrypted_content); expect(wires[1]).toContain(second.id);
+    calls.length = 0; seats(); let nativeReplay = "";
+    native = body => { nativeReplay = JSON.stringify(body); return sse(body.model, "ok"); };
+    if (opaque) {
+      calls.length = 0;
+      expect((await post(cfg, { input: [{ ...first, summary: [] }, user], store: true }, lane)).status).toBe(409);
+      expect(calls).toEqual([]); return;
+    }
+    expect((await post(cfg, { input: [first, user, second, user], store: true }, lane)).status).toBe(200);
+    expect(calls).toEqual(["native:gpt-reserve"]); expect(nativeReplay).toContain(first.encrypted_content);
+    expect(nativeReplay).not.toContain(second.encrypted_content); expect(nativeReplay).toContain("second plan");
+  });
+
   test("a pending tool turn retains its only reasoning ciphertext on the issuing seat", async () => {
     const cfg = config(), lane = { "thread-id": "pending-native-reasoning" }; seats();
-    expect((await post(cfg, {}, lane)).status).toBe(200); calls.length = 0;
+    const item = { type: "reasoning", id: "rs_private", encrypted_content: "owner-only-fixture", summary: [] };
+    native = body => issuedReasoning(body.model, item);
+    expect((await post(cfg, {}, lane)).text).toContain(item.encrypted_content); calls.length = 0;
     let wire = "";
     native = body => { wire = JSON.stringify(body); return sse(body.model, "ok"); };
-    const input = [{ type: "reasoning", id: "rs_private", encrypted_content: "owner-only-fixture", summary: [] },
-      { type: "function_call", name: "lookup", arguments: "{}", call_id: "call_fixture" }];
+    const input = [item, { type: "function_call", name: "lookup", arguments: "{}", call_id: "call_fixture" }];
     expect((await post(cfg, { input }, lane)).status).toBe(200);
-    expect(calls).toEqual(["native:gpt-reserve"]); expect(wire).toContain("owner-only-fixture");
+    expect(calls).toEqual(["native:gpt-reserve"]); expect(wire).toContain(item.encrypted_content);
   });
 
   test("a summarized blob stays intact on the same Reserve seat", async () => {
     const cfg = config(), lane = { "thread-id": "same-reserve-history" }; seats();
-    expect((await post(cfg, {}, lane)).status).toBe(200);
+    const item = { type: "reasoning", id: "rs_same123", summary: [{ type: "summary_text", text: "readable" }], encrypted_content: "same-owner-cipher" };
+    native = body => issuedReasoning(body.model, item);
+    expect((await post(cfg, {}, lane)).text).toContain(item.encrypted_content);
     let wire = ""; native = body => { wire = JSON.stringify(body); return sse(body.model, "ok"); };
-    const input = [{ type: "reasoning", id: "rs_same123", summary: [{ type: "summary_text", text: "readable" }], encrypted_content: "same-owner-cipher" },
-      { role: "user", content: "continue" }];
+    const input = [item, { role: "user", content: "continue" }];
     expect((await post(cfg, { input }, lane)).status).toBe(200);
-    expect(new Set(nativeAccounts).size).toBe(1); expect(wire).toContain("same-owner-cipher");
+    expect(new Set(nativeAccounts).size).toBe(1); expect(wire).toContain(item.encrypted_content);
   });
 
   test("a closed reasoning id is not forwarded to an unknown item store", async () => {
@@ -740,9 +801,85 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
           if (transient) { vetoed = true; return undefined; }
           expect(permit.use()).toBe(true); return last;
         });
-      expect(vetoed).toBe(true); expect(result).toBe(last); expect(result?.headers.get("x-fixture")).toBe("from B");
+      expect(vetoed).toBe(true); expect(result?.status).toBe(last.status); expect(result?.headers.get("x-fixture")).toBe("from B");
       expect(await result?.text()).toBe("readable alternate refusal"); expect(budget.used).toBe(1);
     } finally { booking.permit.release(); }
+  });
+
+  function alternateRetry(first: Response, retry: (admit: () => void) => Promise<Response>,
+    signal = new AbortController().signal, caller = signal) {
+    const budget = createRequestExecutionBudget();
+    const booking = budget.reserveDispatch({ sendClass: "account-failover", targetKey: "alternate" });
+    if (!booking.allowed) throw new Error("first move not admitted");
+    return sendReserveSeat({ remaining: new Set([B]), movesSent: 0, transientRetries: 0 }, budget, booking.permit, signal,
+      async (permit, transient, onAdmitted) => {
+        const admit = () => { expect(permit.use()).toBe(true); onAdmitted?.(); };
+        if (transient) return retry(admit);
+        admit(); return first;
+      }, caller).finally(() => booking.permit.release());
+  }
+
+  test("Reserve retry returns the alternate refusal when pacing denies a replacement", async () => {
+    const original = new Response(new Uint8Array([0, 255, 7]), { status: 503, statusText: "busy", headers: { "x-seat": "B" } });
+    markCodexWsPreludeProjection(original);
+    const result = await alternateRetry(original, async () => { throw new RequestPacingQueueOverloadError("native", "queue_full", 5); });
+    expect(result?.status).toBe(503); expect(result?.statusText).toBe("busy"); expect(result?.headers.get("x-seat")).toBe("B");
+    expect(isCodexWsPreludeProjection(result!)).toBe(true); expect(await result!.bytes()).toEqual(new Uint8Array([0, 255, 7]));
+  });
+
+  test.each(["placement", "caller"])("Reserve retry distinguishes %s cancellation during backoff", async source => {
+    const placement = new AbortController(), caller = new AbortController();
+    const reason = new DOMException(source, source === "caller" ? "AbortError" : "TimeoutError");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const upstream = new Response(new ReadableStream<Uint8Array>({ pull(c) {
+      c.enqueue(new TextEncoder().encode("B refused")); c.close();
+      timer = setTimeout(() => (source === "caller" ? caller : placement).abort(reason), 25);
+    } }, { highWaterMark: 0 }), { status: 503, headers: { "retry-after": "30" } });
+    try {
+      const result = alternateRetry(upstream, async () => { throw new Error("unexpected replacement"); },
+        AbortSignal.any([caller.signal, placement.signal]), caller.signal);
+      if (source === "caller") expect(await result.catch(error => error)).toBe(reason);
+      else { const refusal = await result; expect(refusal?.status).toBe(503); expect(await refusal?.text()).toBe("B refused"); }
+    } finally { clearTimeout(timer); }
+  });
+
+  test.each([false, true])("Reserve retry settles on the physical replacement (throws: %s)", async fails => {
+    const problem = new RequestPacingQueueOverloadError("native", "queue_expired", 1);
+    const result = alternateRetry(new Response("obsolete", { status: 503 }), async admit => {
+      admit(); if (fails) throw problem;
+      return new Response("replacement answered", { status: 400 });
+    });
+    if (fails) expect(await result.catch(error => error.cause)).toBe(problem);
+    else { const answer = await result; expect(answer?.status).toBe(400); expect(await answer?.text()).toBe("replacement answered"); }
+  });
+
+  test("Reserve retry hands back an oversized chunk without a tee or missing bytes", async () => {
+    const large = new Uint8Array(65537).fill(231);
+    const first = new Response(new ReadableStream({ start(c) {
+      c.enqueue(Uint8Array.of(8)); c.enqueue(large); c.enqueue(Uint8Array.of(9)); c.close();
+    } }), { status: 503 });
+    const clone = spyOn(first, "clone");
+    const result = await alternateRetry(first, async () => { throw new Error("oversized refusal was retried"); });
+    expect(result?.status).toBe(503); expect(await result!.bytes()).toEqual(new Uint8Array([8, ...large, 9]));
+    expect(clone).not.toHaveBeenCalled();
+  });
+
+  test("Reserve retry publishes slow refusal before EOF and preserves its pending read", async () => {
+    let finish!: () => void;
+    const first = new Response(new ReadableStream({ start(c) {
+      c.enqueue(Uint8Array.of(0xff)); finish = () => { c.enqueue(Uint8Array.of(0x80)); c.close(); };
+    } }), { status: 503 });
+    const result = alternateRetry(first, async () => new Response("unexpected replacement")).then(async refusal => {
+      expect(refusal).toBeDefined();
+      expect(await shouldRetryCodexPoolAccountQuota(refusal!)).toBe(false);
+      return refusal;
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let published: boolean;
+    try { published = await Promise.race([result.then(() => true), new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), 1000); })]); }
+    finally { clearTimeout(timer); finish(); }
+    const response = await result;
+    expect(published).toBe(true); expect(response?.status).toBe(503); expect(await response!.bytes()).toEqual(Uint8Array.of(0xff, 0x80));
   });
 
   test("a denied physical claim refunds the pool window for another turn", async () => {

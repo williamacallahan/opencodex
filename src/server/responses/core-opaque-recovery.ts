@@ -1,3 +1,4 @@
+import { inspectedReserveRefusal } from "./reserve-refusal-body";
 import { copyPreviousResponseReplayProvenance } from "../../responses/state/body-policy";
 import { ENCRYPTED_FUNCTION_OUTPUT_REJECTION, upstreamErrorMessageFromPayload } from "../../lib/errors";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
@@ -461,7 +462,7 @@ export async function opaqueBlobRejectionBodyForRecovery(
     || !outboundResponsesBodyCarriesOpaqueBlob(outboundBody)
   ) return undefined;
   try {
-    const body = await readBoundedResponseBody(response.clone(), { signal });
+    const body = inspectedReserveRefusal(response) ?? await readBoundedResponseBody(response.clone(), { signal });
     return body.displaySafe && !body.truncated ? body.text : undefined;
   } catch {
     return undefined;

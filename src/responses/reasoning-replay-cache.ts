@@ -214,14 +214,51 @@ export function reasoningReplayServingIdentityChanged(
   return reasoningReplayServingIdentityChange(scope) !== undefined;
 }
 
-/** Positive evidence, unlike absence of a known mismatch after eviction or restart. */
-export function matchesReasoningServingIdentity(scope: OcxReasoningReplayScopeRef | undefined): boolean {
+// Entries contain only fixed-size digests, never an item id or ciphertext. A thread match
+// alone is insufficient: a single client history may contain output from several issuers.
+const issuedReasoning = new Map<string, number>();
+const MAX_ITEM_PROOFS = 4096;
+function itemProofScope(scope: OcxReasoningReplayScopeRef | undefined): string | undefined {
   const current = servingIdentityFor(scope);
-  if (!current) return false;
-  const prior = servingIdentities.get(current.key);
-  if (!prior) return false;
-  const age = now() - prior.at;
-  return age >= 0 && age < TTL_MS && prior.identity === current.identity;
+  return current && createHash("sha256").update(JSON.stringify([current.key, current.identity])).digest("hex");
+}
+function opaqueDigest(value: string): string {
+  return value ? createHash("sha256").update(value).digest("hex") : "";
+}
+function proofKey(owner: string, id: string, blob: string): string {
+  return createHash("sha256").update(`${owner}:${id}:${blob}`).digest("hex");
+}
+function rememberProof(key: string, at: number): void {
+  issuedReasoning.delete(key);
+  issuedReasoning.set(key, at);
+  if (issuedReasoning.size > MAX_ITEM_PROOFS) issuedReasoning.delete(issuedReasoning.keys().next().value!);
+}
+export function rememberIssuedReasoning(scope: OcxReasoningReplayScopeRef | undefined, output: unknown): void {
+  if (!Array.isArray(output) || scope?.current?.adapterName !== "openai-responses") return;
+  let owner: string | undefined;
+  const at = now();
+  for (const item of output) {
+    if (item?.type !== "reasoning") continue;
+    const id = typeof item.id === "string" ? opaqueDigest(item.id) : "";
+    const blob = typeof item.encrypted_content === "string" ? opaqueDigest(item.encrypted_content) : "";
+    if (!id && !blob) continue;
+    owner ??= itemProofScope(scope);
+    if (!owner) return;
+    // Clients may omit either field. Never authorize a new pairing of two issued fields.
+    rememberProof(proofKey(owner, id, blob), at);
+    if (id && blob) {
+      rememberProof(proofKey(owner, id, ""), at);
+      rememberProof(proofKey(owner, "", blob), at);
+    }
+  }
+}
+export function issuedReasoningMatcher(scope: OcxReasoningReplayScopeRef | undefined) {
+  const owner = itemProofScope(scope);
+  const at = now();
+  return (id: string, ciphertext: string): boolean => {
+    const recorded = owner ? issuedReasoning.get(proofKey(owner, opaqueDigest(id), opaqueDigest(ciphertext))) : undefined;
+    return recorded !== undefined && at >= recorded && at - recorded < TTL_MS;
+  };
 }
 
 /** Known durable route differences; an unknown issuer never establishes compatibility. */
@@ -620,6 +657,7 @@ export function peekReasoningForCall(
 export function clearReasoningReplayCacheForTests(clock?: (() => number) | null): void {
   entries.clear();
   servingIdentities.clear();
+  issuedReasoning.clear();
   opaqueBlobRejections.clear();
   totalBytes = 0;
   servingIdentityTotalBytes = 0;

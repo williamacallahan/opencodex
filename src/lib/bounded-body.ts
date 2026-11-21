@@ -274,7 +274,7 @@ function decodeUtf8(chunks: readonly Uint8Array[], fatal: boolean, timedOut = fa
 	}
 }
 
-function decodeUtf8WithValidity(bytes: Uint8Array): { text: string; utf8Valid: boolean } {
+export function decodeUtf8WithValidity(bytes: Uint8Array): { text: string; utf8Valid: boolean } {
 	try {
 		return { text: decodeUtf8([bytes], true), utf8Valid: true };
 	} catch {

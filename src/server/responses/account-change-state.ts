@@ -107,7 +107,7 @@ function isPortableEnvelope(record: Record<string, unknown>): boolean {
   return false;
 }
 
-function hasEncryptedReasoning(input: unknown): boolean {
+function hasEncryptedReasoning(input: unknown, assignment?: unknown): boolean {
   if (!Array.isArray(input)) return false;
   for (const item of input) {
     if (!item || typeof item !== "object") continue;
@@ -120,6 +120,7 @@ function hasEncryptedReasoning(input: unknown): boolean {
       if (!Array.isArray(parts)) continue;
       for (const part of parts) {
         if (!part || typeof part !== "object") continue;
+        if (item === assignment && key === "content" && (part as { type?: unknown }).type === "encrypted_content") continue;
         const encrypted = (part as { encrypted_content?: unknown }).encrypted_content;
         if (typeof encrypted === "string" && encrypted.length > 0) return true;
       }
@@ -128,7 +129,7 @@ function hasEncryptedReasoning(input: unknown): boolean {
   return false;
 }
 
-export function collectConversationStateCarriers(body: unknown): ConversationStateCarriers {
+export function collectConversationStateCarriers(body: unknown, assignment?: unknown): ConversationStateCarriers {
   if (!body || typeof body !== "object" || Array.isArray(body)) return {};
   const record = body as Record<string, unknown>;
   const previousResponseId = typeof record.previous_response_id === "string"
@@ -138,7 +139,7 @@ export function collectConversationStateCarriers(body: unknown): ConversationSta
     previousResponseId,
     providerConversationId: providerConversationIdFromBody(record),
     fileIds: collectFileIds(record.input),
-    encryptedReasoning: hasEncryptedReasoning(record.input) ? true : undefined,
+    encryptedReasoning: hasEncryptedReasoning(record.input, assignment) ? true : undefined,
   };
 }
 
@@ -227,7 +228,7 @@ export interface ApplyAccountChangeConversationStateScrubArgs {
   /** Account this request body was prepared for, when this is an in-request move. */
   priorAccountId?: string | null;
   sameUploadedFileAccount?: (firstAccountId: string, secondAccountId: string) => boolean;
-  parsed?: Pick<OcxParsedRequest, "previousResponseId" | "_stripReasoningEncryptedContent" | "_stripNativeCompactionEncryptedContent" | "_dropForeignReasoningItemIds">;
+  parsed?: Pick<OcxParsedRequest, "previousResponseId" | "_lunaProjectForeignReasoning" | "_stripReasoningEncryptedContent" | "_stripNativeCompactionEncryptedContent" | "_dropForeignReasoningItemIds">;
   /** Trusted canonical-native caller policy; does not make continuation or file ids portable. */
   preserveReasoningEncryptedContent?: boolean;
   logCtx?: RequestLogContext;
@@ -251,7 +252,7 @@ export function applyAccountChangeConversationStateScrub(
   if (!accountChanged) return false;
   // The issuer record can outlive the serving-route cache. Even a retained ciphertext cannot
   // make its reasoning item id resolvable in the new account's store.
-  if (parsed) parsed._dropForeignReasoningItemIds = true;
+  if (parsed && !parsed._lunaProjectForeignReasoning) parsed._dropForeignReasoningItemIds = true;
   let headerScrubbed = false;
   const turnState = args.headers?.get("x-codex-turn-state");
   if (turnState != null && !args.verifiedTurnStateHandles?.has(turnState)) {
@@ -263,7 +264,7 @@ export function applyAccountChangeConversationStateScrub(
   if (parsed) {
     delete parsed.previousResponseId;
     parsed._stripNativeCompactionEncryptedContent = true;
-    if (args.preserveReasoningEncryptedContent !== true) parsed._stripReasoningEncryptedContent = true;
+    if (!parsed._lunaProjectForeignReasoning && args.preserveReasoningEncryptedContent !== true) parsed._stripReasoningEncryptedContent = true;
   }
   if (logCtx && logCtx.conversationStateScrub !== "account-change") {
     console.warn(

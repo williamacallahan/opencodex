@@ -592,7 +592,7 @@ export async function prepareResponsesRequest(
       markBodyNonPersistable(parsed._rawBody);
     }
     toolBridgeMaps = buildToolBridgeMaps(parsed, translatorBudget);
-    if (options.comboReplaySnapshot?.projectForeignReasoning) parsed._lunaProjectForeignReasoning = true;
+    if (options.comboReplaySnapshot?.projectForeignReasoning) parsed._lunaProjectForeignReasoning = options.comboReplaySnapshot.projectForeignReasoning;
     if (previousResponseInputExpanded) parsed._previousResponseInputExpanded = true;
     const providerContinuationCandidate = options.comboReplaySnapshot
       ? options.comboReplaySnapshot.providerContinuation
