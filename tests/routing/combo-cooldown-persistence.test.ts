@@ -7,6 +7,7 @@ import { setTimeout as wait } from "node:timers/promises";
 import { PersistedCooldownMap, type PersistableCooldown } from "../../src/combos/cooldown-store";
 import { clearComboTargetCooldowns, isComboTargetInCooldown } from "../../src/combos/failover";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { repoRoot } from "../helpers/repo-root";
 
 let home: string;
 let previous: string | undefined;
@@ -37,6 +38,32 @@ test("a provider-wide 429 keeps its expiry and scope when a fresh map reloads it
 
   const restarted = peer();
   expect(restarted.get(key)).toMatchObject({ cooldownUntil, status: 429, scope: "provider" });
+});
+
+test("startup caps a legacy relay deadline once on disk without shortening native cooldowns", () => {
+  const now = Date.now();
+  const long = now + 86_400_000;
+  const key = "previous\0pool-proxy/gpt-6-luna";
+  const native = "previous\0direct/gpt-6-luna";
+  writeFileSync(file(), JSON.stringify({ [key]: { cooldownUntil: long, status: 502 }, [native]: { cooldownUntil: long, status: 429 } }));
+  const restarted = Bun.spawnSync([process.execPath, "-e", `
+    import { setLiveStateStoreConfig } from './src/lib/state-store-registrations';
+    import { comboTargetCooldownExpiry } from './src/combos/failover';
+    import { runOptionalShutdownHooks } from './src/lib/optional-shutdown-hooks';
+    const target = { provider: 'pool-proxy', model: 'gpt-6-luna' };
+    setLiveStateStoreConfig({ port: 0, defaultProvider: 'direct', providers: {
+      'pool-proxy': { adapter: 'openai-responses', baseUrl: 'https://pool.example.test/backend-api/codex' },
+      direct: { adapter: 'openai-responses', baseUrl: 'https://api.openai.com/v1' },
+    }, combos: { previous: { targets: [target, { ...target, provider: 'direct' }] } } });
+    console.log(comboTargetCooldownExpiry('previous', target));
+    runOptionalShutdownHooks();
+  `], { cwd: repoRoot(), env: { ...process.env, HOME: home, CODEX_HOME: home, OPENCODEX_HOME: home }, timeout: 5000 });
+  expect(restarted.exitCode, restarted.stderr.toString()).toBe(0);
+  const until = Number(restarted.stdout.toString().trim());
+  expect(until).toBeGreaterThanOrEqual(now + 300_000);
+  expect(until).toBeLessThanOrEqual(Date.now() + 300_000);
+  expect(peer().get(key)?.cooldownUntil).toBe(until);
+  expect(stored()[native]?.cooldownUntil).toBe(long);
 });
 
 test("expired rows and a corrupt file are ignored", () => {

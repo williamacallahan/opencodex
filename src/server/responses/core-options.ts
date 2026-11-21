@@ -58,6 +58,8 @@ export interface ConsumedComboFailure {
   upstreamType?: string;
   /** Valid numeric/date value used only for cooldown calculation. */
   retryAfter?: string;
+  /** Quota refusal: null without a valid wire directive, never a delay inferred from seat prose. */
+  quotaRetryAfterHeader?: string | null;
   /** Upstream Codex quota-window reset timestamps used for combo cooldowns. */
   resetAt?: string[];
   /** Reserved for 040 usage attribution without adding another body read. */

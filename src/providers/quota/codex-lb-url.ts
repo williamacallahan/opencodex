@@ -3,6 +3,11 @@ import type { OcxProviderConfig } from "../../types";
 const CODEX_BACKEND_PATH = "/backend-api/codex";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 
+/** Cooldown policy follows the resolved destination, not the combo target's or provider's name. */
+export function hasUpstreamSeatPool(route: { provider: OcxProviderConfig; modelId: string }): boolean {
+  return route.provider.modelCapabilities?.[route.modelId]?.upstreamSeatPool === true || isCodexLbProvider(route.provider);
+}
+
 /** True for a key-auth Responses provider that {@link codexLbUsageUrl} recognizes as a codex-lb relay. */
 export function isCodexLbProvider(provider: OcxProviderConfig): boolean {
   return codexLbUsageUrl(provider) !== null;

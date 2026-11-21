@@ -171,6 +171,74 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     return cfg;
   }
 
+  test.each([
+    ["seat reset and body advice", undefined, 60_000],
+    ["short Retry-After", "1", 1_000],
+    ["weekly Retry-After", "604800", 300_000],
+  ] as const)("relay quota: %s holds only Luna until its relay deadline", async (_, retryAfter, delay) => {
+    const luna = { provider: "relay", model: "gpt-6-luna" };
+    const sol = { provider: "relay", model: "gpt-6.2-sol" };
+    const cfg = config({}, [luna, sol]);
+    if (retryAfter === "1") {
+      // This relay uses a different URL shape and pools only its Luna model.
+      cfg.providers.relay!.baseUrl = "https://relay.example.test/v1";
+      cfg.providers.relay!.modelCapabilities = { [luna.model]: { upstreamSeatPool: true } };
+      relayUrl = "https://relay.example.test/v1/responses";
+    }
+    cfg.providers.relay!.upstreamWebsocket = false;
+    cfg.combos!.luna!.waitForCooldownMs = 0;
+    relay = (_, body) => body.model === sol.model ? sse(sol.model, "ok") : Response.json({ error: {
+      code: retryAfter === undefined ? "usage_limit_reached" : "insufficient_quota", message: "Weekly quota exhausted. Try again in 144 hours.",
+    } }, { status: 502, headers: { "x-should-retry": "false", "x-codex-secondary-reset-at": String((now + 604_800_000) / 1000),
+      ...(retryAfter ? { "retry-after": retryAfter } : {}) } });
+    await post(cfg);
+    expect(isComboTargetInCooldown("luna", luna, now + delay - 1)).toBe(true);
+    expect(isComboTargetInCooldown("luna", sol)).toBe(false);
+    now += delay;
+    calls.length = 0;
+    relay = (_, body) => sse(body.model, "ok");
+    expect((await post(cfg)).text).toContain("response.completed");
+    expect(calls).toEqual(["relay:gpt-6-luna"]);
+  });
+
+  test.each([true, false])("a zero-output billing prelude does not turn seat reset prose into a relay header (stream: %s)", async stream => {
+    const luna = { provider: "relay", model: "gpt-6-luna" };
+    const cfg = config({}, [luna]);
+    cfg.combos!.luna!.waitForCooldownMs = 0;
+    cfg.providers.relay!.upstreamWebsocket = false;
+    relay = () => new Response(`data: ${JSON.stringify({ type: "error", status: 502, error: {
+      code: "usage_limit_exceeded", message: "The usage limit has been reached. Try again in 144 hours.",
+    } })}\n\n`, { headers: { "content-type": "text/event-stream" } });
+    await post(cfg, { stream });
+    expect(isComboTargetInCooldown("luna", luna, now + 59_999)).toBe(true);
+    now += 60_000;
+    relay = () => sse(luna.model, "ok");
+    expect((await post(cfg)).text).toContain("response.completed");
+  });
+
+  test("a non-relay Responses target keeps its full quota Retry-After for the same Luna model", async () => {
+    const luna = { provider: "direct", model: "gpt-6-luna" };
+    const cfg = config({ direct: { adapter: "openai-responses", baseUrl: "https://metered.example.test/v1", apiKey: "direct-key" } }, [luna]);
+    cfg.combos!.luna!.waitForCooldownMs = 0;
+    metered = () => Response.json({ error: { code: "insufficient_quota", message: "Weekly quota exhausted" } },
+      { status: 502, headers: { "retry-after": "86400", "x-should-retry": "false" } });
+    expect((await post(cfg)).status).toBe(502);
+    expect(isComboTargetInCooldown("luna", luna, now + 86_399_999)).toBe(true);
+    expect(isComboTargetInCooldown("luna", luna, now + 86_400_000)).toBe(false);
+  });
+
+  test("relay transport failure uses the configured short schedule, not quota advice", async () => {
+    const luna = { provider: "relay", model: "gpt-6-luna" };
+    const cfg = config({}, [luna]);
+    cfg.providers.relay!.upstreamWebsocket = false;
+    Object.assign(cfg.combos!.luna!, { cooldownMs: 7_000, waitForCooldownMs: 0 });
+    relay = () => Response.json({ error: { code: "server_error", message: "Gateway unavailable" } },
+      { status: 502, headers: { "retry-after": "86400" } });
+    expect((await post(cfg)).status).toBe(502);
+    expect(isComboTargetInCooldown("luna", luna, now + 6_999)).toBe(true);
+    expect(isComboTargetInCooldown("luna", luna, now + 7_000)).toBe(false);
+  });
+
   test("a third Reserve seat serves after two seats refuse", async () => {
     const cfg = threeSpentSeats();
     native = body => nativeAccounts.length < 3 ? reserveRefused() : sse(body.model, "ok");

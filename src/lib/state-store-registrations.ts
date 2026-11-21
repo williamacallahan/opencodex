@@ -19,6 +19,7 @@ import {
 } from "../codex/routing";
 import { sweepExpiredSubagentModelHealth } from "../codex/subagent-model-fallback";
 import {
+  bindComboCooldownRelays,
   reconcileComboTargetCooldowns,
   sweepExpiredComboTargetCooldowns,
 } from "../combos/failover";
@@ -47,7 +48,8 @@ import { reconcileProviderRequestPacing } from "../providers/request-pacing";
 import { sweepAbandonedResponseStateTemps, sweepExpiredResponseStates, sweepOrphanedResponseSpills } from "../responses/state";
 import { sweepExpiredAntigravityReplay } from "../adapters/google-antigravity-replay";
 import { reconcileProviderAccountQuotaRows } from "../providers/quota";
-import { reconcileRouterWarningMemos } from "../router";
+import { reconcileRouterWarningMemos, routeConcreteModel } from "../router";
+import { hasUpstreamSeatPool } from "../providers/quota/codex-lb-url";
 import { configureSharedSpendLedger, spendPolicyFromConfig } from "./spend-reservation-ledger";
 import type { OcxConfig } from "../types";
 import {
@@ -81,6 +83,10 @@ export function notifyLiveConfigObservers(config: OcxConfig): void {
 
 export function setLiveStateStoreConfig(config: OcxConfig): void {
   liveServerConfig = config;
+  bindComboCooldownRelays(selector => {
+    try { return hasUpstreamSeatPool(routeConcreteModel(config, selector)); }
+    catch { return false; } // A removed or unresolvable target supplies no relay identity.
+  });
   // The one place the server's live config object is installed; detached configs (catalog sync)
   // never come through here, so the outbound compression opt-in follows the running server only.
   bindUpstreamRequestCompressionConfig(config);

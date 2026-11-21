@@ -11,7 +11,7 @@
  * Several proxies can share one home, so a write never replaces the file wholesale:
  * - `set()` marks its key dirty. A flush re-reads the file under the config mutation lock and
  *   overlays only dirty keys, keeping the later of the two expiries, so it never shortens a
- *   cooldown another process wrote and never rewrites a row it did not touch.
+ *   cooldown another process wrote, except when migrating an oversized pooling-relay deadline.
  * - `dropLocal()` (and the Map `delete()`/`clear()` it backs) forgets a row in memory only. Expiry
  *   checks, sweeps and the revision-guarded probe lift use it, so an expired local copy can never
  *   erase a row another process has since extended.
@@ -39,6 +39,7 @@ export interface PersistableCooldown {
 }
 type StoredRow = Omit<PersistableCooldown, "revision">;
 
+export const MAX_RELAY_COOLDOWN_MS = 5 * 60_000;
 const FILE = "combo-cooldowns.json";
 const FLUSH_DELAY_MS = 250;
 const MAX_FLUSH_DELAY_MS = 4_000;
@@ -112,10 +113,32 @@ export class PersistedCooldownMap<V extends PersistableCooldown> extends Map<str
       if (row.cooldownUntil <= now || super.has(key)) continue;
       super.set(key, { ...row, revision: this.nextRevision() } as V);
     }
+    this.clampRelayRows(now);
+  }
+
+  private isRelay?: (selector: string) => boolean;
+  private readonly clamped = new Map<string, { previous: number; until: number }>();
+
+  /** Legacy rows have no write timestamp or retry provenance. Bound remaining time at adoption. */
+  bindRelayTargets(isRelay: (selector: string) => boolean): void {
+    this.isRelay = isRelay;
+    if (this.loadedFor !== getConfigDir()) this.ensureLoaded();
+    else this.clampRelayRows(Date.now());
+  }
+
+  private clampRelayRows(now: number): void {
+    if (!this.isRelay) return;
+    const until = now + MAX_RELAY_COOLDOWN_MS;
+    for (const [key, row] of super.entries()) {
+      if (row.cooldownUntil <= until || !this.isRelay(key.slice(key.indexOf("\0") + 1))) continue;
+      super.set(key, { ...row, cooldownUntil: until, revision: this.nextRevision() });
+      this.clamped.set(key, { previous: row.cooldownUntil, until });
+    }
+    if (this.clamped.size) this.schedule();
   }
 
   private pending(): boolean {
-    return this.clearAll || this.dirty.size > 0 || this.tombstones.size > 0 || this.clearedPrefixes.size > 0;
+    return this.clearAll || this.dirty.size > 0 || this.clamped.size > 0 || this.tombstones.size > 0 || this.clearedPrefixes.size > 0;
   }
 
   private schedule(): void {
@@ -138,6 +161,10 @@ export class PersistedCooldownMap<V extends PersistableCooldown> extends Map<str
         const clearedPrefixes = [...this.clearedPrefixes];
         if (!this.clearAll) {
           for (const [key, row] of Object.entries(file)) {
+            const clamp = this.clamped.get(key);
+            // Preserve a peer's newer in-policy write or clear; never restore the old seat horizon.
+            if (clamp) row.cooldownUntil = row.cooldownUntil === clamp.previous ? clamp.until
+              : Math.min(row.cooldownUntil, now + MAX_RELAY_COOLDOWN_MS);
             if (row.cooldownUntil > now && !this.tombstones.has(key)
               && !clearedPrefixes.some(prefix => key.startsWith(prefix))) out[key] = row;
           }
@@ -159,6 +186,7 @@ export class PersistedCooldownMap<V extends PersistableCooldown> extends Map<str
       return false;
     }
     this.dirty.clear();
+    this.clamped.clear();
     this.tombstones.clear();
     this.clearedPrefixes.clear();
     this.clearAll = false;

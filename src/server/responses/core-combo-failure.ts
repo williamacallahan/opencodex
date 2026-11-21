@@ -31,7 +31,9 @@ import {
   namesModelNotInPlanCode,
 } from "../../lib/errors";
 import { normalizeUpstreamErrorText } from "./core-errors";
-import { resolveClientRetryAfter } from "../../lib/retry-after";
+import { resolveClientRetryAfter, validateClientRetryAfterHeader } from "../../lib/retry-after";
+import { isUpstreamQuotaToken } from "../../lib/upstream-condition";
+import { isAnthropicBillingFailure } from "../../providers/anthropic-billing-refusal";
 import { formatErrorResponse } from "../../bridge";
 import { upstreamCodeForComboFailure } from "../../bridge/errors";
 import { OLLAMA_LATE_ATTRIBUTION_LIMIT_MESSAGE } from "../../adapters/ollama-native";
@@ -156,8 +158,8 @@ export async function consumeComboFailure(
     && parseRetryAfterMs(upstreamRetryAfter, now, { preserveImmediate: true }) !== undefined
     ? "0"
     : upstreamRetryAfter;
-  // Client response may get the synthetic "2" fallback; cooldown metadata must not —
-  // otherwise coolComboTarget treats it as a 2s cooldown instead of the 60s default.
+  const quotaStatusOrMessage = response.status === 429 || response.status === 402 || quotaConfirmedByBody;
+  // The synthetic "2" fallback is client advice only, never target cooldown metadata.
   const clientRetryAfter = replayRefusal ? undefined : resolveClientRetryAfter({
     status: response.status,
     message,
@@ -210,12 +212,14 @@ export async function consumeComboFailure(
     ...(upstreamMessage !== undefined ? { upstreamMessage } : {}),
     ...(upstreamType !== undefined ? { upstreamType } : {}),
     ...(!cyberFailure && cooldownRetryAfter !== undefined ? { retryAfter: cooldownRetryAfter } : {}),
+    ...(!cyberFailure && !replayRefusal && (quotaStatusOrMessage || isUpstreamQuotaToken(upstreamCode)
+      || isUpstreamQuotaToken(upstreamType) || isAnthropicBillingFailure(response.status, classificationText, upstreamCode))
+      ? { quotaRetryAfterHeader: validateClientRetryAfterHeader(effectiveRetryAfter, now) ?? null } : {}),
     // The EFFECTIVE classification decides, not the raw status. An upstream that wraps a quota
     // refusal in a 5xx still carries `x-codex-*-reset-at`, and gating on 402/429 alone threw
     // those away, so the combo target came back up immediately instead of waiting for the
     // window it was told about. `cyberFailure` stays excluded: a policy block is not a quota.
-    ...(!cyberFailure && !replayRefusal
-      && (response.status === 429 || response.status === 402 || quotaConfirmedByBody)
+    ...(!cyberFailure && !replayRefusal && quotaStatusOrMessage
       ? { resetAt: codexQuotaOutcomeMeta(response).resetAt }
       : {}),
     ...(usage ? { usage } : {}),

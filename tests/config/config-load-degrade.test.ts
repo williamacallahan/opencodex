@@ -240,7 +240,7 @@ test("model capability writes stay strict while load preserves independent restr
 test("model capabilities round-trip all explicit axes without expanding inference", () => {
   const raw = { ...candidate(undefined), providers: { xai: {
     ...candidate(undefined).providers.xai,
-    modelCapabilities: { ModelA: { inputModalities: ["text", "image"], contextTier: "long_context", video: { processing: "agentic" }, supportsReasoning: true, supportsThinkingToggle: true, supportsReasoningEffort: false, defaultThinkingEnabled: false } },
+    modelCapabilities: { ModelA: { upstreamSeatPool: true, inputModalities: ["text", "image"], contextTier: "long_context", video: { processing: "agentic" }, supportsReasoning: true, supportsThinkingToggle: true, supportsReasoningEffort: false, defaultThinkingEnabled: false } },
   } } };
   const validated = validateConfigCandidate(raw);
   expect(validated.ok).toBe(true);

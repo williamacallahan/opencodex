@@ -4,8 +4,8 @@
  * The output is what request logs and client-facing error text may name. It never carries input
  * bytes: callers pass bounded structured tokens (status, type, code, reason) and optionally the
  * upstream message, which is read here only through fixed lowercase keyword sets and never stored
- * or returned. Routing, retry and recovery keep using their own classifiers (src/lib/errors.ts);
- * this module must not feed them.
+ * or returned. Routing can recognize the same structured quota tokens; the presentation verdict
+ * and its keyword/status fallbacks never decide retry or routing.
  */
 
 import { isDefiniteContextOverflow } from "./context-overflow-verdict";
@@ -45,13 +45,22 @@ const MAX_TOKEN_LENGTH = 128;
 // Keyword matching reads at most this much of the message.
 const MAX_MESSAGE_SCAN = 4096;
 
+const BILLING_CODES = new Set(["insufficient_quota", "billing_hard_limit_reached", "usage_limit_reached", "usage_limit_exceeded", "1308", "monthly_request_count", "overage_request_limit_exceeded", "payment_required", "insufficient_balance", "credit_balance_too_low"]);
+const RATE_CODES = new Set(["rate_limit_exceeded", "rate_limit_error", "too_many_requests", "throttling", "throttled", "rate_limited"]);
+
+/** Structured evidence only; a client-facing description is never a routing verdict. */
+export function isUpstreamQuotaToken(raw: string | undefined): boolean {
+  const code = token(raw);
+  return code !== undefined && (BILLING_CODES.has(code) || RATE_CODES.has(code) || code === "billing_exhausted" || code === "billing_error");
+}
+
 const STRUCTURED: ReadonlyArray<readonly [UpstreamCondition, ReadonlySet<string>]> = [
   ["context_overflow", new Set(["context_length_exceeded", "string_above_max_length", "context_window_exceeded", "prompt_too_long"])],
   ["location_unsupported", new Set(["location_not_supported", "unsupported_country_region_territory", "unsupported_country", "user_location_is_not_supported"])],
   ["account_verification_required", new Set(["validation_required", "verification_required", "organization_verification_required"])],
-  ["billing_exhausted", new Set(["insufficient_quota", "billing_hard_limit_reached", "usage_limit_reached", "usage_limit_exceeded", "1308", "monthly_request_count", "overage_request_limit_exceeded", "payment_required", "insufficient_balance", "credit_balance_too_low"])],
+  ["billing_exhausted", BILLING_CODES],
   ["model_unavailable", new Set(["model_not_found", "unsupported_model", "model_not_available", "model_not_supported", "deployment_not_found"])],
-  ["rate_limited", new Set(["rate_limit_exceeded", "rate_limit_error", "too_many_requests", "throttling", "throttled", "rate_limited"])],
+  ["rate_limited", RATE_CODES],
   ["upstream_unavailable", new Set(["server_is_overloaded", "overloaded_error", "service_unavailable", "unavailable"])],
 ];
 

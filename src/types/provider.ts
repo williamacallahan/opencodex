@@ -288,6 +288,8 @@ export interface ReasoningCapabilities {
 
 /** Explicit per-model operator declarations; absent axes keep legacy behavior. */
 export interface ModelCapabilities extends ReasoningCapabilities {
+  /** The upstream routes this model among its own seats; a seat reset is not a relay deadline. */
+  upstreamSeatPool?: boolean;
   inputModalities?: Array<"text" | "image" | "audio" | "video">;
   /** Requested tier only; does not imply an upstream window or activate an unverified wire. */
   contextTier?: "default" | "long_context";

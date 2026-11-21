@@ -7,7 +7,7 @@ import { hasConflictingReasoningEffortCode } from "../providers/reasoning-metada
 import { isKiroAccountProfileRefusal } from "../adapters/kiro-refusal";
 import type { OcxComboTarget } from "../types";
 import { targetKey } from "./types";
-import { PersistedCooldownMap, type PersistableCooldown } from "./cooldown-store";
+import { MAX_RELAY_COOLDOWN_MS, PersistedCooldownMap, type PersistableCooldown } from "./cooldown-store";
 import { registerOptionalShutdownHook } from "../lib/optional-shutdown-hooks";
 import { isDefiniteContextOverflow } from "../lib/context-overflow-verdict";
 
@@ -48,8 +48,11 @@ const HTTP_MONTH_INDEX: Record<string, number> = {
 /** Map<`${comboId}\0${provider/model}`, TargetCooldown> */
 // Never reset: an in-flight reservation may still refer to an entry cleared from the map.
 let nextCooldownRevision = 0;
-// Disk-backed (combo-cooldowns.json): a restart keeps every live, reset-aware cooldown.
+// Disk-backed; obsolete relay deadlines are bounded when the server adopts its config.
 const targetCooldowns = new PersistedCooldownMap(() => ++nextCooldownRevision);
+export function bindComboCooldownRelays(isRelay: (selector: string) => boolean): void {
+  targetCooldowns.bindRelayTargets(isRelay);
+}
 registerOptionalShutdownHook("combo-target-cooldowns", () => targetCooldowns.flushForShutdown());
 let lastReconciledGeneration = 0;
 let liveComboTargets = new Set<string>();
@@ -153,6 +156,13 @@ export function parseRetryAfterMs(
   const delay = timestamp - now;
   if (delay > 0) return Math.min(delay, maximum);
   return options?.preserveImmediate ? 1 : undefined;
+}
+
+/** An upstream seat's reset is not the relay's reset. Only its quota Retry-After speaks for the relay. */
+export function relayFailureCooldownMs(status: number, quotaRetryAfterHeader: string | null | undefined, configuredMs: number | undefined, now: number): number | undefined {
+  if (quotaRetryAfterHeader !== undefined) return Math.min(MAX_RELAY_COOLDOWN_MS,
+    parseRetryAfterMs(quotaRetryAfterHeader, now, { preserveImmediate: true }) ?? DEFAULT_COOLDOWN_MS);
+  return status >= 500 ? configuredMs ?? DEFAULT_COOLDOWN_MS : undefined;
 }
 
 export function isComboTargetInCooldown(

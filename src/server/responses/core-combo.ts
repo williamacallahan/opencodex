@@ -14,7 +14,8 @@ import { isCodexAccountCooldownResponse, isIssuerCapacityRefusal } from "../../c
 import { resolveWireProtocolOverride } from "../adapter-resolve";
 import { parseSyntheticRowId } from "../fast-row";
 import { resolveOpenAiVirtualModel } from "../../providers/openai-virtual-models";
-import { clearComboTargetCooldownIfUnchanged, comboCooldownRetryAfterSeconds, isDefiniteContextOverflow, type CodexAccountModelRefusal } from "../../combos/failover";
+import { hasUpstreamSeatPool } from "../../providers/quota/codex-lb-url";
+import { clearComboTargetCooldownIfUnchanged, comboCooldownRetryAfterSeconds, relayFailureCooldownMs, isDefiniteContextOverflow, type CodexAccountModelRefusal } from "../../combos/failover";
 import { fallbackHopAllowed, fallbackTriggerForStatus, guardFallbackHop } from "../../routing/fallback-policy";
 import {
   isCodexReasoningEffort,
@@ -1756,7 +1757,10 @@ export async function executeComboResponses(
     // A Reserve-window rejection is narrower than explicit provider-wide evidence.
     const reserveCapacityRefused = legIntent === "reserve-only" && (attempt.sendCount === 0
       || isReserveSeatQuotaRefusal(failure, classifiedScope));
-    const failureCooldownScope = reserveCapacityRefused || isPolicyCandidateRefusal(failure.response) ? "none" : classifiedScope;
+    const relayCooldown = hasUpstreamSeatPool(targetRoute)
+      ? relayFailureCooldownMs(failure.response.status, failure.quotaRetryAfterHeader, combo.cooldownMs, failureNow) : undefined;
+    const failureCooldownScope = reserveCapacityRefused || isPolicyCandidateRefusal(failure.response) ? "none"
+      : relayCooldown !== undefined && classifiedScope === "provider" ? "target" : classifiedScope;
     const failedTargetKey = targetKey(pick.target);
     let failedTargetCooldownRecorded = false;
     // The dispatch rewrote this to name the pool account that actually served the turn.
@@ -1783,9 +1787,9 @@ export async function executeComboResponses(
     const activeLunaLegs = lunaLegs;
     const nextPick = advanceComboAfterFailure(config, pick, {
       routeConcreteModel,
-      retryAfter: poolLocalRefusal || codexLocalRefusal ? undefined : failure.retryAfter,
-      resetAt: codexLocalRefusal ? undefined : failure.resetAt,
-      cooldownMs: combo.cooldownMs,
+      retryAfter: poolLocalRefusal || codexLocalRefusal || relayCooldown !== undefined ? undefined : failure.retryAfter,
+      resetAt: codexLocalRefusal || relayCooldown !== undefined ? undefined : failure.resetAt,
+      cooldownMs: relayCooldown ?? combo.cooldownMs,
       now: failureNow,
       cooldownScope: failureCooldownScope,
       // A pin may start in the middle. Ask its planned relay before resuming configured order.

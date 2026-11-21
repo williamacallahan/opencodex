@@ -2637,10 +2637,10 @@ describe("server combo failover 030 activation matrix", () => {
     expect(ownedState?.__ocxOwner?.providerName).toBe("b");
 
     config.providers.a = provider("test-owned", "https://provider-a.test/v1", "key-a");
-    config.combos!.free!.targets = [
-      { provider: "a", model: "m1" },
-      { provider: "b", model: "m2" },
-    ];
+    config.combos!.free!.targets = [{ provider: "a", model: "m1" }, { provider: "b", model: "m2" }];
+    // The parent must have replayable history before a child can publish late provider state.
+    rememberResponseState({ model: "combo/free", input: "prior turn" }, { id: "resp_combo_late_provider_state",
+      status: "completed", output: [{ type: "message", role: "assistant", content: "prior answer" }] });
     let backupObserved: string | undefined;
     customRunTurn = async (parsed, _incoming, emit) => {
       if (parsed.modelId === "m1") {
