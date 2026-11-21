@@ -83,7 +83,7 @@ export function createRequestSpendTracker(
   let ledgerRef: SpendReservationLedger | undefined = injected;
   const ledger = (): SpendReservationLedger => (ledgerRef ??= sharedSpendLedger());
   let admissionPolicy: SpendAdmissionPolicy | undefined;
-  let initialEnforced: boolean | undefined;
+  let latestPhysicalOrdinal = 0, lastLegacyRoutedOrdinal = -1;
   // Outstanding entries; exact dispatch reports move their reservation to the end.
   const live: string[] = [];
   const pendingDispatch = new Set<string>();
@@ -108,7 +108,6 @@ export function createRequestSpendTracker(
     ...(target.poolId ?? logCtx.spendPoolId ?? logCtx.provider ? { poolId: target.poolId ?? logCtx.spendPoolId ?? logCtx.provider } : {}),
   });
   const applicable = (scopes: SpendScopes): boolean => {
-    if (initialEnforced !== undefined) return initialEnforced;
     const policy = admissionPolicy ?? ledgerRef?.policy ?? sharedSpendPolicy();
     return (scopes.rootId !== undefined && policy.root.maxTokens !== undefined)
       || (scopes.identityId !== undefined && policy.identity.maxTokens !== undefined)
@@ -125,7 +124,10 @@ export function createRequestSpendTracker(
     retryPhysicalReports();
     // All starts are booked before producers close. Ordinal, never callback order, owns usage.
     const entries = [...physical.entries()].sort((a, b) => a[0] - b[0]);
-    const terminal = entries.findLast(([, entry]) => entry.sendId && !auxiliarySendIds.has(entry.sendId))?.[1].sendId;
+    const lastSeeded = entries.findLast(([, entry]) => entry.sendId && !auxiliarySendIds.has(entry.sendId));
+    const seededOwnsUsage = !!lastSeeded && lastSeeded[0] > lastLegacyRoutedOrdinal;
+    const terminal = seededOwnsUsage ? lastSeeded[1].sendId : undefined;
+    settleOrdinary(seededOwnsUsage ? undefined : finalUsage);
     const ids: string[] = [];
     for (const [, entry] of entries) {
       if (!entry.sendId) return false;
@@ -242,19 +244,33 @@ export function createRequestSpendTracker(
     recordWorkflowRefusalEvent(rootId, "workflow-sends-exhausted");
     return false;
   };
+  function settleOrdinary(usage: TerminalSpendUsage | undefined): void {
+    if (!terminalProcessed && live.length > 0) {
+      const terminalIndex = live.findLastIndex(sendId => !auxiliarySendIds.has(sendId));
+      const terminal = live[terminalIndex];
+      if (terminal && (typeof usage?.inputTokens === "number" || typeof usage?.outputTokens === "number")) {
+        ledger().settle(terminal, { inputTokens: usage?.inputTokens ?? 0, outputTokens: usage?.outputTokens ?? 0 });
+      } else if (terminal) ledger().markLost(terminal);
+      if (terminalIndex >= 0) live.splice(terminalIndex, 1);
+      terminalProcessed = true;
+    }
+    while (live.length > 0) {
+      ledger().markLost(live[live.length - 1]!);
+      live.pop();
+    }
+  }
   const tracker: RequestSpendTracker = {
     recordWorkflowSend() { chargeWorkflowSends(rootId, 1); },
     beforePhysicalSend(auxiliary = false) {
       return claimWorkflowSend(!auxiliary);
     },
-    startRequest(target) {
+    startRequest() {
       if (admissionPolicy) return;
       const policy = ledgerRef?.policy ?? sharedSpendPolicy();
       admissionPolicy = Object.freeze({ root: Object.freeze({ ...policy.root }), identity: Object.freeze({ ...policy.identity }), pool: Object.freeze({ ...policy.pool }) });
-      initialEnforced = applicable(selectedScopes(target));
-      if (!initialEnforced) admissionPolicy = Object.freeze({ root: Object.freeze({}), identity: Object.freeze({}), pool: Object.freeze({}) });
     },
     get enforced(): boolean { return applicable(selectedScopes()); },
+    enforcedFor(target) { return applicable(selectedScopes(target)); },
     get policyStarted(): boolean { return admissionPolicy !== undefined; },
     get spendAdmissionPolicy(): SpendAdmissionPolicy | undefined { return admissionPolicy; },
     ensureSeed(target, prepaidProof) {
@@ -321,6 +337,7 @@ export function createRequestSpendTracker(
         start(seed, ordinal) {
           if (closed || !seedState(seed) || physical.has(ordinal)) throw new Error("Invalid spend reporter start");
           const state = seedState(seed)!;
+          latestPhysicalOrdinal = Math.max(latestPhysicalOrdinal, ordinal);
           state.started = true;
           starts.push({ seed, ordinal });
           physical.set(ordinal, { seed });
@@ -397,7 +414,9 @@ export function createRequestSpendTracker(
         if (alreadySent) chargeWorkflowSends(rootId, 1);
         else if (!claimWorkflowSend(!options?.auxiliary)) return false;
       }
-      if (!alreadySent && tracker.enforced) {
+      const scopes = selectedScopes(options?.scopes);
+      const enforced = applicable(scopes);
+      if (!alreadySent && enforced) {
         const seed = tracker.ensureSeed({ ...options?.scopes, targetKey: options?.targetKey,
           ...(options?.auxiliary ? { auxiliary: true, estimate: options.estimate } : {}) });
         if (!seed) return false;
@@ -406,19 +425,6 @@ export function createRequestSpendTracker(
       }
       const sendId = randomUUID();
       const bookedLedger = ledger();
-      const scopes: SpendScopes = options?.scopes ? selectedScopes(options.scopes) : {
-        ...(rootId !== undefined ? { rootId } : {}),
-        // Already the privacy-safe label the request log uses, and the ledger aliases it
-        // again on the way to disk. A raw credential never reaches either.
-        ...(logCtx.accountLogLabel !== undefined ? { identityId: logCtx.accountLogLabel } : {}),
-        ...((logCtx.spendPoolId ?? logCtx.provider) !== undefined
-          ? { poolId: logCtx.spendPoolId ?? logCtx.provider }
-          : {}),
-      };
-      const policy = admissionPolicy!;
-      const enforced = (scopes.rootId !== undefined && policy.root.maxTokens !== undefined)
-        || (scopes.identityId !== undefined && policy.identity.maxTokens !== undefined)
-        || (scopes.poolId !== undefined && policy.pool.maxTokens !== undefined);
       const decision = bookedLedger.reserve({
         sendId,
         scopes,
@@ -438,15 +444,18 @@ export function createRequestSpendTracker(
       live.push(sendId);
       if (options?.auxiliary) auxiliarySendIds.add(sendId);
       if (options?.deferDispatch) pendingDispatch.add(sendId);
-      else confirmOlderSends();
+      else {
+        if (!options?.auxiliary) lastLegacyRoutedOrdinal = latestPhysicalOrdinal;
+        confirmOlderSends();
+      }
       // It has already left, so the reservation cannot be handed back for free: from here only
       // a settlement or unresolved spend is honest about it.
       if (alreadySent) ledger().markDispatched(sendId);
       return true;
     },
     dispatch(proof): void {
-      if (seededAccounting && proof.ledger === ledgerRef) return;
       if (proof.ledger !== ledgerRef || !pendingDispatch.has(proof.sendId)) return;
+      if (!auxiliarySendIds.has(proof.sendId)) lastLegacyRoutedOrdinal = latestPhysicalOrdinal;
       ledger().markDispatched(proof.sendId);
       pendingDispatch.delete(proof.sendId);
       // Terminal usage follows dispatch/report order, not reservation order.
@@ -456,8 +465,10 @@ export function createRequestSpendTracker(
     refund(proof): void {
       if (proof && proof.ledger === ledgerRef && seededAccounting) {
         const match = [...seeds.entries()].find(([, state]) => state.seed.sendId === proof.sendId);
-        if (match && !match[1].started) retireSeed(match[0], match[1].seed);
-        return;
+        if (match) {
+          if (!match[1].started) retireSeed(match[0], match[1].seed);
+          return;
+        }
       }
       // null is an exact budget reservation that obtained no durable booking.
       if (proof === null || (proof && proof.ledger !== ledgerRef)) return;
@@ -474,26 +485,7 @@ export function createRequestSpendTracker(
       if (resolved) return;
       if (seededAccounting) { tracker.requestFinalSettlement(usage); return; }
       try {
-        if (!terminalProcessed && live.length > 0) {
-          const terminalIndex = live.findLastIndex(sendId => !auxiliarySendIds.has(sendId));
-          const terminal = live[terminalIndex];
-          const reported = typeof usage?.inputTokens === "number" || typeof usage?.outputTokens === "number";
-          if (terminal && reported) {
-            ledger().settle(terminal, {
-              inputTokens: usage?.inputTokens ?? 0,
-              outputTokens: usage?.outputTokens ?? 0,
-            });
-          } else if (terminal) {
-            // The response never reported usage. It may still have been billed.
-            ledger().markLost(terminal);
-          }
-          if (terminalIndex >= 0) live.splice(terminalIndex, 1);
-          terminalProcessed = true;
-        }
-        while (live.length > 0) {
-          ledger().markLost(live[live.length - 1] as string);
-          live.pop();
-        }
+        settleOrdinary(usage);
         resolved = true;
       } catch (error) {
         // A deferred final log may arrive after server.stop released this ledger's lease.

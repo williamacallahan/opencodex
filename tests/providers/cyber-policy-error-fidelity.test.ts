@@ -180,7 +180,9 @@ describe("cyber_policy error fidelity", () => {
     const body = JSON.stringify({ [field]: message });
     const headers = { "retry-after": "120" };
     const direct = formatPassthroughUpstreamError(503, body, { headers: new Headers(headers) });
+    expect(direct.status).toBe(400);
     expect(direct.headers.get("retry-after")).toBeNull();
+    await expect(direct.json()).resolves.toMatchObject({ error: { code, message } });
     const failure = await consumeComboFailure(new Response(body, { status: 503, headers }));
     expect(failure.response.status).toBe(400);
     await expect(failure.response.json()).resolves.toMatchObject({ error: { code, message } });
@@ -194,6 +196,33 @@ describe("cyber_policy error fidelity", () => {
     const direct = formatPassthroughUpstreamError(503, body, { headers: new Headers({ "retry-after": "120" }) });
     expect(direct.headers.get("retry-after")).toBe("120");
     expect((await consumeComboFailure(new Response(body, { status: 503 }))).response.status).toBe(503);
+  });
+
+  test("a structured HTTP 500 overload outranks invalid request prose", () => {
+    expect(comboFailureDecision(500, "The queue rejected an invalid request", {
+      code: "server_is_overloaded",
+    })).toBe("hop");
+  });
+
+  test("direct HTTP 503 policy refusal ends the turn after one upstream send", async () => {
+    let sends = 0;
+    const upstream = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch() {
+      sends++;
+      return Response.json({ detail: CODEX_FALLBACK_MESSAGE }, { status: 503, headers: { "retry-after": "0" } });
+    } });
+    const config: OcxConfig = { port: 0, defaultProvider: "fixture", providers: { fixture: {
+      adapter: "openai-responses", authMode: "key", apiKey: "fixture-key", baseUrl: `${upstream.url}v1`,
+      allowPrivateNetwork: true, liveModels: false, models: ["test"], transientRetryOn5xx: { attempts: 2 },
+    } } };
+    const releaseSpendHome = acquireOwnedSpendHome();
+    try {
+      const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "fixture/test", input: "hello", stream: false }),
+      }), config, { model: "", provider: "" });
+      expect({ sends, status: response.status, retry: response.headers.get("retry-after"), body: await response.json() })
+        .toMatchObject({ sends: 1, status: 400, retry: null, body: { error: { code: CYBER_POLICY_ERROR_CODE, message: CODEX_FALLBACK_MESSAGE } } });
+    } finally { releaseSpendHome(); upstream.stop(true); }
   });
 
   test("a generic wrapper cannot turn a nested overload into a policy stop", () => {

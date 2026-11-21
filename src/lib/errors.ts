@@ -251,6 +251,12 @@ export function terminalPolicyError(payload: unknown): { message: string; code: 
   return { message, code: CYBER_POLICY_ERROR_CODE, ...(type && { type }) };
 }
 
+/** A complete HTTP error document. In JSON, only the protocol's diagnostic carriers count. */
+export function terminalPolicyErrorFromBody(body: string): ReturnType<typeof terminalPolicyError> {
+  try { return terminalPolicyError(JSON.parse(body)); }
+  catch { return isCyberPolicyMessage(body) ? { code: CYBER_POLICY_ERROR_CODE, message: body } : undefined; }
+}
+
 export function cyberPolicyTerminalError(payload: unknown): { message: string; type?: string } | undefined {
   const policy = terminalPolicyError(payload);
   return policy?.code === CYBER_POLICY_ERROR_CODE ? policy : undefined;

@@ -273,11 +273,11 @@ counter, refunds decrement it, and named reports reconcile prepaid sends. Enforc
 the seed and physical-start protocol below across Responses, native Messages and native Chat.
 Each transport claims immediately before inference I/O and retains a producer through completion.
 
-A request fixes its enforcement mode, token ceilings and physical-send limit L when it actually
-starts. Configuration changes apply to requests that start afterward. An in-flight request keeps
+A request snapshots its configured token ceilings at its first admission. Each send checks the
+limits applicable to its selected identity, pool and root. Configuration changes apply to requests that start afterward. An in-flight request keeps
 its starting policy until completion, including when an operator enables, disables, raises or
-lowers a ceiling. Changing policy never resets that request's physical-send allowance. A request
-that starts observe-only keeps the existing observe-only path throughout its lifetime.
+lowers a ceiling. Changing policy never resets that request's physical-send allowance. An unattributed send does not
+disable an identity ceiling for a later credential; both kinds of booking settle in dispatch order.
 The shared tracker captures once at the first actual spend admission or start; constructing a
 budget or reading its enforcement preview does not capture policy. Generic Responses paths that
 omit retry reporters still invoke that same capture before the wire. Re-entry's token-ceiling

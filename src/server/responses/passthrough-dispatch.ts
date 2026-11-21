@@ -109,6 +109,7 @@ import {
 } from "./core-codex-account";
 import { settlePoolResponse } from "./pool-response-alternate";
 import { consumeComboFailure } from "./core-combo-failure";
+import { createOutboundCredentialMask } from "./terminal-error-redaction";
 import { readCodexWsResponseEvidence, codexWsCredentialRejected, codexWsPreludeVerdict, isCodexWsPreOutputRefusal, codexWsSocketDeathStage, isCodexWsUpstreamResponse } from "./codex-ws-wire";
 import { linkAbortSignal } from "./core-lifetime";
 import { checkOutboundBodySize, describeOutboundBodyRefusal } from "./outbound-body-guard";
@@ -1646,7 +1647,8 @@ export async function preparePassthroughExchange(
     const hardStop = codexWsPreludeVerdict(upstreamResponse) === "hard-stop";
     if (options.onConsumedComboFailure && isCodexWsPreOutputRefusal(upstreamResponse)
       && (hardStop || (options.poolCapacityIntent === "reserve-only" && (upstreamResponse.status === 429 || upstreamResponse.status === 402)))) {
-      options.onConsumedComboFailure(await consumeComboFailure(upstreamResponse, options.abortSignal));
+      options.onConsumedComboFailure(await consumeComboFailure(upstreamResponse, options.abortSignal, undefined, undefined, false,
+        createOutboundCredentialMask(request.headers)));
     }
     upstreamResponse = preOutputRefusals.restore(upstreamResponse);
     if (hardStop) break;

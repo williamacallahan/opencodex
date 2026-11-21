@@ -1,6 +1,6 @@
 import { formatErrorResponse } from "../../bridge";
 import { isUnsafeJsonDocument } from "../../codex/quota-rejection";
-import { isCyberPolicyMessage, terminalPolicyError } from "../../lib/errors";
+import { isCyberPolicyCode, terminalPolicyErrorFromBody } from "../../lib/errors";
 import {
   applyReplayRefusalClientHeaders,
   isReplayRefusalCode,
@@ -25,11 +25,6 @@ function maskErrorBody(body: string, mask: (text: string) => string): string {
   if (safe === compact) return body;
   // Noncanonical escapes and numbers need an extra check: JSON.parse can also discard duplicate fields.
   return safe === JSON.stringify(parsed) && mask(body) === body && !isUnsafeJsonDocument(body) ? body : safe;
-}
-
-function isPolicyRefusalBody(body: string): boolean {
-  try { return terminalPolicyError(JSON.parse(body)) !== undefined; }
-  catch { return isCyberPolicyMessage(body); }
 }
 
 /**
@@ -81,6 +76,7 @@ export function formatPassthroughUpstreamError(
     headers?: Headers;
     now?: number;
     maskCredential?: (text: string) => string;
+    policyRefusal?: ReturnType<typeof terminalPolicyErrorFromBody>;
     /** Caller holds an authoritative fatal verdict; neither inherited nor inferred waits apply. */
     suppressRetryAfter?: boolean;
     /**
@@ -92,6 +88,15 @@ export function formatPassthroughUpstreamError(
     replayRefusal?: boolean;
   },
 ): Response {
+  const mask = options?.maskCredential;
+  const statusText = options?.statusText && (mask ? mask(options.statusText) : options.statusText);
+  const publicHeaders = () => {
+    const headers = new Headers(options?.headers ?? { "Content-Type": "application/json" });
+    if (mask) options?.headers?.forEach((value, name) => {
+      if (mask(value) !== value) headers.delete(name);
+    });
+    return headers;
+  };
   const trimmed = bodyText.trim();
   const now = options?.now ?? Date.now();
   // Meta's Muse Code subscription refusal is relayed as this proxy's own explanation (#8352):
@@ -99,24 +104,27 @@ export function formatPassthroughUpstreamError(
   // reads as a rejected credential. The shared classifier keeps the subscription class.
   if (isMetaMusePlanFailure(status, trimmed)) {
     const refusal = formatErrorResponse(status, "permission_error", META_MUSE_PLAN_REFUSAL_MESSAGE);
-    if (!options?.headers) {
-      return options?.statusText
-        ? new Response(refusal.body, { status: refusal.status, statusText: options.statusText, headers: refusal.headers })
-        : refusal;
-    }
     // The body is this proxy's own, but the relayed headers the caller already sanitized (the
     // upstream request id among them) stay; a plan restriction names no wait.
-    const headers = new Headers(options.headers);
+    const headers = publicHeaders();
     for (const name of ["content-length", "content-encoding", "retry-after"]) headers.delete(name);
     refusal.headers.forEach((value, name) => headers.set(name, value));
     return new Response(refusal.body, {
       status: refusal.status,
-      ...(options.statusText ? { statusText: options.statusText } : {}),
+      statusText,
       headers,
     });
   }
   const upstreamRetryAfter = options?.headers?.get("retry-after")?.trim() || undefined;
-  const policyFailure = isPolicyRefusalBody(trimmed);
+  const policyFailure = options?.policyRefusal ?? terminalPolicyErrorFromBody(trimmed);
+  if (policyFailure && status >= 500) {
+    const { message, code, type } = policyFailure;
+    const error = { message, code, type: type ?? (isCyberPolicyCode(code) ? code : "invalid_request_error") };
+    const headers = publicHeaders();
+    for (const name of ["content-length", "content-encoding", "retry-after", "x-should-retry"]) headers.delete(name);
+    headers.set("content-type", "application/json");
+    return new Response(maskDiagnosticJson({ error }, mask ?? (text => text)), { status: 400, headers });
+  }
   const replayRefusal = options?.replayRefusal === true || isReplayRefusalBody(trimmed);
   // Two different reasons to answer with no wait at all, handled the same way: a hard policy
   // block will not become servable, and a refusal we made was never a rate limit.
@@ -134,9 +142,8 @@ export function formatPassthroughUpstreamError(
   const formatted = resolved === undefined ? undefined : formatClientRetryAfter(resolved, now);
 
   if (trimmed) {
-    const mask = options?.maskCredential;
     const publicBody = mask ? maskErrorBody(bodyText, mask) : bodyText;
-    const headers = new Headers(options?.headers ?? { "Content-Type": "application/json" });
+    const headers = publicHeaders();
     if (publicBody !== bodyText) {
       headers.delete("content-length");
       headers.delete("content-encoding");
@@ -146,7 +153,7 @@ export function formatPassthroughUpstreamError(
     if (replayRefusal) applyReplayRefusalClientHeaders(headers);
     const rewritten = new Response(publicBody, {
       status,
-      ...(options?.statusText ? { statusText: options.statusText } : {}),
+      statusText,
       headers,
     });
     return replayRefusal ? retainReplayRefusal(rewritten) : rewritten;

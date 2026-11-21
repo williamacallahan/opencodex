@@ -33,7 +33,7 @@ import {
   relayWithAbort,
 } from "../relay";
 import { isUsageDebugEnabled } from "../../usage/debug";
-import { isNonReplayableResponse, isReplayRefusalResponse } from "../../lib/upstream-retry";
+import { inspectedPolicyRefusal, isNonReplayableResponse, isReplayRefusalResponse } from "../../lib/upstream-retry";
 import { sanitizeNonReplayableUpstreamError } from "./non-replayable-error";
 import { teeWithBoundedInspection } from "../inspection-tee";
 import {
@@ -659,9 +659,11 @@ export async function deliverPassthroughResponse(
       });
     }
     if (!upstreamResponse.ok) {
+      const sentHeaders = nativeExchange.request?.headers;
+      const maskCredential = sentHeaders ? createOutboundCredentialMask(sentHeaders) : () => "";
       if (options.comboAttempt) {
         const comboCause: Pick<typeof logCtx, "causeHint"> = {};
-        const failure = await consumeComboFailure(upstreamResponse, options.abortSignal, undefined, comboCause);
+        const failure = await consumeComboFailure(upstreamResponse, options.abortSignal, undefined, comboCause, false, maskCredential);
         if (comboCause.causeHint) logCtx.causeHint = comboCause.causeHint;
         if (confirmCapacity && !failure.nonReplayable && isOwnerCapacityRefusal(failure.response.status, failure)) confirmCapacity();
         options.onConsumedComboFailure?.(failure);
@@ -685,7 +687,7 @@ export async function deliverPassthroughResponse(
       }
       const policyRefusal = rewriteUpstreamPolicyRefusal({
         status: upstreamResponse.status,
-        errorText,
+        errorText, maskCredential,
         stream: clientRequestedStream,
         modelId: clientFacingModelText(options.clientModelLabel),
         destinationIsXai: isXaiResponsesDestination(route.provider),
@@ -695,15 +697,14 @@ export async function deliverPassthroughResponse(
       if (policyRefusal) return policyRefusal;
       // Meta's Muse Code refusal is a plan restriction, not a rejected credential (#8352).
       stampMetaMusePlanRefusal(logCtx, upstreamResponse.status, errorText);
-      // Without sent headers we cannot safely publish an upstream diagnostic that might echo the selected key.
-      const sentHeaders = nativeExchange.request?.headers;
       return carryPolicyCandidateRefusal(upstreamResponse, carryProxyError(upstreamResponse, formatPassthroughUpstreamError(upstreamResponse.status, sentHeaders ? errorText : "", {
         statusText: upstreamResponse.statusText,
         headers,
         // Provenance, not inference: `errorText` is empty when the bounded read finds nothing
         // display-safe, and an empty body is exactly what the retryable-429 default fires on.
         replayRefusal: isReplayRefusalResponse(upstreamResponse),
-        maskCredential: sentHeaders ? createOutboundCredentialMask(sentHeaders) : undefined,
+        policyRefusal: sentHeaders ? inspectedPolicyRefusal(upstreamResponse) : undefined,
+        maskCredential,
       })));
     }
 

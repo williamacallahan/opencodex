@@ -1283,7 +1283,7 @@ export function codexForwardTerminalOutcomeRecorder(
   const windowMeta = codexFailureWindowOutcomeMeta(authCtx);
   return (status, httpStatusOverride, reserveServed, capacityStatus) => {
     const wsEvidence = response && readCodexWsResponseEvidence(response);
-    if (status === "failed" && (wsEvidence?.hardStopStatus === 401 || wsEvidence?.hardStopStatus === 403) && !wsEvidence.credentialRejected) {
+    if (status === "failed" && (wsEvidence?.hardStopStatus === 401 || wsEvidence?.hardStopStatus === 403) && !wsEvidence.authRejection) {
       releaseCodexAuthContextProbeLease(authCtx);
       return;
     }
@@ -1327,6 +1327,7 @@ export function codexForwardTerminalOutcomeRecorder(
       : (quotaStatus ?? httpStatusOverride ?? logCtx?.terminalHttpStatus ?? 502);
     const confirmCapacity = recordCodexUpstreamOutcome(config, authCtx.accountId, outcome, {
       ...windowMeta,
+      denial: wsEvidence?.authRejection === "credential" ? undefined : wsEvidence?.authRejection,
       ...(quotaStatus !== undefined && response ? codexQuotaOutcomeMeta(response, terminalQuota?.headers) : {}),
       reserveServed,
       threadId: authCtx.affinityKey,

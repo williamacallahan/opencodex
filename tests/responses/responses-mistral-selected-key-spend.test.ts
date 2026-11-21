@@ -8,6 +8,7 @@ import { clearKeyCooldowns, forgetApiKeyRotationCursor } from "../../src/provide
 import { MistralBudgetPacer, resolveMistralTransport } from "../../src/providers/mistral-transport";
 import { resetProviderRequestPacingForTest } from "../../src/providers/request-pacing";
 import { clearResponseStateForTests, flushResponseState } from "../../src/responses/state";
+import { handleChatCompletions } from "../../src/server/chat-completions";
 import { createInferenceSendBudget } from "../../src/server/inference/context";
 import type { RequestLogContext } from "../../src/server/request-log";
 import { handleResponses } from "../../src/server/responses";
@@ -90,8 +91,66 @@ function fixture(spend: NonNullable<OcxConfig["spend"]>, rotate: boolean, combo 
       return { status: response.status, text, chargedSends: sendBudget.used };
     } finally { network.mockRestore(); }
   };
-  return { ledger, wire, reservations, log, run };
+  return { config, ledger, wire, reservations, log, run };
 }
+
+for (const admitted of [false, true]) test(`an earlier unattributed combo booking preserves the Mistral identity ceiling and both balances (admitted=${admitted})`, async () => {
+  const f = fixture({ identity: admitted ? headroom : { maxTokens: 15 } }, false, true);
+  let earlierSends = 0;
+  f.config.providers.earlier = { adapter: "openai-chat", baseUrl: "https://fixture.example/v1", authMode: "local", models: ["m1"], liveModels: false,
+    fetch: Object.assign(async () => {
+      earlierSends++;
+      return Response.json({ error: { message: "temporary fixture failure" } }, { status: 503 });
+    }, { preconnect: fetch.preconnect }) };
+  f.config.combos!.selected!.targets.unshift({ provider: "earlier", model: "m1" });
+  const response = await f.run();
+  expect(earlierSends).toBe(1);
+  expect(f.wire).toEqual(admitted ? ["second"] : []);
+  expect(response.chargedSends).toBe(admitted ? 2 : 1);
+  if (admitted) expect(f.ledger.snapshot("identity", label(1))).toMatchObject({ reserved: 0, unresolved: 0, settled: 3 });
+  else expect(listWorkflowBudgetEvents(1)[0]).toMatchObject({ reason: "workflow-spend-exhausted", spendScope: "identity" });
+  const balance = f.ledger.snapshot("pool", "earlier");
+  expect(balance?.reserved).toBe(0);
+  expect(balance?.unresolved).toBeGreaterThan(0);
+});
+
+test("cancelling a native Chat combo during Mistral pacing records no spend or attempt", async () => {
+  const f = fixture(combined, false, true);
+  const abort = new AbortController();
+  let wires = 0, waits = 0;
+  const pacer = new MistralBudgetPacer(() => 0, async (_delay, signal) => {
+    waits++;
+    abort.abort(); signal?.throwIfAborted();
+  });
+  const row = resolveMistralTransport({ adapter: "openai-chat", baseUrl: "https://api.mistral.ai/v1", authMode: "key",
+    apiKey: keys[0]!.key, liveModels: false, models: ["m1"],
+    fetch: Object.assign(async () => {
+      wires++;
+      return new Response(null, { headers: { "retry-after": "1", "x-ratelimit-remaining-req-minute": "0" } });
+    }, { preconnect: fetch.preconnect }) }, pacer);
+  // Model a prior response requiring the next send on this key/model to wait.
+  await row.fetch!("https://api.mistral.ai/v1/chat/completions", { method: "POST", headers: { authorization: `Bearer ${row.apiKey}` }, body: JSON.stringify({ model: "m1" }) });
+  f.config.providers[provider] = row;
+  f.config.protocols = { rollout: { nativeChatCombos: true } };
+  const admission = admitWorkflowTurn(root, "interactive");
+  if (!admission?.admitted) throw new Error("Fixture root refused");
+  admission.lease.release();
+  const request = new Request("http://localhost/v1/chat/completions", { method: "POST", signal: abort.signal,
+    headers: { "content-type": "application/json", "x-codex-parent-thread-id": root },
+    body: JSON.stringify({ model: "combo/selected", messages: [{ role: "user", content: "fixture" }], max_tokens: 16 }) });
+  const network = spyOn(globalThis, "fetch").mockImplementation(async () => { throw new Error("Unexpected network fetch"); });
+  try {
+    const response = await handleChatCompletions(request, f.config, f.log);
+    await response.text(); f.log.spendTracker?.settle(undefined);
+    expect(waits).toBe(1);
+    expect(wires).toBe(1); // Only the prior request.
+    expect(response.status).toBe(499);
+    const balance = f.ledger.snapshot("pool", provider);
+    expect({ unresolved: balance?.unresolved ?? 0, settled: balance?.settled ?? 0, reserved: balance?.reserved ?? 0,
+      sends: workflowBudgetSnapshot(root)?.sends, attempts: f.log.attempts?.reduce((sum, a) => sum + a.sendCount, 0) ?? 0 })
+      .toEqual({ unresolved: 0, settled: 0, reserved: 0, sends: 0, attempts: 0 });
+  } finally { network.mockRestore(); }
+});
 
 test("translated Mistral reserves the first and rotated keys separately within one pool and root", async () => {
   const f = fixture(combined, true);

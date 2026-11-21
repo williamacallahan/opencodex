@@ -61,6 +61,7 @@ export async function consumeComboFailure(
   logCtx?: { failureDetail?: FailureDetail; causeHint?: RequestFailureCause },
   /** True only when `response` is the provider's own HTTP answer, so its closed error class is evidence. */
   rawUpstream = false,
+  maskCredential?: (text: string) => string,
 ): Promise<ConsumedComboFailure> {
   // Read before the body: the marker lives on this Response object, and the failure below is
   // rebuilt as a new one that would otherwise lose it.
@@ -188,6 +189,7 @@ export async function consumeComboFailure(
     {
       classified: fatalPolicy,
       cyberPolicy: cyberFailure,
+      maskCredential,
       ...(normalizedUpstreamCode !== undefined ? { code: normalizedUpstreamCode } : {}),
       ...(!fatalPolicy && clientRetryAfter !== undefined ? { retryAfter: clientRetryAfter } : {}),
     },
@@ -210,6 +212,7 @@ export async function consumeComboFailure(
     ...(nonReplayable ? { nonReplayable: true } : {}),
     ...(verifiedPlanRefusal ? { verifiedPlanRefusal: true } : {}),
     classificationText,
+    maskCredential,
     ...(isWrappedReserveQuota(response) ? { wrappedReserveQuota: true } : {}),
     ...(codexModelRefusal !== undefined ? { codexModelRefusal } : {}),
     ...(malformedResponseFormat !== undefined ? { malformedResponseFormat } : {}),

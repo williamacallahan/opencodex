@@ -168,6 +168,7 @@ export interface RequestSendObserver {
   charge(options?: { alreadySent?: boolean; deferDispatch?: boolean; workflowAlreadyCounted?: boolean; onReserved?: (proof: SpendReservationProof) => void; targetKey?: string; scopes?: Pick<SpendScopes, "identityId" | "poolId">; auxiliary?: boolean; estimate?: { inputTokens: number; outputCeilingTokens: number } }): boolean;
   /** Confirm the exact reservation once its dispatch is known. */
   readonly enforced?: boolean;
+  enforcedFor?(target?: SpendScopes): boolean;
   readonly policyStarted?: boolean;
   readonly spendAdmissionPolicy?: SpendAdmissionPolicy;
   /** Capture request policy at its first admission or actual physical start. */
@@ -311,7 +312,7 @@ export function hasWorkflowSendObserver(budget: TransientSendBudget): boolean {
 const dispatchSpendProofs = new WeakMap<SingleUseDispatchPermit, {
   owner: SharedSendLedger;
   claim(): SpendReservationProof | undefined;
-  report(): boolean;
+  report(seeded?: boolean): boolean;
 }>();
 
 /** One preflight for the exact prepaid dispatch, never another budget or a replayed permit. */
@@ -340,7 +341,7 @@ export function reportDispatchSends(
   // Unnamed, foreign, released or already-reported permits cannot consume another receipt.
   const counter = sharedSendLedgers.get(budget as RequestExecutionBudget);
   if (!workflowAlreadyCounted && prepaid > 0) counter?.observer?.recordWorkflowSend?.();
-  if (workflowAlreadyCounted && counter && counter.observer?.enforced !== true) {
+  if (workflowAlreadyCounted && counter && !(budget as RequestExecutionBudget).spendEnforced) {
     counter.spent += count - prepaid;
     for (let index = prepaid; index < count; index++) counter.observer?.charge({ alreadySent: true, workflowAlreadyCounted: true });
   } else budget.used += count - prepaid;
@@ -381,7 +382,7 @@ export function createPhysicalSendReporter(
   const report: PhysicalSendReporter = (sends) => {
     if (closed) return;
     if (!producer) {
-      if (observer?.enforced === true) return;
+      if ((budget as RequestExecutionBudget).spendEnforced) return;
       const count = Number.isFinite(sends) ? Math.max(0, Math.trunc(sends)) : 0;
       const admitted = Math.min(count, started - reported);
       if (admitted > 0) reportDispatchSends(budget, admitted, permit, true);
@@ -395,7 +396,7 @@ export function createPhysicalSendReporter(
     finally {
       reported += count;
       const receipt = permit && dispatchSpendProofs.get(permit);
-      const prepaid = count > 0 && receipt && receipt.owner === counter && receipt.report() ? 1 : 0;
+      const prepaid = count > 0 && receipt && receipt.owner === counter && receipt.report(true) ? 1 : 0;
       if (counter) counter.spent += count - prepaid;
       telemetry?.(count);
     }
@@ -405,20 +406,20 @@ export function createPhysicalSendReporter(
     const selected = target();
     if ((budget as RequestExecutionBudget).startRequest) (budget as RequestExecutionBudget).startRequest!(selected);
     else observer?.startRequest?.(selected);
-    if (observer?.enforced !== true) {
+    if (!(budget as RequestExecutionBudget).spendEnforced) {
       if (observer?.beforePhysicalSend?.() === false) return false;
       started++;
       return true;
     }
-    producer ??= observer.beginReporter?.();
+    producer ??= observer?.beginReporter?.();
     const receipt = permit && dispatchSpendProofs.get(permit);
     const proof = receipt?.owner === counter ? receipt?.claim() : undefined;
-    const seed = observer.ensureSeed?.(selected, proof);
+    const seed = observer?.ensureSeed?.(selected, proof);
     if (!seed) return false;
     const ordinal = options.explicitContinuation
       ? (budget as RequestExecutionBudget).claimContinuationPhysicalSend?.()
       : (budget as RequestExecutionBudget).claimPhysicalSend?.();
-    if (ordinal === undefined) { observer.releaseSeed?.(seed); return false; }
+    if (ordinal === undefined) { observer?.releaseSeed?.(seed); return false; }
     producer?.start(seed, ordinal);
     currentOrdinal = ordinal;
     started++;
@@ -426,7 +427,7 @@ export function createPhysicalSendReporter(
   };
   report.execute = run => activePhysicalReporters.run(report, run);
   report.bind = (selected: SpendScopes & { targetKey?: string }) => {
-    if (!producer || currentOrdinal === undefined || observer?.enforced !== true) return true;
+    if (!producer || currentOrdinal === undefined) return true;
     return producer.rebindTarget(selected, currentOrdinal);
   };
   report.close = () => {
@@ -476,6 +477,8 @@ function createRequestExecutionBudgetWithLedger(
   recovery?: SameTargetRecoveryScope,
 ): RequestExecutionBudget {
   const observer = counter.observer;
+  // A derived target has its own selected identity but shares the request's frozen policy.
+  let selectedScopes: SpendScopes | undefined;
   let reserveSpent = false;
   let alternateTargetSends = 0;
   let targetTransitions = 0;
@@ -489,17 +492,18 @@ function createRequestExecutionBudgetWithLedger(
       const limit = recovery?.physicalLimit ?? counter.physicalLimit;
       return limit === undefined ? undefined : limit + counter.explicitPhysicalStarted;
     },
-    get spendEnforced(): boolean { return observer?.enforced === true; },
+    get spendEnforced(): boolean { return observer?.enforcedFor?.(selectedScopes) ?? observer?.enforced === true; },
     get workflowCountObserved(): boolean { return observer?.beforePhysicalSend !== undefined; },
     get spendPolicyStarted(): boolean { return observer?.policyStarted === true; },
     get spendAdmissionPolicy(): SpendAdmissionPolicy | undefined { return observer?.spendAdmissionPolicy; },
     startRequest(target) {
       observer?.startRequest?.(target);
-      if (observer?.enforced && counter.physicalLimit === undefined) {
+      if (target !== undefined) selectedScopes = target;
+      if (budget.spendEnforced && counter.physicalLimit === undefined) {
         counter.physicalLimit = Number.isSafeInteger(policy.maxTotalModelSends) && policy.maxTotalModelSends > 0 ? policy.maxTotalModelSends : 0;
       }
     },
-    beginSpendProducer() { return observer?.enforced ? observer.beginReporter?.() : undefined; },
+    beginSpendProducer() { return budget.spendEnforced ? observer?.beginReporter?.() : undefined; },
     claimWorkflowSend(auxiliary = false): boolean {
       budget.startRequest?.();
       return (auxiliary ? observer?.beforePhysicalSend?.(true) : observer?.beforePhysicalSend?.()) ?? true;
@@ -507,14 +511,14 @@ function createRequestExecutionBudgetWithLedger(
     claimPhysicalSend(auxiliary = false): number | undefined {
       budget.startRequest?.();
       const limit = recovery?.physicalLimit ?? counter.physicalLimit;
-      if (observer?.enforced !== true || limit === undefined) return undefined;
+      if (!budget.spendEnforced || limit === undefined) return undefined;
       if (counter.physicalStarted - counter.explicitPhysicalStarted >= limit
         || !(auxiliary ? budget.claimWorkflowSend!(true) : budget.claimWorkflowSend!())) return undefined;
       return ++counter.physicalStarted;
     },
     claimContinuationPhysicalSend(): number | undefined {
       budget.startRequest?.();
-      if (recovery || observer?.enforced !== true || !budget.claimWorkflowSend!()) return undefined;
+      if (recovery || !budget.spendEnforced || !budget.claimWorkflowSend!()) return undefined;
       counter.explicitPhysicalStarted++;
       return ++counter.physicalStarted;
     },
@@ -523,7 +527,7 @@ function createRequestExecutionBudgetWithLedger(
       // A numeric report has no receipt identity. Only reportDispatchSends may settle a
       // prepaid permit; guessing by reservation order can refund another leg's actual send.
       // Enforced sends can only be reconciled through their producer's claimed starts.
-      if (observer?.enforced === true) return;
+      if (budget.spendEnforced) return;
       const charged = next - counter.spent;
       counter.spent = Math.max(0, next);
       // These sends have already left. The ledger records them even past a ceiling it would
@@ -624,12 +628,12 @@ function createRequestExecutionBudgetWithLedger(
       const startPhysical = (): boolean => {
         const selected = intent.selectedSpendScopes?.();
         if (selected && !bookSpend(selected)) return false;
-        if (observer?.enforced !== true) return auxiliary ? budget.claimWorkflowSend!(true) : budget.claimWorkflowSend!();
-        const seed = observer.ensureSeed?.({ ...spendTarget, ...selected }, spendProof);
+        if (!budget.spendEnforced) return auxiliary ? budget.claimWorkflowSend!(true) : budget.claimWorkflowSend!();
+        const seed = observer?.ensureSeed?.({ ...spendTarget, ...selected }, spendProof);
         if (!seed) return false;
         const ordinal = auxiliary ? budget.claimPhysicalSend?.(true) : budget.claimPhysicalSend?.();
-        if (ordinal === undefined) { observer.releaseSeed?.(seed); return false; }
-        producer = observer.beginReporter?.();
+        if (ordinal === undefined) { observer?.releaseSeed?.(seed); return false; }
+        producer = observer?.beginReporter?.();
         producer?.start(seed, ordinal);
         physicalOrdinal = ordinal;
         if (!executing) { try { producer?.report(1); } finally { producer?.close(); } }
@@ -688,11 +692,11 @@ function createRequestExecutionBudgetWithLedger(
         },
       };
       let preflightClaimed = false;
-      dispatchSpendProofs.set(permit, { owner: counter, report: () => {
+      dispatchSpendProofs.set(permit, { owner: counter, report: seeded => {
         if (!counter.pendingExternalSends.has(receipt)) return false;
         // Native Chat reports the external receipt instead of assuming the permit. Its
         // enforced reporter already has a seed; the observe-only path still owes one booking.
-        if (intent.selectedSpendScopes && !observer?.enforced && !spendProof) bookSpend(intent.selectedSpendScopes());
+        if (intent.selectedSpendScopes && !seeded && !spendProof) bookSpend(intent.selectedSpendScopes());
         if (spendProof) observer?.dispatch?.(spendProof);
         counter.pendingExternalSends.delete(receipt);
         // Reset-only helpers report just BEFORE calling the dispatch thunk. Its one use()
