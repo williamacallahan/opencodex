@@ -35,7 +35,7 @@ const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "h
 
 type Listener = (event: unknown) => void;
 const reasoning = { type: "reasoning", id: "rs_inspected", encrypted_content: "fixture-owner-cipher", summary: [] };
-type FirstFrame = { status: number; code?: string | number; request?: { innererror: { code: string } }; error: { code?: string; message: string; innererror?: { code: string } } };
+type FirstFrame = { afterCreated?: boolean; usage?: { input_tokens: number; output_tokens: number }; status: number; code?: string | number; request?: { innererror: { code: string } }; error: { code?: string; message: string; innererror?: { code: string } } };
 type Step = FirstFrame | "generic-hard-failure" | "held-hard-failure" | "issue-reasoning" | "first-quota" | "first-conflict" | "quota-then-refuse" | "quota-output-then-refuse" | "reserve-started-then-refuse"
   | "first-model-missing" | "first-model-missing-underscore" | "wrapped-quota" | "conflicting-wrapper" | "foreign-wrapper" | "missing-status" | "unknown-status";
 
@@ -58,7 +58,9 @@ class FakeWebSocket {
     this.emit("open", {});
     const id = `resp_${FakeWebSocket.instances.indexOf(this)}`;
     if (typeof step === "object") {
-      this.frame({ type: "error", ...step });
+      const { afterCreated, ...error } = step;
+      if (afterCreated) this.frame({ type: "response.created", response: { id, status: "in_progress", output: [] } });
+      this.frame({ type: "error", ...error });
       return;
     }
     if (step === "held-hard-failure" || step === "generic-hard-failure") {
@@ -525,6 +527,38 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect(rows.map(row => row.status)).toEqual([503]);
     expect(rows[0]?.spend).toMatchObject({ sends: 1, settled: 1, unresolved: 0 });
     expect(sharedSpendLedger().snapshot("pool", "openai")).toMatchObject({ reserved: 0, settled: 7, unresolved: 0 });
+  });
+
+  test.each([401, 403])("a committed origin %i without credential evidence leaves the seat selectable", async status => {
+    FakeWebSocket.plan = [{ afterCreated: true, status, code: "origin_rejected", error: { message: "Turn declined" } }, "issue-reasoning"];
+    const direct = () => send(comboConfig(), "hello", undefined, "openai/gpt-5.5");
+    const refused = await direct();
+    expect(refused.body).toContain("event: response.failed");
+    expect(refused.logCtx.terminalHttpStatus).toBe(status);
+    expect((await direct()).body).toContain("event: response.completed");
+  });
+
+  test.each([false, true])("a hard 403 with a rejected bearer retires its seat (after created: %s)", async afterCreated => {
+    FakeWebSocket.plan = [{ afterCreated, status: 403, code: "origin_rejected", error: { code: "token_invalidated", message: "Fixture refusal" } }];
+    const direct = () => send(comboConfig(), "hello", undefined, "openai/gpt-5.5");
+    expect((await direct()).body).toContain("Fixture refusal");
+    expect((await direct()).body).toContain("needs reauthentication");
+    expect(FakeWebSocket.instances.flatMap(ws => ws.sent)).toHaveLength(1);
+  });
+
+  test("a direct wrapped 503 carrying only safety refusal copy is never resent", async () => {
+    const message = "This request was blocked by our safety systems. Reason: Potentially unintended activity.";
+    FakeWebSocket.plan = [{ status: 503, error: { message } }, "issue-reasoning"];
+    const { body } = await send(comboConfig(), "hello", undefined, "openai/gpt-5.5");
+    expect(body).toContain('"code":"invalid_prompt"');
+    expect(body).toContain(message);
+    expect(FakeWebSocket.instances.flatMap(ws => ws.sent)).toHaveLength(1);
+  });
+
+  test("a flat hard failure preserves upstream usage in the request log", async () => {
+    FakeWebSocket.plan = [{ afterCreated: true, status: 401, code: "origin_rejected", usage: { input_tokens: 13, output_tokens: 2 }, error: { message: "Turn declined" } }];
+    const { logCtx } = await send(comboConfig(), "hello", undefined, "openai/gpt-5.5");
+    expect(logCtx.usage).toMatchObject({ inputTokens: 13, outputTokens: 2 });
   });
 
   test("a direct held error keeps the client fatal code on its terminal", async () => {

@@ -111,11 +111,17 @@ function refusalErrorBody(source: unknown): Record<string, string> {
   };
 }
 
+function frameRejectsCredential(status: number, frame: Record<string, unknown>): boolean {
+  if (status !== 401 && status !== 403) return false;
+  const rejects = (code: unknown) => code === "invalid_api_key" || isRevokedChatgptCredentialCode(code);
+  const error = frame.type === "error" || !record(frame.response) ? frame.error : frame.response.error;
+  return rejects(frame.code) || (record(error) && rejects(error.code));
+}
+
 function markFrameRefusal(response: Response, frame: Record<string, unknown>, confirmedCapacity?: boolean,
   hardStop = hasHardRefusalInEnvelope(frame, { source: "ws-frame" })): void {
-  const rejectsCredential = (code: unknown) => code === "invalid_api_key" || isRevokedChatgptCredentialCode(code);
   markCodexWsPreludeProjection(response, { rootCode: envelopeRecordCode(frame),
-    credentialRejected: response.status === 401 && (rejectsCredential(frame.code) || (record(frame.error) && rejectsCredential(frame.error.code))),
+    credentialRejected: frameRejectsCredential(response.status, frame),
     verdict: hardStop ? "hard-stop"
       : confirmedCapacity === undefined ? "ordinary-refusal" : confirmedCapacity ? "confirmed-capacity" : "unconfirmed-capacity" });
 }
@@ -332,7 +338,10 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         restoredHeaders.set("content-type", "text/event-stream; charset=utf-8");
         const restored = new Response(stream, { status: 200, headers: restoredHeaders });
         const evidence = markCodexWsResponse(restored, observed);
-        if (hardStop) evidence.hardStopStatus = status;
+        if (hardStop) {
+          evidence.hardStopStatus = status;
+          evidence.credentialRejected = frameRejectsCredential(status, payload);
+        }
         // The same record object, so the attempt that adopted it keeps reading one stage.
         markCodexWsStage(restored, stage);
         return restored;
@@ -746,13 +755,14 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         if (responseEvidence) {
           const stated = codexWsWrapperStatus(frame);
           responseEvidence.hardStopStatus = refusalStatus ?? transientStatus ?? (stated !== undefined && stated >= 400 ? stated : 400);
+          responseEvidence.credentialRejected = frameRejectsCredential(responseEvidence.hardStopStatus, frame);
         }
         const code = typeof frame.code === "string" && isTerminalRefusalCode(frame.code) ? frame.code
           : isTerminalRefusalCode(error.code) ? error.code : "invalid_prompt";
         const param = error.param ?? frame.param;
         encodedText = encoder.encode(JSON.stringify({ type: publicType, sequence_number: frame.sequence_number,
           response: { id: response?.id ?? frame.response_id ?? refusalResponseId ?? undefined, model: response?.model,
-            status: "failed", output: response?.output, usage: response?.usage, retryable: false,
+            status: "failed", output: response?.output, usage: (response ?? frame).usage, retryable: false,
             error: { type: "invalid_request_error", code, message: error.message,
               ...(typeof param === "string" && { param }) } },
         }));

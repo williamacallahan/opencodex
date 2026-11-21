@@ -20,14 +20,34 @@ const terminalType = (type: unknown) => type === "error" || type === "response.f
 
 /** Serialize the inspected values, never raw bytes discarded by JSON parsing. */
 export function maskDiagnosticJson(parsed: unknown, mask: (text: string) => string): string {
+  const roles = new WeakMap<object, "envelope" | "error" | "usage" | "tokenDetails">();
+  if (parsed && typeof parsed === "object") roles.set(parsed, "envelope");
   return JSON.stringify(parsed, function (key, field: unknown) {
-    if (typeof field === "string" && (
+    const role = roles.get(this);
+    const childRole = role === "envelope" && key === "response" ? "envelope"
+      : role === "envelope" && (key === "error" || key === "last_error" || key === "incomplete_details") ? "error"
+      : role === "envelope" && key === "usage" ? "usage"
+      : role === "usage" && /^(?:input|output|prompt|completion)_tokens_details$/.test(key) ? "tokenDetails" : undefined;
+    if (childRole && field && typeof field === "object") roles.set(field, childRole);
+    const counter = role === "usage" ? /^(?:input|output|total|prompt|completion)_tokens$/.test(key)
+      : role === "tokenDetails" && /^(?:cached|reasoning|cache_write|cache_write_1h|audio|accepted_prediction|rejected_prediction)_tokens$/.test(key);
+    if (counter && typeof field === "number") return field;
+    const protocol = childRole || counter || ((role === "envelope" || role === "error") && /^(?:type|code|message|param)$/.test(key))
+      || (role === "envelope" && /^(?:id|model|status|sequence_number|response_id|output|retryable)$/.test(key));
+    if (!protocol && key && !Array.isArray(this) && mask(key) !== key) return undefined;
+    if (role === "envelope" && ((key === "retryable" && typeof field === "boolean") || (key === "sequence_number" && typeof field === "number"))) return field;
+    if ((role === "envelope" || role === "error") && typeof field === "string" && (
       (key === "code" && (OPENAI_ERROR_CODES.has(field) || OPENAI_ERROR_TYPES.has(field))) ||
       (key === "type" && (OPENAI_ERROR_TYPES.has(field) || (this === parsed && terminalType(field))))
     )) return field;
-    if (key === "status" && (field === "failed" || field === "incomplete" || field === "completed")) return field;
-    return SENSITIVE_KEY_PATTERN.test(key) ? REDACTED_SECRET
-      : typeof field === "string" ? mask(redactSecretString(field)) : field;
+    if (role === "envelope" && key === "status" && (field === "failed" || field === "incomplete" || field === "completed")) return field;
+    if (SENSITIVE_KEY_PATTERN.test(key)) return REDACTED_SECRET;
+    if (typeof field === "string") return mask(redactSecretString(field));
+    if (field === null || typeof field !== "object") {
+      const scalar = String(field);
+      if (mask(scalar) !== scalar) return REDACTED_SECRET;
+    }
+    return field;
   });
 }
 

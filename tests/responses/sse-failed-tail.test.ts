@@ -90,6 +90,16 @@ describe("relaySseWithFailedTail", () => {
     ]);
   });
 
+  test("masks matching diagnostic scalars and omits matching property names without changing usage", () => {
+    const rewrite = createTerminalErrorRedactionBlockRewrite({ "x-api-key": "314", authorization: "Bearer true" });
+    const usage = { input_tokens: 314, output_tokens: 0 };
+    const error = { message: "fixture", details: [314, true, { "echo-314": "omit", keep: 12 }] };
+    const prefix = "event: response.failed\ndata: ";
+    const event = { type: "response.failed", response: { status: "failed", error, usage } };
+    expect(rewrite(prefix + JSON.stringify(event))).toEqual([prefix + JSON.stringify({ ...event,
+      response: { ...event.response, error: { ...error, details: ["[REDACTED]", "[REDACTED]", { keep: 12 }] } } })]);
+  });
+
   test("masks selected credentials in every synthetic refusal field", () => {
     const credential = "fixture-selected-credential";
     const maskCredential = createOutboundCredentialMask({ authorization: `Bearer ${credential}` });
@@ -593,6 +603,17 @@ describe("upstream refusal terminal mapping (#5176)", () => {
       expect(CODEX_TERMINAL_CODES.has(error.code)).toBe(true);
     },
   );
+
+  test.each(["tee", "eager"] as const)("%s preserves an explicit overload even when it quotes policy copy", async mode => {
+    const event = { type: "response.failed", response: { status: "failed", error: {
+      code: "server_is_overloaded", message: "Queue full while reporting a possible cybersecurity risk." } } };
+    const log: RequestLogContext = { model: "fixture", provider: "fixture" };
+    inspectResponseLogJson(log, JSON.stringify(event));
+    expect(log.terminalHttpStatus).toBe(503);
+    const out = await drain(relayFor(mode, ["data: " + JSON.stringify(event) + "\n\n"]));
+    expect(out).toContain('"code":"server_is_overloaded"');
+    expect(out).not.toContain('"retryable":false');
+  });
 
   // The mirror-image defect this fix must not introduce: a real outage is not a
   // refusal, and giving it a terminal code would strand a turn that a reconnect

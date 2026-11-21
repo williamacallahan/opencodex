@@ -407,7 +407,7 @@ export async function prepareAdapterExchange(
   const autoPauseEnabled = config.providers[route.providerName]?.accountAutoPause?.enabled === true;
   const billingPoolRequest = isAnthropicBillingKeyPool(route.provider);
   const deferTransportSpend = () => billingPoolRequest || (route.providerName === "github-copilot" && route.provider.authMode !== "forward")
-    || (adapterSendBudget?.spendEnforced && ownsMistralDispatchReceipt(route.provider));
+    || ((adapterSendBudget?.spendEnforced || sendBudgetState.workflowRootId) && ownsMistralDispatchReceipt(route.provider));
   let billingRecoveryActive = false;
   const genericRefetchCountsSends = () => !!sendBudgetState.workflowRootId || options.comboAttempt === true || sendBudgetState.adapterSendBudget?.spendEnforced === true
     || transientRetryPolicyFor(route.provider) !== null || resetReplayPolicyFor(route.provider) !== null

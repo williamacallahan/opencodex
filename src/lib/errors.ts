@@ -214,6 +214,27 @@ export function safetyRefusalCodeFromMessage(text: string): string | undefined {
   return undefined;
 }
 
+/** A wrapper status or generic error type does not identify the cause; a dedicated code does. */
+export function hasStructuredErrorVerdict(error: { code?: unknown; type?: unknown }): boolean {
+  return (typeof error.code === "string" && !!error.code.trim()) || error.type === "overloaded_error" || error.type === "rate_limit_error";
+}
+
+/** Inspect protocol error carriers, never arbitrary echoed content. Codes precede wording across carriers. */
+export function cyberPolicyTerminalError(payload: unknown): { message: string; type?: string } | undefined {
+  type Diagnostic = { code?: unknown; type?: unknown; message?: unknown };
+  if (!payload || typeof payload !== "object") return undefined;
+  const root = payload as Diagnostic & { error?: Diagnostic; last_error?: Diagnostic;
+    response?: Diagnostic & { error?: Diagnostic; incomplete_details?: Diagnostic } };
+  const candidates = [root.error, root.last_error, root.response?.error, root.response?.incomplete_details, root, root.response];
+  const policy = candidates.find(error => typeof error?.code === "string" && isCyberPolicyCode(error.code.trim()))
+    ?? (!candidates.some(error => error && hasStructuredErrorVerdict(error))
+      ? candidates.find(error => typeof error?.message === "string" && isCyberPolicyMessage(error.message)) : undefined);
+  if (!policy) return undefined;
+  const message = typeof policy.message === "string" && policy.message.trim() || CYBER_POLICY_FALLBACK_MESSAGE;
+  const type = typeof policy.type === "string" && policy.type.trim();
+  return type ? { message, type } : { message };
+}
+
 export function isSubscriptionGateMessage(text: string): boolean {
   return (
     text.includes("requires a subscription") ||
@@ -764,7 +785,7 @@ export function httpStatusFromTerminalError(error: {
   if (!error) return 502;
   if (error.code === SPEND_LEDGER_STORAGE_UNAVAILABLE_CODE) return 503;
   if (error.code === "client_closed_request" || error.code === "client_cancelled") return 499;
-  if (isCyberPolicyCode(error.code) || (error.message ? isCyberPolicyMessage(error.message) : false)) {
+  if (isCyberPolicyCode(error.code) || (!hasStructuredErrorVerdict(error) && error.message && isCyberPolicyMessage(error.message))) {
     return 400;
   }
   const message = error.message ?? "";

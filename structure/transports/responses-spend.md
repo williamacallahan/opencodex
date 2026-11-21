@@ -81,7 +81,7 @@ later-target holdback still intersect it.
 
 Initial passthrough and budgeted translated HTTP ladders report at the final executor admission,
 after pacing, credential rebuild and local egress checks, rather than at retry callback entry.
-The one-shot receipt survives rebuilt request init and nested executor wrappers. The WebSocket
+Mistral commits the key-attempt count, workflow send and any spend charge after its own budget wait, so an aborted refetch records none of them. The one-shot receipt survives rebuilt request init and nested executor wrappers. The WebSocket
 receipt runs immediately before the frame is sent; a refused receipt sends no frame and never
 permits SSE fallback.
 Adapter-owned dispatch claims the prepaid permit once through the live adapter view and closes

@@ -3,9 +3,8 @@ import type { ResponsesTerminalStatus } from "../bridge";
 import {
   cyberPolicyErrorType,
   CYBER_POLICY_ERROR_CODE,
-  CYBER_POLICY_FALLBACK_MESSAGE,
-  isCyberPolicyCode,
-  isCyberPolicyMessage,
+  cyberPolicyTerminalError,
+  hasStructuredErrorVerdict,
   isTerminalRefusalCode,
   recognizedUpstreamError,
   safetyRefusalCodeFromMessage,
@@ -281,7 +280,7 @@ function boundedBareUpstreamError(payload: unknown): {
     .find(candidate => candidate !== undefined)?.slice(0, 128);
   const refusalCode = code !== undefined
     ? (isTerminalRefusalCode(code) ? code : undefined)
-    : message === undefined ? undefined : safetyRefusalCodeFromMessage(message);
+    : message === undefined || candidates.some(candidate => candidate && hasStructuredErrorVerdict(candidate)) ? undefined : safetyRefusalCodeFromMessage(message);
   if (message !== undefined) return { message, refusalCode, errorType, errorCode: code };
   if (refusalCode === undefined) return undefined;
   return {
@@ -622,45 +621,6 @@ function asJsonRecord(value: unknown): JsonRecord | null {
 function stringField(record: JsonRecord | null, key: string): string | undefined {
   const value = record?.[key];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-/**
- * Return a high-confidence policy error carried by an upstream terminal shape.
- * Deliberately inspect structured error fields and known refusal copy only — a
- * bare `cyber_policy` token in an unrelated payload is not sufficient.
- */
-function cyberPolicyTerminalError(parsed: unknown): { message: string; type?: string } | undefined {
-  const root = asJsonRecord(parsed);
-  if (!root) return undefined;
-  const response = asJsonRecord(root.response);
-  const candidates = [
-    asJsonRecord(root.error),
-    asJsonRecord(root.last_error),
-    asJsonRecord(response?.error),
-    asJsonRecord(response?.incomplete_details),
-    root,
-    response,
-  ];
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    if (isCyberPolicyCode(stringField(candidate, "code"))) {
-      return {
-        message: stringField(candidate, "message")
-          ?? CYBER_POLICY_FALLBACK_MESSAGE,
-        ...(stringField(candidate, "type") ? { type: stringField(candidate, "type") } : {}),
-      };
-    }
-  }
-  for (const candidate of candidates) {
-    const message = stringField(candidate, "message");
-    if (message && isCyberPolicyMessage(message)) {
-      return {
-        message,
-        ...(stringField(candidate, "type") ? { type: stringField(candidate, "type") } : {}),
-      };
-    }
-  }
-  return undefined;
 }
 
 function parseSsePayload(payload: string): unknown | undefined {

@@ -1,4 +1,5 @@
 import {
+  hasStructuredErrorVerdict,
   isCyberPolicyCode,
   isCyberPolicyMessage,
   isTerminalRefusalCode,
@@ -149,7 +150,7 @@ export function isHardPolicyOrOriginRefusal(text: string | undefined, depth = 0)
 export function hasHardRefusalInEnvelope(parsed: unknown, evidence: { source: "ws-frame" } | { source: "provider-text"; fallbackText: string }): boolean {
   if (parsed && typeof parsed === "object") {
     const queue: unknown[] = [parsed];
-    let examined = 0;
+    let examined = 0, structuredVerdict = false, refusalCopy = false;
     while (queue.length > 0 && examined < 32) {
       const candidate = queue.shift();
       examined += 1;
@@ -192,6 +193,12 @@ export function hasHardRefusalInEnvelope(parsed: unknown, evidence: { source: "w
       }
       const rec = candidate as Record<string, unknown>;
 
+      if (evidence.source === "ws-frame") {
+        structuredVerdict ||= hasStructuredErrorVerdict(rec);
+        if (!structuredVerdict && typeof rec.message === "string") {
+          refusalCopy ||= isCyberPolicyMessage(rec.message) || !!safetyRefusalCodeFromMessage(rec.message);
+        }
+      }
       const code = typeof rec.code === "string" ? rec.code.trim().toLowerCase().replaceAll("-", "_") : undefined;
       if (code) {
         if (
@@ -254,7 +261,7 @@ export function hasHardRefusalInEnvelope(parsed: unknown, evidence: { source: "w
         }
       }
     }
-    return false;
+    return refusalCopy && !structuredVerdict && !queue.length;
   }
 
   return evidence.source === "provider-text" && isAuthoritativeHardRefusalProse(evidence.fallbackText);

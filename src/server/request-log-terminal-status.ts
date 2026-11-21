@@ -1,8 +1,7 @@
 import {
   CYBER_POLICY_ERROR_CODE,
+  cyberPolicyTerminalError,
   httpStatusFromTerminalError,
-  isCyberPolicyCode,
-  isCyberPolicyMessage,
   isRateLimitOrQuotaFailureMessage,
   recognizedUpstreamError,
 } from "../lib/errors";
@@ -265,15 +264,7 @@ function captureTerminalHttpStatus(
   const candidates: Array<{ type?: unknown; code?: unknown; message?: unknown } | undefined> = [
     json.error, json.last_error, responseError, responseDetails, json,
   ];
-  const policy = candidates.some(candidate => (
-    candidate?.code === null || typeof candidate?.code === "string"
-  ) && isCyberPolicyCode(candidate.code as string | null | undefined))
-    || candidates.some(candidate => (
-      typeof candidate?.message === "string"
-      && candidate.message.trim().length > 0
-      && isCyberPolicyMessage(candidate.message)
-    ));
-  if (policy) {
+  if (cyberPolicyTerminalError(json)) {
     logCtx.terminalErrorCode = CYBER_POLICY_ERROR_CODE;
     noteStatus(400);
     return;

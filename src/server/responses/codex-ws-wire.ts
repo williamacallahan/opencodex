@@ -65,6 +65,7 @@ export interface CodexWsTerminalQuota {
 
 interface CodexWsResponseEvidence {
   hardStopStatus?: number;
+  credentialRejected?: boolean;
   ambiguousTerminal?: true;
   terminalQuota?: CodexWsTerminalQuota;
 }

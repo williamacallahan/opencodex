@@ -49,7 +49,7 @@ import {
 import { isMainQuotaDispatchLive, isMainQuotaDispatchWsClaimed } from "../../codex/main-account-cache";
 import { MAIN_CODEX_ACCOUNT_ID } from "../../codex/account-id";
 import type { ResponsesTerminalStatus } from "../../bridge";
-import { codexWsPreludeVerdict } from "./codex-ws-wire";
+import { codexWsCredentialRejected, codexWsPreludeVerdict } from "./codex-ws-wire";
 import { isCodexWsQuotaObservedResponse, isCodexWsUpstreamResponse, isCodexWsPreludeProjection } from "./ws-upstream";
 import { recordSubagentQuotaFailureForThreadSpawn } from "../../codex/subagent-model-fallback";
 import { recordCodexUpstreamOutcome } from "../../codex/routing";
@@ -580,8 +580,11 @@ export async function deliverPassthroughResponse(
           }
           options.onNativePassthroughTerminal?.(status);
         });
-      } else if ((upstreamResponse.status === 401 || upstreamResponse.status === 403) && codexWsPreludeVerdict(upstreamResponse) === "hard-stop" && !nativeExchange.rejectedReplacementBearer) {
-        // Dispatch settled any explicit credential rejection independently of the refused turn.
+      } else if (codexWsPreludeVerdict(upstreamResponse) === "hard-stop" && (
+        (upstreamResponse.status === 401 && !nativeExchange.rejectedReplacementBearer) ||
+        (upstreamResponse.status === 403 && !codexWsCredentialRejected(upstreamResponse))
+      )) {
+        // Dispatch already handled the initial 401. A bare origin refusal says nothing about the credential.
         releaseCodexAuthContextProbeLease(admissionState.authCtx);
       } else if (!nativeExchange.terminalOutcomeRecorded && !(upstreamResponse.ok && nativeExchange.request.outboundModelId === NATIVE_RESERVE_MODEL
         && hasResponseMediaType(headers, "application/json")) && !shouldDeferCodexResetDerivedCooldown(

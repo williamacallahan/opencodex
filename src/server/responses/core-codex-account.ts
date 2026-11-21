@@ -1283,6 +1283,10 @@ export function codexForwardTerminalOutcomeRecorder(
   const windowMeta = codexFailureWindowOutcomeMeta(authCtx);
   return (status, httpStatusOverride, reserveServed, capacityStatus) => {
     const wsEvidence = response && readCodexWsResponseEvidence(response);
+    if (status === "failed" && (wsEvidence?.hardStopStatus === 401 || wsEvidence?.hardStopStatus === 403) && !wsEvidence.credentialRejected) {
+      releaseCodexAuthContextProbeLease(authCtx);
+      return;
+    }
     const terminalQuota = status === "failed" ? wsEvidence?.terminalQuota : undefined;
     // The normalized SSE tail cannot establish or overrule what the WebSocket actually proved.
     if (wsEvidence?.ambiguousTerminal) capacityStatus = undefined;
