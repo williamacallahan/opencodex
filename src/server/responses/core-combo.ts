@@ -3,14 +3,14 @@ import { comboTurnStateOwner, withComboTurnStateOwner, CodexTurnStateOwnerUnavai
 import { comboLogLabel, comboTargetLogLabel } from "../../combos/resolve";
 import { clientFacingModelLabel, clientFacingModelText } from "../../lib/error-destination";
 import { projectLocalModelRefusalLog } from "../request-log-failure-detail";
-import { carryProxyErrorContext, hasProxyErrorMessage, markProxyError, proxyErrorPresentation } from "../../lib/client-error-body";
+import { carryProxyErrorContext, hasProxyErrorMessage, markProxyError } from "../../lib/client-error-body";
 import { classifyUpstreamCondition } from "../../lib/upstream-condition";
 import { effectiveAzureOutputBudget } from "../../adapters/azure";
 import { buildResponsesTransport } from "../../adapters/openai-responses/transport";
 import { isMetaAiResponsesDestination } from "../../responses/muse-tool-name-alias";
 import { chatCanPreserveMandatoryToolChoice, hasMandatoryToolChoice } from "./combo-required-tool-contract";
 import { isPolicyCandidateRefusal, isMandatoryToolChoiceRefusal } from "./policy-request-scope";
-import { isCodexAccountCooldownResponse } from "../../codex/account-cooldown-response";
+import { isCodexAccountCooldownResponse, isIssuerCapacityRefusal } from "../../codex/account-cooldown-response";
 import { resolveWireProtocolOverride } from "../adapter-resolve";
 import { parseSyntheticRowId } from "../fast-row";
 import { resolveOpenAiVirtualModel } from "../../providers/openai-virtual-models";
@@ -129,7 +129,7 @@ import {
   markEagerRelaySseResponse,
 } from "../relay";
 import { preflightComboStreamResponse } from "./combo-stream-preflight";
-import { isReserveSeatQuotaRefusal, nativeLunaTarget, planLunaReserveLegs, portSpentLunaReasoning, prepareLunaReplay, relayProvedNotStarted } from "./combo-luna-legs";
+import { isOwnerCapacityRefusal, isReserveSeatQuotaRefusal, nativeLunaTarget, planLunaReserveLegs, portSpentLunaReasoning, prepareLunaReplay, relayProvedNotStarted } from "./combo-luna-legs";
 import { createPoolReserveWalk, modelHasPoolReserve, type PoolCapacityIntent } from "../../codex/pool-reserve";
 import { requiredToolContractOf } from "./combo-required-tool-contract";
 import {
@@ -139,7 +139,7 @@ import {
   jsonIncompleteResponse,
   streamingIncompleteResponse,
 } from "./context-overflow";
-import { legacyResponseOwnerMatches, mandatoryResponsesReasoningReplayUnavailable } from "./core-replay";
+import { legacyPinnedResponsesStore, legacyResponseOwnerMatches, mandatoryResponsesReasoningReplayUnavailable } from "./core-replay";
 import { anthropicSessionKeyFromParts } from "../../oauth/anthropic-routing";
 import { agentServingThreadKey } from "../../oauth/session-affinity-key";
 import { markResponseNonReplayable, isReplayRefusalResponse, settleOperatorReplacement, UPSTREAM_RESET_REPLAY_REFUSED_CODE } from "../../lib/upstream-retry";
@@ -715,7 +715,6 @@ export async function executeComboResponses(
     toolLoopOnly: combo.strategy === "jev", eligible: pinEligible, now: initialNow });
   const native = nativeLunaTarget(combo, scopedRoute);
   const nativeKey = native && targetKey(native);
-  const lunaPair = native && !unreadableEncryptedAgentTask ? planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed, native) : undefined;
   const lunaCandidate = native !== undefined || combo.strategy === "failover" && combo.targets.some(target =>
     modelHasPoolReserve(target.model) && config.providers[target.provider] && isCanonicalOpenAiForwardProvider(config.providers[target.provider]!));
   // Name recall for readable compaction grants no right to send bound input to a replacement store.
@@ -723,12 +722,20 @@ export async function executeComboResponses(
     && body.input.some(entry => isPlainObject(entry) && entry.type === "compaction_trigger"));
   let lunaReplay = handleOwner || projectStore || unresolvedPrevious ? prepareLunaReplay(body, comboReplaySnapshot.previousResponseInputExpanded && !localExpansion,
     req.headers, unreadableEncryptedAgentTask && encryptedTaskRecoveryAdmitted) : undefined;
+  const ported = native && lunaReplay?.kind === "bound" && lunaReplay.reason === "encrypted-reasoning"
+    ? portSpentLunaReasoning(body, comboReplaySnapshot.previousResponseInputExpanded && !localExpansion, req.headers) : undefined;
+  if (ported !== undefined) replayEligibilityBody = ported;
+  const lunaPair = native && !unreadableEncryptedAgentTask ? planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed, native) : undefined;
+  replayEligibilityBody = body;
   let lunaLegs = lunaReplay?.kind === "portable" ? lunaPair : undefined;
   let dispatchBody = lunaReplay?.kind === "portable" ? lunaReplay.body : body;
   // A migrated pin may route the ID, not other bound state. Check the delta with the ID removed.
-  const legacyIdPin = !handleOwner && !legacyTarget && recorded?.target && !recorded.store && !recorded.idIssuer
+  const legacyDelta = !handleOwner && !legacyTarget && recorded?.target && !recorded.store && !recorded.idIssuer
     && lunaReplay?.kind === "bound" && lunaReplay.reason === "previous-response-id"
-    && prepareLunaReplay(body, true, req.headers).kind === "portable";
+    ? prepareLunaReplay(body, true, req.headers) : undefined;
+  const legacyBody = legacyDelta?.kind === "portable" ? legacyDelta.body : undefined;
+  const legacyIdPin = isPlainObject(legacyBody);
+  if (legacyIdPin) dispatchBody = { ...legacyBody, previous_response_id: requestedPreviousId };
   if (unresolvedPrevious && !handleOwner && !recorded?.idIssuer && !legacyIdPin) return unavailableOwner();
   if (lunaReplay?.kind === "bound") {
     const owner = legacyTarget ? combo.targets.find(target => targetKey(target) === legacyTarget) : recorded?.target;
@@ -754,7 +761,7 @@ export async function executeComboResponses(
     && (!lunaLegs || targetKey(recalledPick.target) === lunaLegs.nativeKey) ? recalledPick : undefined;
   let evaluatedStrictReserve = false;
   let lunaStage: "off" | "reserve" | "relay" | "done" = "off";
-  let comboLegCount = lunaLegs?.legCount ?? combo.targets.length;
+  const comboLegCount = ported !== undefined && lunaPair ? lunaPair.legCount + 1 : lunaLegs?.legCount ?? combo.targets.length;
   const onlyReplayIncompatibleTargetsRemain = (excluded: Iterable<string> = []): boolean => {
     const excludedKeys = new Set(excluded);
     const remaining = combo.targets.filter(target => {
@@ -1132,8 +1139,8 @@ export async function executeComboResponses(
   const callerOutputCeilingTokens = logCtx.spendOutputCeilingTokens
     ?? (typeof callerBudget === "number" && Number.isFinite(callerBudget) && callerBudget > 0
       ? Math.trunc(callerBudget) : undefined);
-  let reserveWalk = isRequestExecutionBudget(options.sendBudget)
-    && lunaLegs
+  const reserveWalk = isRequestExecutionBudget(options.sendBudget)
+    && (lunaLegs || ported !== undefined && lunaPair)
     ? createPoolReserveWalk(config) : undefined;
   const ordinaryPoolSends = 1 + CODEX_TEXT_GUARDED_BUDGET_POLICY.maxAlternateTargetSends;
   // A previously charged ledger can still visit unreported seats, but cannot grow its send limit.
@@ -1198,8 +1205,9 @@ export async function executeComboResponses(
     const spendProvider = resolveWireProtocolOverride(targetRoute.providerName, targetRoute.modelId,
       targetRoute.provider, options.inboundWire ?? "responses", targetRoute.staticPolicy);
     const responsesWire = spendProvider.adapter === "openai-responses";
+    const legacyStore = legacyIdPin && responsesWire ? legacyPinnedResponsesStore(targetRoute.providerName, spendProvider, targetRoute.modelId) : undefined;
     if ((legacyIdPin || recorded?.idIssuer) && (!responsesWire || spendProvider.authMode === "forward" || spendProvider.statelessResponses
-      || (legacyIdPin && (targetRoute.providerName !== pick.target.provider || targetRoute.modelId !== pick.target.model)))) return missingPrevious();
+      || (legacyIdPin && (!legacyStore || targetRoute.providerName !== pick.target.provider || targetRoute.modelId !== pick.target.model)))) return missingPrevious();
     if (boundTargetKey && !localExpansion && recorded?.store && !responsesWire) return unavailableOwner();
     const outputBudget = effectiveAzureOutputBudget(spendProvider, callerBudget);
     if (outputBudget !== callerBudget && typeof outputBudget === "number" && outputBudget > 0) {
@@ -1260,10 +1268,10 @@ export async function executeComboResponses(
     // re-tiered mid-session and its prompt cache survives the turn.
     const jevEffortApplies = initialJevDecision !== undefined && combo.jevEffortMode !== "client";
     // Native Responses can decide from the final credential; other wires get only the proven cross-owner copy.
-    const lateReasoningProjection = responsesWire && (((projectStore || recorded?.idIssuer) && lunaReplay?.kind === "bound") || (localExpansion && recorded?.store)) ? "owner"
+    const lateReasoningProjection = responsesWire && (((projectStore || legacyIdPin || recorded?.idIssuer) && lunaReplay?.kind === "bound") || (localExpansion && recorded?.store)) ? "owner"
       : responsesWire && lunaReplay?.kind === "portable" && lunaReplay.ownerBody !== undefined ? "portable" : undefined;
     // A verified handle owns its physical send even when lane recall names another account.
-    const recordedResponsesStore = handleOwner || localExpansion ? undefined : recorded?.store;
+    const recordedResponsesStore = handleOwner || localExpansion ? undefined : legacyStore ?? recorded?.store;
     const targetBody = lateReasoningProjection === "portable" && lunaReplay?.kind === "portable" ? lunaReplay.ownerBody : dispatchBody;
     const childInput = options.droidDefaultEffort && isPlainObject(targetBody) ? { ...targetBody } : targetBody;
     applyDroidResponsesReasoningDefault(childInput, options.droidDefaultEffort, {
@@ -1640,31 +1648,6 @@ export async function executeComboResponses(
         return settled;
       }
     }
-    const ownerCapacity = failure.response.status === 429 && (attempt.sendCount === 0
-      ? proxyErrorPresentation(failure.response) === "model_availability" || isCodexAccountCooldownResponse(failure.response)
-      : ["usage_limit_reached", "usage_not_included", "rate_limit_exceeded"].includes(failure.upstreamCode ?? ""));
-    if (lunaReplay?.kind === "bound" && lunaReplay.reason === "encrypted-reasoning"
-      && boundTargetKey === nativeKey && ownerCapacity && !failure.nonReplayable && !spentReplacement && native) {
-      const ported = portSpentLunaReasoning(body, comboReplaySnapshot.previousResponseInputExpanded && !localExpansion, req.headers);
-      if (ported !== undefined) {
-        replayEligibilityBody = ported;
-        boundTargetKey = undefined;
-        const plan = planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed, native);
-        const next = plan ? await pickWithWait({ eligible: target => targetKey(target) === plan.nativeKey && targetEligible(target) }) : null;
-        if (plan && next) {
-          dispatchBody = ported; lunaReplay = { kind: "portable", body: ported }; lunaLegs = plan;
-          evaluatedStrictReserve = false; lunaStage = "off";
-          comboLegCount = plan.legCount + 1;
-          reserveWalk = isRequestExecutionBudget(options.sendBudget) ? createPoolReserveWalk(config) : undefined;
-          if (isRequestExecutionBudget(options.sendBudget)) comboSendScope = deriveSendBudgetScope(options.sendBudget, comboExecutionBudgetPolicy(comboLegCount, 0));
-          logCtx.routeDecision = { ...logCtx.routeDecision!, selected: { ...logCtx.routeDecision!.selected, reason: "luna-owner-spent-ported" } };
-          pick = next;
-          continue;
-        }
-        boundTargetKey = nativeKey;
-        replayEligibilityBody = body;
-      }
-    }
     // A non-replayable failure (the answer to a spent ambiguous-reset replacement) may follow a
     // send that already ran the turn, so no later target may receive it, whatever its status says.
     const failureDecision = boundTargetKey !== undefined || failure.nonReplayable || spentReplacement
@@ -1719,6 +1702,22 @@ export async function executeComboResponses(
           : jsonContextOverflowResponse();
       }
       return lastFailure;
+    }
+    if (ported !== undefined && lunaPair && boundTargetKey && !failure.nonReplayable && !spentReplacement && native
+      && (attempt.sendCount === 0 ? isIssuerCapacityRefusal(failure.response) : isOwnerCapacityRefusal(failure))) {
+      replayEligibilityBody = ported;
+      boundTargetKey = undefined;
+      const plan = planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed, native);
+      const next = plan ? await pickWithWait({ eligible: target => targetKey(target) === plan.nativeKey && targetEligible(target) }) : null;
+      if (options.abortSignal?.aborted || req.signal.aborted) return clientCancelledResponse();
+      if (plan && next) {
+        dispatchBody = ported; lunaReplay = { kind: "portable", body: ported }; lunaLegs = plan;
+        logCtx.routeDecision = { ...logCtx.routeDecision!, selected: { ...logCtx.routeDecision!.selected, reason: "luna-owner-spent-ported" } };
+        pick = next;
+        continue;
+      }
+      boundTargetKey = legTargetKey;
+      replayEligibilityBody = body;
     }
     if (failureDecision === "stop") {
       adoptFailedChildLog(childLog);

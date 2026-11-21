@@ -695,7 +695,7 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(logCtx.routeDecision?.selected.reason).toBe("luna-owner-turn-state");
   });
 
-  test.each(["unchanged", "renamed", "redirected"])("a migrated NULL-store pin resumes only on its named relay: %s", async target => {
+  test.each(["unchanged", "renamed", "redirected", "path", "keys", "prompt", "signature", "readable"])("a migrated NULL-store pin resumes only on its named relay: %s", async target => {
     const cfg = config(), lane = { "thread-id": "legacy-relay-continuation" };
     const id = "resp_legacy_pin";
     seats(false);
@@ -711,7 +711,16 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
       expect(db.run("UPDATE combo_pins SET store = NULL, proofs = NULL WHERE provider = 'relay'").changes).toBe(1);
     } finally { db.close(); }
     clearComboRecallForTests(); release = acquireOwnedSpendHome();
-    if (target === "redirected") {
+    if (target === "unchanged") {
+      cfg.providers.relay!.apiKey = "${OCX_TEST_LEGACY_RELAY_KEY}";
+      cfg.providers.relay!.apiKeyPool = [{ id: "only", key: cfg.providers.relay!.apiKey }];
+    } else if (target === "path") {
+      cfg.providers.relay!.responsesPath = "/new-store/responses";
+      relayUrl = "https://relay.example.test/backend-api/codex/new-store/responses";
+    } else if (target === "keys") {
+      cfg.providers.relay!.apiKeyPool = [{ id: "a", key: "relay-key" }, { id: "b", key: "fixture-other" }];
+      cfg.providers.relay!.requestPacing = { enabled: true, keySelection: "round-robin" };
+    } else if (target === "redirected") {
       cfg.disabledModels = ["relay/gpt-6-luna"];
       cfg.blockedModelRedirects = { "relay/gpt-6-luna": "metered/gpt-6-luna" };
     } else if (target === "renamed") {
@@ -728,8 +737,20 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
       expect((await post(cfg, { previous_response_id: id, input: upload }, lane)).status).toBe(400);
       expect(calls).toEqual([]);
     }
-    const result = await post(cfg, { previous_response_id: id, input }, lane);
-    if (target !== "unchanged") {
+    const delta = target === "signature" ? { input: [{ type: "function_call", name: "lookup", arguments: "{}", call_id: "call_fixture",
+      extra_content: { google: { thought_signature: "fixture-signature" } } }, { type: "function_call_output", call_id: "call_fixture", output: "ok" }, ...input] }
+      : target === "prompt" ? { input, prompt: { id: "pmpt_fixture" } } : target === "readable" ? { input: [
+        { type: "reasoning", id: "rs_old", encrypted_content: "old-cipher", summary: [{ type: "summary_text", text: "readable" }] }, ...input] } : { input };
+    const savedKey = process.env.OCX_TEST_LEGACY_RELAY_KEY;
+    if (target === "unchanged") process.env.OCX_TEST_LEGACY_RELAY_KEY = "relay-key";
+    const result = await post(cfg, { previous_response_id: id, ...delta }, lane).finally(() => {
+      if (target !== "unchanged") return;
+      if (savedKey === undefined) delete process.env.OCX_TEST_LEGACY_RELAY_KEY; else process.env.OCX_TEST_LEGACY_RELAY_KEY = savedKey;
+    });
+    if (target === "readable") {
+      expect(result.status).toBe(200); expect(JSON.stringify(sent)).toContain("readable");
+      expect(JSON.stringify(sent)).not.toContain("old-cipher"); expect(JSON.stringify(sent)).not.toContain("rs_old");
+    } else if (target !== "unchanged") {
       expect(result.status).toBe(400); expect(result.text).toContain("previous_response_not_found"); expect(calls).toEqual([]);
     } else {
       expect(result.status, `${result.text} (sends: ${calls.length})`).toBe(200);
@@ -838,7 +859,7 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     relay = (_request, body) => { wire = JSON.stringify(body); return sse(body.model, "ok"); };
     const logCtx: RequestLogContext = { model: "", provider: "" };
     const input = [{ type: "reasoning", id: "rs_readable", encrypted_content: "readable-cipher", summary: [{ type: "summary_text", text: "retained summary" }] },
-      { role: "user", content: "earlier" }, item, { type: "function_call", id: "fc_one", call_id: "call_one", name: "lookup", arguments: "{}" },
+      { type: "message", id: "msg_earlier", role: "user", content: "earlier" }, item, { type: "function_call", id: "fc_one", call_id: "call_one", name: "lookup", arguments: "{}" },
       { type: "function_call_output", call_id: "call_one", output: "result" }, { role: "user", content: "continue" }];
     const result = await post(cfg, { input }, lane, undefined, { logCtx });
     expect(result.status).toBe(200);
@@ -846,6 +867,7 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(wire).not.toContain(item.id); expect(wire).not.toContain(item.encrypted_content);
     expect(wire).not.toContain("rs_readable"); expect(wire).not.toContain("readable-cipher");
     expect(wire).toContain("retained summary");
+    expect(wire).not.toContain("fc_one"); expect(wire).not.toContain("msg_earlier");
     expect(JSON.parse(wire).input.filter((entry: { call_id?: string }) => entry.call_id === "call_one")).toHaveLength(2);
     expect(logCtx.routeDecision?.selected.reason).toBe("luna-owner-spent-ported");
     expect(logCtx.attempts?.[0]).toMatchObject({ status: 429, sendCount: localRefusal ? 0 : 1 });
@@ -854,6 +876,89 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
       expect(nativeAccounts[0]).toBe(`fixture-workspace-${A}`);
     }
     expect(logCtx.attempts?.at(-1)?.provider).toBe("relay");
+  });
+
+  const ownerItem = { type: "reasoning", id: "rs_fixture", encrypted_content: "opaque-fixture", summary: [] };
+  const ownerLane = { "thread-id": "owner-refusal-fixture" };
+  async function issueOwner(cfg: OcxConfig, owner: "native" | "relay" = "native") {
+    seats(false);
+    relay = owner === "relay" ? (_request, body) => issuedReasoning(body.model, ownerItem) : refusedConnect;
+    native = body => issuedReasoning(body.model, ownerItem);
+    expect((await post(cfg, {}, ownerLane)).text).toContain(ownerItem.encrypted_content);
+    clearComboTargetCooldowns("luna", ["relay/gpt-6-luna"]); calls.length = 0; nativeAccounts.length = 0;
+    relay = (_request, body) => sse(body.model, "ok");
+  }
+  const ownerDelta = { input: [ownerItem, { role: "user", content: "continue" }] };
+
+  test("cancelling a waiting portable pick returns cancellation rather than the issuer refusal", async () => {
+    const cfg = config(); await issueOwner(cfg); cfg.combos!.luna!.waitForCooldownMs = 2_000;
+    const controller = new AbortController();
+    native = () => {
+      coolComboTarget("luna", { provider: "openai", model: "gpt-6-luna" }, { status: 503, retryAfter: "1" });
+      setTimeout(() => controller.abort(), 25);
+      return reserveRefused();
+    };
+    const result = await post(cfg, ownerDelta, ownerLane, controller.signal);
+    expect(result.status).toBe(499); expect(calls).toEqual(["native:gpt-6-luna"]);
+  });
+
+  test.each(["paused", "conflict"])("a non-capacity issuer refusal stays on its owner: %s", async reason => {
+    const cfg = config(); await issueOwner(cfg);
+    if (reason === "paused") cfg.pausedCodexAccountIds = [A];
+    native = () => Response.json({ code: "origin_rejected", error: { code: "usage_limit_reached" } }, { status: 429 });
+    const result = await post(cfg, ownerDelta, ownerLane);
+    expect(result.status).toBe(429); expect(calls).toEqual(reason === "paused" ? [] : ["native:gpt-6-luna"]);
+  });
+
+  test.each([["native", 402, "usage_not_included"], ["native", 429, "insufficient_quota"], ["relay", 429, "usage_limit_reached"]] as const)(
+    "%s issuer capacity %i %s starts the portable ladder at native Reserve", async (owner, status, code) => {
+      const cfg = config(); await issueOwner(cfg, owner); seats();
+      const refusal = () => Response.json({ error: { code } }, { status });
+      if (owner === "relay") relay = refusal;
+      native = body => owner === "native" && calls.length === 1 ? refusal() : sse(body.model, "ok");
+      expect((await post(cfg, ownerDelta, ownerLane)).text).toContain("response.completed");
+      expect(calls).toEqual([`${owner}:gpt-6-luna`, "native:gpt-reserve"]);
+    });
+
+  test.each(["prompt", "signature"])("an issuer refusal cannot port a delta containing a %s", async carrier => {
+    const cfg = config(); await issueOwner(cfg); native = reserveRefused;
+    const request = carrier === "prompt" ? { ...ownerDelta, prompt: { id: "pmpt_fixture" } } : { input: [ownerItem,
+      { type: "function_call", call_id: "call_fixture", name: "lookup", arguments: "{}", extra_content: { google: { thought_signature: "fixture-signature" } } },
+      { type: "function_call_output", call_id: "call_fixture", output: "ok" }] };
+    const result = await post(cfg, request, ownerLane);
+    expect(result.status).toBe(429); expect(calls).toEqual(["native:gpt-6-luna"]);
+  });
+
+  test("a spent stored-credential retry cannot start a portable ladder", async () => {
+    const cfg = config(); await issueOwner(cfg);
+    native = () => {
+      if (calls.length !== 1) return reserveRefused();
+      saveCodexAccountCredential(A, { accessToken: "fixture-renewed", refreshToken: "fixture-renewed-grant",
+        chatgptAccountId: `fixture-workspace-${A}`, expiresAt: now + 86_400_000 });
+      return Response.json({ error: { message: "rejected bearer" } }, { status: 401 });
+    };
+    const result = await post(cfg, ownerDelta, ownerLane);
+    expect(result.status).toBe(429); expect(calls).toEqual(["native:gpt-6-luna", "native:gpt-6-luna"]);
+  });
+
+  test("an enforced portable ladder preserves the relay send after the Reserve walk", async () => {
+    const cfg = config(); await issueOwner(cfg);
+    for (let i = 0; i < 8; i++) addUnreportedSpentSeat(cfg, `port-walk-${i}`);
+    configureSharedPoolBackpressure({ ...DEFAULT_POOL_BACKPRESSURE_POLICY, minRecoveryAllowance: 8 });
+    native = reserveRefused;
+    const lines: string[] = [];
+    const ledger = createSpendReservationLedger({ policy: { ...DEFAULT_SPEND_RESERVATION_POLICY, root: { maxTokens: 1_000_000 } },
+      journal: { read: () => [...lines], append: line => { lines.push(line); }, rewrite: next => { lines.splice(0, lines.length, ...next); } } });
+    const logCtx: RequestLogContext = { model: "combo/luna", provider: "combo", spendInputEstimateTokens: 1 };
+    const tracker = createRequestSpendTracker(logCtx, "ported-owner", ledger);
+    const sendBudget = createRequestExecutionBudget(undefined, undefined, tracker);
+    try {
+      const result = await post(cfg, ownerDelta, ownerLane, undefined, { logCtx, sendBudget });
+      expect(calls).toEqual(["native:gpt-6-luna", ...Array(8).fill("native:gpt-reserve"), "relay:gpt-6-luna"]);
+      expect(result.text).toContain("response.completed"); expect(sendBudget.physicalStarted).toBe(calls.length);
+      expect(sendBudget.used).toBe(calls.length);
+    } finally { tracker.settle(logCtx.usage); }
+    expect(lines.filter(line => JSON.parse(line).kind === "dispatch")).toHaveLength(calls.length);
   });
 
   test("a healthy reasoning issuer receives the original opaque item", async () => {

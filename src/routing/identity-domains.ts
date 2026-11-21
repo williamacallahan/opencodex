@@ -411,6 +411,8 @@ export function countQuotaCapacity(identities: readonly CredentialIdentity[]): {
 export type PortabilityDenial =
   | "previous-response-id"
   | "provider-conversation-id"
+  | "stored-prompt"
+  | "tool-signature"
   | "uploaded-file-ids"
   | "encrypted-reasoning";
 
@@ -422,6 +424,8 @@ export interface ConversationStateCarriers {
   readonly previousResponseId?: string | null;
   readonly providerConversationId?: string | null;
   readonly fileIds?: readonly string[];
+  readonly storedPrompt?: boolean;
+  readonly toolSignature?: boolean;
   readonly encryptedReasoning?: unknown;
 }
 
@@ -453,6 +457,8 @@ export function canPortConversationState(
   if (present(state.providerConversationId)) {
     return { portable: false, reason: "provider-conversation-id" };
   }
+  if (state.storedPrompt) return { portable: false, reason: "stored-prompt" };
+  if (state.toolSignature) return { portable: false, reason: "tool-signature" };
   if (present(state.fileIds)) {
     return { portable: false, reason: "uploaded-file-ids" };
   }

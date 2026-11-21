@@ -10,6 +10,7 @@
  * The issuer association lives next to thread affinity in `src/codex/routing.ts`.
  */
 
+import { isPlainObject } from "../../lib/plain-data";
 import { conversationStateAccountId } from "../../codex/request-owned-affinity";
 import type { CodexAuthContext } from "../../codex/auth-context";
 import { CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER, peekConversationStateStoredIssuerAccount } from "../../codex/routing/thread-affinity";
@@ -138,6 +139,10 @@ export function collectConversationStateCarriers(body: unknown, assignment?: unk
   return {
     previousResponseId,
     providerConversationId: providerConversationIdFromBody(record),
+    ...(record.prompt != null ? { storedPrompt: true } : {}),
+    ...(Array.isArray(record.input) && record.input.some(call => isPlainObject(call) && call.type === "function_call"
+      && isPlainObject(call.extra_content) && isPlainObject(call.extra_content.google) && call.extra_content.google.thought_signature != null)
+      ? { toolSignature: true } : {}),
     fileIds: collectFileIds(record.input),
     encryptedReasoning: hasEncryptedReasoning(record.input, assignment) ? true : undefined,
   };

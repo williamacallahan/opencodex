@@ -285,6 +285,17 @@ function responsesDestination(provider: OcxProviderConfig): string {
   return JSON.stringify([responsesTransportUrl(provider)]);
 }
 
+/** A pre-store pin can assume only a single configured key at the default Responses endpoint. */
+export function legacyPinnedResponsesStore(providerName: string, provider: OcxProviderConfig, modelId: string): string | undefined {
+  if ((provider.authMode ?? "key") !== "key" || provider.statelessResponses
+    || (provider.responsesPath !== undefined && responsesTransportUrl(provider) !== responsesTransportUrl({ ...provider, responsesPath: undefined }))) return;
+  const pool = provider.apiKeyPool ?? [];
+  const first = pool[0];
+  if (pool.length > 1 || first?.disabled || !nonEmptyProviderApiKey(provider)
+    || (first && first.key !== provider._apiKeyAttempt?.reference)) return;
+  return responsesReplayStore(routeReasoningReplayIdentity({ providerName, modelId, adapterName: "openai-responses", provider }));
+}
+
 /** The physical credential is rechecked after selection (including pool and queued rebuilds). */
 export function couldServeResponsesStore(provider: OcxProviderConfig, store: string, keySelected = false): boolean {
   const destination = durableReplayDestinationIdentity(responsesDestination(provider));

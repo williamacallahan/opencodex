@@ -21,7 +21,8 @@ import {
   MainAuthJsonChangedDuringRefreshError,
 } from "../../codex/main-account";
 import { NativeProfileError } from "../../codex/native-profile-types";
-import { markCodexAccountCooldownResponse } from "../../codex/account-cooldown-response";
+import { hasUnrecoveredCodexQuotaRefusal } from "../../codex/routing/health-store";
+import { markCodexAccountCooldownResponse, markIssuerCapacityRefusal } from "../../codex/account-cooldown-response";
 
 export interface CodexAuthContextErrorResponseOptions {
   accountSelector?: string;
@@ -30,7 +31,8 @@ export interface CodexAuthContextErrorResponseOptions {
 
 export function codexModelAvailabilityErrorResponse(error: CodexModelAvailabilityError): Response {
   if (error.reason === "temporarily_unavailable") {
-    return markProxyError(formatErrorResponse(429, "rate_limit_error", error.message), "model_availability");
+    const response = markProxyError(formatErrorResponse(429, "rate_limit_error", error.message), "model_availability");
+    return error.ownerQuotaHeld ? markIssuerCapacityRefusal(response) : response;
   }
   return markProxyError(formatErrorResponse(400, "invalid_request_error", error.message), "model_availability");
 }
@@ -87,6 +89,8 @@ export function mapCodexAuthContextErrorToResponse(
   }
   if (error instanceof CodexAccountCooldownError) {
     const response = cooldownErrorResponse(error, options.now, options.accountSelector);
+    if (error instanceof CodexPoolAccountCreditsOffError || (error.constructor === CodexAccountCooldownError
+      && hasUnrecoveredCodexQuotaRefusal(error.accountId, error.quotaScope))) markIssuerCapacityRefusal(response);
     // Exact class only (#7850): main hard-lock, credit, Reserve, recovery-withheld and future
     // policy subclasses keep their own retry semantics, including in combo target cooldowns.
     const presentation = error instanceof CodexMainAccountHardLockError ? "hard_lock"

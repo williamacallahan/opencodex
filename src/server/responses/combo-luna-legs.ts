@@ -13,7 +13,6 @@ import type { RouteResult } from "../../router";
 import { stripPreviousResponseId } from "../../adapters/openai-responses/canonical-forward";
 import { closedReasoningPrefix, hasReasoningSummary } from "../../adapters/openai-responses/luna-reasoning";
 import { sanitizeReasoningInputContent } from "../../adapters/openai-responses/reasoning";
-import { stripItemIdsWhenUnstored } from "../../adapters/openai-responses/request-strips";
 import { CODEX_TURN_STATE_HEADER } from "../../codex/forward-transport-headers";
 import { isPlainObject } from "../../lib/plain-data";
 import { canPortConversationState, collectConversationStateCarriers, type PortabilityDenial } from "./account-change-state";
@@ -28,6 +27,15 @@ export function isReserveSeatQuotaRefusal(failure: ConsumedComboFailure, scope =
   return failure.wrappedReserveQuota === true || (failure.response.status === 429 && scope === "target")
     || (failure.response.status === 402 && isReserveQuotaCode(failure.upstreamCode ?? failure.upstreamType)
       && !failure.upstreamRootCode && (!failure.upstreamType || isReserveQuotaCode(failure.upstreamType)));
+}
+
+/** An owner may release opaque state only on positive quota evidence, not on every hoppable 429. */
+export function isOwnerCapacityRefusal(failure: ConsumedComboFailure): boolean {
+  const { response: { status }, upstreamCode: code, upstreamRootCode: rootCode, upstreamType } = failure;
+  return (failure.wrappedReserveQuota === true || ((status === 429 || status === 402)
+    && isReserveQuotaCode(code ?? upstreamType) && (!upstreamType || isReserveQuotaCode(upstreamType))))
+    && (!rootCode || isReserveQuotaCode(rootCode))
+    && comboFailureDecision(status, failure.classificationText, { code, rootCode }) === "hop";
 }
 
 /** The pool already classified this response as quota (including body-confirmed 5xx). */
@@ -89,11 +97,18 @@ export function portSpentLunaReasoning(body: unknown, expanded: boolean, headers
   const full = stripPreviousResponseId(body, expanded);
   if (!isPlainObject(full) || !Array.isArray(full.input)) return undefined;
   const boundary = closedReasoningPrefix(full.input);
-  const input = full.input.filter((item, index) => !isPlainObject(item) || item.type !== "reasoning"
-    || (!(item.id || item.encrypted_content) || index < boundary && hasReasoningSummary(item)));
-  const scrubbed = stripItemIdsWhenUnstored(sanitizeReasoningInputContent({ ...full, input }, {
+  const input: unknown[] = [];
+  for (const [index, item] of full.input.entries()) {
+    if (isPlainObject(item) && item.type === "reasoning" && (item.id || item.encrypted_content)
+      && !(index < boundary && hasReasoningSummary(item))) continue;
+    if (isPlainObject(item) && "id" in item) {
+      const { id: _issuerLocal, ...portable } = item;
+      input.push(portable);
+    } else input.push(item);
+  }
+  const scrubbed = sanitizeReasoningInputContent({ ...full, input }, {
     stripEncryptedContent: true, dropForeignItemId: true, preserveRawReasoningContent: true,
-  }));
+  });
   const replay = prepareLunaReplay(scrubbed, false, headers);
   return replay.kind === "portable" ? replay.body : undefined;
 }

@@ -62,7 +62,8 @@ import {
 // The half-open TRANSIENT-HOLD lease (#4701). Not the quota-cooldown probe lease imported from
 // ./routing above -- different module, different domain, and a request never holds both.
 import { releaseTransientProbe } from "../routing/probe-lease";
-import { scopedHealthFor } from "./routing/health-store";
+import { codexAccountBlockReason } from "./routing/selection";
+import { hasUnrecoveredCodexQuotaRefusal, scopedHealthFor } from "./routing/health-store";
 import { trackBackgroundWork } from "../lib/background-work";
 import {
   codexConversationIdentity,
@@ -353,7 +354,7 @@ export type CodexModelAvailabilityReason = "unsupported" | "temporarily_unavaila
 export class CodexModelAvailabilityError extends CodexPoolAuthenticationError {
   reason: CodexModelAvailabilityReason;
 
-  constructor(reason: CodexModelAvailabilityReason, message: string) {
+  constructor(reason: CodexModelAvailabilityReason, message: string, readonly ownerQuotaHeld = false) {
     super(message);
     this.name = "CodexModelAvailabilityError";
     this.reason = reason;
@@ -1516,12 +1517,15 @@ async function resolveCodexAuthContextUnannotated(
         assertMainAccountPolicy(policy);
       }
       if (modelEligibleAccountIds !== undefined) {
+        const owner = options.poolCapacityIntent === "owner-only" && modelEligibleAccountIds.size === 1 ? modelEligibleAccountIds.values().next().value : undefined;
+        const block = owner && codexAccountBlockReason(config, owner, Date.now(), quotaScope, selectionOptions);
         const unsupported = entitledAccountIds?.size === 0 && !mainModelGrantUnobserved;
         throw new CodexModelAvailabilityError(
           unsupported ? "unsupported" : "temporarily_unavailable",
           unsupported
             ? "No eligible Codex account supports this model"
             : "Codex accounts that support this model are currently unavailable",
+          block === "credits_off" || block === "cooldown" && !!owner && hasUnrecoveredCodexQuotaRefusal(owner, quotaScope),
         );
       }
       const mainCandidate = !nativeMainReadsForbidden
