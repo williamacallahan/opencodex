@@ -1,6 +1,7 @@
 import type { PoolReserveWalk } from "../../codex/pool-reserve";
 import type { RequestExecutionBudget, SingleUseDispatchPermit } from "../../lib/request-execution-budget";
-import { fetchWithTransientRetry, TRANSIENT_RETRY_MAX_ATTEMPTS } from "../../lib/upstream-retry";
+import { readBoundedResponseBody } from "../../lib/bounded-body";
+import { cancelResponseBodyBestEffort, fetchWithTransientRetry, TRANSIENT_RETRY_MAX_ATTEMPTS, UpstreamRetryEvidenceError } from "../../lib/upstream-retry";
 
 /** No bytes left on this candidate. Only this disposition permits selection of the next seat. */
 export class StaleReserveSeat extends Error {
@@ -15,6 +16,7 @@ export async function sendReserveSeat(walk: PoolReserveWalk, budget: RequestExec
 ): Promise<Response | undefined> {
   const withheld = new Error("Reserve dispatch withheld");
   const remaining = budget.remainingBaseSends(Math.max(0, TRANSIENT_RETRY_MAX_ATTEMPTS - 1 - walk.transientRetries));
+  let retained: Response | undefined;
   try {
     return await fetchWithTransientRetry(async recovery => {
       const transient = recovery === "transient-5xx";
@@ -25,11 +27,27 @@ export async function sendReserveSeat(walk: PoolReserveWalk, budget: RequestExec
       try {
         const response = await send(permit, transient);
         if (!response) throw withheld;
+        if (retained) { cancelResponseBodyBestEffort(retained); retained = undefined; }
         return response;
       } finally { if (transient) permit.release(); }
-    }, { attempts: 1 + remaining, abortSignal: signal });
+    }, { attempts: 1 + remaining, abortSignal: signal, async retainBeforeTransientRetry(response) {
+      // Drain a bounded branch so pacing can release the old connection. Keep the original
+      // Response (including provenance markers, exact status, headers and bytes) for a veto.
+      try {
+        const copy = await readBoundedResponseBody(response.clone(), { signal });
+        if (copy.truncated) return false;
+      } catch (error) {
+        if (signal.aborted) { cancelResponseBodyBestEffort(response); throw error; }
+        return false;
+      }
+      retained = response;
+      return true;
+    } });
   } catch (error) {
-    if (error === withheld) return undefined;
+    if (error === withheld || (error instanceof UpstreamRetryEvidenceError && error.cause === withheld)) {
+      const refusal = retained; retained = undefined;
+      return refusal;
+    }
     throw error;
-  }
+  } finally { if (retained) cancelResponseBodyBestEffort(retained); }
 }

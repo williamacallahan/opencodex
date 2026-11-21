@@ -33,7 +33,7 @@ const byHandle = new Map<string, Entry>();
 const byBoundValue = new Map<string, string>();
 
 // The admitted caller of the request being served. Admission records it; the provider fetch reads it.
-type CallerScope = { caller?: string };
+type CallerScope = { caller?: string; owner?: ComboTurnStateOwner };
 const callerScope = new AsyncLocalStorage<CallerScope>();
 
 /** Run one request (or one WebSocket frame) with its own caller slot. */
@@ -79,18 +79,53 @@ function verifiedMember(account: string, authorization: string): string | undefi
 
 function accountBinding(caller: string, providerName: string, account: string, authorization: string): string {
   const member = verifiedMember(account, authorization);
-  return createHash("sha256")
-    .update(JSON.stringify([caller, providerName, account, member, member ? null : authorization]))
-    .digest("hex");
+  return (authorization ? routePrefix(caller, providerName) : "") + createHash("sha256")
+    .update(JSON.stringify([caller, providerName, account, member, member ? null : authorization])).digest("hex");
+}
+
+function routePrefix(caller: string, provider: string): string {
+  return createHash("sha256").update(JSON.stringify([caller, provider])).digest("hex") + ".";
+}
+
+function presentedHandles(headers: Headers, body: unknown): string[] {
+  const metadata = record(body) && record(body.client_metadata) ? body.client_metadata : undefined;
+  return [headers.get(TURN_STATE_HEADER), metadata?.[TURN_STATE_HEADER]]
+    .filter((token): token is string => typeof token === "string" && token.startsWith(HANDLE_PREFIX));
+}
+
+export interface ComboTurnStateOwner {
+  permitsProvider(providerName: string): boolean;
+  forProvider(providerName: string): TurnStateOwner;
+}
+
+/** The caller/provider prefix selects a route, never a credential. Recheck the entire binding
+ * and the lifetime of every presented handle at the physical executor. */
+export function comboTurnStateOwner(headers: Headers, body: unknown): ComboTurnStateOwner | undefined {
+  const handles = presentedHandles(headers, body);
+  if (!handles.length) return;
+  const caller = callerScope.getStore()?.caller ?? "unadmitted";
+  const binding = live(handles[0]!, Date.now())?.binding;
+  return {
+    permitsProvider: provider => binding !== undefined && binding.startsWith(routePrefix(caller, provider))
+      && handles.every(handle => live(handle, Date.now())?.binding === binding),
+    forProvider: provider => ownerForHandles(provider, handles, caller),
+  };
+}
+export function requiredComboSendOwner(provider: string): TurnStateOwner | undefined {
+  return callerScope.getStore()?.owner?.forProvider(provider);
+}
+export function withComboTurnStateOwner<T>(owner: ComboTurnStateOwner | undefined, run: () => T): T {
+  return owner ? callerScope.run({ ...callerScope.getStore(), owner }, run) : run();
 }
 
 /** A native Pool turn must satisfy every handle it carries, even without conversation affinity. */
 export function requiredTurnStateOwner(providerName: string, headers: Headers, body: unknown) {
-  const metadata = record(body) && record(body.client_metadata) ? body.client_metadata : undefined;
-  const handles = [headers.get(TURN_STATE_HEADER), metadata?.[TURN_STATE_HEADER]]
-    .filter((token): token is string => typeof token === "string" && token.startsWith(HANDLE_PREFIX));
+  const handles = presentedHandles(headers, body);
   if (!handles.length) return undefined;
-  const caller = callerScope.getStore()?.caller ?? "unadmitted";
+  return ownerForHandles(providerName, handles, callerScope.getStore()?.caller ?? "unadmitted");
+}
+
+function ownerForHandles(providerName: string, handles: string[], caller: string) {
   const matches = (binding: string) => handles.every(handle => live(handle, Date.now())?.binding === binding);
   return {
     matchesCredential: (credential: { chatgptAccountId: string; accessToken: string }) =>

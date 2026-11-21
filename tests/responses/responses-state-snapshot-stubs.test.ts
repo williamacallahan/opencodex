@@ -8,6 +8,7 @@ import {
   expandPreviousResponseInput,
   flushResponseState,
   rememberResponseState,
+  previousResponseReplayFailure,
   responseStateMetrics,
   setResponseStateByteCapForTests,
   setResponseStateSnapshotByteCapForTests,
@@ -53,6 +54,16 @@ describe("Responses snapshot spill stub retention", () => {
     removeTreeWithRetry(home);
     if (priorHome === undefined) delete process.env["OPENCODEX_HOME"];
     else process.env["OPENCODEX_HOME"] = priorHome;
+  });
+
+  test.each([false, true])("restart cannot promote an upstream append to full history (spilled: %s)", async spilled => {
+    setResponseStateByteCapForTests(spilled ? 1_024 : 1_000_000);
+    rememberResponseState({ conversation: "upstream-only-history", input: "x".repeat(2_048) }, fixedResponse("resp_append", []));
+    expect(responseStateMetrics().spillStubCount).toBe(spilled ? 1 : 0);
+    await flushResponseState(); clearResponseStateMemoryForTests();
+    const delta = { previous_response_id: "resp_append", input: "next" };
+    expect(expandPreviousResponseInput(delta)).toBe(delta);
+    expect(previousResponseReplayFailure(delta)?.reason).toBe("upstream_history");
   });
 
   test("a restart keeps spilled continuations replayable when residents fill the snapshot budget", async () => {

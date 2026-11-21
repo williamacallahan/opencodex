@@ -282,6 +282,7 @@ export interface HandleResponsesOptions {
   comboReplaySnapshot?: {
     sourceBody: unknown;
     previousResponseInputExpanded: boolean;
+    projectForeignReasoning?: boolean;
     providerContinuation: OcxProviderContinuationState | undefined;
     recoveredPlaintext: boolean;
   };

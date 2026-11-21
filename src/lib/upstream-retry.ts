@@ -572,6 +572,8 @@ export interface ResetRetryOptions {
 }
 
 export interface TransientRetryOptions extends ResetRetryOptions {
+  /** Takes ownership of a fully retained refusal until replacement. False keeps the original and stops. */
+  retainBeforeTransientRetry?: (response: Response) => Promise<boolean>;
   /** Test seam: per-attempt slow budget override (defaults to TRANSIENT_RETRY_SLOW_ATTEMPT_MS). */
   slowAttemptMs?: number;
   /**
@@ -905,7 +907,9 @@ export async function fetchWithTransientRetry(
       headers: res.headers,
       retryAfterIsLowerBound: true,
     });
-    cancelResponseBodyBestEffort(res);
+    if (opts.retainBeforeTransientRetry) {
+      if (!await opts.retainBeforeTransientRetry(res)) return res;
+    } else cancelResponseBodyBestEffort(res);
     // Throws on abort (see sleepWithAbort): the rejection propagates, and the body we just
     // cancelled belonged to a response we were discarding anyway.
     await sleepWithAbort(delay, opts.abortSignal);

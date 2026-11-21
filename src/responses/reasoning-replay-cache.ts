@@ -214,6 +214,16 @@ export function reasoningReplayServingIdentityChanged(
   return reasoningReplayServingIdentityChange(scope) !== undefined;
 }
 
+/** Positive evidence, unlike absence of a known mismatch after eviction or restart. */
+export function matchesReasoningServingIdentity(scope: OcxReasoningReplayScopeRef | undefined): boolean {
+  const current = servingIdentityFor(scope);
+  if (!current) return false;
+  const prior = servingIdentities.get(current.key);
+  if (!prior) return false;
+  const age = now() - prior.at;
+  return age >= 0 && age < TTL_MS && prior.identity === current.identity;
+}
+
 /** Known durable route differences; an unknown issuer never establishes compatibility. */
 export function reasoningReplayServingIdentityChange(
   scope: OcxReasoningReplayScopeRef | undefined,

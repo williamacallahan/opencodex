@@ -592,6 +592,7 @@ export async function prepareResponsesRequest(
       markBodyNonPersistable(parsed._rawBody);
     }
     toolBridgeMaps = buildToolBridgeMaps(parsed, translatorBudget);
+    if (options.comboReplaySnapshot?.projectForeignReasoning) parsed._lunaProjectForeignReasoning = true;
     if (previousResponseInputExpanded) parsed._previousResponseInputExpanded = true;
     const providerContinuationCandidate = options.comboReplaySnapshot
       ? options.comboReplaySnapshot.providerContinuation
@@ -1216,7 +1217,7 @@ export async function prepareResponsesRequest(
         try {
           const reparsed = parseRequest(body);
           const kept: Array<keyof OcxParsedRequest> = [
-            "_previousResponseInputExpanded",
+            "_previousResponseInputExpanded", "_lunaProjectForeignReasoning",
             "_providerContinuation",
             "_providerContinuationCandidate",
             "_providerContinuationOwner",

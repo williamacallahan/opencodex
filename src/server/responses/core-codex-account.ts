@@ -27,7 +27,7 @@ import {
 } from "../../codex/upstream-host-health";
 import { safeOriginLabel, fetchWithHeaderTimeout, providerFetch } from "./fetch-helpers";
 import type { AdapterRequest } from "../../adapters/base";
-import { classifyPoolRecoveryDispatch } from "../../routing/probe-lease";
+import { sharedPoolBackpressure } from "../../routing/probe-lease";
 import { formatErrorResponse } from "../../bridge";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { upstreamErrorMessageFromPayload, isRateLimitOrQuotaFailureMessage } from "../../lib/errors";
@@ -1074,26 +1074,7 @@ async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal
     while (true) {
       // A same-account rung uses its bounded recovery owner. Only an account move takes the
       // ordinary final-recovery reserve and the pool-wide recovery window.
-      if (accountMovePermit && !args.reserveWalk) {
-        // The pool-wide recovery window is consulted BEFORE the request-local permit is used.
-        // `reserveDispatch` charges at reservation time and `release()` is the only way back, so
-        // using the permit first and refusing afterwards would spend a send the request never
-        // made. An account move is recovery traffic like any other: one request's own budget
-        // cannot see that a thousand other requests are moving at the same moment, which is
-        // precisely the amplification this window exists to bound (#4701).
-        //
-        // A refusal here is not a new failure mode: "no alternate was available" is already the
-        // outcome when the pool has nowhere to move this request to, and it is handled.
-        if (!classifyPoolRecoveryDispatch("retry").admitted) {
-          accountMovePermit.release();
-          accountMovePermit = undefined;
-          // The alternate context was resolved and will not send. Hand back whatever recovery
-          // lease it is holding rather than leaving that account unprobeable.
-          releaseCodexAuthContextProbeLease(retryAuthCtx);
-          recordUnmovedTransientOutcome();
-          return { kind: "no-alternate" };
-        }
-      }
+      const movingAccount = accountMovePermit !== undefined;
       const rung = sameAccountRecovery?.reserve();
       if (rung && !rung.allowed) {
         if (retrySendCount > 0) break;
@@ -1112,7 +1093,9 @@ async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal
             let admitted = false;
             const admit = (): boolean => {
               if (signal.aborted || (args.reserveDeadline !== undefined && Date.now() >= args.reserveDeadline)
-                || !claimRetrySend(physicalPermit)) return false;
+                || !(movingAccount && !transient
+                  ? sharedPoolBackpressure().tryPermitRetryDispatch(Date.now(), () => claimRetrySend(physicalPermit))
+                  : claimRetrySend(physicalPermit))) return false;
               admitted = true;
               if (args.reserveWalk) {
                 if (transient) args.reserveWalk.transientRetries++;
@@ -1149,7 +1132,7 @@ async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal
                         if (!transient) throw new StaleReserveSeat(retryAuthCtx.accountId);
                         throw withheld;
                       }
-                      if ((!transient && !classifyPoolRecoveryDispatch("retry").admitted) || !admit()) throw withheld;
+                      if (!admit()) throw withheld;
                       if (!transient) void upstreamResponse.body?.cancel().catch(() => undefined);
                     }
                     args.onPhysicalSend?.(request, body);
@@ -1171,8 +1154,11 @@ async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal
               return undefined;
             } catch (error) {
               if (error === withheld || (!admitted && signal.aborted && !args.upstream.signal.aborted)) return undefined;
-              if (args.reserveWalk && !admitted && !transient && retryAuthCtx.kind === "pool"
-                && (error instanceof CodexAccountCooldownError || error instanceof CodexPoolAuthenticationError)) throw new StaleReserveSeat(retryAuthCtx.accountId);
+              if (args.reserveWalk && !admitted && retryAuthCtx.kind === "pool"
+                && (error instanceof CodexAccountCooldownError || error instanceof CodexPoolAuthenticationError)) {
+                if (transient) return undefined;
+                throw new StaleReserveSeat(retryAuthCtx.accountId);
+              }
               throw error;
             } finally {
               if (!admitted) logCtx.accountLogLabel = priorAccountLabel;

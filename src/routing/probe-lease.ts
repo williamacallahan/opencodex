@@ -412,7 +412,7 @@ export interface PoolBackpressureLimiter {
   /** A new request's FIRST send. Always recorded, never refused. */
   recordInitialSend(now?: number): void;
   /** Admit one retry dispatch, or refuse when the window's ratio is spent. */
-  tryPermitRetryDispatch(now?: number): boolean;
+  tryPermitRetryDispatch(now?: number, admit?: () => boolean): boolean;
   /** Admit one probe dispatch under the same shared recovery budget. */
   tryPermitProbeDispatch(now?: number): boolean;
   /**
@@ -467,7 +467,7 @@ export function createPoolBackpressureLimiter(
     return Math.max(policy.minRecoveryAllowance, Math.floor(initials * policy.maxRetryRatio));
   }
 
-  function tryPermit(now: number): boolean {
+  function tryPermit(now: number, admit?: () => boolean): boolean {
     const bucket = bucketFor(now);
     const { initials, recoveries } = totals(now);
     if (recoveries + 1 > allowanceFor(initials)) {
@@ -475,7 +475,9 @@ export function createPoolBackpressureLimiter(
       return false;
     }
     bucket.recoveries += 1;
-    return true;
+    let committed = false;
+    try { return committed = admit?.() ?? true; }
+    finally { if (!committed) bucket.recoveries--; }
   }
 
   function nextRecoveryAt(now: number): number {
@@ -495,8 +497,8 @@ export function createPoolBackpressureLimiter(
     recordInitialSend(now = Date.now()): void {
       bucketFor(now).initials += 1;
     },
-    tryPermitRetryDispatch(now = Date.now()): boolean {
-      return tryPermit(now);
+    tryPermitRetryDispatch(now = Date.now(), admit?: () => boolean): boolean {
+      return tryPermit(now, admit);
     },
     tryPermitProbeDispatch(now = Date.now()): boolean {
       return tryPermit(now);

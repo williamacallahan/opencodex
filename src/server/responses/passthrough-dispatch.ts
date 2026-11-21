@@ -28,7 +28,7 @@ import { isLocalUpstream } from "../../lib/local-upstream";
 import { resolveConnectTimeoutMs } from "../../stall-timeout";
 import { codexSafetyBufferingFilterOptions, terminalStatusFromParsed } from "../relay";
 import { imageGenToolCallAliases } from "../responses-image-gen-repair";
-import { rememberResponseState, isBodyNonPersistable } from "../../responses/state";
+import { copyPreviousResponseReplayProvenance, rememberResponseState, isBodyNonPersistable } from "../../responses/state";
 import {
   currentTurnWireToolCatalogBody,
   hasExplicitEmptyToolCatalog,
@@ -331,7 +331,9 @@ export async function preparePassthroughExchange(
       const Replay = options.nativeControl.kind === "injection" ? NativeInjectionReplay : NativeSteeringReplay;
       options.nativeControl.replayFactory = () => new Replay(body.input, (input, response) => {
         if (passthroughRecordEligible && !isBodyNonPersistable(body)) {
-          rememberResponseState({ ...body, input }, response, undefined, responseStateOptions(true));
+          const replay = { ...body, input };
+          copyPreviousResponseReplayProvenance(body, replay);
+          rememberResponseState(replay, response, undefined, responseStateOptions(true));
         }
       });
     }

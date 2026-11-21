@@ -24,6 +24,7 @@ interface LegacySnapshotState {
   providers?: OcxProviderContinuationState;
   conversationId?: unknown;
   cursorCheckpointUsable?: unknown;
+  selfContained?: unknown;
   unforcedStoreFalse?: unknown;
 }
 
@@ -65,6 +66,7 @@ export function loadSnapshotEntry(id: string, value: unknown, store: SnapshotLoa
       // here; the spill payload validator re-checks it against the real array.
       ...(anchorFor(Number.MAX_SAFE_INTEGER) !== undefined ? { providerOutputStart: anchorFor(Number.MAX_SAFE_INTEGER) } : {}),
       ...(rec.providers ? { providers: rec.providers } : {}),
+      ...(rec.selfContained === true ? { selfContained: true as const } : {}),
       ...(rec.unforcedStoreFalse === true ? { unforcedStoreFalse: true } : {}),
       spill: rec.spill,
     };
@@ -93,6 +95,7 @@ export function loadSnapshotEntry(id: string, value: unknown, store: SnapshotLoa
     items: rec.items,
     ...(anchorFor(rec.items.length) !== undefined ? { providerOutputStart: anchorFor(rec.items.length) } : {}),
     ...(providers ? { providers } : {}),
+    ...(rec.selfContained === true ? { selfContained: true as const } : {}),
     ...(rec.unforcedStoreFalse === true ? { unforcedStoreFalse: true } : {}),
   });
   if (!resident) {

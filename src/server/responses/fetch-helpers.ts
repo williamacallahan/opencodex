@@ -33,7 +33,7 @@ import {
 import { redactSecretString } from "../../lib/redact";
 import { outboundCredentials } from "../../lib/outbound-credential-registry";
 import { compressUpstreamRequestBody, isCanonicalCodexResponsesUrl } from "./request-compression";
-import { redeemOutboundTurnState, TURN_STATE_BINDING_INIT, TURN_STATE_OWNER, type TurnStateConstrained, turnStateBinding } from "../turn-state-handles";
+import { requiredComboSendOwner, redeemOutboundTurnState, TURN_STATE_BINDING_INIT, TURN_STATE_OWNER, type TurnStateConstrained, turnStateBinding } from "../turn-state-handles";
 
 export { withUpstreamHttpVersion };
 
@@ -416,7 +416,7 @@ export function providerFetch(
     // Turn-state handles are redeemed here, at the send, where the admitted caller, the provider and
     // the outbound account are all settled; a handle bound to anything else is not forwarded.
     const sendHeaders = (sent?: RequestInit) => new Headers(sent?.headers ?? (input instanceof Request ? input.headers : undefined));
-    const owner = provider[TURN_STATE_OWNER];
+    const owner = requiredComboSendOwner(providerName) ?? provider[TURN_STATE_OWNER];
     if (owner) {
       owner.assertHeaders(sendHeaders(init));
       init = { ...init, [TURN_STATE_OWNER]: owner };

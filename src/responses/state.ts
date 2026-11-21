@@ -1,3 +1,5 @@
+import { noteUpstreamHistory, recordExpandedHistory, isCompleteResponseTranscript } from "./state/body-policy";
+export { previousResponseReplayPrefixLength, previousResponseRestoredPrefixLength, copyPreviousResponseReplayProvenance } from "./state/body-policy";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { atomicWriteFileAsync, getConfigDir, resolveWriteTarget } from "../config";
@@ -104,6 +106,7 @@ export interface ResidentResponseState {
   /** Index in `items` where provider output begins; see clientCarriedPrefixLength. */
   providerOutputStart?: number;
   providers?: OcxProviderContinuationState;
+  selfContained?: true;
   unforcedStoreFalse?: boolean;
   sizeBytes: number;
 }
@@ -115,6 +118,7 @@ export interface SpilledResponseState {
   /** Mirrors the spilled payload boundary so a spilled entry keeps its anchor. */
   providerOutputStart?: number;
   providers?: OcxProviderContinuationState;
+  selfContained?: true;
   unforcedStoreFalse?: boolean;
   spill: ResponseSpillRef;
   sizeBytes: number;
@@ -131,7 +135,7 @@ export type ResidentInput = Omit<ResidentResponseState, "kind" | "sizeBytes">;
 
 export type PreviousResponseReplayFailure = {
   code: "previous_response_not_found";
-  reason: "spill_missing" | "spill_corrupt" | "spill_failed" | "spill_too_large" | "scope_mismatch";
+  reason: "spill_missing" | "spill_corrupt" | "spill_failed" | "spill_too_large" | "scope_mismatch" | "upstream_history";
 };
 
 const states = new Map<string, StoredResponseState>();
@@ -301,6 +305,7 @@ function measureResidentEntry(id: string, entry: ResidentInput): ResidentRespons
     createdAt: entry.createdAt,
     ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
     items: entry.items,
+    ...(entry.selfContained ? { selfContained: true } : {}),
     ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
     ...(entry.providers ? { providers: entry.providers } : {}),
     ...(entry.unforcedStoreFalse ? { unforcedStoreFalse: entry.unforcedStoreFalse } : {}),
@@ -408,6 +413,7 @@ function swapResidentForSpill(id: string, expected: ResidentResponseState, ref: 
     ...(expected.clientThreadId ? { clientThreadId: expected.clientThreadId } : {}),
     ...(expected.providerOutputStart !== undefined ? { providerOutputStart: expected.providerOutputStart } : {}),
     ...(expected.providers ? { providers: expected.providers } : {}),
+    ...(expected.selfContained ? { selfContained: true as const } : {}),
     ...(expected.unforcedStoreFalse ? { unforcedStoreFalse: expected.unforcedStoreFalse } : {}),
     spill: ref,
   };
@@ -440,6 +446,7 @@ function replaceSpillEntryAtomically(
       ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
       ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
       ...(candidate.providers ? { providers: candidate.providers } : {}),
+      ...(candidate.selfContained ? { selfContained: true as const } : {}),
       ...(candidate.unforcedStoreFalse ? { unforcedStoreFalse: candidate.unforcedStoreFalse } : {}),
       spill: ref,
     };
@@ -547,6 +554,7 @@ function admitOversizedCandidate(
       ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
       ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
       ...(candidate.providers ? { providers: candidate.providers } : {}),
+      ...(candidate.selfContained ? { selfContained: true as const } : {}),
       ...(candidate.unforcedStoreFalse ? { unforcedStoreFalse: candidate.unforcedStoreFalse } : {}),
       spill: ref,
     };
@@ -590,13 +598,6 @@ bindSpillQueueStore({
   terminalizationMaxPasses: () => RESPONSE_SPILL_SHUTDOWN_TERMINALIZATION_MAX_PASSES,
 });
 
-// Replay provenance must stay proxy-private: a WeakMap distinguishes replayed history from the
-// newly appended input suffix without adding an unknown field that native passthrough could send
-// upstream. The parser uses this boundary to acknowledge historical compaction markers exactly
-// once. It records the boundary whether the proxy prepended the history or the client already
-// carried it — the boundary is the same either way, and only its provenance differs.
-const replayedInputPrefixLengths = new WeakMap<object, number>();
-const clientCarriedReplays = new WeakSet<object>(); // overlap skip: the client resent the window itself
 const replayFailures = new WeakMap<object, PreviousResponseReplayFailure>();
 let loaded = false;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1070,6 +1071,7 @@ function materializeEntry(
   }
   const state = measureResidentEntry(id, {
     createdAt: result.payload.createdAt,
+    ...(entry.selfContained ? { selfContained: true } : {}),
     ...(result.payload.clientThreadId ? { clientThreadId: result.payload.clientThreadId } : {}),
     items: result.payload.items,
     ...(result.payload.providerOutputStart !== undefined
@@ -1095,6 +1097,7 @@ export function expandPreviousResponseInput(body: unknown, clientThreadId?: stri
   if (!body || typeof body !== "object" || Array.isArray(body)) return body;
   const request = body as Record<string, unknown>;
   const previousId = typeof request.previous_response_id === "string" ? request.previous_response_id : undefined;
+  if (request.conversation != null || request.prompt != null || previousId) noteUpstreamHistory(request);
   if (!previousId) return body;
   ensureLoaded();
   pruneResponses();
@@ -1112,6 +1115,12 @@ export function expandPreviousResponseInput(body: unknown, clientThreadId?: stri
   if (requestThreadId !== storedThreadId) {
     replayFailures.set(request, { code: "previous_response_not_found", reason: "scope_mismatch" });
     replayScopeMismatchDrops += 1;
+    return body;
+  }
+  // A cache hit may contain only the append to a server-owned conversation. Legacy rows
+  // carry no proof either. Never turn either into a self-contained cold replay.
+  if (!materialized.state.selfContained || request.conversation != null) {
+    replayFailures.set(request, { code: "previous_response_not_found", reason: "upstream_history" });
     return body;
   }
   const clientInput = inputItems(request.input);
@@ -1149,8 +1158,7 @@ export function expandPreviousResponseInput(body: unknown, clientThreadId?: stri
       // Same provenance boundary a real expansion would record, so the replayed prefix does
       // not re-acknowledge historical compaction markers (parser.ts) and stays visible to
       // guidance de-duplication (collaboration.ts).
-      replayedInputPrefixLengths.set(unchanged, carried);
-      clientCarriedReplays.add(unchanged);
+      recordExpandedHistory(unchanged, carried, true);
       return unchanged;
     }
   }
@@ -1158,36 +1166,13 @@ export function expandPreviousResponseInput(body: unknown, clientThreadId?: stri
     ...request,
     input: [...stored, ...clientInput],
   };
-  replayedInputPrefixLengths.set(expanded, stored.length);
+  recordExpandedHistory(expanded, stored.length);
   return expanded;
 }
 
 export function previousResponseReplayFailure(body: unknown): PreviousResponseReplayFailure | undefined {
   if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
   return replayFailures.get(body);
-}
-
-/** Number of leading input items restored from previous_response_id state for this exact body. */
-export function previousResponseReplayPrefixLength(body: unknown): number {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return 0;
-  return replayedInputPrefixLengths.get(body) ?? 0;
-}
-
-/** Leading items the PROXY prepended; 0 when the client resent the stored window itself (overlap skip). */
-export function previousResponseRestoredPrefixLength(body: unknown): number {
-  return body && typeof body === "object" && clientCarriedReplays.has(body) ? 0 : previousResponseReplayPrefixLength(body);
-}
-
-/** Copy proxy-private replay provenance to an internal clone with the same materialized input. */
-export function copyPreviousResponseReplayProvenance(source: unknown, target: unknown): void {
-  if (!source || typeof source !== "object" || Array.isArray(source)) return;
-  if (!target || typeof target !== "object" || Array.isArray(target)) return;
-  const prefixLength = replayedInputPrefixLengths.get(source);
-  if (!prefixLength) return;
-  const input = (target as { input?: unknown }).input;
-  if (!Array.isArray(input) || prefixLength > input.length) return;
-  replayedInputPrefixLengths.set(target, prefixLength);
-  if (clientCarriedReplays.has(source)) clientCarriedReplays.add(target);
 }
 
 /** True when this exact request could not replay because its task scope did not match. */
@@ -1295,6 +1280,7 @@ export function rememberResponseState(
     createdAt: now(),
     ...(clientThreadId ? { clientThreadId } : {}),
     items: [...requestItems, ...response.output],
+    ...(isCompleteResponseTranscript(request) ? { selfContained: true as const } : {}),
     // Where response.output begins. A replay skip requires a matched item at or past this
     // index that also carries a provider-issued id — position alone proves only that an item
     // sits on the provider side, not that the provider authored it.

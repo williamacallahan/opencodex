@@ -23,3 +23,46 @@ export function markBodyNonPersistable(body: unknown): void {
 export function isBodyNonPersistable(body: unknown): boolean {
   return !!body && typeof body === "object" && nonPersistableBodies.has(body);
 }
+
+// Replay provenance must stay proxy-private: a WeakMap distinguishes replayed history from the
+// newly appended input suffix without adding an unknown field that native passthrough could send
+// upstream. The parser uses this boundary to acknowledge historical compaction markers exactly
+// once. It records the boundary whether the proxy prepended the history or the client already
+// carried it — the boundary is the same either way, and only its provenance differs.
+const upstreamHistoryBodies = new WeakSet<object>();
+const replayedInputPrefixLengths = new WeakMap<object, number>();
+const clientCarriedReplays = new WeakSet<object>(); // overlap skip: the client resent the window itself
+
+export function noteUpstreamHistory(body: object): void { upstreamHistoryBodies.add(body); }
+export function recordExpandedHistory(body: object, prefix: number, clientCarried = false): void {
+  replayedInputPrefixLengths.set(body, prefix);
+  if (clientCarried) clientCarriedReplays.add(body);
+}
+export function isCompleteResponseTranscript(request: Record<string, unknown>): boolean {
+  return !upstreamHistoryBodies.has(request) && request.conversation == null && request.prompt == null
+    && (request.previous_response_id == null || replayedInputPrefixLengths.has(request));
+}
+
+/** Number of leading input items restored from previous_response_id state for this exact body. */
+export function previousResponseReplayPrefixLength(body: unknown): number {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return 0;
+  return replayedInputPrefixLengths.get(body) ?? 0;
+}
+
+/** Leading items the PROXY prepended; 0 when the client resent the stored window itself (overlap skip). */
+export function previousResponseRestoredPrefixLength(body: unknown): number {
+  return body && typeof body === "object" && clientCarriedReplays.has(body) ? 0 : previousResponseReplayPrefixLength(body);
+}
+
+/** Copy proxy-private replay provenance to an internal clone with the same materialized input. */
+export function copyPreviousResponseReplayProvenance(source: unknown, target: unknown): void {
+  if (!source || typeof source !== "object" || Array.isArray(source)) return;
+  if (!target || typeof target !== "object" || Array.isArray(target)) return;
+  if (upstreamHistoryBodies.has(source)) upstreamHistoryBodies.add(target);
+  const prefixLength = replayedInputPrefixLengths.get(source);
+  if (prefixLength === undefined) return;
+  const input = (target as { input?: unknown }).input;
+  if (!Array.isArray(input) || prefixLength > input.length) return;
+  replayedInputPrefixLengths.set(target, prefixLength);
+  if (clientCarriedReplays.has(source)) clientCarriedReplays.add(target);
+}

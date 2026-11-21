@@ -1,3 +1,4 @@
+import { sendReserveSeat } from "../../src/server/responses/reserve-seat-dispatch";
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,7 +34,7 @@ import { createTranslatorBudget } from "../../src/lib/translator-budget";
 import { createRequestExecutionBudget } from "../../src/lib/request-execution-budget";
 import { createSpendReservationLedger, DEFAULT_SPEND_RESERVATION_POLICY } from "../../src/lib/spend-reservation-ledger";
 import { createRequestSpendTracker } from "../../src/server/responses/request-spend";
-import { configureSharedPoolBackpressure, DEFAULT_POOL_BACKPRESSURE_POLICY, resetSharedPoolBackpressureForTests } from "../../src/routing/probe-lease";
+import { sharedPoolBackpressure, configureSharedPoolBackpressure, DEFAULT_POOL_BACKPRESSURE_POLICY, resetSharedPoolBackpressureForTests } from "../../src/routing/probe-lease";
 
 import { providerRequestPacingStatus, resetProviderRequestPacingForTest, waitForProviderRequestSlot } from "../../src/providers/request-pacing";
 import { decodeCompactionSummary } from "../../src/responses/compaction";
@@ -616,7 +617,7 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     { name: "a portable turn asks the eligible relay before spending native included usage", input: "again", nativeReserve: false, expected: "relay:gpt-6-luna" },
     { name: "a portable turn uses newly available native Reserve before the relay", input: "again", nativeReserve: true, expected: "native:gpt-reserve" },
     { name: "a turn carrying scrub-safe native reasoning tries the relay", nativeReserve: false, input: [
-      { type: "reasoning", id: "rs_native", summary: [], encrypted_content: "native-cipher" }, { role: "user", content: "again" },
+      { type: "reasoning", id: "rs_native", summary: [{ type: "summary_text", text: "completed reasoning" }], encrypted_content: "native-cipher" }, { role: "user", content: "again" },
     ], expected: "relay:gpt-6-luna" },
   ])("after native ordinary Luna served, $name", async ({ input, nativeReserve, expected }) => {
     seats(false);
@@ -667,6 +668,90 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(result.status).toBe(429); expect(calls).toEqual(["native:gpt-6-luna"]);
     expect(nativeAccounts).toEqual([`fixture-workspace-${A}`]);
     expect(logCtx.routeDecision?.selected.reason).toBe("luna-owner-turn-state");
+  });
+
+  test("an append to a server conversation is not a complete locally replayable transcript", async () => {
+    seats(false); const cfg = config();
+    expect((await post(cfg, { model: "relay/gpt-6-luna", conversation: "fixture-upstream-conversation", input: "only the append", store: true })).status).toBe(200);
+    calls.length = 0;
+    const result = await post(cfg, { previous_response_id: "resp_1", input: "where did we begin?" });
+    expect(result.status).toBe(400); expect(result.text).toContain("previous_response_not_found"); expect(calls).toEqual([]);
+  });
+
+  test("a native handle outranks a later relay completion on the same lane", async () => {
+    const cfg = config(), lane = { "thread-id": "handle-before-relay" }; seats(false);
+    const handle = issueTurnStateHandle("fixture-native-state", turnStateBinding("openai", new Headers({
+      authorization: `Bearer fixture-access-${A}`, "chatgpt-account-id": `fixture-workspace-${A}`,
+    })));
+    expect((await post(cfg, {}, lane)).status).toBe(200); expect(calls).toEqual(["relay:gpt-6-luna"]);
+    calls.length = 0; seats();
+    expect((await post(cfg, {}, { ...lane, [TURN_STATE_HEADER]: handle })).status).toBe(200);
+    expect(calls).toEqual(["native:gpt-6-luna"]); expect(nativeAccounts).toEqual([`fixture-workspace-${A}`]);
+  });
+
+  test("a disabled relay cannot release a bound turn to a third provider", async () => {
+    const cfg = config(); cfg.providers.relay!.disabled = true; seats(); native = reserveRefused;
+    const handle = issueTurnStateHandle("fixture-disabled-relay", turnStateBinding("openai", new Headers({
+      authorization: `Bearer fixture-access-${A}`, "chatgpt-account-id": `fixture-workspace-${A}`,
+    })));
+    expect((await post(cfg, {}, { [TURN_STATE_HEADER]: handle })).status).toBe(429);
+    expect(calls).toEqual(["native:gpt-6-luna"]);
+  });
+
+  test("a pending tool turn retains its only reasoning ciphertext on the issuing seat", async () => {
+    const cfg = config(), lane = { "thread-id": "pending-native-reasoning" }; seats();
+    expect((await post(cfg, {}, lane)).status).toBe(200); calls.length = 0;
+    let wire = "";
+    native = body => { wire = JSON.stringify(body); return sse(body.model, "ok"); };
+    const input = [{ type: "reasoning", id: "rs_private", encrypted_content: "owner-only-fixture", summary: [] },
+      { type: "function_call", name: "lookup", arguments: "{}", call_id: "call_fixture" }];
+    expect((await post(cfg, { input }, lane)).status).toBe(200);
+    expect(calls).toEqual(["native:gpt-reserve"]); expect(wire).toContain("owner-only-fixture");
+  });
+
+  test("a summarized blob stays intact on the same Reserve seat", async () => {
+    const cfg = config(), lane = { "thread-id": "same-reserve-history" }; seats();
+    expect((await post(cfg, {}, lane)).status).toBe(200);
+    let wire = ""; native = body => { wire = JSON.stringify(body); return sse(body.model, "ok"); };
+    const input = [{ type: "reasoning", id: "rs_same123", summary: [{ type: "summary_text", text: "readable" }], encrypted_content: "same-owner-cipher" },
+      { role: "user", content: "continue" }];
+    expect((await post(cfg, { input }, lane)).status).toBe(200);
+    expect(new Set(nativeAccounts).size).toBe(1); expect(wire).toContain("same-owner-cipher");
+  });
+
+  test("a closed reasoning id is not forwarded to an unknown item store", async () => {
+    const cfg = config(); seats(false); let wire = "";
+    relay = (_req, body) => { wire = JSON.stringify(body); return sse(body.model, "ok"); };
+    const input = [{ type: "reasoning", id: "rs_foreign123", summary: [{ type: "summary_text", text: "readable history" }] },
+      { role: "user", content: "continue" }];
+    expect((await post(cfg, { input, store: true })).status).toBe(200);
+    expect(calls).toEqual(["relay:gpt-6-luna"]); expect(wire).toContain("readable history"); expect(wire).not.toContain("rs_foreign123");
+  });
+
+  test("a pre-wire retry veto returns the alternate's exact last response", async () => {
+    const budget = createRequestExecutionBudget();
+    const booking = budget.reserveDispatch({ sendClass: "account-failover", targetKey: "alternate" });
+    if (!booking.allowed) throw new Error("first move not admitted");
+    const last = new Response("readable alternate refusal", { status: 503, headers: { "retry-after": "0", "x-fixture": "from B" } });
+    let vetoed = false;
+    try {
+      const result = await sendReserveSeat({ remaining: new Set([B]), movesSent: 0, transientRetries: 0 }, budget, booking.permit,
+        new AbortController().signal, async (permit, transient) => {
+          if (transient) { vetoed = true; return undefined; }
+          expect(permit.use()).toBe(true); return last;
+        });
+      expect(vetoed).toBe(true); expect(result).toBe(last); expect(result?.headers.get("x-fixture")).toBe("from B");
+      expect(await result?.text()).toBe("readable alternate refusal"); expect(budget.used).toBe(1);
+    } finally { booking.permit.release(); }
+  });
+
+  test("a denied physical claim refunds the pool window for another turn", async () => {
+    const cfg = twoSpentSeats(); native = reserveRefused; let admission = 0;
+    const sendBudget = createRequestExecutionBudget(undefined, undefined, { charge: () => true, refund() {}, beforePhysicalSend: () => ++admission !== 2 });
+    const before = sharedPoolBackpressure().state(now).recoveryDispatches;
+    expect((await post(cfg, {}, {}, undefined, { sendBudget })).text).toContain("response.completed");
+    expect(calls).toEqual(["native:gpt-reserve", "relay:gpt-6-luna"]); expect(sendBudget.used).toBe(2);
+    expect(sharedPoolBackpressure().state(now).recoveryDispatches).toBe(before);
   });
 
   test("a portable follow-up holds a remembered Reserve seat's empty quota prelude", async () => {

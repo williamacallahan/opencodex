@@ -52,7 +52,7 @@ export interface LunaReserveLegPlan {
 /** Judge the same expanded transcript the child will send. A native compaction blob or an
  * encrypted task is not a reasoning summary: if any opaque carrier survives, keep its owner. */
 export function prepareLunaReplay(body: unknown, expanded: boolean, headers: Headers):
-  { kind: "portable"; body: unknown } | { kind: "bound"; reason: PortabilityDenial | "turn-state" | "item-reference" } {
+  { kind: "portable"; body: unknown; ownerBody?: unknown } | { kind: "bound"; reason: PortabilityDenial | "turn-state" | "item-reference" } {
   if (headers.has(CODEX_TURN_STATE_HEADER) || (isPlainObject(body) && isPlainObject(body.client_metadata)
     && CODEX_TURN_STATE_HEADER in body.client_metadata)) return { kind: "bound", reason: "turn-state" };
   const full = stripPreviousResponseId(body, expanded);
@@ -60,14 +60,37 @@ export function prepareLunaReplay(body: unknown, expanded: boolean, headers: Hea
     return { kind: "bound", reason: "item-reference" };
   }
   const verdict = canPortConversationState(collectConversationStateCarriers(full));
-  if (verdict.portable) return { kind: "portable", body: full };
-  if (verdict.reason === "encrypted-reasoning") {
-    const scrubbed = sanitizeReasoningInputContent(full, { stripEncryptedContent: true, dropForeignItemId: true, preserveRawReasoningContent: true });
-    if (scrubbed !== full && canPortConversationState(collectConversationStateCarriers(scrubbed)).portable) {
-      return { kind: "portable", body: scrubbed };
+  if (!verdict.portable && verdict.reason !== "encrypted-reasoning") return { kind: "bound", reason: verdict.reason };
+  const input = isPlainObject(full) && Array.isArray(full.input) ? full.input : [];
+  let sensitive = false, freshUserTurn = false;
+  const pending = new Set<string>();
+  for (const item of input) {
+    if (!isPlainObject(item)) continue;
+    if (item.type === "reasoning" && (item.id || item.encrypted_content)) {
+      // A pointer or ciphertext with no readable replacement is not discardable context.
+      if (!Array.isArray(item.summary) || !item.summary.some(part => isPlainObject(part)
+        && part.type === "summary_text" && typeof part.text === "string" && part.text.trim())) return { kind: "bound", reason: "encrypted-reasoning" };
+      sensitive = true; freshUserTurn = false;
     }
+    if (sensitive && item.role === "user" && (typeof item.content === "string" ? item.content.trim().length > 0
+      : Array.isArray(item.content) && item.content.some(part => isPlainObject(part) && part.type === "input_text" && typeof part.text === "string" && part.text.trim()))) freshUserTurn = true;
+    if (item.type === "function_call" || item.type === "custom_tool_call") pending.add(typeof item.call_id === "string" ? item.call_id : "");
+    if ((item.type === "function_call_output" || item.type === "custom_tool_call_output") && typeof item.call_id === "string") pending.delete(item.call_id);
   }
-  return { kind: "bound", reason: verdict.reason };
+  if (!sensitive && verdict.portable) return { kind: "portable", body: full };
+  if (!sensitive || !freshUserTurn || pending.size) return { kind: "bound", reason: "encrypted-reasoning" };
+  const scrubbed = sanitizeReasoningInputContent(full, { stripEncryptedContent: true, dropForeignItemId: true, preserveRawReasoningContent: true });
+  return canPortConversationState(collectConversationStateCarriers(scrubbed)).portable
+    ? { kind: "portable", body: scrubbed, ownerBody: full } : { kind: "bound", reason: "encrypted-reasoning" };
+}
+
+export function nativeLunaTarget(combo: Combo, resolve: (target: ComboTarget) => RouteResult | undefined) {
+  if (combo.strategy !== "failover") return;
+  return combo.targets.find(target => {
+    if (!modelHasPoolReserve(target.model)) return false;
+    const route = resolve(target);
+    return route?.codexAccountMode === "pool" && isCanonicalOpenAiForwardProvider(route.provider) && modelHasPoolReserve(route.modelId);
+  });
 }
 
 export function planLunaReserveLegs(
@@ -76,18 +99,10 @@ export function planLunaReserveLegs(
   resolve: (target: ComboTarget) => RouteResult | undefined,
   eligible: (target: ComboTarget) => boolean,
   hopAllowed: (from: ComboTarget, to: ComboTarget) => boolean,
+  native = nativeLunaTarget(combo, resolve),
 ): LunaReserveLegPlan | undefined {
-  // Configured model ids are enough to rule out every other combo before any route is resolved.
-  if (combo.strategy !== "failover" || !combo.targets.some(target => modelHasPoolReserve(target.model))) return undefined;
-  // Each leg is judged by its resolved destination: a model redirect can leave Luna, and a per-model wire
-  // override can make the relay a Chat route whose failures carry no Responses no-start evidence.
-  const nativeIndex = combo.targets.findIndex(target => {
-    if (!modelHasPoolReserve(target.model)) return false;
-    const route = resolve(target);
-    return route?.codexAccountMode === "pool" && isCanonicalOpenAiForwardProvider(route.provider) && modelHasPoolReserve(route.modelId);
-  });
-  const native = combo.targets[nativeIndex];
-  const relay = combo.targets[nativeIndex + 1];
+  // Discovery of the owner-capable native target does not require a usable relay.
+  const relay = native && combo.targets[combo.targets.indexOf(native) + 1];
   const relayRoute = native && relay ? resolve(relay) : undefined;
   if (!native || !relay || !relayRoute || relay.metered || !modelHasPoolReserve(relayRoute.modelId)
     || !isCodexLbProvider(relayRoute.provider) || relayRoute.staticPolicy.model.adapter !== "openai-responses"

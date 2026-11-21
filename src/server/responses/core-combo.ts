@@ -1,3 +1,4 @@
+import { comboTurnStateOwner, withComboTurnStateOwner, CodexTurnStateOwnerUnavailableError } from "../turn-state-handles";
 import { comboLogLabel, comboTargetLogLabel } from "../../combos/resolve";
 import { clientFacingModelLabel, clientFacingModelText } from "../../lib/error-destination";
 import { projectLocalModelRefusalLog } from "../request-log-failure-detail";
@@ -126,8 +127,8 @@ import {
   markEagerRelaySseResponse,
 } from "../relay";
 import { preflightComboStreamResponse } from "./combo-stream-preflight";
-import { isReserveSeatQuotaRefusal, planLunaReserveLegs, prepareLunaReplay, relayProvedNotStarted } from "./combo-luna-legs";
-import { createPoolReserveWalk, type PoolCapacityIntent } from "../../codex/pool-reserve";
+import { isReserveSeatQuotaRefusal, nativeLunaTarget, planLunaReserveLegs, prepareLunaReplay, relayProvedNotStarted } from "./combo-luna-legs";
+import { createPoolReserveWalk, modelHasPoolReserve, type PoolCapacityIntent } from "../../codex/pool-reserve";
 import { requiredToolContractOf } from "./combo-required-tool-contract";
 import {
   streamingContextOverflowResponse,
@@ -139,7 +140,7 @@ import {
 import { mandatoryResponsesReasoningReplayUnavailable } from "./core-replay";
 import { anthropicSessionKeyFromParts } from "../../oauth/anthropic-routing";
 import { agentServingThreadKey } from "../../oauth/session-affinity-key";
-import { isReplayRefusalResponse, settleOperatorReplacement, UPSTREAM_RESET_REPLAY_REFUSED_CODE } from "../../lib/upstream-retry";
+import { markResponseNonReplayable, isReplayRefusalResponse, settleOperatorReplacement, UPSTREAM_RESET_REPLAY_REFUSED_CODE } from "../../lib/upstream-retry";
 import { attributeFinalRequest } from "../request-log-failure-attribution";
 import { createComboProtocolLanes, dispatchNativeComboChild } from "./core-combo-native";
 import { createJevModelInvoker } from "./jev-model-invoke";
@@ -663,7 +664,12 @@ export async function executeComboResponses(
       return routeAllowedByScope(admissionScope, route) ? route : undefined;
     } catch { return undefined; }
   };
+  const handleOwner = comboTurnStateOwner(req.headers, body);
   const pinEligible = (target: (typeof combo.targets)[number]): boolean => {
+    if (handleOwner) {
+      const route = scopedRoute(target);
+      if (route?.staticPolicy.model.adapter !== "openai-responses" || !handleOwner.permitsProvider(route.providerName)) return false;
+    }
     if (!((meteredAllowed || !target.metered) && targetEligible(target))) return false;
     const primary = combo.targets[0];
     if (!failoverOrder || !primary || targetKey(primary) === targetKey(target)) return true;
@@ -672,6 +678,11 @@ export async function executeComboResponses(
       site: "combo", route: `combo/${comboId}`, aliases: [requestedModel], trigger: "unavailable", admission: options.admission,
       from: resolvedComboDestination(config, primary), to: resolvedComboDestination(config, target),
     });
+  };
+  const unavailableOwner = (): Response => {
+    const refusal = markProxyError(formatErrorResponse(409, "invalid_request_error", new CodexTurnStateOwnerUnavailableError().message));
+    markResponseNonReplayable(refusal);
+    return refusal;
   };
   const recalledPick = options.compactionRoutingOverride || options.mainHardLockFallbackOverride
     ? undefined
@@ -684,17 +695,26 @@ export async function executeComboResponses(
       eligible: pinEligible,
       now: initialNow,
     });
-  const lunaPair = !unreadableEncryptedAgentTask ? planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed) : undefined;
-  const lunaReplay = lunaPair ? prepareLunaReplay(body, comboReplaySnapshot.previousResponseInputExpanded, req.headers) : undefined;
+  const native = nativeLunaTarget(combo, scopedRoute);
+  const nativeKey = native && targetKey(native);
+  const lunaPair = native && !unreadableEncryptedAgentTask ? planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed, native) : undefined;
+  const lunaCandidate = native !== undefined || combo.strategy === "failover" && combo.targets.some(target =>
+    modelHasPoolReserve(target.model) && config.providers[target.provider] && isCanonicalOpenAiForwardProvider(config.providers[target.provider]!));
+  const lunaReplay = handleOwner || lunaCandidate ? prepareLunaReplay(body, comboReplaySnapshot.previousResponseInputExpanded, req.headers) : undefined;
   const lunaLegs = lunaReplay?.kind === "portable" ? lunaPair : undefined;
   const dispatchBody = lunaReplay?.kind === "portable" ? lunaReplay.body : body;
-  if (lunaPair && lunaReplay?.kind === "bound") {
+  if (lunaReplay?.kind === "bound") {
     const owner = recalledPick?.target ?? (!options.compactionRoutingOverride && !options.mainHardLockFallbackOverride
       ? recallComboTargetForLane(config, comboLane, comboId) : undefined);
-    boundLunaTarget = owner ? targetKey(owner) : lunaPair.nativeKey;
+    if (handleOwner) {
+      const match = combo.targets.find(target => owner && targetKey(target) === targetKey(owner) && pinEligible(target)) ?? combo.targets.find(pinEligible);
+      boundLunaTarget = match && targetKey(match);
+    } else boundLunaTarget = owner ? targetKey(owner) : nativeKey;
+    if (!boundLunaTarget) return unavailableOwner();
   }
   // Recall identifies a provider, not an account dependency. A portable relay pin cannot skip Reserve.
-  const conversationPin = !lunaLegs || (recalledPick && targetKey(recalledPick.target) === lunaLegs.nativeKey) ? recalledPick : undefined;
+  const conversationPin = recalledPick && (!boundLunaTarget || boundLunaTarget === targetKey(recalledPick.target))
+    && (!lunaLegs || targetKey(recalledPick.target) === lunaLegs.nativeKey) ? recalledPick : undefined;
   let lunaStage: "off" | "reserve" | "relay" | "done" = "off";
   const comboLegCount = lunaLegs?.legCount ?? combo.targets.length;
   const onlyReplayIncompatibleTargetsRemain = (excluded: Iterable<string> = []): boolean => {
@@ -769,7 +789,7 @@ export async function executeComboResponses(
     routeConcreteModel,
     // Every pick, including the recovery picks that skip `targetEligible`, keeps metered
     // targets away from callers that may not spend on them.
-    eligible: target => (meteredAllowed || !target.metered) && (pickOptions.eligible?.(target) ?? true),
+    eligible: target => (!boundLunaTarget || targetKey(target) === boundLunaTarget) && (meteredAllowed || !target.metered) && (pickOptions.eligible?.(target) ?? true),
     waitForCooldownMs: combo.waitForCooldownMs,
     abortSignal: options.abortSignal,
   });
@@ -782,6 +802,7 @@ export async function executeComboResponses(
     ? undefined
     : jevSessionPinScope({ combo, comboId, admission: options.admission, lane: comboLane });
 
+  if (!pick && handleOwner) return unavailableOwner();
   if (unreadableEncryptedAgentTask && !pick) {
     pick = await pickWithWait({
       eligible: recoveryEligible,
@@ -1087,7 +1108,7 @@ export async function executeComboResponses(
     const firstComboTarget = comboTargetsDispatched === 0;
     const legTargetKey = targetKey(pick.target);
     if (lunaLegs && firstComboTarget) lunaStage = legTargetKey === lunaLegs.nativeKey ? "reserve" : legTargetKey === lunaLegs.relayKey ? "relay" : "off";
-    const legIntent: PoolCapacityIntent | undefined = boundLunaTarget && boundLunaTarget === lunaPair?.nativeKey ? "owner-only"
+    const legIntent: PoolCapacityIntent | undefined = boundLunaTarget && boundLunaTarget === nativeKey ? "owner-only"
       : legTargetKey !== lunaLegs?.nativeKey ? undefined
       : lunaStage === "reserve" ? "reserve-only" : lunaStage === "done" ? "ordinary-only" : undefined;
     // The physical destination after provider aliases and blockedModelRedirects: hops are
@@ -1193,7 +1214,11 @@ export async function executeComboResponses(
     // own the wire effort, so a provider whose effort swaps the upstream model id is never
     // re-tiered mid-session and its prompt cache survives the turn.
     const jevEffortApplies = initialJevDecision !== undefined && combo.jevEffortMode !== "client";
-    const childInput = options.droidDefaultEffort && isPlainObject(dispatchBody) ? { ...dispatchBody } : dispatchBody;
+    // Native Responses can decide from the final credential; other wires get only the proven cross-owner copy.
+    const lateReasoningProjection = lunaReplay?.kind === "portable" && lunaReplay.ownerBody !== undefined
+      && targetRoute.staticPolicy.model.adapter === "openai-responses";
+    const targetBody = lateReasoningProjection && lunaReplay?.kind === "portable" ? lunaReplay.ownerBody : dispatchBody;
+    const childInput = options.droidDefaultEffort && isPlainObject(targetBody) ? { ...targetBody } : targetBody;
     applyDroidResponsesReasoningDefault(childInput, options.droidDefaultEffort, {
       provider: targetRoute.provider,
       modelId: targetRoute.modelId,
@@ -1330,7 +1355,7 @@ export async function executeComboResponses(
           && targetEligible(target)
           && !isComboTargetInCooldown(comboId, target),
         );
-      const nativeChild = legIntent || dispatchBody !== body ? undefined : protocolLanes?.nativeChild(pick.target, targetRoute, targetSendBudget, initialJevDecision, jevEffortApplies);
+      const nativeChild = handleOwner || legIntent || dispatchBody !== body ? undefined : protocolLanes?.nativeChild(pick.target, targetRoute, targetSendBudget, initialJevDecision, jevEffortApplies);
       response = nativeChild ? await dispatchNativeComboChild({
         source: options.protocolSource!,
         plan: nativeChild,
@@ -1352,7 +1377,7 @@ export async function executeComboResponses(
           onCancel: callbackGate.onCancel,
           onResponseComplete: callbackGate.onResponseComplete,
         },
-      }) : await requestDispatchers.handleResponses(childRequest, config, childLog, {
+      }) : await withComboTurnStateOwner(handleOwner, () => requestDispatchers.handleResponses(childRequest, config, childLog, {
         ...options,
         replayPrincipal,
         // A bridge child is a concrete route; the native source belongs to this loop only.
@@ -1363,7 +1388,7 @@ export async function executeComboResponses(
         comboAttempt: true,
         comboInitialSend: initialSend,
         comboDispatchPermit: hopDecision?.allowed ? hopDecision.permit : undefined,
-        comboReplaySnapshot,
+        comboReplaySnapshot: lateReasoningProjection ? { ...comboReplaySnapshot, projectForeignReasoning: true } : comboReplaySnapshot,
         deferCodexResetDerivedCooldown,
         poolCapacityIntent: legIntent,
         reserveWalk: walkSeats,
@@ -1386,7 +1411,7 @@ export async function executeComboResponses(
         onNativePassthroughTerminal: callbackGate.onTerminal,
         onNativePassthroughCancel: callbackGate.onCancel,
         onResponseComplete: callbackGate.onResponseComplete,
-      });
+      }));
       // Both lanes applied the initial choice before provider pins/caps; retain those transitions.
       restoreOriginalRequestedEffort(childLog, jevEffortApplies ? initialJevDecision?.effort : undefined);
     } catch (error) {

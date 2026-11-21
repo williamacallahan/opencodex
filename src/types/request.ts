@@ -109,6 +109,8 @@ export interface OcxParsedRequest {
    * "this request is self-contained", never as "the proxy mutated it".
    */
   _previousResponseInputExpanded?: boolean;
+  /** Preserve the original reasoning only at its proven serving identity. */
+  _lunaProjectForeignReasoning?: boolean;
   /** Provider-private stable Cursor conversation id resolved from the Responses previous_response_id chain. */
   _cursorConversationId?: string;
   /** Stable upstream client thread identity, used only to derive provider-scoped continuation ids. */

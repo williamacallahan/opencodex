@@ -1,3 +1,4 @@
+import { matchesReasoningServingIdentity } from "../../responses/reasoning-replay-cache";
 import { truncationReasonFor } from "../../responses/truncated-stop-reason";
 import { normalizeRoutedAgentMessages } from "../routed-agent-messages";
 import { frameCompactionHistory } from "../../responses/compaction-history-framing";
@@ -437,7 +438,8 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
           plaintextV2AgentMessageAliasedToolNames = prepared.aliasedAgentMessageToolNames;
         }
       }
-      const threadServingIdentityChanged = parsed._stripReasoningEncryptedContent === true;
+      const foreignLunaReasoning = parsed._lunaProjectForeignReasoning === true && !matchesReasoningServingIdentity(parsed._reasoningReplayScope);
+      const threadServingIdentityChanged = parsed._stripReasoningEncryptedContent === true || foreignLunaReasoning;
       const stripNativeCompaction = parsed._stripNativeCompactionEncryptedContent === true
         || threadServingIdentityChanged;
       // Providers with the strict plaintext tool-continuation contract cannot consume any
@@ -459,7 +461,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
                   preserveRawReasoningContent: provider.preserveResponsesReasoningContent === true,
                   dropNullContentChannel: !isOpenAiOperatedResponsesDestination(provider),
                   stripEncryptedContent: threadServingIdentityChanged || requiresPlaintextReasoningReplay(provider),
-                  dropForeignItemId: parsed._dropForeignReasoningItemIds === true,
+                  dropForeignItemId: parsed._dropForeignReasoningItemIds === true || foreignLunaReasoning,
                   requirePlaintextReasoning: requiresPlaintextReasoningReplay(provider),
                   onPlaintextReasoningBlanked: () => notePlaintextReasoningDropped(provider),
                 },
