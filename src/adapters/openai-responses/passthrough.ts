@@ -471,6 +471,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
           ),
           isXaiResponsesDestination(provider),
           provider.preserveResponsesInputItemIds === true,
+          parsed._lunaProjectForeignReasoning === "owner",
         ),
         isXaiSchemaTarget(provider),
         parsed._chatCompletionsInput === true && isOpenAiOperatedResponsesDestination(provider),
