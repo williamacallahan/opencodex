@@ -10,6 +10,7 @@ import type { ResponsesEffects } from "./response-effects";
 import type { ResponsesSendBudget } from "./request-send-budget";
 import { preparePassthroughExchange, type PassthroughAdapterHandoff } from "./passthrough-dispatch";
 import { deliverPassthroughResponse } from "./passthrough-delivery";
+import { carryCodexWsPreludeVerdict } from "./codex-ws-wire";
 import { guardDirectPassthroughBodyInactivity } from "../../lib/response-body-inactivity";
 import { resolveStallTimeoutMs } from "../../stall-timeout";
 import { releaseUpstreamHostAdmission } from "../../codex/upstream-host-health";
@@ -76,7 +77,7 @@ export async function executePassthroughResponse(
     ), nativeExchange.providerExecutedCallTypes);
     const wrapped = retainReserveTrial(guarded, admissionState.authCtx, requestContext.options.abortSignal ?? requestContext.req.signal);
     reserveTrialAttached = wrapped !== undefined;
-    return wrapped ?? guarded;
+    return carryCodexWsPreludeVerdict(nativeExchange.upstreamResponse, wrapped ?? guarded);
   } finally {
     if (nativeHostState.lease) releaseUpstreamHostAdmission(nativeHostState.lease);
     if (!reserveTrialAttached && (nativeHostState.lease || (admissionState.authCtx.kind === "pool" && admissionState.authCtx.poolReserve))) {

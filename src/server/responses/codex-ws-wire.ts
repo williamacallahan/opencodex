@@ -69,7 +69,7 @@ interface CodexWsResponseEvidence {
 
 const codexWsUpstreamResponses = new WeakMap<Response, CodexWsResponseEvidence>();
 const quotaObservedResponses = new WeakMap<Response, true>();
-export type CodexWsPreludeVerdict = "hard-stop" | "confirmed-capacity" | "unconfirmed-capacity";
+export type CodexWsPreludeVerdict = "hard-stop" | "confirmed-capacity" | "unconfirmed-capacity" | "ordinary-refusal";
 const codexWsPreludeProjections = new WeakMap<Response, CodexWsPreludeVerdict | undefined>();
 registerProviderResponseProvenance(codexWsUpstreamResponses);
 registerProviderResponseProvenance(quotaObservedResponses);
@@ -93,6 +93,13 @@ export function markCodexWsPreludeProjection(response: Response, verdict?: Codex
 /** The original frame decides whether a refusal stops the request or confirms seat capacity. */
 export function codexWsPreludeVerdict(response: Response): CodexWsPreludeVerdict | undefined {
   return codexWsPreludeProjections.get(response);
+}
+
+/** A formatted error can omit the root code. Keep the verdict separate from its client body. */
+export function carryCodexWsPreludeVerdict(source: Response, delivered: Response): Response {
+  const verdict = codexWsPreludeVerdict(source);
+  if (verdict !== undefined) markCodexWsPreludeProjection(delivered, verdict);
+  return delivered;
 }
 
 export function isCodexWsPreludeProjection(response: Response): boolean {

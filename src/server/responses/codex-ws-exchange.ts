@@ -687,8 +687,8 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
             cleanup();
             try { controller.close(); } catch { /* unused stream already closed */ }
             session.dispose();
-            markCodexWsPreludeProjection(projection, hasHardRefusalInEnvelope(normalized.payload) ? "hard-stop"
-              : !terminalQuota ? undefined : terminalQuota.confirmedCapacity ? "confirmed-capacity" : "unconfirmed-capacity");
+            markCodexWsPreludeProjection(projection, hasHardRefusalInEnvelope(normalized.payload, { source: "ws-frame" }) ? "hard-stop"
+              : !terminalQuota ? "ordinary-refusal" : terminalQuota.confirmedCapacity ? "confirmed-capacity" : "unconfirmed-capacity");
             resolve(projection);
             return;
           }

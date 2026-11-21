@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { clearComboSelectionState } from "../../src/combos/resolve";
 import { advanceComboAfterFailure, pickComboTarget } from "../../src/combos/resolve";
 import { clearComboTargetCooldowns, coolComboTarget, isComboTargetInCooldown, reconcileComboTargetCooldowns } from "../../src/combos/failover";
-import { captureConfigGeneration, type GenerationContext } from "../../src/lib/state-store-sweeper";
+import { captureConfigGeneration, reconcileStateGeneration, type GenerationContext } from "../../src/lib/state-store-sweeper";
+import { listLiveComboTargetKeys } from "../../src/combos/types";
+import "../../src/lib/state-store-registrations";
 import { handleResponses } from "../../src/server/responses";
 import type { OcxConfig } from "../../src/types";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
@@ -320,6 +322,28 @@ test("a pool account's 429 cools nothing at the combo layer, other failures stil
   // Provider-scoped evidence (a rejected credential) outranks the account attribution.
   expect(cool({ status: 429, cooldownScope: "provider", ...account })).toBe(true);
 });
+test.each([true, false])("a cooldown retry requires uninterrupted target membership (replaced: %s)", async replaced => {
+  let sends = 0;
+  const server = serve(() => ++sends === 1
+    ? Response.json({ error: { message: "first target unavailable" } }, { status: 503, headers: { "x-should-retry": "false" } })
+    : chatSuccess("retry served", "m1"));
+  const cfg = config(baseUrl(server));
+  const live = { ...removalContext(), comboTargets: listLiveComboTargetKeys(cfg) };
+  reconcileStateGeneration(live);
+  const pending = post(cfg);
+  const deadline = performance.now() + 2_000;
+  while (!isComboTargetInCooldown("free", target)) {
+    if (performance.now() >= deadline) throw new Error("first 503 did not cool the target");
+    await Bun.sleep(1);
+  }
+  if (replaced) reconcileStateGeneration(removalContext());
+  reconcileStateGeneration(live);
+  const response = await pending;
+  expect(response.status).toBe(replaced ? 503 : 200);
+  expect(await response.text()).toContain(replaced ? "first target unavailable" : "retry served");
+  expect(sends).toBe(replaced ? 1 : 2);
+});
+
 test("a stale in-flight single-target request does not replay a reconciled-away target", async () => {
   let hits = 0;
   upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() {

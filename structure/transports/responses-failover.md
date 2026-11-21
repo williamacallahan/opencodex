@@ -141,7 +141,7 @@ A pooling Codex relay or a model declared with `upstreamSeatPool: true` cools on
 
 `src/combos/failover.ts` reports whether the current failure wrote or retained the target’s cooldown. An ordinary local `CodexAccountCooldownError` mapped by `mapCodexAuthContextErrorToResponse` (`src/server/responses/codex-auth-error.ts`) carries process-local Response identity in `src/codex/account-cooldown-response.ts`. `core-lifetime.ts` carries it through the translator-budget and account-lease wrappers (retained compaction delivers through the latter), and `core-combo-failure.ts` carries it through error reconstruction; `core-combo.ts` omits its restated retry/reset metadata only when recording combo target cooldowns. The target retains the existing capped local backoff, while the client's Retry-After, account quota/health, probe leases and admission policy remain authoritative. Main hard-lock, credit, Reserve and transient-policy subclasses do not receive this provenance. Copied bodies or headers cannot grant it; genuine upstream Retry-After retains the 24-hour ceiling. Coverage: `tests/server/server-combo-cooldown-recording.test.ts`.
 `src/combos/resolve.ts` forwards that result for each target; `src/server/responses/core-combo.ts`
-permits its bounded same-target retry only for that acknowledged hold. A request that predates the target’s removal cannot write or claim its cooldown, even if the same target is added again.
+permits its bounded same-target retry only for that acknowledged hold. After waiting, it checks membership against the failed pick’s generation. Removing and re-adding the target returns the original failure without another send; a reload that retains the target does not invalidate the retry.
 
 ## Combo per-target reasoning controls
 

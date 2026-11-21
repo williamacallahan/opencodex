@@ -15,7 +15,7 @@ import { resolveWireProtocolOverride } from "../adapter-resolve";
 import { parseSyntheticRowId } from "../fast-row";
 import { resolveOpenAiVirtualModel } from "../../providers/openai-virtual-models";
 import { hasUpstreamSeatPool } from "../../providers/quota/codex-lb-url";
-import { clearComboTargetCooldownIfUnchanged, comboCooldownRetryAfterSeconds, relayFailureCooldownMs, isDefiniteContextOverflow, type CodexAccountModelRefusal } from "../../combos/failover";
+import { clearComboTargetCooldownIfUnchanged, comboCooldownRetryAfterSeconds, comboTargetContinuousSince, relayFailureCooldownMs, isDefiniteContextOverflow, type CodexAccountModelRefusal } from "../../combos/failover";
 import { fallbackHopAllowed, fallbackTriggerForStatus, guardFallbackHop } from "../../routing/fallback-policy";
 import {
   isCodexReasoningEffort,
@@ -1647,10 +1647,12 @@ export async function executeComboResponses(
     }
     // A non-replayable failure (the answer to a spent ambiguous-reset replacement) may follow a
     // send that already ran the turn, so no later target may receive it, whatever its status says.
-    const failureDecision = boundTargetKey !== undefined || failure.wsPreludeVerdict === "hard-stop" || failure.nonReplayable || spentReplacement
+    const hardRefusal = failure.wsPreludeVerdict && failure.wsPreludeVerdict === "hard-stop";
+    const failureDecision = boundTargetKey !== undefined || hardRefusal || failure.nonReplayable || spentReplacement
       ? "stop"
       : isPolicyCandidateRefusal(failure.response) ? "hop"
       : comboFailureDecision(failure.response.status, failure.classificationText, {
+        hardRefusal,
         code: failure.upstreamCode,
         rootCode: failure.upstreamRootCode,
         codexModelRefusal: failure.codexModelRefusal,
@@ -1809,12 +1811,6 @@ export async function executeComboResponses(
     });
     // Only untried targets can use the original probe reservation. A same-target retry waits for expiry.
     const carriedReprobe: ComboPick["cooldownReprobeTargets"] = pick.cooldownReprobeTargets;
-    const retryAfterCooldown = (): Promise<ComboPick | null> =>
-      pickWithWait({
-        allowCooldownReprobe: false,
-        eligible: targetEligible,
-        now: failureNow,
-      });
     if (nextPick) {
       pick = nextPick;
     } else {
@@ -1824,16 +1820,8 @@ export async function executeComboResponses(
         cooldownReprobeTargets: carriedReprobe ? Object.entries(carriedReprobe) : undefined,
         now: failureNow,
       });
-      // A single-target combo with waitForCooldownMs has no alternate target to fail over to,
-      // but can recover if it waits for its brief cooldown. The initial attempt accumulated into
-      // pick.attempted, so the first pickWithWait above excluded it. retryAfterCooldown below is
-      // the same selector with `exclude` deliberately dropped, so the single cooled target
-      // becomes eligible again once its cooldown expires.
-      // Termination is double-guarded:
-      // 1) comboSendScope?.reserveDispatch refuses a second failover hop via comboExecutionBudgetPolicy
-      //    (maxAlternateTargetSends: 1 for a single declared target).
-      // 2) comboTargetsDispatched <= 1 bounds it locally so the retry never loops or waits unnecessarily
-      //    even if sendBudget scope is absent.
+      // Drop the attempted-target exclusion for one same-target retry. The picker rechecks
+      // eligibility after sleeping: a removed target cannot lend a new membership to the failed pick.
       if (
         !pick
         && combo.targets.length === 1
@@ -1842,7 +1830,11 @@ export async function executeComboResponses(
         && failedTargetCooled
         && !options.abortSignal?.aborted
       ) {
-        pick = await retryAfterCooldown();
+        pick = await pickWithWait({
+          allowCooldownReprobe: false, now: failureNow,
+          eligible: target => targetKey(target) === failedTargetKey
+            && comboTargetContinuousSince(comboId, failedTargetKey, writerGeneration) && targetEligible(target),
+        });
       }
     }
     if (activeLunaLegs && failureDecision === "hop"

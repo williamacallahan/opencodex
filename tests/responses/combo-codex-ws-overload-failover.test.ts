@@ -34,7 +34,7 @@ const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "h
 type Listener = (event: unknown) => void;
 const reasoning = { type: "reasoning", id: "rs_inspected", encrypted_content: "fixture-owner-cipher", summary: [] };
 type Step = "issue-reasoning" | "first-quota" | "first-conflict" | "quota-then-refuse" | "quota-output-then-refuse" | "reserve-started-then-refuse"
-  | "wrapped-quota" | "conflicting-wrapper" | "foreign-wrapper" | "missing-status" | "unknown-status";
+  | "first-model-missing" | "first-model-missing-underscore" | "wrapped-quota" | "conflicting-wrapper" | "foreign-wrapper" | "missing-status" | "unknown-status";
 
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -54,6 +54,11 @@ class FakeWebSocket {
   run(step: Step) {
     this.emit("open", {});
     const id = `resp_${FakeWebSocket.instances.indexOf(this)}`;
+    if (step === "first-model-missing" || step === "first-model-missing-underscore") {
+      this.frame({ type: "error", status: 400, error: { code: "model_not_found",
+        type: step === "first-model-missing" ? "origin-rejected" : "origin_rejected", message: "Model unavailable" } });
+      return;
+    }
     if (step === "first-quota" || step === "first-conflict") {
       this.frame({ type: "error", status: 429, headers: { "retry-after": "120" },
         ...(step === "first-conflict" && { code: "origin_rejected" }),
@@ -344,6 +349,26 @@ describe("a failover combo moves past a native Codex overload that preceded any 
       expect(cooldown?.confirmedCapacity).toBe(true);
     }
     expect(fallbackSends).toBe(0);
+  });
+
+  test.each(["first-conflict", "first-quota", "first-model-missing-underscore"] as const)("a routing profile honors the native verdict: %s", async terminal => {
+    const cfg = comboConfig();
+    cfg.routingProfiles = { ordered: { candidates: cfg.combos!.overload!.targets } };
+    FakeWebSocket.plan = [terminal];
+    const { response, body, logCtx } = await send(cfg, "hello", undefined, "policy/ordered");
+    expect(logCtx.routeDecision?.selected.provider).toBe("openai");
+    expect(FakeWebSocket.instances.flatMap(ws => ws.sent)).toHaveLength(1);
+    expect(fallbackSends).toBe(terminal === "first-conflict" ? 0 : 1);
+    expect(response.status).toBe(terminal === "first-conflict" ? 429 : 200);
+    expect(body).toContain(terminal === "first-conflict" ? "Limit reached" : "resp_fallback");
+  });
+
+  test.each(["first-model-missing", "first-model-missing-underscore"] as const)("a non-Luna combo honors a model_not_found code over a diagnostic type: %s", async step => {
+    FakeWebSocket.plan = [step];
+    const { response, body } = await send();
+    expect(response.status).toBe(200);
+    expect(body).toContain("resp_fallback");
+    expect(fallbackSends).toBe(1);
   });
 
   test("output after the rate-limit frame still commits the native target", async () => {

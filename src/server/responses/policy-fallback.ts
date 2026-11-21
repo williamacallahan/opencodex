@@ -18,6 +18,7 @@ import { isPolicyCandidateRefusal, isMandatoryToolChoiceRefusal, mandatoryToolCh
 import { fallbackTriggerForStatus, guardFallbackHop } from "../../routing/fallback-policy";
 import { captureAdmissionPolicy } from "../capture-admission-policy";
 import { upstreamCodeForComboFailure } from "../../bridge/errors";
+import { codexWsPreludeVerdict } from "./codex-ws-wire";
 
 type CoreHandler = typeof handleResponsesCore;
 type CoreOptions = Parameters<CoreHandler>[3];
@@ -129,12 +130,15 @@ function errorCodeFromText(text: string): string | undefined {
 async function shouldHopPolicyCandidate(response: Response, signal?: AbortSignal): Promise<boolean> {
   if (response.status < 400 || signal?.aborted) return false;
   // A response that must not be sent again cannot open a policy-candidate retry either.
-  if (isNonReplayableResponse(response)) return false;
+  const verdict = codexWsPreludeVerdict(response);
+  const hardRefusal = verdict && verdict === "hard-stop";
+  if (hardRefusal || isNonReplayableResponse(response)) return false;
   if (isPolicyCandidateRefusal(response)) return true;
   try {
     const inspected = await readBoundedResponseBody(response.clone(), { signal });
     const text = inspected.displaySafe && !inspected.truncated ? inspected.text : "";
     return comboFailureDecision(response.status, text, {
+      hardRefusal,
       code: upstreamCodeForComboFailure(response, errorCodeFromText(text)),
       // A passthrough candidate returns its upstream body unchanged, so the code is not provenance.
       verifiedPlanRefusal: isVerifiedModelNotInPlanResponse(response),

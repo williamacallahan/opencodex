@@ -1,4 +1,4 @@
-import { codexWsPreludeVerdict } from "./codex-ws-wire";
+import { carryCodexWsPreludeVerdict, codexWsPreludeVerdict } from "./codex-ws-wire";
 import { inspectedReserveRefusal } from "./reserve-refusal-body";
 import { recordUpstreamProviderErrorDetail, recordUpstreamValidationDetail, type FailureDetail } from "../request-log-failure-detail";
 import { carryProxyErrorPresentation } from "../../lib/client-error-body";
@@ -199,7 +199,7 @@ export async function consumeComboFailure(
   carryAnthropicRefusalCredential(response, failureResponse);
   carryCodexAccountCooldownResponse(response, failureResponse);
   return {
-    response: failureResponse,
+    response: carryCodexWsPreludeVerdict(response, failureResponse),
     wsPreludeVerdict: codexWsPreludeVerdict(response),
     ...(nonReplayable ? { nonReplayable: true } : {}),
     ...(verifiedPlanRefusal ? { verifiedPlanRefusal: true } : {}),

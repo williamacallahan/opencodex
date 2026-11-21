@@ -286,6 +286,10 @@ export function comboCooldownRetryAfterSeconds(comboId: string, now = Date.now()
   return String(Math.max(1, Math.ceil(remainingMs / 1000)));
 }
 
+export function comboTargetContinuousSince(comboId: string, key: string, generation: number): boolean {
+  return generation >= (liveTargetSince.get(`${comboId}::${key}`) ?? lastReconciledGeneration);
+}
+
 /** True when this writer established or retained the cooldown; a stale removed writer returns false. */
 export function coolComboTarget(
   comboId: string,
@@ -305,8 +309,7 @@ export function coolComboTarget(
 ): boolean {
   const now = options?.now ?? Date.now();
   const writerGeneration = options?.writerGeneration ?? captureConfigGeneration();
-  const ownerKey = `${comboId}::${targetKey(target)}`;
-  if (writerGeneration < (liveTargetSince.get(ownerKey) ?? lastReconciledGeneration)) return false;
+  if (!comboTargetContinuousSince(comboId, targetKey(target), writerGeneration)) return false;
   // A server-provided Retry-After is authoritative, including an immediate `0` directive.
   // A quota reset is the next-most-specific signal (#3256); configured and default cooldowns
   // are only fallbacks when upstream supplied neither usable value.
@@ -1498,6 +1501,8 @@ export function comboFailureDecision(
   message: string,
   options?: {
     code?: string | number | null;
+    /** The transport inspected the original frame before formatting mixed type, code and prose. */
+    hardRefusal?: boolean;
     /** The envelope root's own code when it differs from `code`; absent or blank states none. */
     rootCode?: string | number | null;
     codexModelRefusal?: CodexAccountModelRefusal;
@@ -1510,6 +1515,7 @@ export function comboFailureDecision(
     providerModerationRefusal?: boolean;
   },
 ): ComboFailureDecision {
+  if (options?.hardRefusal ?? message.toLowerCase().includes("origin_rejected")) return "stop";
   const rootRawCode = typeof options?.rootCode === "number" ? String(options.rootCode) : options?.rootCode;
   const nestedRawCode = typeof options?.code === "number" ? String(options.code) : options?.code;
   const rootCode = normalizedFailureCode(rootRawCode);
@@ -1539,7 +1545,6 @@ function decideComboFailure(
   },
 ): ComboFailureDecision {
   if (status === 499) return "stop";
-  if (message.toLowerCase().includes("origin_rejected")) return "stop";
   // Structured form of the same hard refusal. The prose test above misses it when the origin
   // reports the code out of band, and every hop rule below -- including the context-overflow
   // one -- must stay subordinate to it.

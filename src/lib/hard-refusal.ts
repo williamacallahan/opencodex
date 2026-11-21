@@ -142,11 +142,11 @@ export function isHardPolicyOrOriginRefusal(text: string | undefined, depth = 0)
     }
   }
 
-  return hasOuterRefusal || hasHardRefusalInEnvelope(parsed, unescaped);
+  return hasOuterRefusal || hasHardRefusalInEnvelope(parsed, { source: "provider-text", fallbackText: unescaped });
 }
 
 /** Use only diagnostic carriers in a decoded frame, never request echoes. */
-export function hasHardRefusalInEnvelope(parsed: unknown, fallbackText?: string): boolean {
+export function hasHardRefusalInEnvelope(parsed: unknown, evidence: { source: "ws-frame" } | { source: "provider-text"; fallbackText: string }): boolean {
   if (parsed && typeof parsed === "object") {
     const queue: unknown[] = [parsed];
     let examined = 0;
@@ -204,7 +204,10 @@ export function hasHardRefusalInEnvelope(parsed: unknown, fallbackText?: string)
         }
       }
 
-      const type = typeof rec.type === "string" ? rec.type.trim().toLowerCase().replaceAll("-", "_") : undefined;
+      // A native error with a dedicated code carries type only for diagnostics. Keep the
+      // type-only refusal fallback for providers that omitted the code.
+      const type = (!code || evidence.source === "provider-text") && typeof rec.type === "string"
+        ? rec.type.trim().toLowerCase().replaceAll("-", "_") : undefined;
       if (type) {
         if (
           isCyberPolicyCode(type)
@@ -254,5 +257,5 @@ export function hasHardRefusalInEnvelope(parsed: unknown, fallbackText?: string)
     return false;
   }
 
-  return isAuthoritativeHardRefusalProse(fallbackText);
+  return evidence.source === "provider-text" && isAuthoritativeHardRefusalProse(evidence.fallbackText);
 }
