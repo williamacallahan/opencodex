@@ -387,6 +387,34 @@ test.each([[false, false], [false, true], [true, false], [true, true]])("Mistral
   expect(await response.text()).toContain(replaced ? "first target unavailable" : "retry served");
 });
 
+test.each([false, true])("direct Mistral books a same-key 429 retry only if its transport sends (cancel: %s)", async cancel => {
+  const cfg = config("https://api.mistral.ai/v1");
+  const abort = new AbortController();
+  let now = 0, sends = 0;
+  const waits: number[] = [];
+  const pacer = new MistralBudgetPacer(() => now, async (delay, signal) => {
+    waits.push(delay);
+    if (cancel) abort.abort();
+    signal?.throwIfAborted();
+    now += delay;
+  });
+  cfg.providers.a = resolveMistralTransport({ ...cfg.providers.a!, retryOn429: { intervalMs: 0 },
+    fetch: Object.assign(async () => ++sends === 1 ? Response.json({ message: "minute limit" }, { status: 429, headers: {
+      "x-ratelimit-limit-tokens-minute": "1000", "x-ratelimit-remaining-tokens-minute": "400", "x-ratelimit-tokens-query-cost": "600",
+    } }) : chatSuccess("retry served", "m1"), { preconnect: fetch.preconnect }) }, pacer);
+  takeSpendHome();
+  cfg.spend = { pool: { maxTokens: 1_000_000 } };
+  configureSharedSpendLedger(spendPolicyFromConfig(cfg.spend, undefined, ["a"]));
+  const sendBudget = createInferenceSendBudget(new Request("http://localhost"), { provider: "a", model: "m1" });
+  const response = await post(cfg, { model: "a/m1" }, { sendBudget, abortSignal: abort.signal });
+  await response.text();
+  expect(waits).toEqual([60_000]);
+  expect(response.status).toBe(cancel ? 499 : 200);
+  expect(sends).toBe(cancel ? 1 : 2);
+  const journal = await Bun.file(join(home, SPEND_LEDGER_JOURNAL_FILENAME)).text();
+  expect(journal.trim().split("\n").map(parseSpendJournalRecord).filter(row => row?.kind === "dispatch")).toHaveLength(sends);
+});
+
 test("a stale in-flight single-target request does not replay a reconciled-away target", async () => {
   let hits = 0;
   upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() {

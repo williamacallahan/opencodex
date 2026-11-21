@@ -698,6 +698,7 @@ export async function deliverPassthroughResponse(
         // Provenance, not inference: `errorText` is empty when the bounded read finds nothing
         // display-safe, and an empty body is exactly what the retryable-429 default fires on.
         replayRefusal: isReplayRefusalResponse(upstreamResponse),
+        maskCredential: createOutboundCredentialMask(nativeExchange.request.headers),
       })));
     }
 

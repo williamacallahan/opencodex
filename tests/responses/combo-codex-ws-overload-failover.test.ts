@@ -36,7 +36,7 @@ const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "h
 type Listener = (event: unknown) => void;
 const reasoning = { type: "reasoning", id: "rs_inspected", encrypted_content: "fixture-owner-cipher", summary: [] };
 type FirstFrame = { status: number; code?: string | number; request?: { innererror: { code: string } }; error: { code?: string; message: string; innererror?: { code: string } } };
-type Step = FirstFrame | "held-hard-failure" | "issue-reasoning" | "first-quota" | "first-conflict" | "quota-then-refuse" | "quota-output-then-refuse" | "reserve-started-then-refuse"
+type Step = FirstFrame | "generic-hard-failure" | "held-hard-failure" | "issue-reasoning" | "first-quota" | "first-conflict" | "quota-then-refuse" | "quota-output-then-refuse" | "reserve-started-then-refuse"
   | "first-model-missing" | "first-model-missing-underscore" | "wrapped-quota" | "conflicting-wrapper" | "foreign-wrapper" | "missing-status" | "unknown-status";
 
 class FakeWebSocket {
@@ -61,9 +61,9 @@ class FakeWebSocket {
       this.frame({ type: "error", ...step });
       return;
     }
-    if (step === "held-hard-failure") {
+    if (step === "held-hard-failure" || step === "generic-hard-failure") {
       this.frame({ type: "response.failed", code: "origin_rejected", headers: { "x-fixture-private": "not-for-client" }, response: { id, status: "failed", output: [], usage: { input_tokens: 7, output_tokens: 0 },
-        error: { code: "overloaded_error", message: "Reserve refused", param: "input" } } });
+        error: { code: step === "generic-hard-failure" ? "server_error" : "overloaded_error", message: "Reserve refused", param: "input" } } });
       return;
     }
     if (step === "first-model-missing" || step === "first-model-missing-underscore") {
@@ -101,7 +101,7 @@ class FakeWebSocket {
         error: { code: "usage_limit_reached", message: "Limit reached" } } });
     } else {
       this.frame({ type: "error", status: 503,
-        error: { type: "server_error", code: "server_is_overloaded", message: "Our servers are currently overloaded." } });
+        error: { type: "server_error", code: "server_is_overloaded", message: "Our servers are currently overloaded; invalid_prompt rate is unchanged." } });
     }
   }
 
@@ -272,7 +272,7 @@ describe("a failover combo moves past a native Codex overload that preceded any 
 
   test("a nonfatal bare diagnostic is masked without changing its overload verdict", async () => {
     const marker = `${WORK}-access`;
-    const refusal = { status: 503, error: { code: "server_is_overloaded", message: `Fixture diagnostic: ${marker}` } };
+    const refusal = { status: 503, error: { code: "server_is_overloaded", message: `Fixture diagnostic: invalid_prompt metric, ${marker}` } };
     FakeWebSocket.plan = [refusal, refusal, refusal];
     const { body } = await send(comboConfig(), "hello", undefined, "openai/gpt-5.5");
     expect(body).toContain("Fixture diagnostic:");
@@ -281,11 +281,11 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect(body.includes(marker)).toBe(false);
   });
 
-  test("an ordinary combo stops on a hard failed terminal without selecting fallback", async () => {
-    FakeWebSocket.plan = ["held-hard-failure"];
+  test.each(["held-hard-failure", "generic-hard-failure"] as const)("an ordinary combo stops on %s without selecting fallback", async step => {
+    FakeWebSocket.plan = [step];
     const { body, response, logCtx } = await send();
     expect(fallbackSends).toBe(0);
-    expect(logCtx.attempts?.map(attempt => attempt.status)).toEqual([503]);
+    expect(logCtx.attempts?.map(attempt => attempt.status)).toEqual([step === "held-hard-failure" ? 503 : 400]);
     expect(response.status).toBe(200);
     expect(body).toContain('"code":"invalid_prompt"');
     expect(body).toContain("Reserve refused");
@@ -296,14 +296,16 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     writeSeats(WORK, "backup");
     cfg.codexAccounts!.push({ id: "backup", label: "backup" });
     setAccountQuotaFromParsed("backup", { weeklyPercent: 50 });
-    FakeWebSocket.plan = ["first-quota", { status: 401, code: "origin_rejected", error: { code: "token_invalidated", message: "Alternate rejected" } }];
+    const marker = "backup-access";
+    FakeWebSocket.plan = ["first-quota", { status: 401, code: "origin_rejected", error: { code: "token_invalidated", message: `Alternate rejected: ${marker}` } }];
     const fixtureFetch = globalThis.fetch;
     globalThis.fetch = (async (input, init) => new URL(input instanceof Request ? input.url : String(input)).hostname === "auth.openai.com"
       ? Response.json({ error: "invalid_grant" }, { status: 400 }) : fixtureFetch(input, init)) as typeof fetch;
     try {
       const { response, body } = await send(cfg, "hello", undefined, "openai/gpt-6-luna");
       expect(response.status).toBe(401);
-      expect(body).toContain("Alternate rejected");
+      expect(JSON.parse(body).error.message).toContain("Alternate rejected");
+      expect(body.includes(marker)).toBe(false);
       expect(fallbackSends).toBe(0);
       expect(FakeWebSocket.instances.flatMap(ws => ws.sent)).toHaveLength(2);
       expect(isAccountNeedsReauth(WORK)).toBe(false);
@@ -588,6 +590,7 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect(fallbackSends).toBe(0);
     expect(response.status).toBe(200);
     expect(body).toContain("response.output_item.added");
-    expect(body).toContain("server_is_overloaded");
+    expect(body).toContain('"code":"server_is_overloaded"');
+    expect(body).not.toContain('"code":"invalid_prompt"');
   });
 });

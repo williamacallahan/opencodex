@@ -11,6 +11,14 @@ import {
   resolveClientRetryAfter,
 } from "../../lib/retry-after";
 import { isMetaMusePlanFailure, META_MUSE_PLAN_REFUSAL_MESSAGE } from "../../providers/meta-muse-plan-refusal";
+import { maskDiagnosticJson } from "./terminal-error-redaction";
+
+function maskErrorBody(body: string, mask: (text: string) => string): string {
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); }
+  catch { return mask(body); }
+  return maskDiagnosticJson(parsed, mask);
+}
 
 function isCyberPolicyBody(body: string): boolean {
   if (isCyberPolicyMessage(body)) return true;
@@ -56,9 +64,8 @@ function isReplayRefusalBody(body: string): boolean {
  * Codex maps an *empty* body to the literal client string "Unknown error"
  * (UnexpectedResponseError) — issue #452. Only empty bodies need wrapping.
  *
- * Non-empty bodies (including ChatGPT `{detail: ...}` account-model 400s and
- * HTML/text errors) must keep their original bytes and headers so pool-retry
- * activation and client diagnostics stay honest.
+ * Non-empty bodies retain their upstream shape, including `{detail: ...}` account-model
+ * errors. Public delivery masks credentials after retry policy reads the original diagnostic.
  *
  * Retry-After is validated independently of the body path:
  * - valid upstream values are preserved
@@ -80,6 +87,7 @@ export function formatPassthroughUpstreamError(
     statusText?: string;
     headers?: Headers;
     now?: number;
+    maskCredential?: (text: string) => string;
     /** Caller holds an authoritative fatal verdict; neither inherited nor inferred waits apply. */
     suppressRetryAfter?: boolean;
     /**
@@ -133,26 +141,17 @@ export function formatPassthroughUpstreamError(
   const formatted = resolved === undefined ? undefined : formatClientRetryAfter(resolved, now);
 
   if (trimmed) {
-    const needsSet = formatted !== undefined && upstreamRetryAfter !== formatted;
-    const needsDelete = formatted === undefined && upstreamRetryAfter !== undefined;
-
-    // A refusal always takes the rewriting path: it has a header to add even when the
-    // upstream named no wait for it to remove.
-    if (!needsSet && !needsDelete && !replayRefusal) {
-      return new Response(bodyText, {
-        status,
-        ...(options?.statusText ? { statusText: options.statusText } : {}),
-        ...(options?.headers ? { headers: options.headers } : { headers: { "Content-Type": "application/json" } }),
-      });
+    const mask = options?.maskCredential;
+    const publicBody = mask ? maskErrorBody(bodyText, mask) : bodyText;
+    const headers = new Headers(options?.headers ?? { "Content-Type": "application/json" });
+    if (publicBody !== bodyText) {
+      headers.delete("content-length");
+      headers.delete("content-encoding");
     }
-
-    const headers = options?.headers
-      ? new Headers(options.headers)
-      : new Headers({ "Content-Type": "application/json" });
-    if (needsSet) headers.set("Retry-After", formatted!);
+    if (formatted !== undefined) headers.set("Retry-After", formatted);
     else headers.delete("Retry-After");
     if (replayRefusal) applyReplayRefusalClientHeaders(headers);
-    const rewritten = new Response(bodyText, {
+    const rewritten = new Response(publicBody, {
       status,
       ...(options?.statusText ? { statusText: options.statusText } : {}),
       headers,

@@ -406,6 +406,8 @@ export async function prepareAdapterExchange(
   };
   const autoPauseEnabled = config.providers[route.providerName]?.accountAutoPause?.enabled === true;
   const billingPoolRequest = isAnthropicBillingKeyPool(route.provider);
+  const deferTransportSpend = () => billingPoolRequest || (route.providerName === "github-copilot" && route.provider.authMode !== "forward")
+    || (adapterSendBudget?.spendEnforced && ownsMistralDispatchReceipt(route.provider));
   let billingRecoveryActive = false;
   const genericRefetchCountsSends = () => !!sendBudgetState.workflowRootId || options.comboAttempt === true || sendBudgetState.adapterSendBudget?.spendEnforced === true
     || transientRetryPolicyFor(route.provider) !== null || resetReplayPolicyFor(route.provider) !== null
@@ -483,8 +485,7 @@ export async function prepareAdapterExchange(
         ? fetchWithTransientRetry
         : fetchWithResetRetry;
       const initialReporter = transientSendReporter(compactPrepaid ?? options.comboDispatchPermit);
-      const deferAdmission = reserve || billingPoolRequest || (route.providerName === "github-copilot" && route.provider.authMode !== "forward")
-        || (adapterSendBudget?.spendEnforced && ownsMistralDispatchReceipt(route.provider));
+      const deferAdmission = reserve || deferTransportSpend();
       const deferredInitial = deferAdmission && !receiptMode ? deferPhysicalSendReporter(initialReporter) : undefined;
       try { upstreamResponse = await fetchWithRetryPolicy(
         recovery => {
@@ -774,7 +775,7 @@ export async function prepareAdapterExchange(
             : undefined;
           let refetchPermitUsed = false;
           const refetchReporter = refetchAllowance ? transientSendReporter(refetchAllowance.permit) : undefined;
-          const deferredRefetch = (billingPoolRequest || options.comboAttempt || route.providerName === "github-copilot" && route.provider.authMode !== "forward") && refetchReporter
+          const deferredRefetch = (options.comboAttempt || deferTransportSpend()) && refetchReporter
             ? deferPhysicalSendReporter(refetchReporter) : undefined;
           const pendingKeyMetadata = deferredRefetch && transportState.attemptSendDeferred();
           try {

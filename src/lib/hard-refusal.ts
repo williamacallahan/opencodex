@@ -155,11 +155,11 @@ export function hasHardRefusalInEnvelope(parsed: unknown, evidence: { source: "w
       examined += 1;
       if (!candidate || typeof candidate !== "object") continue;
       if (Array.isArray(candidate)) {
-        if (candidate.length > 32) return true;
-        for (const item of candidate) {
+        if (candidate.length > 32 && evidence.source === "provider-text") return true;
+        for (const item of candidate.slice(0, 32)) {
           if (item && typeof item === "object") {
             queue.push(item);
-          } else if (typeof item === "string") {
+          } else if (evidence.source === "provider-text" && typeof item === "string") {
             let itemParsed: unknown;
             let itemHasOuterRefusal = false;
             try {
@@ -222,7 +222,7 @@ export function hasHardRefusalInEnvelope(parsed: unknown, evidence: { source: "w
       // Parse structured diagnostic strings first so nested request echo is not matched by prose rules (#8173).
       for (const field of ["message", "error", "innererror", "details", "detail", "last_error", "response", "errors"] as const) {
         const val = rec[field];
-        if (typeof val === "string") {
+        if (evidence.source === "provider-text" && typeof val === "string") {
           let innerParsed: unknown;
           let innerHasOuterRefusal = false;
           try {

@@ -659,8 +659,8 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       if (quotaVerdict === undefined) quotaPrelude = undefined;
       if (!controlFrame && !type.startsWith("response.") && type !== "error") return;
       let steeringEnded = false;
-      const transientStatus = !nativeControl && (type === "error" || type === "response.failed")
-        ? codexWsPreOutputRefusalStatus(normalized.payload) : undefined;
+      const failureFrame = !nativeControl && (type === "error" || type === "response.failed");
+      const transientStatus = failureFrame ? codexWsPreOutputRefusalStatus(normalized.payload) : undefined;
       let refusalStatus: number | undefined;
       let refusalHeaders: Headers | undefined;
       let refusalPrelude: Headers | undefined;
@@ -735,8 +735,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
           terminalErrorStatus = wrapperStatus ?? null;
         }
       }
-      const originalStatus = refusalStatus ?? transientStatus;
-      const hardStop = originalStatus !== undefined && hasHardRefusalInEnvelope(normalized.payload, { source: "ws-frame" });
+      const hardStop = failureFrame && !normalized.ambiguousTerminal && hasHardRefusalInEnvelope(normalized.payload, { source: "ws-frame" });
       const publicType = hardStop ? "response.failed" : type;
       if (hardStop) {
         // Codex retries an unknown response.error.code regardless of the wrapper's verdict.
@@ -744,7 +743,10 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         const response = record(frame.response) ? frame.response : undefined;
         const source = type === "error" ? frame.error : response?.error;
         const error = refusalErrorBody(record(source) ? source : frame);
-        if (responseEvidence) responseEvidence.hardStopStatus = originalStatus;
+        if (responseEvidence) {
+          const stated = codexWsWrapperStatus(frame);
+          responseEvidence.hardStopStatus = refusalStatus ?? transientStatus ?? (stated !== undefined && stated >= 400 ? stated : 400);
+        }
         const code = typeof frame.code === "string" && isTerminalRefusalCode(frame.code) ? frame.code
           : isTerminalRefusalCode(error.code) ? error.code : "invalid_prompt";
         const param = error.param ?? frame.param;

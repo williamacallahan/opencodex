@@ -8,7 +8,7 @@ import { codexWsUpstreamFetch, streamingInit } from "../helpers/ws-upstream-fixt
 import { readCodexWsStage } from "../../src/server/responses/codex-ws-wire";
 import { TERMINAL_REFUSAL_FALLBACK_MESSAGE } from "../../src/lib/errors";
 import { TranslatorBudgetExceededError } from "../../src/lib/translator-budget";
-import { createOutboundCredentialMask } from "../../src/server/responses/terminal-error-redaction";
+import { createOutboundCredentialMask, createTerminalErrorRedactionBlockRewrite } from "../../src/server/responses/terminal-error-redaction";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -78,6 +78,16 @@ describe("relaySseWithFailedTail", () => {
       : relaySseEagerBounded(src, new AbortController(), parityHooks, { maskCredential }));
     expect(failedMessage(out)).toContain("[REDACTED]");
     expect(failedMessage(out)).not.toContain(credential);
+  });
+
+  test("a short selected key masks diagnostic values and comments without renaming the terminal", () => {
+    const rewrite = createTerminalErrorRedactionBlockRewrite({ "x-api-key": "response" });
+    const prefix = ": response\r\nevent: response.failed\r\ndata: ";
+    const event = { type: "response.failed", response: { status: "failed", error: { message: "echo: response" } } };
+    expect(rewrite(prefix + JSON.stringify(event))).toEqual([
+      ": [REDACTED]\r\nevent: response.failed\r\ndata: " + JSON.stringify({ ...event,
+        response: { ...event.response, error: { message: "echo: [REDACTED]" } } }),
+    ]);
   });
 
   test("masks selected credentials in every synthetic refusal field", () => {
