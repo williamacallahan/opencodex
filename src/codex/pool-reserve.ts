@@ -19,6 +19,8 @@ export const POOL_RESERVE_UNAVAILABLE_MESSAGE = "No Codex pool account can serve
 export const modelHasPoolReserve = (modelId: unknown): boolean => modelId === "gpt-6-luna";
 /** Request-local capacity for a native Luna leg: Reserve or nothing, or ordinary Luna without ever consulting Reserve. */
 export type PoolCapacityIntent = "reserve-only" | "ordinary-only";
+export const permitsPoolWireModel = (intent: PoolCapacityIntent | undefined, wireModel: string | undefined): boolean =>
+  intent !== "reserve-only" || wireModel === NATIVE_RESERVE_MODEL;
 // Longer than the 5-minute recovery probe cadence (CODEX_QUOTA_PROBE_INTERVAL_MS), so a grant
 // does not lapse between two scheduled re-reads; a revoked grant still fails closed upstream.
 export const POOL_RESERVE_FRESHNESS_MS = 15 * 60_000;
@@ -176,6 +178,14 @@ export function poolLunaReserveSelection(
   const includedOnly: CodexAccountUsabilityOptions = { ...options, poolCapacity: "included" };
   return getEligiblePoolAccounts(config, excludeId, now, quotaScope, includedOnly).length > 0
     ? { ...unchanged, options: includedOnly } : unchanged;
+}
+
+/** An alternate may have regained included quota or lost eligibility while its request was being built. */
+export function liveReserveMoveSeat(config: OcxConfig, remaining: ReadonlySet<string>, id: string, now = Date.now()): boolean {
+  if (!remaining.has(id)) return false;
+  const seat = config.codexAccounts?.find(account => account.id === id);
+  return seat !== undefined && codexUsageLimitResetAt(getAccountQuota(id), seat.plan, now) !== undefined
+    && isCodexAccountSelectable(config, id, now, "reserve", { poolCapacity: "reserve", modelEligibleAccountIds: remaining });
 }
 
 /** The shared Responses serialization feeds both HTTP and WebSocket dispatch. */

@@ -243,7 +243,7 @@ booking, and a combo child's sends would go missing from the ledger. `permit.ass
 closes its booking on the same shared ledger, so the adapter handoff above and the combo
 derivation agree rather than each settling against a counter the other cannot see.
 
-The alternate-target and transition limits belong to each target; all targets share the physical-send ledger. The [strict Luna Reserve leg](../quota-snapshots.md#automatic-pool-luna-reserve) sizes its allowance before the first booking freezes the physical limit. Beyond the ordinary two pool sends it can use one slot per additional seat, without adding combo target transitions. The next leg inherits only the extra slots actually spent, never the unused portion of the walk.
+The alternate-target and transition limits belong to each target; all targets share the physical-send ledger. The [strict Luna Reserve leg](../quota-snapshots.md#automatic-pool-luna-reserve) sizes its allowance before the first booking freezes the physical limit. A small seat roster does not shorten the ordinary same-seat transient retry ladder. An uncharged request can add one slot per Reserve seat beyond the ordinary two pool sends, without adding combo target transitions. An inherited booking still permits live seat selection but adds no headroom. Later legs inherit only extra slots actually spent, never the unused portion of the walk.
 
 ## Durable spend reservations
 

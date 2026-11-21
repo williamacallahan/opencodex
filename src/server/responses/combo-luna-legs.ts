@@ -1,5 +1,8 @@
 import { comboFailureCooldownScope, targetKey, type getCombo } from "../../combos";
 import type { ConsumedComboFailure } from "./core-options";
+import { consumeComboFailure } from "./core-combo-failure";
+import { isNonReplayableResponse } from "../../lib/upstream-retry";
+import { wasAccountAutoPaused } from "../../oauth/account-auto-pause";
 import { isReserveQuotaCode } from "./combo-stream-preflight";
 import { modelHasPoolReserve } from "../../codex/pool-reserve";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
@@ -15,6 +18,12 @@ export function isReserveSeatQuotaRefusal(failure: ConsumedComboFailure, scope =
   return (failure.response.status === 429 && scope === "target")
     || (failure.response.status === 402 && isReserveQuotaCode(failure.upstreamCode ?? failure.upstreamType)
       && !failure.upstreamRootCode && (!failure.upstreamType || isReserveQuotaCode(failure.upstreamType)));
+}
+
+/** The pool already classified this response as quota (including body-confirmed 5xx). */
+export async function reserveQuotaPermitsMove(response: Response, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted || wasAccountAutoPaused(response) || isNonReplayableResponse(response)) return false;
+  return response.status >= 500 || isReserveSeatQuotaRefusal(await consumeComboFailure(response.clone(), signal));
 }
 
 const notStarted = new WeakSet<object>();

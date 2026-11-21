@@ -18,8 +18,11 @@ import {
   captureCallerDirectAuth,
 } from "../../providers/caller-authorization";
 import { inspectChatGptDomainClaim } from "../../oauth/chatgpt";
+import { poolReserveWalkSeats, POOL_RESERVE_UNAVAILABLE_MESSAGE } from "../../codex/pool-reserve";
+import { isRequestExecutionBudget } from "../../lib/request-execution-budget";
 import {
   resolveCodexAuthContext,
+  CodexReserveUnavailableError,
   CodexMainProfileDrainingError,
   materializeCodexUpstreamAuthAsync,
   headersForCodexAuthContext,
@@ -237,6 +240,10 @@ export async function resolveResponsesCodexAuth(
   // routed credential with it either, because that would be a silent credential swap.
   if (hasAgentAssertionAuthorization(req.headers)) return { ok: false, response: markProxyError(agentAssertionUnsupportedResponse()) };
   try {
+    if (options.poolCapacityIntent === "reserve-only" && (route.codexAccountMode !== "pool"
+      || !isCanonicalOpenAiForwardProvider(route.provider) || route.staticPolicy.model.adapter !== "openai-responses")) {
+      throw new CodexReserveUnavailableError(POOL_RESERVE_UNAVAILABLE_MESSAGE);
+    }
     let authInputHeaders = codexRouteCredentialDomainHeadersFor(
       req,
       route,
@@ -297,6 +304,9 @@ export async function resolveResponsesCodexAuth(
       validateForwardAdmissionCredential(authInputHeaders, config);
     }
     if (route.codexAccountMode) {
+      // A strict caller without a combo plan still selects only from untried seats, within its existing ledger.
+      if (route.codexAccountMode === "pool" && options.poolCapacityIntent === "reserve-only" && !requestScopedMainCredential
+        && isRequestExecutionBudget(options.sendBudget)) options.remainingReserveSeats ??= poolReserveWalkSeats(config);
       // Only selection sees the Claude bridge pool identity; materialization below keeps the
       // uncompleted headers, so the wire matches the original request.
       authCtx = await resolveCodexAuthContext(applyClaudeBridgePoolSession(authInputHeaders, route, options), config, route.codexAccountMode, {

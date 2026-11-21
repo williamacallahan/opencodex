@@ -6,7 +6,7 @@ import { CodexInstallationIdUnavailableError } from "../../codex/installation-id
 import { captureAccountAutoPauseAttempt, wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
 import type { OcxConfig, OcxProviderConfig, OcxParsedRequest } from "../../types";
 import type { CodexAuthContext, CodexAuthPolicyConfig } from "../../codex/auth-context";
-import type { PoolCapacityIntent } from "../../codex/pool-reserve";
+import { liveReserveMoveSeat, permitsPoolWireModel, type PoolCapacityIntent } from "../../codex/pool-reserve";
 import type { CodexUpstreamOutcome } from "../../codex/routing";
 import {
   recordCodexUpstreamOutcome,
@@ -31,7 +31,7 @@ import { classifyPoolRecoveryDispatch } from "../../routing/probe-lease";
 import { formatErrorResponse } from "../../bridge";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { upstreamErrorMessageFromPayload, isRateLimitOrQuotaFailureMessage } from "../../lib/errors";
-import { isNonReplayableResponse, isTransientUpstreamStatus, SendBudgetExhaustedError, sleepWithAbort } from "../../lib/upstream-retry";
+import { isNonReplayableResponse, isTransientUpstreamStatus, SendBudgetExhaustedError } from "../../lib/upstream-retry";
 import { clearableDeadline } from "../../lib/abort";
 import { applyClaudeBridgePoolSession } from "../claude-bridge-pool-session";
 import {
@@ -716,6 +716,7 @@ export function shouldDeferCodexResetDerivedCooldown(response: Response, enabled
 export async function retryCodexPoolOnAlternateAccount(
   args: CodexPoolAccountRetryArgs,
 ): Promise<CodexPoolAccountRetryResult> {
+  if (args.options.poolCapacityIntent === "reserve-only" && !args.remainingReserveSeats) return { kind: "no-alternate" };
   if (args.reserveDeadline === undefined) return dispatchCodexAccountRetry(args, args.upstream.signal);
   const remainingMs = args.reserveDeadline - Date.now();
   if (remainingMs <= 0) return { kind: "no-alternate" };
@@ -1073,15 +1074,7 @@ async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal
         //
         // A refusal here is not a new failure mode: "no alternate was available" is already the
         // outcome when the pool has nowhere to move this request to, and it is handled.
-        let window = classifyPoolRecoveryDispatch("retry");
-        // Strict placement can wait for this shared window, but never replenish the turn's deadline.
-        while (!window.admitted && args.reserveDeadline !== undefined && window.retryAt < args.reserveDeadline && !signal.aborted) {
-          try { await sleepWithAbort(Math.max(1, window.retryAt - Date.now()), signal); }
-          catch (error) { if (!signal.aborted) throw error; }
-          if (!signal.aborted && Date.now() < args.reserveDeadline) window = classifyPoolRecoveryDispatch("retry");
-          else break;
-        }
-        if (!window.admitted) {
+        if (!classifyPoolRecoveryDispatch("retry").admitted) {
           accountMovePermit.release();
           accountMovePermit = undefined;
           // The alternate context was resolved and will not send. Hand back whatever recovery
@@ -1136,7 +1129,9 @@ async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal
                 modelId: route.modelId,
                 onPhysicalDispatch: body => {
                   if (args.remainingReserveSeats) {
-                    if (!admit()) throw withheld;
+                    if (retryAuthCtx.kind !== "pool" || !retryAuthCtx.poolReserve
+                      || !permitsPoolWireModel(options.poolCapacityIntent, request.outboundModelId)
+                      || !liveReserveMoveSeat(config, args.remainingReserveSeats, retryAuthCtx.accountId) || !admit()) throw withheld;
                     void upstreamResponse.body?.cancel().catch(() => undefined);
                   }
                   args.onPhysicalSend?.(request, body);

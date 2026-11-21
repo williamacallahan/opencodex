@@ -342,7 +342,7 @@ export function comboTargetSendBudget(
   const heldForLaterTargets = Math.max(0, targetsDeclaredAfterThisOne);
   const ceiling = Math.max(1, policy.maxTotalModelSends - heldForLaterTargets);
   if (reserveSeats !== undefined) {
-    const total = Math.min(ceiling, comboScope.used + reserveSeats);
+    const total = Math.min(ceiling, comboScope.used + Math.max(reserveSeats, COMBO_TARGET_BASE_SENDS));
     const moves = Math.max(0, reserveSeats - 1);
     return deriveSendBudgetScope(comboScope, { maxTotalModelSends: total, baseSendAllowance: total,
       finalRecoveryAllowance: 0, maxAlternateTargetSends: moves, maxTargetTransitions: moves });
@@ -1069,11 +1069,12 @@ export async function executeComboResponses(
   const callerOutputCeilingTokens = logCtx.spendOutputCeilingTokens
     ?? (typeof callerBudget === "number" && Number.isFinite(callerBudget) && callerBudget > 0
       ? Math.trunc(callerBudget) : undefined);
-  const remainingReserveSeats = isRequestExecutionBudget(options.sendBudget) && options.sendBudget.used === 0
+  const remainingReserveSeats = isRequestExecutionBudget(options.sendBudget)
     && pick && lunaLegs && targetKey(pick.target) === lunaLegs.nativeKey
     ? poolReserveWalkSeats(config) : undefined;
   const ordinaryPoolSends = 1 + CODEX_TEXT_GUARDED_BUDGET_POLICY.maxAlternateTargetSends;
-  const walkHeadroom = Math.max(0, (remainingReserveSeats?.size ?? 0) - ordinaryPoolSends);
+  // A previously charged ledger can still visit unreported seats, but cannot grow its send limit.
+  const walkHeadroom = options.sendBudget?.used === 0 ? Math.max(0, (remainingReserveSeats?.size ?? 0) - ordinaryPoolSends) : 0;
   let comboSendScope = isRequestExecutionBudget(options.sendBudget)
     ? deriveSendBudgetScope(options.sendBudget, comboExecutionBudgetPolicy(comboLegCount, walkHeadroom)) : undefined;
   while (pick) {

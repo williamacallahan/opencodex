@@ -33,6 +33,7 @@ import { createTranslatorBudget } from "../../src/lib/translator-budget";
 import { createRequestExecutionBudget } from "../../src/lib/request-execution-budget";
 import { createSpendReservationLedger, DEFAULT_SPEND_RESERVATION_POLICY } from "../../src/lib/spend-reservation-ledger";
 import { createRequestSpendTracker } from "../../src/server/responses/request-spend";
+import { configureSharedPoolBackpressure, DEFAULT_POOL_BACKPRESSURE_POLICY, resetSharedPoolBackpressureForTests } from "../../src/routing/probe-lease";
 
 const A = "luna-order-a";
 const B = "luna-order-b";
@@ -86,11 +87,12 @@ function seats(reserveOnB = true) {
   updateAccountQuota(A, 40, now + 86_400_000); updateAccountQuota(B, 100, now + 86_400_000);
   setAccountQuotaFromParsed(B, { customWindows: [{ label: "Luna Reserve", percent: reserveOnB ? 25 : 100, resetAt: now + 604_800_000, observedAt: now }] });
 }
-async function post(cfg: OcxConfig, extra: Record<string, unknown> = {}, headers: Record<string, string> = {}, signal?: AbortSignal, logCtx: RequestLogContext = { model: "", provider: "" }) {
+async function post(cfg: OcxConfig, extra: Record<string, unknown> = {}, headers: Record<string, string> = {}, signal?: AbortSignal,
+  { logCtx = { model: "", provider: "" }, sendBudget }: { logCtx?: RequestLogContext; sendBudget?: ReturnType<typeof createRequestExecutionBudget> } = {}) {
   const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST", signal,
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify({ model: "combo/luna", input: "ping", stream: true, prompt_cache_key: "luna-order", ...extra }) }),
-    cfg, logCtx, { admission: local, ...(signal ? { abortSignal: signal } : {}) });
+    cfg, logCtx, { admission: local, sendBudget, ...(signal ? { abortSignal: signal } : {}) });
   return { status: response.status, text: await response.text() };
 }
 
@@ -124,7 +126,7 @@ beforeEach(() => {
   }, { preconnect() {} }));
 });
 afterEach(async () => {
-  mock.restore(); release?.(); release = undefined;
+  mock.restore(); resetSharedPoolBackpressureForTests(); release?.(); release = undefined;
   clearAccountQuota(); clearCodexUpstreamHealth(); clearThreadAccountMap(); clearPoolRotationState(); resetQuotaQueryBackoffForTests();
   clearComboSelectionState(); clearComboRecallForTests(); clearComboTargetCooldowns();
   await flushConfigDirHardeningForTests(); setIcaclsRunnerForTests(null); setAsyncIcaclsRunnerForTests(null);
@@ -193,16 +195,81 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(new Set(nativeAccounts).size).toBe(3);
   });
 
-  test.each([false, true])("a long Reserve walk books each physical send once (enforced: %s)", async enforced => {
+  function addUnreportedSpentSeat(cfg: OcxConfig, id: string): void {
+    cfg.codexAccounts!.push({ id, email: `${id}@example.test`, isMain: false, plan: "pro" });
+    saveCodexAccountCredential(id, { accessToken: `fixture-${id}`, refreshToken: `fixture-refresh-${id}`,
+      chatgptAccountId: `fixture-workspace-${id}`, expiresAt: now + 86_400_000 });
+    updateAccountQuota(id, 100, now + 86_400_000);
+  }
+
+  function eightSpentSeats() {
     const cfg = threeSpentSeats();
-    // Unreported Reserve seats follow the verified seats. Earlier one-minute holds expire mid-walk.
-    for (const id of ["walk-d", "walk-e", "walk-f", "walk-g", "walk-h"]) {
-      cfg.codexAccounts!.push({ id, email: `${id}@example.test`, isMain: false, plan: "pro" });
-      saveCodexAccountCredential(id, { accessToken: `fixture-${id}`, refreshToken: `fixture-refresh-${id}`,
-        chatgptAccountId: `fixture-workspace-${id}`, expiresAt: now + 86_400_000 });
-      updateAccountQuota(id, 100, now + 86_400_000);
-    }
-    native = () => { now += 11_000; return Response.json({ error: { code: "usage_limit_reached" } }, { status: 429 }); };
+    for (const id of ["walk-d", "walk-e", "walk-f", "walk-g", "walk-h"]) addUnreportedSpentSeat(cfg, id);
+    return cfg;
+  }
+
+  test.each([false, true])("a Reserve rate_limit_exceeded never spends included Luna (all refuse: %s)", async allRefuse => {
+    const cfg = config();
+    updateAccountQuota(A, 100, now + 86_400_000);
+    setAccountQuotaFromParsed(A, { customWindows: [{ label: "Luna Reserve", percent: 25, resetAt: now + 604_800_000, observedAt: now }] });
+    updateAccountQuota(B, 20, now + 86_400_000);
+    addUnreportedSpentSeat(cfg, "walk-c");
+    // A live inherited booking limits headroom, not which eligible Reserve seats the selector may try.
+    const sendBudget = createRequestExecutionBudget();
+    const prior = sendBudget.reserveDispatch({ sendClass: "initial", targetKey: "prior" });
+    if (!prior.allowed) throw new Error("fixture booking refused");
+    try {
+      native = body => allRefuse || nativeAccounts.length === 1
+        ? Response.json({ error: { code: "rate_limit_exceeded", type: "rate_limit_error" } }, { status: 429 }) : sse(body.model, "ok");
+      const result = await post(cfg, {}, {}, undefined, { sendBudget });
+      expect(result.text).toContain("response.completed");
+      expect(nativeAccounts).toEqual([`fixture-workspace-${A}`, "fixture-workspace-walk-c"]);
+      expect(calls).toEqual(["native:gpt-reserve", "native:gpt-reserve", ...(allRefuse ? ["relay:gpt-6-luna"] : [])]);
+    } finally { prior.permit.release(); }
+  });
+
+  test("a strict child resolving to an ordinary Responses wire sends nothing", async () => {
+    const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "relay/gpt-6-luna", input: "ping", stream: true }),
+    }), config(), { model: "", provider: "" }, { admission: local, comboAttempt: true, poolCapacityIntent: "reserve-only" });
+    expect(response.status).toBe(429);
+    expect(await response.text()).toContain("nothing was sent");
+    expect(calls).toEqual([]);
+  });
+
+  test("a single Reserve seat retries its transient 502 on the same seat", async () => {
+    seats();
+    native = body => nativeAccounts.length === 1 ? new Response("bad gateway", { status: 502 }) : sse(body.model, "ok");
+    expect((await post(config())).text).toContain("response.completed");
+    expect(nativeAccounts).toEqual([`fixture-workspace-${B}`, `fixture-workspace-${B}`]);
+    expect(calls).toEqual(["native:gpt-reserve", "native:gpt-reserve"]);
+  });
+
+  test("unused Reserve slots cannot fund the last relay model's third send", async () => {
+    const cfg = eightSpentSeats();
+    cfg.combos!.luna!.targets[2] = { provider: "relay", model: "gpt-6-sol" };
+    // A provider-wide refusal ends a large walk after one send. Only the ordinary combo allowance survives.
+    native = () => Response.json({ error: { message: "Monthly usage limit reached" } }, { status: 429 });
+    relay = (_request, body) => body.model === "gpt-6-sol" && calls.filter(call => call === "relay:gpt-6-sol").length === 3
+      ? sse(body.model, "ok") : new Response("bad gateway", { status: 502 });
+    const result = await post(cfg);
+    expect(result.text).not.toContain("response.completed");
+    expect(calls).toEqual(["native:gpt-reserve", ...Array(3).fill("relay:gpt-6-luna"), ...Array(2).fill("relay:gpt-6-sol")]);
+  });
+
+  test("the default pool window refuses a fourth move and the relay serves without waiting", async () => {
+    const cfg = eightSpentSeats();
+    native = reserveRefused;
+    const result = await post(cfg, {}, {}, AbortSignal.timeout(2_000));
+    expect(result.text).toContain("response.completed");
+    expect(calls).toEqual([...Array(4).fill("native:gpt-reserve"), "relay:gpt-6-luna"]);
+    expect(new Set(nativeAccounts).size).toBe(4);
+  });
+
+  test.each([false, true])("a window admitting seven moves books each physical send once (enforced: %s)", async enforced => {
+    const cfg = eightSpentSeats();
+    configureSharedPoolBackpressure({ ...DEFAULT_POOL_BACKPRESSURE_POLICY, minRecoveryAllowance: 7 });
+    native = reserveRefused;
     const lines: string[] = [];
     const ledger = createSpendReservationLedger({
       journal: { read: () => [...lines], append: line => { lines.push(line); }, rewrite: next => { lines.splice(0, lines.length, ...next); } },
@@ -479,10 +546,10 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     seats(false);
     const session = { session_id: "opencode-session-1" };
     const first: RequestLogContext = { model: "", provider: "" };
-    expect((await post(config(), { model: "gpt-6-luna" }, session, undefined, first)).status).toBe(200);
+    expect((await post(config(), { model: "gpt-6-luna" }, session, undefined, { logCtx: first })).status).toBe(200);
     expect(first.affinity).toBe("new_bind");
     const second: RequestLogContext = { model: "", provider: "" };
-    expect((await post(config(), { model: "gpt-6-luna" }, session, undefined, second)).status).toBe(200);
+    expect((await post(config(), { model: "gpt-6-luna" }, session, undefined, { logCtx: second })).status).toBe(200);
     expect(second.affinity).toBe("reused");
     expect(calls).toEqual(["native:gpt-6-luna", "native:gpt-6-luna"]);
   });

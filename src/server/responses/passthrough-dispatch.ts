@@ -137,7 +137,7 @@ import { classifyTransportFailureKind, transportErrorCode } from "../../lib/upst
 import { captureAccountAutoPauseAttempt, wasAccountAutoPaused, wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
 import { codexFailureWindowOutcomeMeta, recordCodexUpstreamOutcome } from "../../codex/routing";
 import { describeUpstreamConnectFailure } from "./upstream-error";
-import { isReserveSeatQuotaRefusal, markUpstreamNotStarted } from "./combo-luna-legs";
+import { markUpstreamNotStarted, reserveQuotaPermitsMove } from "./combo-luna-legs";
 import {
   rateLimitRetryPolicyFor,
   rateLimitRetryDelayMs,
@@ -746,6 +746,7 @@ export async function preparePassthroughExchange(
     // Judged once on the inbound body and once per send on the body that physically leaves; the
     // split and its reasons live in the sibling module.
     const replayGuard = createNativeReplayGuard({
+      poolCapacityIntent: options.poolCapacityIntent,
       providerExecuted: () => isXaiResponsesDestination(route.provider)
         && collectProviderExecutedCallTypes(clientToolAuthorizationBody).size > 0,
       parsed,
@@ -983,6 +984,7 @@ export async function preparePassthroughExchange(
     // #6969: Pool sends hold empty lifecycle frames so a pre-output refusal reaches the ladder below.
     const preOutputRefusals = new PoolPreOutputRefusals();
     const firstPoolContext = admissionState.authCtx;
+    let movedReserveSeat = false;
     const reserveSeats = options.poolCapacityIntent === "reserve-only" ? options.remainingReserveSeats : undefined;
     const reserveDeadline = reserveSeats ? Date.now() + (connectMs || resolveConnectTimeoutMs(undefined)) : undefined;
     const preOutputRefusalHold = poolPreOutputRefusalHold(firstPoolContext, route.provider, connectMs, options.comboAttempt, parsed, req.headers);
@@ -1605,7 +1607,6 @@ export async function preparePassthroughExchange(
     };
     recordDistributedResponseFailure(lastDistributedResponse ?? upstreamResponse, config, route.providerName, options.abortSignal);
     captureAffinityResponse(upstreamResponse);
-    let movedReserveSeat = false;
     while (usesCodexForwardPoolAuth(admissionState.authCtx, route.provider)) {
       const reservePreflight = preflightReserveFirstResponse(upstreamResponse, movedReserveSeat || admissionState.authCtx === firstPoolContext,
         preOutputRefusalHold, logCtx, upstream.signal, upstreamRequestsStream);
@@ -1667,9 +1668,8 @@ export async function preparePassthroughExchange(
           && (poolRetryOutcome === 429 || poolRetryOutcome === 402)) {
           preOutputRefusals.recordReserveQuota(config, admissionState.authCtx, route.provider, upstreamResponse, route.modelId, poolRetryOutcome);
           if (!reserveSeats.delete(admissionState.authCtx.accountId) || !reserveSeats.size || storedReplaySpent
-            || sendBudgetState.ambiguousResendSpent || wasAccountAutoPaused(upstreamResponse) || isNonReplayableResponse(upstreamResponse)
-            || upstream.signal.aborted || (reserveDeadline !== undefined && Date.now() >= reserveDeadline)) break;
-          if (upstreamResponse.status < 500 && !isReserveSeatQuotaRefusal(await consumeComboFailure(upstreamResponse.clone(), upstream.signal))) break;
+            || sendBudgetState.ambiguousResendSpent || (reserveDeadline !== undefined && Date.now() >= reserveDeadline)
+            || !await reserveQuotaPermitsMove(upstreamResponse, upstream.signal)) break;
           walkSeats = reserveSeats;
         }
         if (movedReserveSeat && !walkSeats) break;

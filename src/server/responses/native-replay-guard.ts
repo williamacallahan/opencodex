@@ -13,11 +13,14 @@
  * rebuild or an exhausted send budget must not leave the next ordinary send judged as one.
  */
 import type { AdapterRequest } from "../../adapters/base";
+import { CodexReserveUnavailableError } from "../../codex/auth-context";
+import { permitsPoolWireModel, POOL_RESERVE_UNAVAILABLE_MESSAGE, type PoolCapacityIntent } from "../../codex/pool-reserve";
 import {
   createPhysicalReplayGuard, nativePassthroughReplayJudgmentBody, selfContainedResponsesBody,
 } from "./reset-replay";
 
 export interface NativeReplayGuardOptions {
+  poolCapacityIntent?: PoolCapacityIntent;
   /** Whether the destination the request is dialled against executes tools on the origin. */
   providerExecuted: () => boolean;
   /** The parsed inbound body the judgment is made on. */
@@ -42,6 +45,13 @@ export interface NativeReplayGuard {
 
 export function createNativeReplayGuard(options: NativeReplayGuardOptions): NativeReplayGuard {
   const physical = createPhysicalReplayGuard(options.providerExecuted);
+  const record: typeof physical.record = (request, body, next) => {
+    // outboundModelId is captured from the final serialized model; don't parse a large turn again.
+    if (!permitsPoolWireModel(options.poolCapacityIntent, request.outboundModelId)) {
+      throw new CodexReserveUnavailableError(POOL_RESERVE_UNAVAILABLE_MESSAGE);
+    }
+    physical.record(request, body, next);
+  };
   // Judged once: walking the input array is not something a provider that never opted in should
   // pay for on every leg, and the inbound body cannot change mid-request.
   let selfContained: boolean | undefined;
@@ -51,7 +61,7 @@ export function createNativeReplayGuard(options: NativeReplayGuardOptions): Nati
       && physical.isSelfContained(options.currentRequest()),
     authorize: () => physical.authorize(),
     sendHandler: (next?: () => void) => (body?: BodyInit | null): void =>
-      physical.record(options.currentRequest(), body, next),
-    record: (request: AdapterRequest, body: BodyInit | null | undefined) => physical.record(request, body),
+      record(options.currentRequest(), body, next),
+    record,
   };
 }
