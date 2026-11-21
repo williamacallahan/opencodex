@@ -1346,8 +1346,7 @@ export function recordCodexUpstreamOutcome(
     // replaced the cooldown in the meantime, so only give the lease back.
     // Non-owners keep every hard-cooldown field, including someone else's live lease.
     const base = ownsProbeLease(current, meta) ? withProbeLeaseReleased(current!, now) : current;
-    const preserved = preservedCooldownFields(base);
-    settleCodexSuccessStreak(config, accountId, current, base, preserved, cooldownUntil);
+    settleCodexSuccessStreak(config, accountId, current, base, preservedCooldownFields(base), cooldownUntil);
     return;
   }
   if (outcomeClass === "caller") {
@@ -1448,6 +1447,7 @@ export function recordCodexUpstreamOutcome(
   }
 
   if (outcomeClass === "quota") {
+    const capacityEvidence = { confirmed: false };
     // A pool Reserve refusal's reset names the seat's spent plan window, not Reserve: ChatGPT never
     // discloses Reserve and it comes and goes per seat, so only Retry-After holds it past the default
     // (honoring that reset kept every seat off Reserve for hours after one refusal each, 2026-11-20).
@@ -1461,7 +1461,7 @@ export function recordCodexUpstreamOutcome(
         consecutiveFailures: 0,
         lastFailureStatus,
         lastFailureAt: now,
-        cooldownUntil: until,
+        cooldownUntil: until, capacityEvidence,
         quotaAvoidUntil: meta.poolReserve ? until : quotaAvoidUntilFor(meta, now, until),
         cooldownSince: now,
         cooldownSource: source,
@@ -1491,7 +1491,7 @@ export function recordCodexUpstreamOutcome(
           if (fallback) promoteActiveCodexAccount(config, fallback);
         }
       }
-      return () => { cooldown.confirmedCapacity = true; };
+      return () => { capacityEvidence.confirmed = true; };
     }
 
     // A scoped probe that received an account-wide throttle is no longer live.
@@ -1511,7 +1511,7 @@ export function recordCodexUpstreamOutcome(
       consecutiveFailures: 0,
       lastFailureStatus,
       lastFailureAt: now,
-      cooldownUntil: until,
+      cooldownUntil: until, capacityEvidence,
       quotaAvoidUntil: quotaAvoidUntilFor(meta, now, until),
       cooldownSince: now,
       cooldownSource: source,
@@ -1544,7 +1544,7 @@ export function recordCodexUpstreamOutcome(
         }
       }
     }
-    return () => { cooldown.confirmedCapacity = true; };
+    return () => { capacityEvidence.confirmed = true; };
   }
 
   // transient (connect_error / timeout / 5xx)

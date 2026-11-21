@@ -130,7 +130,8 @@ import { classifyTransportFailureKind, transportErrorCode } from "../../lib/upst
 import { captureAccountAutoPauseAttempt, wasAccountAutoPaused, wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
 import { codexFailureWindowOutcomeMeta, recordCodexUpstreamOutcome } from "../../codex/routing";
 import { describeUpstreamConnectFailure } from "./upstream-error";
-import { markUpstreamNotStarted, terminalOwnerCapacityStatus } from "./combo-luna-legs";
+import { markUpstreamNotStarted } from "./combo-luna-legs";
+import { terminalOwnerCapacityStatus } from "./owner-capacity-refusal";
 import {
   rateLimitRetryPolicyFor,
   rateLimitRetryDelayMs,

@@ -131,7 +131,8 @@ import {
   markEagerRelaySseResponse,
 } from "../relay";
 import { preflightComboStreamResponse } from "./combo-stream-preflight";
-import { isOwnerCapacityRefusal, isReserveSeatQuotaRefusal, nativeLunaTarget, planLunaReserveLegs, portSpentLunaReasoning, prepareLunaReplay, relayProvedNotStarted } from "./combo-luna-legs";
+import { isOwnerCapacityRefusal } from "./owner-capacity-refusal";
+import { isReserveSeatQuotaRefusal, nativeLunaTarget, planLunaReserveLegs, portSpentLunaReasoning, prepareLunaReplay, relayProvedNotStarted } from "./combo-luna-legs";
 import { createPoolReserveWalk, modelHasPoolReserve, type PoolCapacityIntent } from "../../codex/pool-reserve";
 import { requiredToolContractOf } from "./combo-required-tool-contract";
 import {
@@ -1789,7 +1790,7 @@ export async function executeComboResponses(
       routeConcreteModel,
       retryAfter: poolLocalRefusal || codexLocalRefusal || relayCooldown !== undefined ? undefined : failure.retryAfter,
       resetAt: codexLocalRefusal || relayCooldown !== undefined ? undefined : failure.resetAt,
-      cooldownMs: relayCooldown ?? combo.cooldownMs,
+      relayCooldownMs: relayCooldown,
       now: failureNow,
       cooldownScope: failureCooldownScope,
       // A pin may start in the middle. Ask its planned relay before resuming configured order.

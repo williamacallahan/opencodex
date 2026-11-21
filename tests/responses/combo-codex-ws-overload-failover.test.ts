@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { clearAccountNeedsReauth } from "../../src/codex/auth-api";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import { clearAccountQuota, setAccountQuotaFromParsed } from "../../src/codex/quota";
-import { clearCodexUpstreamHealth, clearThreadAccountMap } from "../../src/codex/routing";
+import { clearCodexUpstreamHealth, clearThreadAccountMap, getCodexQuotaHealthSnapshot } from "../../src/codex/routing";
 import { clearComboSelectionState, clearComboTargetCooldowns, coolComboTarget, isComboTargetInCooldown } from "../../src/combos";
 import { handleResponses } from "../../src/server/responses";
 import { codexWsPool } from "../../src/server/responses/codex-ws-pool";
@@ -32,7 +32,8 @@ const HOME_KEYS = ["HOME", "OPENCODEX_HOME", "CODEX_HOME"] as const;
 const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"] as const;
 
 type Listener = (event: unknown) => void;
-type Step = "quota-then-refuse" | "quota-output-then-refuse" | "reserve-started-then-refuse";
+type Step = "quota-then-refuse" | "quota-output-then-refuse" | "reserve-started-then-refuse"
+  | "wrapped-quota" | "conflicting-wrapper" | "foreign-wrapper" | "missing-status" | "unknown-status";
 
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -55,11 +56,18 @@ class FakeWebSocket {
     this.frame({ type: "codex.rate_limits", rate_limits: { primary: { used_percent: 10, window_minutes: 10080 } } });
     this.frame({ type: "response.created", response: { id, status: "in_progress", output: [] } });
     this.frame({ type: "response.in_progress", response: { id, status: "in_progress", output: [] } });
-    if (step === "quota-output-then-refuse") {
+    if (step !== "quota-then-refuse" && step !== "reserve-started-then-refuse") {
       this.frame({ type: "response.output_item.added", response_id: id, output_index: 0,
         item: { id: "msg_1", type: "message", role: "assistant", content: [] } });
     }
-    if (step === "reserve-started-then-refuse") {
+    if (step === "wrapped-quota" || step === "conflicting-wrapper" || step === "foreign-wrapper") {
+      this.frame({ type: "error", response_id: step === "foreign-wrapper" ? "resp_other" : id, status_code: 429,
+        headers: { "retry-after": "120" }, ...(step === "conflicting-wrapper" && { code: "origin_rejected" }),
+        error: { type: "usage_limit_reached", message: "Limit reached" } });
+    } else if (step === "missing-status" || step === "unknown-status") {
+      this.frame({ type: "response.done", response: { id, ...(step === "unknown-status" && { status: "future" }),
+        error: { code: "insufficient_quota", message: "Limit reached" } } });
+    } else if (step === "reserve-started-then-refuse") {
       this.frame({ type: "response.failed", response: { id, status: "failed", output: [],
         error: { code: "usage_limit_reached", message: "Limit reached" } } });
     } else {
@@ -250,6 +258,23 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect(body).not.toContain("resp_fallback");
     expect(isComboTargetInCooldown("overload", target)).toBe(true);
   });
+
+  test.each(["wrapped-quota", "conflicting-wrapper", "foreign-wrapper", "missing-status", "unknown-status"] as const)(
+    "committed Luna WebSocket quota evidence: %s", async terminal => {
+      FakeWebSocket.plan = [terminal];
+      const cfg = comboConfig();
+      cfg.combos!.overload!.targets[0]!.model = "gpt-6-luna";
+      const { body } = await send(cfg);
+      expect(body).toContain("response.output_item.added");
+      expect(fallbackSends).toBe(0);
+      const cooldown = getCodexQuotaHealthSnapshot(WORK, "shared");
+      if (terminal === "wrapped-quota") {
+        expect(cooldown?.cooldownSource).toBe("retry-after");
+        expect(cooldown?.confirmedCapacity).toBe(true);
+      } else {
+        expect(cooldown?.confirmedCapacity).toBeUndefined();
+      }
+    });
 
   test("output after the rate-limit frame still commits the native target", async () => {
     FakeWebSocket.plan = ["quota-output-then-refuse"];

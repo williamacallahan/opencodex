@@ -1,4 +1,4 @@
-import { responsesTransportUrl, stripTrailingSlashes } from "../openai-tiers-destination";
+import { responsesTransportUrl } from "../openai-tiers-destination";
 import type { RouteResult } from "../../router";
 import type { OcxProviderConfig } from "../../types";
 
@@ -13,15 +13,16 @@ export function hasUpstreamSeatPool(route: Pick<RouteResult, "provider" | "model
 
 /** Only the two key-auth Responses handlers on a Codex relay base share its seat pool. */
 export function isCodexLbResponsesEndpoint(provider: OcxProviderConfig, wire: string, target?: string): boolean {
-  if ((provider.authMode ?? "key") !== "key" || !codexLbUsageUrl(provider, wire)) return false;
-  const base = stripTrailingSlashes(provider.baseUrl);
-  const url = target ?? responsesTransportUrl(provider);
-  return url === `${base}/responses` || url === `${base}/v1/responses`;
+  const origin = (provider.authMode ?? "key") === "key" && codexLbOrigin(provider, wire);
+  if (!origin) return false;
+  const destination = URL.parse(target ?? responsesTransportUrl(provider));
+  if (destination?.origin !== origin || destination.username || destination.password || destination.search || destination.hash) return false;
+  return destination.pathname === `${CODEX_BACKEND_PATH}/responses` || destination.pathname === `${CODEX_BACKEND_PATH}/v1/responses`;
 }
 
 /** Base-level detection used for native Luna placement, independent of cooldown policy. */
 export function isCodexLbProvider(provider: OcxProviderConfig): boolean {
-  return codexLbUsageUrl(provider) !== null;
+  return codexLbOrigin(provider, provider.adapter) !== null;
 }
 
 /**
@@ -30,12 +31,17 @@ export function isCodexLbProvider(provider: OcxProviderConfig): boolean {
  * on the same origin that already receives that key for every inference request.
  */
 export function codexLbUsageUrl(provider: OcxProviderConfig, wire = provider.adapter): string | null {
+  const origin = codexLbOrigin(provider, wire);
+  return origin && `${origin}/v1/usage`;
+}
+
+function codexLbOrigin(provider: OcxProviderConfig, wire: string): string | null {
   if (wire !== "openai-responses") return null;
   try {
     const url = new URL(provider.baseUrl);
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) return null;
     if (url.origin === CHATGPT_ORIGIN || url.pathname.replace(/\/+$/, "") !== CODEX_BACKEND_PATH) return null;
-    return `${url.origin}/v1/usage`;
+    return url.origin;
   } catch {
     return null;
   }

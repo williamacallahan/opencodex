@@ -71,6 +71,8 @@ describe("codex-lb pooled usage quota", () => {
   test.each([
     ["codex-lb", { responsesPath: "/responses" }, true],
     ["codex-lb", {}, true],
+    ["codex-lb", { baseUrl: "https://RELAY.example.test:443/backend-api/codex" }, true],
+    ["codex-lb", { responsesPath: "/responses?other=1" }, false],
     ["codex-lb", { responsesPath: "/other/responses" }, false],
     ["codex-lb", { modelAdapters: { luna: "openai-chat" } }, false],
     ["codex-lb", { responsesPath: "/other/responses", modelCapabilities: { luna: { upstreamSeatPool: true } } }, true],

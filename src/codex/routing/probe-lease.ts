@@ -263,7 +263,7 @@ function settleCooldownRecoveryLease(claim: CooldownRecoveryLease, recovered: bo
     deleteScopedHealth(claim.accountId, claim.scope);
   } else {
     const {
-      cooldownUntil: _until,
+      capacityEvidence: _evidence, cooldownUntil: _until,
       cooldownSince: _since,
       cooldownSource: _source,
       probeLeaseId: _leaseId,

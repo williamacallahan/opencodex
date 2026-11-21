@@ -57,11 +57,13 @@ export const CODEX_WS_CREATE_FRAME_LIMIT_BYTES =
 const WS_CLOSE_MESSAGE_TOO_BIG = 1009;
 
 export interface CodexWsTerminalQuota {
+  confirmedCapacity: boolean;
   status: 402 | 429;
   headers: Headers;
 }
 
 interface CodexWsResponseEvidence {
+  ambiguousTerminal?: true;
   terminalQuota?: CodexWsTerminalQuota;
 }
 
@@ -100,8 +102,8 @@ export function markCodexWsResponse(response: Response, observed: boolean): Code
 }
 
 /** Validated quota metadata from the accepted turn's terminal, not its SSE head. */
-export function readCodexWsTerminalQuota(response: Response): CodexWsTerminalQuota | undefined {
-  return codexWsUpstreamResponses.get(response)?.terminalQuota;
+export function readCodexWsResponseEvidence(response: Response): CodexWsResponseEvidence | undefined {
+  return codexWsUpstreamResponses.get(response);
 }
 
 /**

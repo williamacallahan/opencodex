@@ -12,7 +12,8 @@ export type CodexUpstreamHealth = {
   consecutiveSuccesses?: number;
   /** A completed Reserve turn is routing evidence, not a quota reading. */
   reserveSuccess?: { at: number; credentialGeneration: number };
-  confirmedCapacity?: true;
+  /** Shared by health writes that retain this cooldown, never by a replacement refusal. */
+  capacityEvidence?: { confirmed: boolean };
   lastFailureStatus?: number;
   lastFailureAt?: number;
   /** Hard cooldown (quota 429). Survives a later 2xx; blocks auth + selection. */
@@ -201,7 +202,7 @@ export function preservedCooldownFields(health: CodexUpstreamHealth | undefined)
   // when the old credential dies, deleting evidence that was never about it (#2892 gap 4 review).
   const {
     consecutiveFailures: _f, consecutiveSuccesses: _s, lastFailureStatus: _st, lastFailureAt: _at,
-    confirmedCapacity: _capacity, softAvoidUntil: _sa, credentialFailureGeneration: _cg, ...cooldownFields
+    softAvoidUntil: _sa, credentialFailureGeneration: _cg, ...cooldownFields
   } = health;
   return cooldownFields;
 }
@@ -223,7 +224,7 @@ export function getCodexAccountHealthSnapshot(accountId: string, now = Date.now(
   return {
     cooldownUntil,
     ...(health?.cooldownSource ? { cooldownSource: health.cooldownSource } : {}),
-    ...(health?.confirmedCapacity && { confirmedCapacity: true }),
+    ...(health?.capacityEvidence?.confirmed && { confirmedCapacity: true }),
   };
 }
 
@@ -251,7 +252,7 @@ export function getCodexQuotaHealthSnapshot(
   return {
     cooldownUntil,
     ...(scoped?.cooldownSource ? { cooldownSource: scoped.cooldownSource } : {}),
-    ...(scoped?.confirmedCapacity && { confirmedCapacity: true }),
+    ...(scoped?.capacityEvidence?.confirmed && { confirmedCapacity: true }),
     quotaScope,
   };
 }
@@ -291,7 +292,7 @@ export function clearCodexAccountCooldown(accountId: string, now = Date.now()): 
     const liveAvoidance = typeof avoidUntil === "number" && Number.isFinite(avoidUntil) && avoidUntil > now;
     if (!liveCooldown && !liveAvoidance) return null;
     const {
-      confirmedCapacity: _capacity, cooldownUntil: _until,
+      capacityEvidence: _capacity, cooldownUntil: _until,
       cooldownSince: _since,
       cooldownSource: _source,
       probeLeaseId: _leaseId,
@@ -369,7 +370,7 @@ export function noteScopedCodexSuccess(
   const reserveSuccess = scope === "reserve" && reserveGeneration !== undefined
     && isCodexAccountGenerationLive(accountId, reserveGeneration) ? { at: now, credentialGeneration: reserveGeneration } : undefined;
   if (!reserveSuccess && (!current || !carriesQuotaRefusal(current))) return;
-  const { confirmedCapacity: _capacity, lastFailureStatus: _refusal, lastFailureAt: _refusedAt, quotaAvoidUntil: _avoid, ...retained } =
+  const { lastFailureStatus: _refusal, lastFailureAt: _refusedAt, quotaAvoidUntil: _avoid, ...retained } =
     current ?? { consecutiveFailures: 0 };
   if (reserveSuccess) setScopedHealth(accountId, scope, { ...retained, reserveSuccess });
   else if (Object.keys(retained).length > 1) setScopedHealth(accountId, scope, retained);

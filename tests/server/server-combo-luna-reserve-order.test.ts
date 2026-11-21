@@ -241,6 +241,26 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(isComboTargetInCooldown("luna", luna, now + delay)).toBe(false);
   });
 
+  test("a slow 503 body cannot shorten a newer live relay hold", async () => {
+    const luna = { provider: "relay", model: "gpt-6-luna" };
+    const cfg = config({}, [luna]);
+    cfg.providers.relay!.upstreamWebsocket = false;
+    cfg.combos!.luna!.waitForCooldownMs = 0;
+    const readStarted = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    relay = () => new Response(new ReadableStream({ async pull(controller) {
+      readStarted.resolve(); await resume.promise;
+      controller.enqueue(new TextEncoder().encode('{"error":{"code":"server_is_overloaded"}}')); controller.close();
+    } }), { status: 503, headers: { "retry-after": "120", "x-should-retry": "false" } });
+    const earlier = post(cfg);
+    await readStarted.promise;
+    coolComboTarget("luna", luna, { now, status: 503, retryAfter: "300" });
+    resume.resolve();
+    expect((await earlier).status).toBe(503);
+    expect(isComboTargetInCooldown("luna", luna, now + 299_999)).toBe(true);
+    expect(isComboTargetInCooldown("luna", luna, now + 300_000)).toBe(false);
+  });
+
   test("a third Reserve seat serves after two seats refuse", async () => {
     const cfg = threeSpentSeats();
     native = body => nativeAccounts.length < 3 ? reserveRefused() : sse(body.model, "ok");
@@ -955,6 +975,15 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(calls).toEqual(["native:gpt-6-luna"]); calls.length = 0;
     expect((await post(cfg, ownerDelta, ownerLane)).status).toBe(conflict ? 429 : 200);
     expect(calls).toEqual(conflict ? [] : ["relay:gpt-6-luna"]);
+  });
+
+  test.each([false, true])("a late success keeps confirmation on the active cooldown (scoped: %s)", async scoped => {
+    const cfg = config(); await issueOwner(cfg);
+    const seat = { modelId: "gpt-6-luna", now, ...(scoped ? { resetAt: now + 180_000 } : { retryAfter: "180" }) };
+    recordCodexUpstreamOutcome(cfg, A, 429, seat)?.();
+    recordCodexUpstreamOutcome(cfg, A, 200, { modelId: seat.modelId, now: now + 1 });
+    expect((await post(cfg, ownerDelta, ownerLane)).status).toBe(200);
+    expect(calls).toEqual(["relay:gpt-6-luna"]);
   });
 
   test("a late quota body cannot confirm the next cooldown on the same seat", async () => {

@@ -54,7 +54,7 @@ import { recordSubagentQuotaFailureForThreadSpawn } from "../../codex/subagent-m
 import { recordCodexUpstreamOutcome } from "../../codex/routing";
 import { codexFailureWindowOutcomeMeta } from "../../codex/routing/failure-window";
 import { codexProbeLeaseId, codexProbeQuotaScope, codexTransientProbeGrant, releaseCodexAuthContextProbeLease } from "../../codex/auth-context";
-import { isOwnerCapacityRefusal } from "./combo-luna-legs";
+import { isOwnerCapacityRefusal } from "./owner-capacity-refusal";
 import { upstreamEnvelopeRootCode } from "../../combos/failover";
 import { consumeComboFailure } from "./core-combo-failure";
 import { clientCancelledResponse, normalizeUpstreamErrorText, readDisplaySafeErrorText } from "./core-errors";

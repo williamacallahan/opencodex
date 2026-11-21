@@ -41,7 +41,7 @@ import {
   codexWsPreOutputRefusalOutcomeRecorded,
   isCodexWsPreOutputRefusal,
   noteCodexWsPreOutputRefusalOutcome,
-  readCodexWsTerminalQuota,
+  readCodexWsResponseEvidence,
   restoreCodexWsPreOutputRefusal,
   type CodexWsPreOutputRefusalHold,
 } from "./codex-ws-wire";
@@ -1279,7 +1279,12 @@ export function codexForwardTerminalOutcomeRecorder(
   }
   const windowMeta = codexFailureWindowOutcomeMeta(authCtx);
   return (status, httpStatusOverride, reserveServed, capacityStatus) => {
-    const terminalQuota = status === "failed" && response ? readCodexWsTerminalQuota(response) : undefined;
+    const wsEvidence = response && readCodexWsResponseEvidence(response);
+    const terminalQuota = status === "failed" ? wsEvidence?.terminalQuota : undefined;
+    // The normalized SSE tail cannot establish or overrule what the WebSocket actually proved.
+    if (wsEvidence?.ambiguousTerminal) capacityStatus = undefined;
+    else if (terminalQuota) capacityStatus = terminalQuota.confirmedCapacity && response && !isNonReplayableResponse(response)
+      ? terminalQuota.status : undefined;
     const quotaStatus = [httpStatusOverride, logCtx?.terminalHttpStatus]
       .find(value => value === 429 || value === 402)
       ?? terminalQuota?.status

@@ -294,6 +294,7 @@ export function coolComboTarget(
     resetAt?: unknown | unknown[];
     now?: number;
     cooldownMs?: number;
+    relayCooldownMs?: number;
     writerGeneration?: number;
     status?: number;
     scope?: NonNullable<PersistableCooldown["scope"]>;
@@ -314,6 +315,7 @@ export function coolComboTarget(
   });
   const cooldownMs = serverDelayMs
     ?? parseResetCooldownMs(options?.resetAt, now)
+    ?? options?.relayCooldownMs
     ?? options?.cooldownMs
     // A spent account window or an unpaid/rejected credential does not turn over in a minute,
     // so the 60s default would re-offer a target that cannot succeed. Only the duration
@@ -326,10 +328,12 @@ export function coolComboTarget(
         code: options?.code,
         message: options?.message,
       }) ? COMBO_REQUEST_RATE_COOLDOWN_MS : DEFAULT_COOLDOWN_MS);
-  targetCooldowns.set(cooldownMapKey(comboId, target), {
+  const key = cooldownMapKey(comboId, target);
+  const cooldownUntil = now + (serverDelayMs ?? Math.min(Math.max(cooldownMs, 1), MAX_COOLDOWN_MS));
+  if (options?.relayCooldownMs !== undefined && (targetCooldowns.get(key)?.cooldownUntil ?? 0) > cooldownUntil) return false;
+  targetCooldowns.set(key, {
     revision: ++nextCooldownRevision,
-    // Local fallbacks are capped at ten minutes; explicit server delays at one day.
-    cooldownUntil: now + (serverDelayMs ?? Math.min(Math.max(cooldownMs, 1), MAX_COOLDOWN_MS)),
+    cooldownUntil,
     status: options?.status,
     ...(options?.status === 429 ? { scope: options.scope ?? "target" } : {}),
   });

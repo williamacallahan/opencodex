@@ -1,4 +1,5 @@
 import { NativeSteeringError } from "./native-steering";
+import { terminalOwnerCapacityStatus } from "./owner-capacity-refusal";
 import { reserveQuotaPrelude } from "./combo-stream-preflight";
 import { NativeContinuationRefusalError } from "./native-continuation-refusal";
 import { mergeSteeringContinuation } from "./native-steering-settings";
@@ -164,7 +165,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
     // Drops for good on any identity the exchange cannot tie to one response: a stream id, two
     // different ids in one frame, or an id that differs from the first one seen. Independent of
     // socket reuse, so a cold one-shot socket is held to the same rule as a pooled one.
-    let refusalEligible = holdEnabled;
+    let refusalEligible = true;
     let quotaPrelude = holdEnabled && preOutputRefusalHold?.reserveFirstPlacement ? reserveQuotaPrelude() : undefined;
     let refusalResponseId: string | null = null;
     let heldHeaders: Headers | null = null;
@@ -651,8 +652,10 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
           if (nativeControl) steeringEnded = nativeControl.observe(normalized.payload);
           else correlation?.accept(normalized.payload);
         } catch (error) { failStream(error); return; }
-        const holdOpen = refusalEligible && sent && !responseCommitted;
-        if (holdOpen) noteRefusalIdentity(normalized.payload);
+        const holdOpen = holdEnabled && sent && !responseCommitted;
+        const acceptedId = refusalResponseId;
+        if (refusalEligible && metadata && (normalized.payload.response !== undefined || normalized.payload.response_id !== undefined
+          || normalized.payload.stream_id !== undefined)) noteRefusalIdentity(normalized.payload);
         // Correlation must run first: a reused socket's foreign-stream error settles as a
         // non-replayable 502 above, never as the refused-create 4xx projection below, which
         // is the one status family that could authorize an account replay.
@@ -681,7 +684,9 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
           }
           if (rejection && (rejection.status === 402 || rejection.status === 429)) {
             // Keep the quota evidence if the correlated first-placement check below declines the move.
-            terminalQuota = { status: rejection.status, headers: rejection.headers };
+            terminalQuota = { status: rejection.status, headers: rejection.headers,
+              confirmedCapacity: refusalEligible && !!acceptedId && normalized.payload.response_id === acceptedId
+                && terminalOwnerCapacityStatus(normalized.payload, rejection.status) === rejection.status };
           }
         }
         let holdFrame = false;
@@ -732,7 +737,10 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         return;
       }
       if (!controlFrame) relayedEvents += 1;
-      if (terminalQuota && responseEvidence) responseEvidence.terminalQuota = terminalQuota;
+      if (responseEvidence) {
+        if (terminalQuota) responseEvidence.terminalQuota = terminalQuota;
+        if (normalized.ambiguousTerminal) responseEvidence.ambiguousTerminal = true;
+      }
       if (nativeControl ? steeringEnded : (type === "response.completed" || type === "response.failed" || type === "response.incomplete" || type === "error")) {
         const completedId = correlation?.completed(normalized.payload) ?? null;
         terminal = true;

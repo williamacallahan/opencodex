@@ -541,6 +541,7 @@ export function advanceComboAfterFailure(
     eligible?: (target: NormalizedComboTarget) => boolean;
     routeConcreteModel?: typeof routeConcreteModel;
     cooldownScope?: ComboFailureCooldownScope;
+    relayCooldownMs?: number;
     onCooldownRecorded?: (target: Pick<OcxComboTarget, "provider" | "model">) => void;
     status?: number;
     code?: string | null;
