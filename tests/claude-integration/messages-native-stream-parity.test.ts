@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fixturePath, helperPath, repoRoot } from "../helpers/repo-root";
+import { pinnedMessagesObservation } from "../helpers/messages-sse-observer";
 
 type Outcome = { bytes: string; calls?: { status: number; closeReason: string }[]; settlements?: { status: number; mode?: string }[]; sends?: number; status?: number; cancelled: string[] };
 const outcomes: Record<string, Record<string, Outcome>> = {};
@@ -60,7 +61,14 @@ for (const lane of ["tap", "native-fixture", "native-anthropic"]) for (const sce
       expect(head.settlements![0]!.status).toBe(scenario === "cancel" ? 499 : ["overflow", "throughput", "complete"].includes(scenario) ? 200 : 502);
     }
     if (scenario === "overflow") expect(head.bytes).toContain("prompt is too long");
-    if (scenario === "throughput") expect(head.bytes).toContain(lane === "tap" ? "too many tokens per minute" : "The provider rate limit was reached; retry later.");
+    if (scenario === "throughput") {
+      expect(head.bytes).toContain(lane === "tap" ? "too many tokens per minute" : "The provider rate limit was reached; retry later.");
+      if (lane !== "tap") {
+        const events = pinnedMessagesObservation(Buffer.from(head.bytes)).events.filter(event => event.event === "error");
+        expect(events).toHaveLength(1);
+        expect(JSON.parse(events[0]!.data)).toEqual({ type: "error", error: { type: "rate_limit_error", message: "The provider rate limit was reached; retry later." } });
+      }
+    }
     if (scenario === "guard" && lane !== "tap") expect(head.bytes).toContain("undeclared_tool_call");
     if (["cancel", "cap", "stall"].includes(scenario)) expect(head.cancelled.length).toBeGreaterThan(0);
   });

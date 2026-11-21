@@ -67,6 +67,7 @@ export function registerSseLane(lane: string) {
         }
         if (input.kind !== "OVERSIZE-1M" || lane === "tap") expect(after.clientRecognizes, key).toBe(before.clientRecognizes);
         const observed = pinnedMessagesObservation(bytes);
+        if (lane !== "fold") expect(observed.events.some(event => event.event === "error"), key).toBe(golden.dictionaries.diagnostics[values[9]].length > 0);
         expect(observed.clientRecognizes, key).toBe(after.clientRecognizes);
       }
     } finally { rmSync(scratch, { recursive: true, force: true }); }
