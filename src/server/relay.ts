@@ -195,7 +195,8 @@ function upstreamErrorFailedPayload(message: string, refusalCode?: string, maskC
   const recognized = recognizedUpstreamError({ type: errorType, code: errorCode });
   const error = {
     type: refusalCode === undefined ? (recognized?.type ?? "upstream_error") : "invalid_request_error",
-    code: refusalCode === undefined ? (recognized?.code ?? "upstream_server_error") : (maskCredential?.(refusalCode) ?? refusalCode),
+    code: refusalCode === undefined ? (recognized?.code ?? "upstream_server_error")
+      : isTerminalRefusalCode(refusalCode) ? refusalCode : (maskCredential?.(refusalCode) ?? refusalCode),
     message: (maskCredential?.(diagnostic) ?? diagnostic).slice(0, MAX_TAIL_ERROR_MESSAGE_CHARS),
   };
   return JSON.stringify({
@@ -278,8 +279,7 @@ function boundedBareUpstreamError(payload: unknown): {
   // error records can authoritatively name classes such as rate_limit_error or server_error.
   const errorType = candidates.slice(0, -1).map(candidate => stringField(candidate, "type"))
     .find(candidate => candidate !== undefined)?.slice(0, 128);
-  const refusalCode = code !== undefined
-    ? (isTerminalRefusalCode(code) ? code : undefined)
+  const refusalCode = isTerminalRefusalCode(code) ? code
     : message === undefined || candidates.some(candidate => candidate && hasStructuredErrorVerdict(candidate)) ? undefined : safetyRefusalCodeFromMessage(message);
   if (message !== undefined) return { message, refusalCode, errorType, errorCode: code };
   if (refusalCode === undefined) return undefined;

@@ -471,6 +471,7 @@ export async function prepareAdapterExchange(
       // physical-send reporter, which already owns the permit lifecycle there.
       // Stable per request: a Combo or compaction permit comes from `reserveDispatch`, which starts
       // (and freezes) the spend policy first, so `spendEnforced` cannot change before dispatch.
+      if (ownsMistralDispatchReceipt(route.provider)) adapterSendBudget?.startRequest?.(responsesSpendTarget(logCtx, route.providerName));
       const receiptMode = !sendBudgetState.adapterSendBudget?.spendEnforced
         && Boolean(options.comboInitialSend || compactPrepaid);
       // Combo and emergency compaction admission already book this target's first send.
@@ -1955,6 +1956,7 @@ export async function prepareAdapterExchange(
         normalized.cyberPolicy ? (normalized.type ?? CYBER_POLICY_ERROR_CODE) : "upstream_error",
         message,
         {
+          cyberPolicy: normalized.cyberPolicy,
           ...(normalized.cyberPolicy ? { code: CYBER_POLICY_ERROR_CODE } : {}),
           ...(retryAfter !== undefined ? { retryAfter } : {}),
         },

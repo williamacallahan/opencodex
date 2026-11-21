@@ -107,7 +107,7 @@ function safeSnapshotTools(value: unknown, budget: { remaining: number }, depth 
   });
 }
 
-function safeSnapshotUsage(value: unknown): boolean {
+export function safeSnapshotUsage(value: unknown): boolean {
   if (!recordWithOnly(value, ["input_tokens", "output_tokens", "total_tokens", "input_tokens_details", "output_tokens_details"])) return false;
   for (const key of ["input_tokens", "output_tokens", "total_tokens"]) {
     if (value[key] != null && !(typeof value[key] === "number" && Number.isFinite(value[key]) && value[key] >= 0)) return false;

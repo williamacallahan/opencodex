@@ -164,6 +164,20 @@ describe("cyber_policy error fidelity", () => {
     expect(codeOnlyResponse.headers.get("retry-after")).toBeNull();
   });
 
+  test("policy precedence: a direct HTTP overload keeps Retry-After when its diagnostic quotes refusal copy", async () => {
+    const body = JSON.stringify({ error: { code: "server_is_overloaded", message: `Queue full while recording "${CODEX_FALLBACK_MESSAGE}"` } });
+    const response = formatPassthroughUpstreamError(503, body, { headers: new Headers({ "retry-after": "120" }) });
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("120");
+    expect(await response.text()).toBe(body);
+  });
+
+  test("a generic wrapper cannot turn a nested overload into a policy stop", () => {
+    expect(comboFailureDecision(503, `Queue full while recording "${CODEX_FALLBACK_MESSAGE}"`, {
+      code: "server_is_overloaded", rootCode: "invalid_request_error",
+    })).toBe("hop");
+  });
+
   test("consumeComboFailure preserves cyber_policy code as HTTP 400", async () => {
     const upstream = new Response(JSON.stringify(CYBER_ERROR_BODY), {
       status: 400,

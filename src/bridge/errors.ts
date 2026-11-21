@@ -51,10 +51,10 @@ export function formatErrorResponse(
   status: number,
   type: string,
   message: string,
-  options?: { code?: string | null; retryAfter?: string | null; classified?: boolean; upstreamCode?: string | null },
+  options?: { code?: string | null; retryAfter?: string | null; classified?: boolean; upstreamCode?: string | null; cyberPolicy?: boolean },
 ): Response {
   const validationStatus = status === 400 || status === 422;
-  const error = classifyError(status, type, message);
+  const error = classifyError(status, type, message, options?.cyberPolicy);
   // A combo child holding an adapterFailureFromEvent verdict has already classified this
   // failure. Re-deriving it from the status folded insufficient_quota into rate_limit_exceeded
   // and a 400 modality refusal into invalid_request_error, so the combo loop cooled and hopped

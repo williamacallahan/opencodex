@@ -16,6 +16,8 @@
   "current-turn-tool-catalog-direct.test.ts": "responses",
   "current-turn-tool-catalog-namespace.test.ts": "responses",
   "responses-workflow-send-ceiling.test.ts": "responses",
+  "responses-mistral-selected-key-spend.test.ts": "responses",
+  "terminal-retry-metadata.test.ts": "responses",
   "responses-websocket-workflow-ceiling.test.ts": "responses",
   "ws-native-continuation-send-budget.test.ts": "responses",
   "responses-native-compact-ocx-envelope.test.ts": "responses",

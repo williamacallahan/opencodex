@@ -1,10 +1,10 @@
 import { isRevokedChatgptCredentialCode } from "../../codex/chatgpt-refresh-failure";
 import { NativeSteeringError } from "./native-steering";
 import { envelopeRecordCode } from "../../combos/failover";
-import { isTerminalRefusalCode, recognizedUpstreamError } from "../../lib/errors";
+import { CYBER_POLICY_ERROR_CODE, cyberPolicyTerminalError, isTerminalRefusalCode, recognizedUpstreamError, safetyRefusalCodeFromMessage } from "../../lib/errors";
 import { hasHardRefusalInEnvelope } from "../../lib/hard-refusal";
 import { terminalOwnerCapacityStatus } from "./owner-capacity-refusal";
-import { reserveQuotaPrelude } from "./combo-stream-preflight";
+import { reserveQuotaPrelude, safeSnapshotUsage } from "./combo-stream-preflight";
 import { NativeContinuationRefusalError } from "./native-continuation-refusal";
 import { mergeSteeringContinuation } from "./native-steering-settings";
 import { markNativeControlResponse } from "./native-response-control";
@@ -111,9 +111,14 @@ function refusalErrorBody(source: unknown): Record<string, string> {
   };
 }
 
+function refusalUsage(frame: Record<string, unknown>): unknown {
+  const usage = (record(frame.response) ? frame.response.usage : undefined) ?? frame.usage;
+  return safeSnapshotUsage(usage) ? usage : undefined;
+}
+
 function frameRejectsCredential(status: number, frame: Record<string, unknown>): boolean {
   if (status !== 401 && status !== 403) return false;
-  const rejects = (code: unknown) => code === "invalid_api_key" || isRevokedChatgptCredentialCode(code);
+  const rejects = (code: unknown) => code === "invalid_authentication" || code === "invalid_api_key" || isRevokedChatgptCredentialCode(code);
   const error = frame.type === "error" || !record(frame.response) ? frame.error : frame.response.error;
   return rejects(frame.code) || (record(error) && rejects(error.code));
 }
@@ -327,7 +332,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       const source = payload.type === "error"
         ? payload.error
         : record(payload.response) ? payload.response.error : undefined;
-      const projection = new Response(JSON.stringify({ error: refusalErrorBody(source) }), { status, headers });
+      const projection = new Response(JSON.stringify({ error: refusalErrorBody(source), usage: refusalUsage(payload) }), { status, headers });
       const capacity = status === 429 || status === 402
         ? terminalOwnerCapacityStatus(payload, payload.type === "error" ? status : undefined) === status : undefined;
       markFrameRefusal(projection, payload, capacity, hardStop);
@@ -709,6 +714,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
           if (rejection && projectCreateRefusal) {
             const projection = new Response(JSON.stringify({
               error: rejection.error ?? { type: "upstream_error", message: "Upstream rejected the request" },
+              usage: refusalUsage(normalized.payload),
             }), { status: rejection.status, headers: rejection.headers });
             terminal = true;
             cleanup();
@@ -758,11 +764,12 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
           responseEvidence.credentialRejected = frameRejectsCredential(responseEvidence.hardStopStatus, frame);
         }
         const code = typeof frame.code === "string" && isTerminalRefusalCode(frame.code) ? frame.code
-          : isTerminalRefusalCode(error.code) ? error.code : "invalid_prompt";
+          : isTerminalRefusalCode(error.code) ? error.code : cyberPolicyTerminalError(frame) ? CYBER_POLICY_ERROR_CODE
+          : safetyRefusalCodeFromMessage(error.message ?? "") ?? "invalid_prompt";
         const param = error.param ?? frame.param;
         encodedText = encoder.encode(JSON.stringify({ type: publicType, sequence_number: frame.sequence_number,
           response: { id: response?.id ?? frame.response_id ?? refusalResponseId ?? undefined, model: response?.model,
-            status: "failed", output: response?.output, usage: (response ?? frame).usage, retryable: false,
+            status: "failed", output: response?.output, usage: response?.usage ?? frame.usage, retryable: false,
             error: { type: "invalid_request_error", code, message: error.message,
               ...(typeof param === "string" && { param }) } },
         }));

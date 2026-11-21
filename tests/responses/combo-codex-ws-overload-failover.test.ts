@@ -35,7 +35,8 @@ const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "h
 
 type Listener = (event: unknown) => void;
 const reasoning = { type: "reasoning", id: "rs_inspected", encrypted_content: "fixture-owner-cipher", summary: [] };
-type FirstFrame = { afterCreated?: boolean; usage?: { input_tokens: number; output_tokens: number }; status: number; code?: string | number; request?: { innererror: { code: string } }; error: { code?: string; message: string; innererror?: { code: string } } };
+type TokenCounts = { input_tokens: number; output_tokens: number };
+type FirstFrame = { afterCreated?: boolean; usage?: TokenCounts; response?: { id: string; usage?: TokenCounts }; status: number; code?: string | number; request?: { innererror: { code: string } }; error: { code?: string; message: string; innererror?: { code: string } } };
 type Step = FirstFrame | "generic-hard-failure" | "held-hard-failure" | "issue-reasoning" | "first-quota" | "first-conflict" | "quota-then-refuse" | "quota-output-then-refuse" | "reserve-started-then-refuse"
   | "first-model-missing" | "first-model-missing-underscore" | "wrapped-quota" | "conflicting-wrapper" | "foreign-wrapper" | "missing-status" | "unknown-status";
 
@@ -270,6 +271,26 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     const { body } = await send(cfg, "hello", undefined, model);
     expect(body).toContain("Fixture diagnostic:");
     expect(body.includes(marker)).toBe(false);
+  });
+
+  test("policy precedence: a zero-output overload quoting a refusal reaches the combo fallback", async () => {
+    const message = 'Queue full while recording "This request was flagged for possible cybersecurity risk."';
+    FakeWebSocket.plan = [{ status: 503, error: { code: "server_is_overloaded", message } }];
+    const { response, body, logCtx } = await send();
+    expect(response.status).toBe(200);
+    expect(body).toContain("resp_fallback");
+    expect(logCtx.attempts?.[0]?.status).toBe(503);
+    expect(fallbackSends).toBe(1);
+  });
+
+  test.each(["openai/gpt-5.5", "chain/overload"])("policy precedence: %s stops on a bare safety refusal in a generic server error", async model => {
+    const message = "This request was blocked by our safety systems. Reason: Potentially unintended activity.";
+    FakeWebSocket.plan = [{ status: 503, error: { code: "server_error", message } }, "issue-reasoning"];
+    const { body } = await send(comboConfig(), "hello", undefined, model);
+    const terminal = body.split("event: response.failed\n")[1]?.split("\n")[0]?.replace(/^data: /, "");
+    expect(JSON.parse(terminal ?? "null")?.response).toMatchObject({ error: { code: "invalid_prompt", message }, retryable: false });
+    expect(FakeWebSocket.instances.flatMap(socket => socket.sent)).toHaveLength(1);
+    expect(fallbackSends).toBe(0);
   });
 
   test("a nonfatal bare diagnostic is masked without changing its overload verdict", async () => {
@@ -538,12 +559,23 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect((await direct()).body).toContain("event: response.completed");
   });
 
-  test.each([false, true])("a hard 403 with a rejected bearer retires its seat (after created: %s)", async afterCreated => {
-    FakeWebSocket.plan = [{ afterCreated, status: 403, code: "origin_rejected", error: { code: "token_invalidated", message: "Fixture refusal" } }];
+  test.each([
+    [false, 403, "token_invalidated"], [true, 403, "token_invalidated"], [true, 401, "invalid_authentication"],
+  ] as const)("after created=%s, a hard %i with %s retires its seat", async (afterCreated, status, code) => {
+    FakeWebSocket.plan = [{ afterCreated, status, code: "origin_rejected", error: { code, message: "Fixture refusal" } }, "issue-reasoning"];
     const direct = () => send(comboConfig(), "hello", undefined, "openai/gpt-5.5");
     expect((await direct()).body).toContain("Fixture refusal");
     expect((await direct()).body).toContain("needs reauthentication");
     expect(FakeWebSocket.instances.flatMap(ws => ws.sent)).toHaveLength(1);
+  });
+
+  test.each(["upstream_server_error", "invalid_request_error"])("policy precedence: a direct %s preserves the cyber refusal on the wire", async code => {
+    const message = "This request was flagged for possible cybersecurity risk.";
+    FakeWebSocket.plan = [{ status: 503, error: { code, message } }, "issue-reasoning"];
+    const { body } = await send(comboConfig(), "hello", undefined, "openai/gpt-5.5");
+    const terminal = body.split("event: response.failed\n")[1]?.split("\n")[0]?.replace(/^data: /, "");
+    expect(JSON.parse(terminal ?? "null")?.response).toMatchObject({ error: { code: "cyber_policy", message }, retryable: false });
+    expect(FakeWebSocket.instances.flatMap(socket => socket.sent)).toHaveLength(1);
   });
 
   test("a direct wrapped 503 carrying only safety refusal copy is never resent", async () => {
@@ -555,10 +587,26 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect(FakeWebSocket.instances.flatMap(ws => ws.sent)).toHaveLength(1);
   });
 
-  test("a flat hard failure preserves upstream usage in the request log", async () => {
-    FakeWebSocket.plan = [{ afterCreated: true, status: 401, code: "origin_rejected", usage: { input_tokens: 13, output_tokens: 2 }, error: { message: "Turn declined" } }];
-    const { logCtx } = await send(comboConfig(), "hello", undefined, "openai/gpt-5.5");
-    expect(logCtx.usage).toMatchObject({ inputTokens: 13, outputTokens: 2 });
+  test.each([
+    [false, undefined], [true, undefined], [true, { id: "resp_0" }],
+    [true, { id: "resp_0", usage: { input_tokens: 17, output_tokens: 3 } }],
+  ] as const)("a hard 403 preserves usage (after created=%s, nested response=%j)", async (afterCreated, response) => {
+    const usage = { input_tokens: 13, output_tokens: 2 };
+    FakeWebSocket.plan = [{ afterCreated, response, status: 403, code: "origin_rejected", usage, error: { message: "Turn declined" } }];
+    const result = await send(comboConfig(), "hello", undefined, "openai/gpt-5.5");
+    const expected = response && "usage" in response ? response.usage : usage;
+    if (afterCreated) expect(result.logCtx.usage).toMatchObject({ inputTokens: expected.input_tokens, outputTokens: expected.output_tokens });
+    else {
+      expect(result.response.status).toBe(403);
+      expect(JSON.parse(result.body).usage).toEqual(expected);
+    }
+  });
+
+  test("a first-frame refusal omits malformed usage instead of reporting a charge", async () => {
+    FakeWebSocket.plan = [{ status: 403, code: "origin_rejected", usage: { input_tokens: -1, output_tokens: 2 }, error: { message: "Turn declined" } }];
+    const { response, body } = await send(comboConfig(), "hello", undefined, "openai/gpt-5.5");
+    expect(response.status).toBe(403);
+    expect(JSON.parse(body)).not.toHaveProperty("usage");
   });
 
   test("a direct held error keeps the client fatal code on its terminal", async () => {

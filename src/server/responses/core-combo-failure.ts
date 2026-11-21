@@ -24,7 +24,6 @@ import { codexQuotaFailureMessage, codexQuotaOutcomeMeta, isWrappedReserveQuota 
 import {
   isRateLimitOrQuotaFailureMessage,
   isCyberPolicyCode,
-  isCyberPolicyMessage,
   CYBER_POLICY_ERROR_CODE,
   CYBER_POLICY_FALLBACK_MESSAGE,
   isModelNotInPlanRefusal,
@@ -77,6 +76,7 @@ export async function consumeComboFailure(
   let upstreamRootCode = codexWsPreludeRootCode(response);
   let upstreamMessage: string | undefined;
   let upstreamType: string | undefined;
+  let cyberFailure = false;
   // Whether the body itself confirms a quota/rate-limit refusal, computed on the SAME read as
   // the classification below. `shouldRetryCodexPoolAccountQuota` cannot be called here without
   // a second body read, so this mirrors its normalization: raw 402/429, or a 5xx whose intact,
@@ -124,7 +124,8 @@ export async function consumeComboFailure(
       // beside it has to be captured here or the conflict rule never sees it.
       upstreamRootCode ??= upstreamEnvelopeRootCode(body.text);
       const normalized = normalizeUpstreamErrorText(body.text, fallback);
-      if (utf8Trusted || isCyberPolicyCode(normalized.code) || isCyberPolicyMessage(normalized.safeText)) {
+      cyberFailure = normalized.cyberPolicy;
+      if (utf8Trusted || cyberFailure) {
         classificationText = normalized.safeText;
         upstreamCode = codexAccountModelRefusalHardStopCode(response.status, body.text)
           ?? upstreamCodeForComboFailure(response, normalized.code);
@@ -143,7 +144,7 @@ export async function consumeComboFailure(
     if (signal?.aborted) throw error;
     classificationText = fallback;
   }
-  const cyberFailure = isCyberPolicyCode(upstreamCode) || isCyberPolicyMessage(classificationText);
+  cyberFailure ||= isCyberPolicyCode(upstreamCode);
   const normalizedUpstreamCode = cyberFailure ? CYBER_POLICY_ERROR_CODE
     : replayRefusal ? UPSTREAM_RESET_REPLAY_REFUSED_CODE : upstreamCode;
   const message = cyberFailure
@@ -183,6 +184,7 @@ export async function consumeComboFailure(
     cyberFailure ? (upstreamType ?? CYBER_POLICY_ERROR_CODE) : "upstream_error",
     message,
     {
+      cyberPolicy: cyberFailure,
       ...(normalizedUpstreamCode !== undefined ? { code: normalizedUpstreamCode } : {}),
       ...(clientRetryAfter !== undefined ? { retryAfter: clientRetryAfter } : {}),
     },

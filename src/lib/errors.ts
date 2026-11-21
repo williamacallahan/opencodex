@@ -192,7 +192,7 @@ export function terminalRefusalFallbackMessage(code: string): string {
  * only. A loose match here is the mirror-image defect — it would end a turn
  * that a genuine transient failure would have retried successfully — so a
  * message that merely mentions safety or blocking does not qualify. Callers
- * must consult this only when the upstream carried no structured code at all,
+ * must consult this only when the upstream carried no specific verdict,
  * so that a transport failure quoting a refusal in its diagnostic text cannot
  * be promoted past the verdict the upstream actually gave.
  *
@@ -214,9 +214,12 @@ export function safetyRefusalCodeFromMessage(text: string): string | undefined {
   return undefined;
 }
 
+const GENERIC_ERROR_CODES = new Set(["error", "api_error", "server_error", "upstream_error", "upstream_server_error", "invalid_request_error"]);
+
 /** A wrapper status or generic error type does not identify the cause; a dedicated code does. */
 export function hasStructuredErrorVerdict(error: { code?: unknown; type?: unknown }): boolean {
-  return (typeof error.code === "string" && !!error.code.trim()) || error.type === "overloaded_error" || error.type === "rate_limit_error";
+  const code = typeof error.code === "string" ? error.code.trim().toLowerCase() : "";
+  return (!!code && !GENERIC_ERROR_CODES.has(code)) || error.type === "overloaded_error" || error.type === "rate_limit_error";
 }
 
 /** Inspect protocol error carriers, never arbitrary echoed content. Codes precede wording across carriers. */
@@ -224,8 +227,8 @@ export function cyberPolicyTerminalError(payload: unknown): { message: string; t
   type Diagnostic = { code?: unknown; type?: unknown; message?: unknown };
   if (!payload || typeof payload !== "object") return undefined;
   const root = payload as Diagnostic & { error?: Diagnostic; last_error?: Diagnostic;
-    response?: Diagnostic & { error?: Diagnostic; incomplete_details?: Diagnostic } };
-  const candidates = [root.error, root.last_error, root.response?.error, root.response?.incomplete_details, root, root.response];
+    response?: Diagnostic & { error?: Diagnostic; last_error?: Diagnostic; incomplete_details?: Diagnostic } };
+  const candidates = [root.error, root.last_error, root.response?.error, root.response?.last_error, root.response?.incomplete_details, root, root.response];
   const policy = candidates.find(error => typeof error?.code === "string" && isCyberPolicyCode(error.code.trim()))
     ?? (!candidates.some(error => error && hasStructuredErrorVerdict(error))
       ? candidates.find(error => typeof error?.message === "string" && isCyberPolicyMessage(error.message)) : undefined);
@@ -447,7 +450,7 @@ export function isUpstreamResetReplayRefusedMessage(text: string): boolean {
   );
 }
 
-export function classifyError(status: number, type: string, message: string): OcxErrorPayload {
+export function classifyError(status: number, type: string, message: string, cyberPolicy?: boolean): OcxErrorPayload {
   const text = message.toLowerCase();
   if (type === SPEND_LEDGER_STORAGE_UNAVAILABLE_CODE) {
     return { message, type: "server_error", code: SPEND_LEDGER_STORAGE_UNAVAILABLE_CODE };
@@ -471,7 +474,7 @@ export function classifyError(status: number, type: string, message: string): Oc
   // The public wire does not establish invalid_request_error as the canonical type, so
   // message-only classification keeps the dedicated identity instead of inventing one.
   // Structured callers re-apply their real upstream type with cyberPolicyErrorType().
-  if (type === CYBER_POLICY_ERROR_CODE || isCyberPolicyMessage(text)) {
+  if (type === CYBER_POLICY_ERROR_CODE || (cyberPolicy ?? isCyberPolicyMessage(text))) {
     return { message, type: CYBER_POLICY_ERROR_CODE, code: CYBER_POLICY_ERROR_CODE };
   }
   // A LOCAL preflight refusal keeps its own code (#1524). The message necessarily says

@@ -1,5 +1,5 @@
 import { parseResetCooldownMs } from "../codex/routing";
-import { CYBER_POLICY_FALLBACK_MESSAGE, TERMINAL_REFUSAL_FALLBACK_MESSAGE, classifyError, isCyberPolicyCode, isCyberPolicyMessage, isRateLimitOrQuotaFailureMessage, isSubscriptionGateMessage, isTerminalRefusalCode, safetyRefusalCodeFromMessage } from "../lib/errors";
+import { CYBER_POLICY_FALLBACK_MESSAGE, TERMINAL_REFUSAL_FALLBACK_MESSAGE, classifyError, hasStructuredErrorVerdict, isCyberPolicyCode, isCyberPolicyMessage, isRateLimitOrQuotaFailureMessage, isSubscriptionGateMessage, isTerminalRefusalCode, safetyRefusalCodeFromMessage } from "../lib/errors";
 import { isHardPolicyOrOriginRefusal } from "../lib/hard-refusal";
 import { isNonReplayableUpstreamCode } from "../lib/upstream-retry";
 import { isAnthropicBillingFailure } from "../providers/anthropic-billing-refusal";
@@ -1524,12 +1524,13 @@ export function comboFailureDecision(
   const nestedRawCode = typeof options?.code === "number" ? String(options.code) : options?.code;
   const rootCode = normalizedFailureCode(rootRawCode);
   const nestedCode = normalizedFailureCode(nestedRawCode);
+  const cyberPolicy = isCyberPolicyCode(rootCode) || isCyberPolicyCode(nestedCode) || (
+    !hasStructuredErrorVerdict({ code: rootCode }) && !hasStructuredErrorVerdict({ code: nestedCode }) && isCyberPolicyMessage(message)
+  );
+  if (cyberPolicy) return "stop";
   if (rootCode !== "" && rootCode !== nestedCode) {
-    if (nestedCode === "") return decideComboFailure(status, message, { ...options, code: rootRawCode });
     const rootDecision = decideComboFailure(status, message, { ...options, code: rootRawCode });
-    if (rootDecision === "stop") return "stop";
-    return decideComboFailure(status, message, { ...options, code: nestedRawCode }) === "hop"
-      ? "hop" : "stop";
+    if (rootDecision === "stop" || nestedCode === "") return rootDecision;
   }
   return decideComboFailure(status, message, options);
 }
@@ -1572,8 +1573,7 @@ function decideComboFailure(
   // Require structured lifecycle code or explicit model+lifecycle prose so unrelated
   // application-level 410 responses remain fail-closed.
   if (isModelLifecycleGone(status, message, rawCode)) return "hop";
-  const error = classifyError(status, "upstream_error", message);
-  if (isCyberPolicyCode(error.code)) return "stop";
+  const error = classifyError(status, "upstream_error", message, false);
   // A provider can expose its own target hard cap with a non-semantic vendor code
   // (for example 5059 + invalid_request_prompt_too_long). That is evidence that this
   // target is too small, not that every later combo target is incapable of serving it.

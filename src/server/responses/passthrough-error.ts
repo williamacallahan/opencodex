@@ -1,5 +1,5 @@
 import { formatErrorResponse } from "../../bridge";
-import { isCyberPolicyCode, isCyberPolicyMessage } from "../../lib/errors";
+import { cyberPolicyTerminalError, isCyberPolicyMessage } from "../../lib/errors";
 import {
   applyReplayRefusalClientHeaders,
   isReplayRefusalCode,
@@ -21,22 +21,8 @@ function maskErrorBody(body: string, mask: (text: string) => string): string {
 }
 
 function isCyberPolicyBody(body: string): boolean {
-  if (isCyberPolicyMessage(body)) return true;
-  try {
-    const parsed = JSON.parse(body) as Record<string, unknown>;
-    const response = parsed.response && typeof parsed.response === "object" && !Array.isArray(parsed.response)
-      ? parsed.response as Record<string, unknown>
-      : undefined;
-    for (const candidate of [parsed.error, response?.error, response?.last_error, parsed.last_error, parsed]) {
-      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
-      const record = candidate as Record<string, unknown>;
-      if (isCyberPolicyCode(typeof record.code === "string" ? record.code : undefined)) return true;
-      if (typeof record.message === "string" && isCyberPolicyMessage(record.message)) return true;
-    }
-  } catch {
-    /* non-JSON body — message detection above is the only safe fallback */
-  }
-  return false;
+  try { return cyberPolicyTerminalError(JSON.parse(body)) !== undefined; }
+  catch { return isCyberPolicyMessage(body); }
 }
 
 /**

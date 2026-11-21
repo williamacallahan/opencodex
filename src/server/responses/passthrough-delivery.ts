@@ -1,7 +1,7 @@
 import { clientFacingModelText } from "../../lib/error-destination";
 import { projectLocalModelRefusalLog } from "../request-log-failure-detail";
 import { carryPolicyCandidateRefusal } from "./policy-request-scope";
-import { markProxyError, rememberProxyErrorMessage, carryProxyError } from "../../lib/client-error-body";
+import { markProxyError, rememberProxyErrorMessage, carryProxyError, OPENAI_ERROR_TYPES, OPENAI_ERROR_CODES } from "../../lib/client-error-body";
 import { releaseRequestOwnedMainOnOutcome, isKeyedRequestOwnedMain } from "../../codex/request-owned-affinity";
 import { wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
 import { hasResponseMediaType } from "../../lib/http-response-semantics";
@@ -1019,8 +1019,8 @@ export async function deliverPassthroughResponse(
           const presentation = rawPresentation === undefined ? undefined : {
             status: rawPresentation.status,
             error: {
-              type: maskCredential(rawPresentation.error.type),
-              code: maskCredential(rawPresentation.error.code),
+              type: OPENAI_ERROR_TYPES.get(rawPresentation.error.type) ?? maskCredential(rawPresentation.error.type),
+              code: OPENAI_ERROR_CODES.get(rawPresentation.error.code) ?? OPENAI_ERROR_TYPES.get(rawPresentation.error.code) ?? maskCredential(rawPresentation.error.code),
               message: maskCredential(rawPresentation.error.message),
             },
           };

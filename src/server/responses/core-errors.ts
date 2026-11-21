@@ -5,7 +5,7 @@ import { inspectedReserveRefusal } from "./reserve-refusal-body";
 import { cancelResponseBodyBestEffort } from "../../lib/upstream-retry";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { redactSecretString } from "../../lib/redact";
-import { isCyberPolicyMessage, isCyberPolicyCode } from "../../lib/errors";
+import { CYBER_POLICY_ERROR_CODE, cyberPolicyTerminalError, isCyberPolicyMessage } from "../../lib/errors";
 import { isTranslatorBudgetExceededError } from "../../lib/translator-budget";
 import { formatErrorResponse, formatUsageLimitReachedResponse } from "../../bridge";
 import {
@@ -60,7 +60,10 @@ export function normalizeUpstreamErrorText(text: string, fallback: string): Norm
   let code: string | undefined;
   try {
     const parsed = JSON.parse(text) as Record<string, unknown>;
-    const response = parsed.response && typeof parsed.response === "object" && !Array.isArray(parsed.response)
+    const policy = cyberPolicyTerminalError(parsed);
+    if (policy) return { safeText, code: CYBER_POLICY_ERROR_CODE, type: policy.type,
+      message: redactSecretString(policy.message).slice(0, 500), cyberPolicy: true };
+    const response = parsed?.response && typeof parsed.response === "object" && !Array.isArray(parsed.response)
       ? parsed.response as Record<string, unknown>
       : undefined;
     const candidates = [parsed.error, response?.error, response?.last_error, parsed.last_error, parsed];
@@ -69,7 +72,7 @@ export function normalizeUpstreamErrorText(text: string, fallback: string): Norm
       const record = candidate as Record<string, unknown>;
       return [record.message, record.type, record.code].some(value => typeof value === "string");
     });
-    if (!source) return { safeText, cyberPolicy: isCyberPolicyMessage(safeText) };
+    if (!source) return { safeText, cyberPolicy: false };
     if (typeof source.message === "string" && source.message.trim()) {
       message = redactSecretString(source.message.trim()).slice(0, 500);
     }
@@ -78,10 +81,9 @@ export function normalizeUpstreamErrorText(text: string, fallback: string): Norm
       code = source.code.trim();
     }
   } catch {
-    /* non-JSON upstream body — retain the bounded display-safe text */
+    return { safeText, cyberPolicy: isCyberPolicyMessage(safeText) };
   }
-  const cyberPolicy = isCyberPolicyCode(code) || isCyberPolicyMessage(message ?? safeText);
-  return { safeText, message, type, code, cyberPolicy };
+  return { safeText, message, type, code, cyberPolicy: false };
 }
 
 

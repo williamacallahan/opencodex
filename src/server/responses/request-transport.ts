@@ -163,11 +163,10 @@ export async function prepareResponsesTransport(
   };
   const deferPhysicalAttribution = route.providerName === "github-copilot" && route.provider.authMode !== "forward";
   let copilotCandidate: { model: string; adapter: string; accountLogLabel?: string } | undefined;
-  bindResponsesSpendTarget(logCtx);
-  if (deferPhysicalAttribution) bindResponsesSpendTarget(logCtx, () => ({
+  bindResponsesSpendTarget(logCtx, deferPhysicalAttribution ? () => ({
     poolId: logCtx.spendPoolId ?? route.providerName,
     identityId: copilotCandidate ? copilotCandidate.accountLogLabel : logCtx.accountLogLabel,
-  }));
+  }) : undefined);
   const genericAffinityMode = genericSessionAffinityEnabled(config, route.providerName);
   const anthropicInstance = route.provider.authMode === "oauth"
     ? configuredAnthropicInstance(config, route.providerName) : undefined;
@@ -1341,6 +1340,11 @@ export async function prepareResponsesTransport(
       ? resolveCopilotApiBaseUrl(servingOAuthSnapshot?.apiBaseUrl)
       : undefined,
   );
+  if (ownsMistralDispatchReceipt(route.provider)) bindResponsesSpendTarget(logCtx, () => {
+    const selected: { accountLogLabel?: string } = {};
+    stampApiKeyAccountLabel(selected, route.providerName, route.provider);
+    return { poolId: logCtx.spendPoolId ?? route.providerName, identityId: selected.accountLogLabel ?? "" };
+  });
   try { await resolveCopilotSelection(parsed); }
   catch (error) {
     if ((options.abortSignal ?? req.signal).aborted) return clientCancelledResponse();
