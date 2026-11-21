@@ -106,7 +106,7 @@ export class PromptCacheReuseLedger {
   readonly #clock: () => number;
   readonly #pending = new Map<SendObservation, PendingSend>();
   readonly #records = new Map<number, Anchor>();
-  readonly #prefixes = new Map<string, Map<string, Set<number>>>();
+  readonly #prefixes = new Map<string, Map<string, Set<Anchor>>>();
   readonly #conversations = new Map<string, Set<number>>();
   readonly #unregister: () => void;
   #sequence = 0;
@@ -141,16 +141,14 @@ export class PromptCacheReuseLedger {
   #conversation(send: SendObservation): string | undefined {
     return send.conversation === undefined ? undefined : JSON.stringify([send.destination, send.model, send.conversation]);
   }
-  *#anchors(key: string): Iterable<Anchor> {
-    for (const versions of this.#prefixes.get(key)?.values() ?? []) {
-      for (const id of versions) yield this.#records.get(id)!;
-    }
+  #accountHistories(key: string) {
+    return this.#prefixes.get(key)?.values() ?? [];
   }
   #remove(anchor: Anchor, capacity: boolean): number {
     this.#records.delete(anchor.id);
     const accounts = this.#prefixes.get(anchor.key)!;
     const versions = accounts.get(anchor.account)!;
-    versions.delete(anchor.id);
+    versions.delete(anchor);
     if (!versions.size) accounts.delete(anchor.account);
     if (!accounts.size) this.#prefixes.delete(anchor.key);
     if (anchor.conversation !== undefined) {
@@ -281,7 +279,7 @@ export class PromptCacheReuseLedger {
     const accounts = this.#prefixes.get(key);
     if (accounts && !accounts.has(send.account) && accounts.size >= promptCacheReuseLimits.accountsPerPrefix) {
       const oldestVersions = accounts.values().next().value!;
-      for (const id of oldestVersions) this.#remove(this.#records.get(id)!, true);
+      for (const anchor of oldestVersions) this.#remove(anchor, true);
     }
     while (this.#records.size >= promptCacheReuseLimits.records) this.#evictOldest();
     const conversation = this.#conversation(send);
@@ -293,9 +291,9 @@ export class PromptCacheReuseLedger {
     };
     this.#records.set(anchor.id, anchor);
     this.#pending.get(send)!.anchors.push(anchor.id);
-    const prefixes = this.#prefixes.get(key) ?? new Map<string, Set<number>>();
-    const versions = prefixes.get(send.account) ?? new Set<number>();
-    versions.add(anchor.id);
+    const prefixes = this.#prefixes.get(key) ?? new Map<string, Set<Anchor>>();
+    const versions = prefixes.get(send.account) ?? new Set<Anchor>();
+    versions.add(anchor);
     prefixes.set(send.account, versions);
     this.#prefixes.set(key, prefixes);
     if (conversation !== undefined) {
@@ -319,7 +317,7 @@ export class PromptCacheReuseLedger {
     for (const position of prefix.positions) {
       if (position.index < (prefix.reuseBoundary ?? 0)) continue;
       if (!isCachePositionReachable(position.index, prefix.breakpoints, prefix.positions)) continue;
-      for (const anchor of this.#anchors(this.#key(send, position))) {
+      for (const versions of this.#accountHistories(this.#key(send, position))) for (const anchor of versions) {
         if (anchor.finalized && cacheRelation(anchor, send) === "shared" && anchor.tokens === prefill.read && anchor.readySequence < send.sequence) {
           const previous = matches.get(anchor.key);
           if (!previous || previous.dispatchSequence < anchor.dispatchSequence) matches.set(anchor.key, anchor);
@@ -369,7 +367,7 @@ export class PromptCacheReuseLedger {
       if (position.index < (pending.prefix.reuseBoundary ?? 0)) continue;
       const reachable = isCachePositionReachable(position.index, pending.prefix.breakpoints, pending.prefix.positions);
       let measured: number | undefined;
-      for (const anchor of this.#anchors(this.#key(send, position))) {
+      for (const versions of this.#accountHistories(this.#key(send, position))) for (const anchor of versions) {
         if (anchor.dispatchSequence >= send.sequence) continue;
         const ready = anchor.readySequence < send.sequence && anchor.readyAt <= send.dispatchedAt;
         const alive = send.dispatchedAt < anchor.dispatchedAt + anchor.ttl;

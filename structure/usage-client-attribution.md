@@ -245,7 +245,8 @@ within 52 to 82 minutes of every hub start.
 
 `src/server/prompt-cache-prefix.ts` owns byte-preserving position identities and unsupported shapes.
 `src/server/prompt-cache-reuse.ts` owns dispatch-time history, bounded pending memory, expiry and
-measured anchors. Exact credentials share their observed cache namespace; different credentials
+measured anchors. Each prefix indexes the retained records directly, in account and insertion order;
+classifying a send does not look each historical version up again by ID. Exact credentials share their observed cache namespace; different credentials
 share only with evidence from `src/routing/identity-domains.ts`. With no workspace evidence a
 credential change reports `unknown/credential_changed`, not a proven cache-domain move.
 Expected and per-event lost tokens require a reachable, unexpired measured anchor. The
