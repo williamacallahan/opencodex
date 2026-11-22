@@ -194,6 +194,36 @@ for (const item of [POOL_A, POOL_B]) {
   });
 }
 
+test.each([POOL_A, POOL_B])("$name Usage never flashes a previous account's quota while loading", async item => {
+  const updatedAt = Date.now();
+  const previous = { quota: { weeklyPercent: 15, updatedAt }, updatedAt };
+  const renderDetails = async (accounts: OAuthAccountRow[], accountLoadState: AccountLoadState) => {
+    const { createRoot } = await import("react-dom/client");
+    await act(async () => {
+      root ??= createRoot(host);
+      root.render(<LanguageProvider><ProviderDetails item={item} quotaReport={previous} accounts={accounts}
+        accountLoadState={accountLoadState} oauth={{ loggedIn: true }} availableModels={[]} hasLiveModels={false}
+        selectedModels={[]} modelRows={[]} modelRevision="test" modelRowsReady onOpenModels={() => {}}
+        onDeselect={() => {}} apiBase="" /></LanguageProvider>);
+    });
+  };
+
+  await renderDetails([], "loading");
+  await act(async () => { host.querySelector<HTMLButtonElement>("#pws-tab-usage")?.click(); });
+  expect(host.querySelector("#pws-tab-usage")?.getAttribute("aria-selected")).toBe("true");
+  expect(host.textContent).not.toContain("15% used");
+  await renderDetails(rows(item.name, { quotaMode: "probe", quotaPending: true }), "ready");
+  expect(host.textContent).not.toContain("15% used");
+  const reading = rows(item.name, { quotaMode: "probe", quota: { weeklyPercent: 65, updatedAt } });
+  await renderDetails(reading, "ready");
+  expect(host.textContent).toContain("65% used");
+  await renderDetails(reading.map(row => ({ ...row, quotaPending: true })), "loading");
+  expect(host.textContent).toContain("65% used");
+  await renderDetails(rows(item.name, { active: false }).map(row => ({ ...row, active: row.id === "first", quotaMode: "probe", quotaPending: true })), "ready");
+  expect(host.textContent).not.toContain("65% used");
+  expect(host.textContent).not.toContain("15% used");
+});
+
 test("other OAuth providers keep the login identity in the Overview", async () => {
   const text = await overviewText(OTHER, rows("xai", { alias: "Work" }), "s***d@xai.test");
   expect(text).toContain("Logged in as s***d@xai.test");

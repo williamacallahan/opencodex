@@ -27,6 +27,7 @@ import type { ProviderQuotaReportView } from "../../provider-workspace/report";
 import type { AccountLoadState, ProviderModelUsageRow, ProviderUsageTotals, OAuthAccountRow, ApiKeyRow, LoginHint, ProviderAuthHandlers, ProviderUpdatePatch, ProviderUpdateResult, ProviderUpdateCallback } from "./types";
 import { createProviderDraftStore, providerDraftTargetLabel, type ProviderDraftStore } from "../../provider-workspace/target-drafts";
 import { useRenderTargetCapture } from "../../use-render-target-capture";
+import { anthropicInstanceRowShapeMatches } from "../../../../src/providers/anthropic-instance-id";
 
 type Tab = "overview" | "models" | "usage" | "accounts" | "settings";
 
@@ -171,8 +172,11 @@ export default function ProviderDetails({
   const local = useMemo(() => isLocalProvider(item), [item]);
   const authSurface = useMemo(() => providerAuthSurface(item), [item]);
   const activeOAuthAccount = accounts?.find(account => account.active);
+  // A cached provider report is not tied to the account about to arrive in the roster.
+  const currentQuotaReport = authSurface === "oauth-accounts" && anthropicInstanceRowShapeMatches(item.name, item)
+    ? undefined : quotaReport;
   const currentQuotaReading = authSurface === "oauth-accounts"
-    ? accounts?.find(account => account.active)
+    ? activeOAuthAccount
     : authSurface === "api-keys" ? keys?.find(entry => entry.active) : undefined;
   // Global counter from Providers — only honor it for the reveal target.
   const scopedAccountsFocusToken = accountsFocusProvider === item.name ? accountsFocusToken : 0;
@@ -413,7 +417,7 @@ export default function ProviderDetails({
             onOpenModels={onOpenModels}
             onOpenConnect={onOpenConnect}
             usageTotals={usageTotals}
-            quotaReport={quotaReport}
+            quotaReport={currentQuotaReport}
             currentQuotaReading={currentQuotaReading}
             onRefreshQuota={onRefreshQuota}
             oauthEmail={oauthEmail}
@@ -469,7 +473,7 @@ export default function ProviderDetails({
           <ProviderUsage
             item={item}
             usageTotals={usageTotals}
-            quotaReport={quotaReport}
+            quotaReport={currentQuotaReport}
             currentQuotaReading={currentQuotaReading}
             quotaIdentity={connectionIdentity}
             modelUsage={modelUsage}
