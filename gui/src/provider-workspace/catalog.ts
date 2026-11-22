@@ -219,8 +219,11 @@ export function providerTier(name: string, p: WorkspaceProvider): ProviderTier {
   return "paid";
 }
 
-/** Subscription accounts listed first, in this order, in the provider rail and the quota bar. */
-const PINNED_PROVIDERS: readonly string[] = ["anthropic", "google-antigravity", "openai"];
+/**
+ * Providers listed first, in this order, in the provider rail and the quota bar: both Claude account
+ * pools, Google Antigravity, then the `openai` row (the Codex login), pinned by provider id.
+ */
+const PINNED_PROVIDERS: readonly string[] = ["anthropic", "anthropic2", "google-antigravity", "openai"];
 
 /** Position among the pinned providers; every other provider ranks after them, in its own order. */
 export function pinnedProviderRank(provider: string): number {

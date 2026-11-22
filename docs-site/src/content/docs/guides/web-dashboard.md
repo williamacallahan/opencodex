@@ -148,14 +148,19 @@ badge or the version value to read the full value.
 ### Quota summary bar
 
 A one-line summary at the top of every page except the Startup page shows each provider's current
-quota usage, for example `OpenAI 31% | Claude 54% | xAI 12% | Google 8%`. It reads the same provider
+quota usage, for example `Claude 54% | OpenAI 31% | xAI 12% | Google 8%`. It reads the same provider
 quota reports as the Providers workspace (`GET /api/provider-quotas`, every 60 seconds while the tab
 is visible) and never forces an upstream refresh.
 
-- Each chip shows the preferred reported window: weekly first, then monthly, then 5-hour, then a
-  provider-named window or prepaid credits.
-- Critical prepaid credits (90% or more used) take the headline when the preferred regular window
-  is not critical. If that window is also critical, it remains the headline.
+- Anthropic (both Claude account pools), Google Antigravity and OpenAI (Codex login) come first, in
+  that order; the other providers follow in the order the hub reports them. The Providers rail lists
+  the same providers first in every sort mode, and its sort choice orders everything after them.
+- Each chip shows the provider's most constrained window: the most severe one, so a spent 30-day or
+  budget window is never hidden behind an idle weekly window. Among windows of equal severity it
+  prefers weekly, then monthly, then 5-hour, then a provider-named window, then prepaid credits;
+  among critical windows the fullest one wins, and prepaid credits yield to a critical plan window.
+- Model-family limits (for example Claude Opus) and windows whose reset time has already passed
+  never take the headline; they stay in the details.
 - A chip turns amber at 70% used and red at 90% used.
 - Hover or keyboard-focus a chip to see every reported window with its reset time and the time the
   reading was taken. The details stay open as the pointer moves from the chip into the popover,

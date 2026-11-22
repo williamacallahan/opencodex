@@ -51,14 +51,21 @@ Kenar çubuğu veya mobil işlemlerde başarılı **Bu cihazı unut** ya da baş
 
 Başlangıç güvenliği sayfası dışındaki her sayfanın üst kısmındaki tek satırlık özet, her
 sağlayıcının geçerli kota kullanımını gösterir; örneğin
-`OpenAI 31% | Claude 54% | xAI 12% | Google 8%`. Sağlayıcı çalışma alanıyla aynı kota
+`Claude 54% | OpenAI 31% | xAI 12% | Google 8%`. Sağlayıcı çalışma alanıyla aynı kota
 raporlarını okur (`GET /api/provider-quotas`, sekme görünürken 60 saniyede bir) ve hiçbir
 zaman yukarı akışta yenilemeye zorlamaz.
 
-- Her etiket, bildirilen pencereler arasında tercih edileni gösterir: önce haftalık, sonra
-  aylık, sonra 5 saatlik, sonra sağlayıcı adlı bir pencere veya ön ödemeli krediler.
-- Ön ödemeli kredilerin en az %90'ı kullanılmışsa ve tercih edilen normal pencere kritik
-  değilse etikette krediler gösterilir. Normal pencere de kritikse önceliğini korur.
+- Anthropic (her iki Claude hesap havuzu), Google Antigravity ve OpenAI (Codex girişi) bu sırayla
+  önce gelir; diğer sağlayıcılar hub'ın onları bildirdiği sırayla izler. Sağlayıcılar çalışma
+  alanındaki liste her sıralama modunda aynı sağlayıcıları önce gösterir ve seçilen sıralama
+  onlardan sonraki her şeyi sıralar.
+- Her etiket sağlayıcının en kısıtlı penceresini gösterir: en ağır olanı, böylece tükenmiş bir
+  30 günlük veya bütçe penceresi boşta duran bir haftalık pencerenin arkasında asla gizlenmez.
+  Aynı ağırlıktaki pencereler arasında önce haftalık, sonra aylık, sonra 5 saatlik, sonra sağlayıcı
+  adlı bir pencere, sonra ön ödemeli krediler tercih edilir; kritik pencereler arasında en dolusu
+  kazanır ve ön ödemeli krediler kritik bir plan penceresine yenilir.
+- Model ailesi sınırları (örneğin Claude Opus) ve sıfırlama zamanı çoktan geçmiş pencereler asla
+  başlığa taşınmaz; ayrıntılarda kalırlar.
 - Etiket %70 kullanımda amber rengine, %90 kullanımda kırmızıya döner.
 - Bildirilen tüm pencereleri sıfırlama saati ve okuma zamanıyla görmek için etiketin
   üzerine gelin veya klavyeyle odaklayın. Dokunmatik ekranda ilk dokunuş bu ayrıntıları gösterir.

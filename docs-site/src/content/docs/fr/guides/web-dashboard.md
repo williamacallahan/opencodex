@@ -49,14 +49,23 @@ Une action **Oublier cet appareil** réussie, dans la barre latérale ou les act
 
 Une ligne de résumé en haut de chaque page, sauf la page Sécurité au démarrage, indique
 l'utilisation actuelle des quotas de chaque fournisseur, par exemple
-`OpenAI 31% | Claude 54% | xAI 12% | Google 8%`. Elle lit les mêmes rapports de quotas que l'espace
+`Claude 54% | OpenAI 31% | xAI 12% | Google 8%`. Elle lit les mêmes rapports de quotas que l'espace
 fournisseur (`GET /api/provider-quotas`, toutes les 60 secondes tant que l'onglet est visible) et ne
 force jamais d'actualisation en amont.
 
-- Chaque étiquette affiche la fenêtre signalée prioritaire : d'abord hebdomadaire, puis mensuelle,
-  puis 5 heures, puis une fenêtre nommée par le fournisseur ou des crédits prépayés.
-- Les crédits prépayés utilisés à 90 % ou plus deviennent prioritaires si la fenêtre habituelle
-  préférée n'est pas critique. Si elle est aussi critique, elle reste affichée en priorité.
+- Anthropic (les deux pools de comptes Claude), Google Antigravity et OpenAI (connexion Codex)
+  passent en premier, dans cet ordre ; les autres fournisseurs suivent dans l'ordre où le hub les
+  signale. La liste de l'espace Fournisseurs place ces mêmes fournisseurs en premier dans chaque
+  mode de tri, et le tri choisi ordonne tout ce qui les suit.
+- Chaque étiquette affiche la fenêtre la plus contrainte du fournisseur : la plus sévère, de sorte
+  qu'une fenêtre de 30 jours ou de budget épuisée ne soit jamais masquée derrière une fenêtre
+  hebdomadaire inactive. Entre fenêtres de même sévérité, elle préfère l'hebdomadaire, puis la
+  mensuelle, puis la 5 heures, puis une fenêtre nommée par le fournisseur, puis les crédits
+  prépayés ; entre fenêtres critiques, la plus remplie l'emporte, et les crédits prépayés cèdent le
+  pas à une fenêtre de forfait critique.
+- Les limites de famille de modèles (par exemple Claude Opus) et les fenêtres dont l'heure de
+  réinitialisation est déjà passée ne sont jamais affichées en priorité ; elles restent dans les
+  détails.
 - Une étiquette passe en ambre à 70 % d'utilisation et en rouge à 90 %.
 - Survolez une étiquette ou donnez-lui le focus au clavier pour voir toutes les fenêtres signalées
   avec leur heure de réinitialisation et l'heure de la lecture. Sur un écran tactile, le premier
