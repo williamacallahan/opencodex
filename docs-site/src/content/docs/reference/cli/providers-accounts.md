@@ -694,8 +694,8 @@ Requests already sent upstream keep the credentials they captured.
 New accounts are registered as **validation pending**. After starting the proxy,
 open **Codex Auth** and click **Refresh quotas** to authorize the existing model
 validation step, which may consume a small amount of quota. Offline import and
-JWT parsing do not establish upstream authentication. CLI quota refresh alone
-does not perform that validation. The importer never starts or stops either app,
+JWT parsing do not establish upstream authentication. CLI quota refresh
+performs that validation only while `codexPendingValidationByAdminRefresh` is on. The importer never starts or stops either app,
 changes Orca files, or changes the active pool account.
 
 ### `ocx account list [provider] [--json] [--all] [--quota [--refresh]]`

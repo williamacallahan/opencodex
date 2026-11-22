@@ -1,9 +1,9 @@
 import { parseCodexCredits, rememberCodexCredits } from "../credits";
 import { fetchCodexUsage } from "../quota-query-backoff";
 import type { CodexUsageOwner } from "../quota-query-backoff";
-import { capturePoolQuotaWriter, getValidCodexToken, isCodexAccountGenerationLive, forceRefreshCodexPoolToken, markCodexAccountValidated, markCodexAccountValidationFailed, readCodexAccountRecord, isTerminalCodexPoolRefreshFailure, CodexCredentialGenerationConflictError, CodexCredentialRefreshLockTimeoutError, CodexCredentialRefreshBusyError, CodexCredentialRefreshStaleError, TokenRefreshError } from "../account-store";
+import { capturePoolQuotaWriter, getValidCodexToken, isCodexAccountGenerationLive, forceRefreshCodexPoolToken, markCodexAccountValidated, markCodexAccountValidationAttemptFailed, markCodexAccountValidationFailed, readCodexAccountRecord, isTerminalCodexPoolRefreshFailure, CodexCredentialGenerationConflictError, CodexCredentialRefreshLockTimeoutError, CodexCredentialRefreshBusyError, CodexCredentialRefreshStaleError, TokenRefreshError } from "../account-store";
 import type { PoolQuotaWriter } from "../quota-types";
-import { isValidWhamHistoryObservation, getAccountQuota, isCodexQuotaExhausted, isCompleteCodexQuotaRecoverySnapshot, parseUsageQuota, poolWhamPolicyObservation, setAccountQuotaFromParsed } from "../quota";
+import { isValidWhamHistoryObservation, exhaustedCodexQuotaWindows, getAccountQuota, isCodexQuotaExhausted, isCompleteCodexQuotaRecoverySnapshot, parseUsageQuota, poolWhamPolicyObservation, setAccountQuotaFromParsed } from "../quota";
 import type { StoredAccountQuota, WhamUsageResponse } from "../quota";
 import { CODEX_EXHAUSTED_QUOTA_PROBE_INTERVAL_MS, codexQuotaProbeIntervalMs } from "../routing/cooldown-math";
 import type { ManualResetRefreshLineage } from "../routing";
@@ -561,10 +561,29 @@ function pendingValidationSkipReason(
   if (result.quotaProbeSkipped) return "usage_read_skipped";
   if (result.freshCredentialGeneration === undefined) return "no_fresh_usage_read";
   if (result.freshCredentialGeneration !== recordGeneration) return "credential_generation_moved";
-  if (!isCompleteCodexQuotaRecoverySnapshot(result.freshQuota ?? null, result.freshPlan ?? configuredPlan)) {
-    return result.freshQuota ? "usage_exhausted_or_incomplete" : "no_usage_window";
+  const plan = result.freshPlan ?? configuredPlan;
+  if (!isCompleteCodexQuotaRecoverySnapshot(result.freshQuota ?? null, plan)) {
+    if (!result.freshQuota) return "no_usage_window";
+    const exhausted = exhaustedCodexQuotaWindows(result.freshQuota, plan);
+    return exhausted.length > 0 ? `usage_exhausted window=${exhausted.join(",")}` : "usage_incomplete";
   }
   return undefined;
+}
+
+/** How long an unattended refresh waits after a failed warm-up before it sends that account another. */
+export const PENDING_VALIDATION_RETRY_BACKOFF_MS = 30 * 60_000;
+
+/**
+ * Whether an unattended refresh must leave this pending account's warm-up unsent. The standing
+ * admin-token consent is exercised about once a minute; without this a warm-up that keeps failing
+ * would spend a model request on every pass. A dashboard click never asks.
+ */
+export function pendingValidationRetryHeld(accountId: string, now: number = Date.now()): boolean {
+  const record = readCodexAccountRecord(accountId);
+  const failedAt = record?.codexValidationPending ? record.lastCodexValidationAttemptFailedAt : undefined;
+  if (failedAt === undefined || now - failedAt >= PENDING_VALIDATION_RETRY_BACKOFF_MS) return false;
+  notePendingValidation(accountId, "skipped reason=retry_backoff");
+  return true;
 }
 
 /** One line per dashboard validation outcome; names the account by its id suffix only. */
@@ -690,6 +709,9 @@ export async function fetchPoolAccountQuota(
           markCodexAccountValidationFailed(accountId, reason, { expectedGeneration: generation });
           markAccountNeedsReauth(accountId, captureConfigGeneration(), generation);
         }
+        // Every failure, the auth verdicts included: the account stays pending either way, and
+        // an unattended refresh would otherwise send it another warm-up on its next pass.
+        markCodexAccountValidationAttemptFailed(accountId, Date.now(), generation);
       }
     }
     return result;

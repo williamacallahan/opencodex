@@ -474,6 +474,8 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
       // without having to know that `undefined` and `true` mean the same thing.
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
       showCodexCredits: config.showCodexCredits === true,
+      // Absent means off: an admin-token account refresh then only reads usage.
+      codexPendingValidationByAdminRefresh: config.codexPendingValidationByAdminRefresh === true,
       // Absent means off (today's Design B injection), so the GUI/CLI render a plain switch.
       codexDesktopAuthless: config.codexDesktopAuthless === true,
       // Absent keeps Design B remote compaction; true selects the dedicated provider identity.
@@ -572,6 +574,7 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
       codexQuotaAutoRefresh?: unknown;
       oauthOpenBrowser?: unknown;
       showCodexCredits?: unknown;
+      codexPendingValidationByAdminRefresh?: unknown;
       ultraFastTier?: unknown;
       fastRows?: unknown;
       codexMainAccountHardLock?: unknown;
@@ -592,6 +595,7 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
       && body.codexQuotaAutoRefresh === undefined
       && body.oauthOpenBrowser === undefined
       && body.showCodexCredits === undefined
+      && body.codexPendingValidationByAdminRefresh === undefined
       && body.ultraFastTier === undefined
       && body.fastRows === undefined
       && body.codexMainAccountHardLock === undefined
@@ -603,13 +607,16 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
       && body.compactionRecovery === undefined
       && body.reasoningRetention === undefined
       && body.memoryModels === undefined) {
-      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, usageLedgerMaxBytes, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, showCodexCredits, ultraFastTier, fastRows, codexMainAccountHardLock, codexMainAccountHardLockThresholds, codexMainAccountHardLockFallback, codexDesktopAuthless, codexClientCompaction, compactionRouting, compactionRecovery, reasoningRetention, or memoryModels" }, 400);
+      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, usageLedgerMaxBytes, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, showCodexCredits, codexPendingValidationByAdminRefresh, ultraFastTier, fastRows, codexMainAccountHardLock, codexMainAccountHardLockThresholds, codexMainAccountHardLockFallback, codexDesktopAuthless, codexClientCompaction, compactionRouting, compactionRecovery, reasoningRetention, or memoryModels" }, 400);
     }
     if (body.codexAutoStart !== undefined && typeof body.codexAutoStart !== "boolean") {
       return jsonResponse({ error: "codexAutoStart boolean is required" }, 400);
     }
     if (body.showCodexCredits !== undefined && typeof body.showCodexCredits !== "boolean") {
       return jsonResponse({ error: "showCodexCredits boolean is required" }, 400);
+    }
+    if (body.codexPendingValidationByAdminRefresh !== undefined && typeof body.codexPendingValidationByAdminRefresh !== "boolean") {
+      return jsonResponse({ error: "codexPendingValidationByAdminRefresh boolean is required" }, 400);
     }
     if (body.oauthOpenBrowser !== undefined && typeof body.oauthOpenBrowser !== "boolean") {
       return jsonResponse({ error: "oauthOpenBrowser boolean is required" }, 400);
@@ -725,7 +732,7 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
       const authlessWasEnabled = config.codexDesktopAuthless === true;
       const clientCompactionWasEnabled = config.codexClientCompaction === true;
       const fastRowsWasEnabled = config.fastRows !== false;
-      const restoreCompactionRouting = captureConfigTopLevelRollback(config, ["compactionRouting", "compactionRecovery", "memoryModels", "reasoningRetention", "usageLedgerMaxBytes"]);
+      const restoreCompactionRouting = captureConfigTopLevelRollback(config, ["compactionRouting", "compactionRecovery", "memoryModels", "reasoningRetention", "usageLedgerMaxBytes", "codexPendingValidationByAdminRefresh"]);
       const previousSettings = {
         codexAutoStart: config.codexAutoStart,
         hasCodexAutoStart: Object.hasOwn(config, "codexAutoStart"),
@@ -781,6 +788,8 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
           config.codexAccountPickerEnabled = false;
         }
         if (typeof body.showCodexCredits === "boolean") config.showCodexCredits = body.showCodexCredits;
+        if (body.codexPendingValidationByAdminRefresh === true) config.codexPendingValidationByAdminRefresh = true;
+        else if (body.codexPendingValidationByAdminRefresh === false) deleteConfigTopLevelKey(config, "codexPendingValidationByAdminRefresh");
         if (typeof body.oauthOpenBrowser === "boolean") {
           config.oauthOpenBrowser = body.oauthOpenBrowser;
         }
@@ -923,6 +932,7 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
       codexQuotaAutoRefresh: quotaAutoRefreshSettings(config),
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
       showCodexCredits: config.showCodexCredits === true,
+      codexPendingValidationByAdminRefresh: config.codexPendingValidationByAdminRefresh === true,
       catalogRefreshPending,
       fastRows: config.fastRows !== false,
       codexDesktopAuthless: authlessIsEnabled,

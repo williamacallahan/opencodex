@@ -104,15 +104,24 @@ export function isCodexQuotaExhausted(
 ): boolean {
   if (!quota) return false;
   if (allowCredits && hasSpendableCodexCredits(quota)) return false;
+  return exhaustedCodexQuotaWindows(quota, plan).length > 0;
+}
+
+/** The windows at or past the exhaustion line; `isCodexQuotaExhausted` is "any of these". */
+export function exhaustedCodexQuotaWindows(
+  quota: Pick<StoredAccountQuota, "weeklyPercent" | "monthlyPercent" | "shortPercent">,
+  plan?: unknown,
+): Array<"weekly" | "monthly" | "short"> {
   // The burst window counts on EVERY plan. It is upstream-enforced independently, so an
   // account at 100% there is blocked regardless of which longer window governs its plan;
   // omitting it would route traffic straight into a 429 (#1791).
-  const values = codexQuotaWindowForPlan(plan) === "monthly"
-    ? [quota.monthlyPercent, quota.shortPercent]
-    : [quota.weeklyPercent, quota.monthlyPercent, quota.shortPercent];
-  return values.some(value => typeof value === "number"
-    && Number.isFinite(value)
-    && value >= CODEX_EXHAUSTED_USAGE_PERCENT);
+  const windows = codexQuotaWindowForPlan(plan) === "monthly"
+    ? ["monthly", "short"] as const
+    : ["weekly", "monthly", "short"] as const;
+  return windows.filter(window => {
+    const value = quota[`${window}Percent`];
+    return typeof value === "number" && Number.isFinite(value) && value >= CODEX_EXHAUSTED_USAGE_PERCENT;
+  });
 }
 
 /**

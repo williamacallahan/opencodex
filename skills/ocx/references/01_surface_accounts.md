@@ -141,7 +141,7 @@ Drives no management route.
 
 Usage: `ocx account refresh <provider> [--json]`
 
-Refresh account quotas without model validation; pending Codex accounts require dashboard consent.
+Refresh account quotas; pending Codex accounts validate only with dashboard consent or the codexPendingValidationByAdminRefresh setting.
 
 State-changing: yes. JSON mode: `envelope`.
 
@@ -155,7 +155,8 @@ State-changing: yes. JSON mode: `envelope`.
 |---|---|---|
 | `--json` | boolean | Emit the refresh result as JSON. |
 
-- CLI/admin-token refreshes only observe usage. After quota recovery, a human must click Refresh quotas in the dashboard to authorize model validation. Do not mint a GUI session to work around this consent boundary.
+- By default CLI/admin-token refreshes only observe usage. After quota recovery, a human must click Refresh quotas in the dashboard to authorize model validation. Do not mint a GUI session to work around this consent boundary.
+- An operator who sets codexPendingValidationByAdminRefresh has given standing consent: this refresh then validates pending accounts, at most once per 30 minutes per account after a failed validation request. Do not turn the setting on for them.
 
 ### `ocx account grok-reset-coupons`
 

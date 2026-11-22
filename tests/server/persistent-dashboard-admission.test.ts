@@ -408,6 +408,21 @@ test("account refresh validates pending accounts only for ordinary dashboard ses
   expect(validations).toEqual([false, false, true]);
 });
 
+test("standing consent lets a remembered session and the admin token validate pending accounts", async () => {
+  const validations: unknown[] = [];
+  spies.push(spyOn(accountList, "listCodexAuthAccounts").mockImplementation(async (_config, _refresh, options) => {
+    validations.push([options?.validatePending, options?.paceValidationRetries]); return [];
+  }));
+  config.codexPendingValidationByAdminRefresh = true;
+  const device = await remember("http://127.0.0.1:10100");
+  expect((await dispatch(deviceRequest(device, "/api/codex-auth/accounts/refresh"))).status).toBe(200);
+  expect((await dispatch(request("/api/codex-auth/accounts/refresh"))).status).toBe(200);
+  config.hostname = "127.0.0.1";
+  const session = issueGuiSession(request("/", { origin: device.origin, method: "GET", token: null }), config, state)!;
+  expect((await dispatch(deviceRequest({ ...device, cookie: "", body: { session } }, "/api/codex-auth/accounts/refresh"))).status).toBe(200);
+  expect(validations).toEqual([[true, true], [true, true], [true, false]]);
+});
+
 test("remembered sessions cannot pair, reveal data keys, or authorize local links", async () => {
   const device = await remember("http://127.0.0.1:10100");
   const req = deviceRequest(device, "/api/keys/reveal", { body: { id: "fixture" } });

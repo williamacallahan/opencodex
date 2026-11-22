@@ -107,6 +107,7 @@ function isCredentialRecord(value: unknown): value is CodexAccountCredentialReco
     && (value.lastCodexValidationStatus === undefined || value.lastCodexValidationStatus === "ok" || value.lastCodexValidationStatus === "failed")
     && (value.lastCodexValidationError === undefined || typeof value.lastCodexValidationError === "string")
     && (value.codexValidationPending === undefined || typeof value.codexValidationPending === "boolean")
+    && (value.lastCodexValidationAttemptFailedAt === undefined || typeof value.lastCodexValidationAttemptFailedAt === "number")
     && (value.lastCodexValidationTerminal === undefined || typeof value.lastCodexValidationTerminal === "boolean");
 }
 
@@ -230,9 +231,12 @@ function poolAccountLogLabel(id: string): string {
 function preservedValidationMetadata(record: CodexAccountCredentialRecord | undefined): Pick<
   CodexAccountCredentialRecord,
   "lastCodexValidatedAt" | "lastCodexValidationStatus" | "lastCodexValidationError" | "codexValidationPending"
+  | "lastCodexValidationAttemptFailedAt"
 > {
   return {
     ...(record?.codexValidationPending === true ? { codexValidationPending: true } : {}),
+    ...(record?.lastCodexValidationAttemptFailedAt !== undefined
+      ? { lastCodexValidationAttemptFailedAt: record.lastCodexValidationAttemptFailedAt } : {}),
     ...(record?.lastCodexValidatedAt !== undefined ? { lastCodexValidatedAt: record.lastCodexValidatedAt } : {}),
     ...(record?.lastCodexValidationStatus !== undefined ? { lastCodexValidationStatus: record.lastCodexValidationStatus } : {}),
     ...(record?.lastCodexValidationError !== undefined ? { lastCodexValidationError: record.lastCodexValidationError } : {}),
@@ -265,6 +269,7 @@ export function saveCodexAccountCredential(
       ...preservedValidationMetadata(current),
       ...(options.validationPending ? {
         codexValidationPending: true,
+        lastCodexValidationAttemptFailedAt: undefined,
         lastCodexValidatedAt: undefined,
         lastCodexValidationStatus: undefined,
         lastCodexValidationError: undefined,
@@ -288,6 +293,7 @@ export function markCodexAccountValidated(id: string, atMs: number = Date.now(),
       lastCodexValidationStatus: "ok",
       lastCodexValidationError: undefined,
       codexValidationPending: undefined,
+      lastCodexValidationAttemptFailedAt: undefined,
       // A completed validation is the direct refutation of a terminal verdict, and this
       // spread would otherwise carry the old marker forward.
       lastCodexValidationTerminal: undefined,
@@ -341,6 +347,21 @@ export function markCodexAccountValidationFailed(
     };
     persist(store);
     return true;
+  });
+}
+
+/**
+ * Record when a pending account's warm-up failed, so an unattended refresh can pace its next
+ * attempt. Fenced like the verdict writers: a late failure must not
+ * land on a credential the caller never observed.
+ */
+export function markCodexAccountValidationAttemptFailed(id: string, atMs: number, expectedGeneration: number): void {
+  withCredentialMutationLockSync(() => {
+    const store = loadCodexAccountRecordStore();
+    const current = store[id];
+    if (!current?.codexValidationPending || current.deletedAt != null || current.generation !== expectedGeneration) return;
+    store[id] = { ...current, lastCodexValidationAttemptFailedAt: atMs };
+    persist(store);
   });
 }
 

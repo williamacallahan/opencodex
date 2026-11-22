@@ -157,11 +157,21 @@ Regression coverage: `tests/server/startup-prompt.test.ts`,
 
 ### Pending Codex account validation
 
-Completing deferred account validation spends model quota. Only a human's
-dashboard **Refresh quotas** action authorizes it. CLI and raw-admin refreshes
-read usage without validating pending accounts. Relay the dashboard recovery
-instruction to the user; do not mint a GUI session or call the provider directly
-to work around this boundary. This also applies when operating a headless host.
+Completing deferred account validation spends model quota, so it needs the
+operator's consent. That consent has two forms:
+
+- A human's dashboard **Refresh quotas** action authorizes it for that click.
+- The hub setting `codexPendingValidationByAdminRefresh` (default off) is
+  standing consent the operator gives once. While it is on, an admin-token
+  `POST /api/codex-auth/accounts/refresh` (the CLI, a remembered device, or an
+  unattended refresh job) also validates pending accounts, and it waits 30
+  minutes after a failed validation request before sending that account another.
+
+With the setting off, CLI and raw-admin refreshes read usage without validating
+pending accounts. Turning the setting on is the operator's decision: do not set
+it for them, mint a GUI session, or call the provider directly to work around
+this boundary. Relay the dashboard recovery instruction or name the setting.
+This also applies when operating a headless host.
 
 If a future action spends the user's identity, credits, or reputation, gate it
 the same way rather than relying on a prompt an agent can answer, and document

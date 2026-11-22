@@ -31,7 +31,7 @@ import type { AdmissionLease } from "../../lib/admission";
 import { tryAcquireNativeMainProfileClaim } from "../native-main-admission";
 import { withNativeMainCredentialClaim, isNativeMainClaimUnavailable, isNativeMainObservationUnavailable } from "./http";
 import { fetchMainAccountInfoAttempt, EMPTY_MAIN_ACCOUNT_INFO, mainResetCreditsForCurrentIdentity } from "./main-account-probe";
-import { fetchPoolAccountQuota, isExhaustedPoolQuotaReadHeld, PoolQuotaProbeBusyError, POOL_QUOTA_REFRESH_CONCURRENCY } from "./pool-quota-probe";
+import { fetchPoolAccountQuota, isExhaustedPoolQuotaReadHeld, pendingValidationRetryHeld, PoolQuotaProbeBusyError, POOL_QUOTA_REFRESH_CONCURRENCY } from "./pool-quota-probe";
 import type { PoolQuotaResult } from "./pool-quota-probe";
 import { getRuntimeConfig, configuredPoolAccount, mapWithConcurrency } from "./runtime-config";
 import { isPassiveRead } from "../../lib/passive-read";
@@ -298,8 +298,10 @@ export function reconcileFreshPoolAccountPlans(runtimeConfig: OcxConfig, updates
 }
 
 export interface CodexAuthAccountsListOptions {
-  /** Finish deferred registration; only a dashboard session carries that inference consent. */
+  /** Finish deferred registration; the caller must hold inference consent (routes.ts decides who does). */
   validatePending?: boolean;
+  /** An unattended caller: leave a pending account alone while its last failed warm-up is inside the retry backoff. */
+  paceValidationRetries?: boolean;
   /** An operator's explicit refresh command, which may retry a grant already recorded as dead. */
   explicitRefresh?: boolean;
   /** A forced listing still answers an exhausted seat inside its read hold from the stored reading. */
@@ -351,7 +353,8 @@ export async function listCodexAuthAccountsSnapshot(
         const creditsUnobserved = creditsIdentity !== null && !hasCodexCreditsObservation(account.id, creditsIdentity);
         const held = options.holdExhausted === true && isExhaustedPoolQuotaReadHeld(account.id, Date.now());
         quotaResult = await fetchPoolAccountQuota(account.id, (forceRefresh && !held) || creditsUnobserved, account.plan, getValidCodexToken,
-          options.validatePending === true, undefined, undefined, options.explicitRefresh === true);
+          options.validatePending === true && !(options.paceValidationRetries === true && pendingValidationRetryHeld(account.id)),
+          undefined, undefined, options.explicitRefresh === true);
       } catch (error) {
         if (!(error instanceof PoolQuotaProbeBusyError)) throw error;
         quotaResult = {

@@ -572,8 +572,8 @@ export interface OcxConfig {
    * the guess is wrong.
    */
   oauthOpenBrowser?: boolean;
-  /** Display Codex credits on account cards; display only, default off. */
-  showCodexCredits?: boolean;
+  /** Display Codex credits on account cards; display only, default off. */ showCodexCredits?: boolean;
+  /** Standing consent: an admin-token account refresh also runs the pending-account warm-up; default off. */ codexPendingValidationByAdminRefresh?: boolean;
   /**
    * @deprecated Compatibility-only limit for bounded legacy usage readers.
    * `GET /api/usage` always aggregates the complete ledger.
