@@ -164,6 +164,8 @@ public struct UsageAccountRow: Decodable, Equatable, Sendable {
 
 public struct QuotaWindow: Decodable, Equatable, Sendable {
     public let modelId: String?
+    /// `"model"` for a model-family limit (Anthropic Opus) that carries no exact model id.
+    public let scope: String?
     public let label: String?
     public let percent: Double?
     public let resetAt: Double?
@@ -234,7 +236,9 @@ public extension QuotaReport {
         append(quota?.monthlyPercent, "month", quota?.monthlyResetAt)
 
         for window in quota?.customWindows ?? [] {
-            append(window.percent, window.label ?? "window", window.resetAt, window.modelId)
+            // A model-family window is a model row like one with an exact id: details only.
+            let model = window.modelId ?? (window.scope == "model" ? window.label ?? "model" : nil)
+            append(window.percent, window.label ?? "window", window.resetAt, model)
         }
 
         return windows

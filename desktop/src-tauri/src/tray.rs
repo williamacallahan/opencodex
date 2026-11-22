@@ -468,7 +468,7 @@ pub(crate) fn render_title(settings: &Value, usage: &Value, quotas: &Value) -> O
 
 fn quota_percent(value: &Value, settings: &Value) -> Option<f64> {
     let reports = value.get("reports")?.as_array()?;
-    let mut values = Vec::new();
+    let mut providers = Vec::new();
     for report in reports {
         if crate::companion_usage::hidden(
             settings,
@@ -479,6 +479,7 @@ fn quota_percent(value: &Value, settings: &Value) -> Option<f64> {
         let Some(quota) = report.get("quota") else {
             continue;
         };
+        let mut values = Vec::new();
         for key in ["weeklyPercent", "monthlyPercent", "fiveHourPercent"] {
             if let Some(value) = quota.get(key).and_then(Value::as_f64) {
                 values.push(value);
@@ -488,11 +489,18 @@ fn quota_percent(value: &Value, settings: &Value) -> Option<f64> {
             values.extend(
                 windows
                     .iter()
+                    .filter(|window| {
+                        window.get("modelId").is_none_or(Value::is_null)
+                            && window.get("scope").and_then(Value::as_str) != Some("model")
+                    })
                     .filter_map(|window| window.get("percent").and_then(Value::as_f64)),
             );
         }
+        if let Some(binding) = values.into_iter().reduce(f64::max) {
+            providers.push(binding);
+        }
     }
-    values.into_iter().reduce(f64::min)
+    providers.into_iter().reduce(f64::min)
 }
 
 fn format_percent(value: Option<f64>) -> String {
@@ -592,6 +600,20 @@ mod tests {
         let settings = json!({"settings":{"menuBarMetric":"quota","hiddenProviders":["hidden"]}});
         let quotas = json!({"reports":[{"provider":"hidden","quota":{"weeklyPercent":1}}, {"provider":"visible","quota":{"weeklyPercent":75}}]});
         assert_eq!(render_title(&settings, &usage, &quotas), Some("75%".into()));
+    }
+
+    #[test]
+    fn quota_summary_uses_each_providers_binding_window() {
+        let settings = json!({"settings":{"menuBarMetric":"quota"}});
+        let usage = json!({});
+        for (reports, expected) in [
+            (json!([{"provider":"a","quota":{"weeklyPercent":0,"monthlyPercent":100}}]), "100%"),
+            (json!([{"provider":"a","quota":{"weeklyPercent":0,"monthlyPercent":100}},{"provider":"b","quota":{"weeklyPercent":30}}]), "30%"),
+            (json!([{"provider":"a","quota":{"weeklyPercent":20,"customWindows":[{"scope":"model","percent":100}]}}]), "20%"),
+            (json!([{"provider":"a","quota":{"weeklyPercent":20,"customWindows":[{"modelId":"m","percent":100}]}}]), "20%"),
+        ] {
+            assert_eq!(render_title(&settings, &usage, &json!({"reports":reports})), Some(expected.into()));
+        }
     }
 
     /// This file's own source, read at compile time, with the test module cut off.

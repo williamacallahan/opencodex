@@ -168,7 +168,10 @@ struct OpenCodexWidgetView: View {
 
     private func quotaView(_ snapshot: WidgetSnapshot) -> some View {
         Group {
-            if let quota = snapshot.quotas.compactMap({ $0.percent == nil ? nil : $0 }).min(by: { ($0.percent ?? 100) < ($1.percent ?? 100) }) {
+            // Each provider is as constrained as its fullest window; show the provider with the most headroom.
+            let binding = Dictionary(grouping: snapshot.quotas.filter { $0.percent != nil }, by: \.providerLabel)
+                .values.compactMap { windows in windows.max { ($0.percent ?? 0) < ($1.percent ?? 0) } }
+            if let quota = binding.min(by: { ($0.percent ?? 100, $0.providerLabel) < ($1.percent ?? 100, $1.providerLabel) }) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(quota.providerLabel).font(.caption).lineLimit(1)
                     ProgressView(value: (quota.percent ?? 0) / 100)

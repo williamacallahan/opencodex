@@ -191,7 +191,11 @@ mod macos {
                 quota.get("monthlyResetAt"),
             );
             if let Some(windows) = quota.get("customWindows").and_then(Value::as_array) {
-                for window in windows {
+                // Model-family windows (Anthropic Opus) are not provider-wide capacity.
+                for window in windows.iter().filter(|window| {
+                    window.get("modelId").is_none_or(Value::is_null)
+                        && window.get("scope").and_then(Value::as_str) != Some("model")
+                }) {
                     let label = window
                         .get("label")
                         .and_then(Value::as_str)
@@ -649,6 +653,20 @@ mod macos {
                 windows,
                 [("OpenAI", "week"), ("Kimi", "5h"), ("Kimi", "week")]
             );
+        }
+
+        #[test]
+        fn quota_rows_skip_model_family_windows() {
+            let reports = json!({ "reports": [
+                { "provider": "anthropic", "label": "Anthropic", "quota": { "weeklyPercent": 20.0,
+                    "customWindows": [
+                        { "label": "Opus", "scope": "model", "percent": 100.0 },
+                        { "label": "Sonnet", "modelId": "claude-sonnet", "percent": 90.0 },
+                        { "label": "Extra", "percent": 40.0 } ] } }
+            ] });
+            let rows = quotas(&reports, &json!({ "settings": {} }));
+            let windows: Vec<_> = rows.iter().map(|row| row.window_label.as_str()).collect();
+            assert_eq!(windows, ["week", "Extra"]);
         }
 
         #[test]
