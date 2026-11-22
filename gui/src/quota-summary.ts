@@ -72,7 +72,7 @@ function roundedUnavailablePercent(total: number, remaining: number): number {
   return Number((2n * numerator + denominator) / (2n * denominator));
 }
 
-/** Long windows first: weekly is the default headline, then monthly, then 5h, then custom. */
+/** Among equally severe windows, long windows headline first: weekly, then monthly, then 5h. */
 const HEADLINE_ORDER: TKey[] = ["quota.weeklyLimit", "quota.monthlyLimit", "quota.fiveHourLimit"];
 
 /** Build reported quota windows with distinct IDs, including measured prepaid credits. */
@@ -129,25 +129,36 @@ function summaryWindows(quota: AccountQuota): QuotaSummaryWindow[] {
   });
 }
 
-/** Critical credits displace the preferred regular window only when it is not critical. */
+function severityRank(severity: QuotaSummarySeverity): number {
+  switch (severity) {
+    case "critical": return 2;
+    case "warn": return 1;
+    case "normal": return 0;
+  }
+}
+
+/** Weekly, monthly, 5h, then provider windows in report order, then credits. */
+function headlinePreference(window: QuotaSummaryWindow): number {
+  if (window.labelKey === "quotaSummary.credits") return HEADLINE_ORDER.length + 1;
+  const fixed = window.labelKey === undefined ? -1 : HEADLINE_ORDER.indexOf(window.labelKey);
+  return fixed >= 0 ? fixed : HEADLINE_ORDER.length;
+}
+
+/**
+ * The headline is the binding window: the most severe one, so a spent 30-day or budget window is
+ * never hidden behind a 0% weekly window. Among critical windows the fullest wins, except that
+ * credits yield to a critical plan window; equal severity otherwise follows `headlinePreference`.
+ */
 function pickHeadline(windows: QuotaSummaryWindow[]): QuotaSummaryWindow | undefined {
   const measured = windows.filter(window => window.modelId === undefined && window.percent !== undefined);
-  const byLabel = new Map<TKey, QuotaSummaryWindow>();
-  for (const window of measured) {
-    if (window.labelKey !== undefined && !byLabel.has(window.labelKey)) byLabel.set(window.labelKey, window);
-  }
-  let regular: QuotaSummaryWindow | undefined;
-  for (const key of HEADLINE_ORDER) {
-    const hit = byLabel.get(key);
-    if (hit) {
-      regular = hit;
-      break;
-    }
-  }
-  if (!regular) regular = measured.find(window => window.labelKey !== "quotaSummary.credits");
-  const credits = byLabel.get("quotaSummary.credits");
-  if (credits && credits.severity === "critical" && regular?.severity !== "critical") return credits;
-  return regular ?? measured[0] ?? windows.find(window => window.unknownBudget);
+  const ranked = measured
+    .map((window, order) => ({ window, order }))
+    .sort((a, b) => severityRank(b.window.severity) - severityRank(a.window.severity)
+      || Number(a.window.labelKey === "quotaSummary.credits") - Number(b.window.labelKey === "quotaSummary.credits")
+      || (a.window.severity === "critical" ? (b.window.percent ?? 0) - (a.window.percent ?? 0) : 0)
+      || headlinePreference(a.window) - headlinePreference(b.window)
+      || a.order - b.order);
+  return ranked[0]?.window ?? windows.find(window => window.unknownBudget);
 }
 
 /**
