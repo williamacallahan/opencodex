@@ -69,6 +69,7 @@ import {
   fetchCursorQuota,
   fetchKiroQuota,
   fetchMuseKeyQuota,
+  fetchObservedAntigravityQuota,
   fetchPassiveProviderQuota,
   fetchXaiQuota,
 } from "./quota/vendor-probes-oauth";
@@ -146,7 +147,9 @@ async function probeProviderQuota(
   }
   if (provider.authMode === "oauth" && explicitAccountReader(name)) return await fetchExplicitCurrentQuota(name, provider, config);
   if (provider.authMode === "oauth" && configuredAnthropicInstance(config, name)) return await fetchAnthropicQuota(name, config, forceRefresh, resetPoll);
-  if (provider.authMode === "oauth" && name === ANTIGRAVITY_OAUTH_STORE_KEY) return await fetchAntigravityQuota(name, { ...provider });
+  if (provider.authMode === "oauth" && name === ANTIGRAVITY_OAUTH_STORE_KEY) {
+    return hasPassiveAccountQuota(name) ? fetchObservedAntigravityQuota(name) : await fetchAntigravityQuota(name, { ...provider });
+  }
   if (provider.authMode === "oauth" && name === "kiro") return await fetchKiroQuota(name);
   // meta-muse: only a device-logged-in account can be probed; others fall back to the last in-band observation.
   if (provider.authMode === "oauth" && hasPassiveAccountQuota(name)) {

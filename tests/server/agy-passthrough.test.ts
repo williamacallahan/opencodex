@@ -164,6 +164,49 @@ describe("agy pass-through public HTTP lane", () => {
     expect(stored()).toBe("learned-project");
   });
 
+  test("records each account's quota from Google's answers to agy's own quota calls, which reach agy unchanged", async () => {
+    await launch();
+    const { readPassiveProviderAccountQuotas } = await import("../../src/providers/quota/account-cache");
+    const { fetchObservedAntigravityQuota } = await import("../../src/providers/quota/vendor-probes-oauth");
+    const accountFor = (project: string) => getAccountSet("google-antigravity")!.accounts.find(row => row.credential.projectId === project)!.id;
+    const observed = async (accountId: string, ready: (quota: unknown) => boolean = () => true) => {
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const row = readPassiveProviderAccountQuotas("google-antigravity").find(entry => entry.accountId === accountId);
+        if (row?.quota && ready(row.quota)) return row.quota;
+        await Bun.sleep(10);
+      }
+      return undefined;
+    };
+    const summary = { groups: [{ displayName: "Gemini", buckets: [{ window: "5h", remainingFraction: 0.6 }] }] };
+    const models = (fraction: number) => ({ models: { "gemini-3.8-flash": { quotaInfo: { remainingFraction: fraction } } } });
+    // Provider-wide family windows only; per-model detail rows carry a modelId.
+    const percents = (quota: unknown) => ((quota as { customWindows?: Array<{ percent: number; modelId?: string }> }).customWindows ?? [])
+      .filter(window => window.modelId === undefined).map(window => Math.round(window.percent));
+
+    reply = () => Response.json(summary);
+    const answer = await post("retrieveUserQuotaSummary", '{"project":"synthetic-project-two"}');
+    expect(JSON.parse(answer.text)).toEqual(summary);
+    const two = accountFor("synthetic-project-two");
+    expect(percents(await observed(two))).toEqual([40]);
+
+    // A per-model reading in the same session does not replace that account's fresher summary.
+    reply = () => Response.json(models(0.1));
+    await post("fetchAvailableModels", '{"project":"synthetic-project-two"}');
+    reply = () => Response.json(models(0.75));
+    await post("fetchAvailableModels", '{"project":"synthetic-project-three"}');
+    const three = accountFor("synthetic-project-three");
+    expect(percents(await observed(three))).toEqual([25]);
+    expect(percents(await observed(two))).toEqual([40]);
+
+    // The pool's provider row is the freshest observation, from whichever account agy used last.
+    const row = fetchObservedAntigravityQuota("google-antigravity");
+    expect(row?.observed).toBe(true);
+    expect(percents(row?.quota)).toEqual([25]);
+    expect(calls.map(call => call.path)).toEqual([
+      "/v1internal:retrieveUserQuotaSummary", "/v1internal:fetchAvailableModels", "/v1internal:fetchAvailableModels",
+    ]);
+  });
+
   test("a 429 passes through unchanged; only loadCodeAssist moves the caller, trajectory writes stay put", async () => {
     await launch();
     let served = "";

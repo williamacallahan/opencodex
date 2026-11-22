@@ -356,6 +356,18 @@ export async function probeAntigravityUsageQuota(accessToken: string, projectId:
   }
 }
 
+/**
+ * Quota from Google's answer to agy's own Cloud Code call, read on the `/agy` lane. The hub sends
+ * Google nothing for this; under `nativeHarnessOnly` it is the only Antigravity quota source.
+ */
+export function antigravityQuotaFromRelayedAnswer(
+  method: "retrieveUserQuotaSummary" | "fetchAvailableModels", body: Record<string, unknown> | null,
+): ProviderQuota | null {
+  if (method === "retrieveUserQuotaSummary") return parseAntigravityQuotaSummary(body);
+  const customWindows = antigravityWindowsFromModels(body);
+  return customWindows.length ? { customWindows, updatedAt: Date.now() } : null;
+}
+
 export async function fetchAntigravityUsageQuota(accessToken: string, projectId: string): Promise<ProviderQuota | null> {
   const result = await probeAntigravityUsageQuota(accessToken, projectId);
   if (result.kind === "available") return result.quota;

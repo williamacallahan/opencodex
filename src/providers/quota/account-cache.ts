@@ -20,6 +20,7 @@ import { getProviderQuotaReportCache, hasQuotaRows, routingEvidence, setProvider
 import { isCanonicalCommandCodeBaseUrl, isCanonicalKimiCodeBaseUrl } from "./vendor-probes-key";
 import { isWeeklyAllowancePercent, type AccountQuotaMode, type ProviderQuota, type ProviderQuotaWindow, type QuotaFailureCode } from "../quota-types";
 import type { OcxConfig, OcxProviderConfig } from "../../types";
+import { nativeHarnessOnly } from "../../lib/native-harness";
 
 /** Match oauth/index REFRESH_SKEW_MS — use stored access without refresh when still fresh. */
 const ACCOUNT_TOKEN_SKEW_MS = 60_000;
@@ -404,9 +405,11 @@ export function recordAnthropicAccountQuotaFromHeaders(
  * Deliberately separate from `supportsPerAccountQuota` rather than folded into it. That
  * predicate gates explicit upstream readers. Meta publishes no quota endpoint, so it
  * remains a cache-only observation even when every probe reader is account-scoped.
+ * Antigravity is observed while `nativeHarnessOnly` reserves it to agy: the hub then sends Google
+ * no quota probe, and the `/agy` lane reads Google's answers to agy's own quota calls instead.
  */
 export function hasPassiveAccountQuota(provider: string): boolean {
-  return provider === "meta-muse";
+  return provider === "meta-muse" || (provider === "google-antigravity" && nativeHarnessOnly());
 }
 
 /**

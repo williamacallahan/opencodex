@@ -41,6 +41,7 @@ import {
   hydrateAccountQuotaCache,
   mayCommitAccountQuotaKey,
   persistAccountQuotaCache,
+  readPassiveProviderAccountQuotas,
 } from "./account-cache";
 import type { OcxConfig, OcxProviderConfig } from "../../types";
 import type { ProviderQuota, ProviderQuotaWindow } from "../quota-types";
@@ -470,6 +471,19 @@ export async function fetchPassiveProviderQuota(provider: string): Promise<Provi
   if (!entry?.quota) return null;
   const built = report(provider, `${provider}:subscription-observation`, entry.quota);
   // Tagged here rather than inside report(), which every probed path shares.
+  return built ? { ...built, observed: true } : null;
+}
+
+/**
+ * Provider-level row for the agy-only Antigravity pool: the freshest account observation. agy
+ * rotates across the pool, so the dashboard's active account is not necessarily one agy used.
+ */
+export function fetchObservedAntigravityQuota(provider: string): ProviderQuotaReport | null {
+  let freshest: ProviderQuota | null = null;
+  for (const row of readPassiveProviderAccountQuotas(provider)) {
+    if (row.quota && (!freshest || row.quota.updatedAt > freshest.updatedAt)) freshest = row.quota;
+  }
+  const built = freshest && report(provider, `${provider}:agy-observation`, freshest);
   return built ? { ...built, observed: true } : null;
 }
 

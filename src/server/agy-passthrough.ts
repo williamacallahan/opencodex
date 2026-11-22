@@ -30,11 +30,26 @@ import { oauthAccountLogLabel } from "../codex/account-label";
 import { nativeHarnessOnly } from "../lib/native-harness";
 import { ANTIGRAVITY_OAUTH_STORE_KEY } from "../providers/antigravity-quota-identity";
 import { PROVIDER_REGISTRY } from "../providers/registry";
+import { recordPassiveAccountQuota } from "../providers/quota/account-cache";
+import { antigravityQuotaFromRelayedAnswer } from "../providers/quota/antigravity";
+import { captureConfigGeneration } from "../lib/state-store-sweeper";
 import { classifyUsageClient } from "../usage/client";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 
 const MAX_AGY_REQUEST_BYTES = 32 * 1024 * 1024;
-const MAX_OBSERVED_LOAD_BYTES = 1024 * 1024;
+/** Bound on a relayed answer copied for reading; a larger one is not read (agy still gets it whole). */
+const MAX_OBSERVED_ANSWER_BYTES = 4 * 1024 * 1024;
+/** agy's own quota calls; Google's answers to them are this pool's only quota reading. */
+const QUOTA_METHODS = new Set(["retrieveUserQuotaSummary", "fetchAvailableModels"] as const);
+type QuotaMethod = typeof QUOTA_METHODS extends Set<infer M> ? M : never;
+const isQuotaMethod = (method: string): method is QuotaMethod => QUOTA_METHODS.has(method as QuotaMethod);
+/**
+ * When each account last had a quota summary read. A per-model reading (agy sends one each
+ * session) does not replace a summary younger than this, because only the summary reports the
+ * 5-hour and weekly family buckets.
+ */
+const SUMMARY_PRECEDENCE_MS = 30 * 60_000;
+const summaryReadAt = new Map<string, number>();
 const CLOUD_CODE_METHOD = /^\/v1internal:[A-Za-z]+$/;
 /** Generation calls always carry their account's project; refusing a project-less one keeps them off rotation. */
 const PROJECT_REQUIRED = /^\/v1internal:(?:streamGenerateContent|generateContent|countTokens)$/;
@@ -135,8 +150,8 @@ function cloudCodeOrigin(config: OcxConfig): string {
   }
 }
 
-/** Learn the project Google handed this account, from a bounded copy of a relayed `loadCodeAssist` answer. */
-async function observeLoadCodeAssist(copy: ReadableStream<Uint8Array>, contentEncoding: string | null, accountId: string): Promise<void> {
+/** A bounded, decoded copy of a relayed JSON answer; undefined when it is too large or not a JSON object. */
+async function readRelayedJson(copy: ReadableStream<Uint8Array>, contentEncoding: string | null): Promise<Record<string, unknown> | undefined> {
   const reader = copy.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -145,20 +160,40 @@ async function observeLoadCodeAssist(copy: ReadableStream<Uint8Array>, contentEn
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > MAX_OBSERVED_LOAD_BYTES) return;
+      if (total > MAX_OBSERVED_ANSWER_BYTES) return undefined;
       chunks.push(value);
     }
     const plain = decoded(Buffer.concat(chunks), contentEncoding);
-    if (!plain) return;
+    if (!plain) return undefined;
     const parsed: unknown = JSON.parse(new TextDecoder().decode(plain));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
-    const project = extractProjectId(parsed as Record<string, unknown>);
-    if (project) learnAgyAccountProject(accountId, project);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
   } catch {
-    // An unreadable copy teaches nothing; the client's own branch is untouched.
+    return undefined;
   } finally {
     await reader.cancel().catch(() => {});
   }
+}
+
+/**
+ * Read a relayed answer agy asked for: the project Google handed this account (`loadCodeAssist`)
+ * or the account's quota (agy's own quota calls). The client's bytes are never touched.
+ */
+async function observeRelayedAnswer(copy: ReadableStream<Uint8Array>, contentEncoding: string | null, accountId: string,
+  method: string, writerGeneration: number): Promise<void> {
+  const body = await readRelayedJson(copy, contentEncoding);
+  if (!body) return;
+  if (method === "loadCodeAssist") {
+    const project = extractProjectId(body);
+    if (project) learnAgyAccountProject(accountId, project);
+    return;
+  }
+  if (!isQuotaMethod(method)) return;
+  const quota = antigravityQuotaFromRelayedAnswer(method, body);
+  if (!quota) return;
+  const now = Date.now();
+  if (method === "fetchAvailableModels" && now - (summaryReadAt.get(accountId) ?? 0) < SUMMARY_PRECEDENCE_MS) return;
+  if (method === "retrieveUserQuotaSummary") summaryReadAt.set(accountId, now);
+  recordPassiveAccountQuota(ANTIGRAVITY_OAUTH_STORE_KEY, accountId, quota, writerGeneration);
 }
 
 /** The client's branch of the answer; it settles the request log and the turn lease exactly once. */
@@ -221,6 +256,8 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
     project, callerKey: callerKey(admission, authorization), mayRotate: parts.method === "/v1internal:loadCodeAssist",
   });
   if (choice.kind !== "account") return choiceRefusal(choice);
+  // Captured with the account choice, so a roster change during the send fences the quota write.
+  const quotaWriterGeneration = captureConfigGeneration();
   let snapshot: Awaited<ReturnType<typeof getValidAccessSnapshotForAccount>>;
   try {
     snapshot = await getValidAccessSnapshotForAccount(ANTIGRAVITY_OAUTH_STORE_KEY, choice.accountId, { requireUsableAccount: true });
@@ -280,10 +317,11 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
   // A token Google rejected before its recorded expiry: mint a fresh one for the next request.
   if (upstream.status === 401) void forceRefreshOAuthAccessSnapshot(snapshot).catch(() => {});
   let clientBody = upstream.body;
-  if (upstream.status >= 200 && upstream.status < 300 && parts.method === "/v1internal:loadCodeAssist") {
+  const method = parts.method.slice("/v1internal:".length);
+  if (upstream.status >= 200 && upstream.status < 300 && (method === "loadCodeAssist" || isQuotaMethod(method))) {
     const [forClient, forObserver] = upstream.body.tee();
     clientBody = forClient;
-    void observeLoadCodeAssist(forObserver, upstream.headers.get("content-encoding"), choice.accountId);
+    void observeRelayedAnswer(forObserver, upstream.headers.get("content-encoding"), choice.accountId, method, quotaWriterGeneration);
   }
   return new Response(settledBody(clientBody, settle, () => controller.abort(), () => req.signal.aborted), {
     status: upstream.status, statusText: upstream.statusText, headers: messagesEndToEndHeaders(upstream.headers),

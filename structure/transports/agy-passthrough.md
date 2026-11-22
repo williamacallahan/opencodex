@@ -25,6 +25,21 @@ prefix on the public listener only, through one dynamic-import line in
   is listed by `GET /api/providers` with `nativeHarness: "agy"`, the catalog lists none of its
   models, and any translated route to it refuses with a 400 naming the agy harness.
 
+## Observed quota
+
+Under `nativeHarnessOnly` the hub sends Google no quota probe, so the pool's quota comes only from
+Google's answers to agy's own quota calls. `src/server/agy-passthrough.ts` copies a 2xx answer to
+`retrieveUserQuotaSummary` or `fetchAvailableModels` (and `loadCodeAssist`, for its project) with a
+`tee`, reads at most 4 MiB of the copy, and leaves agy's bytes untouched. The reading is parsed by
+`antigravityQuotaFromRelayedAnswer` (`src/providers/quota/antigravity.ts`) and recorded for the
+serving account with `recordPassiveAccountQuota`, fenced by the config generation captured at the
+account choice. A per-model reading does not replace that account's summary for 30 minutes, because
+only the summary reports the 5-hour and weekly family buckets. `hasPassiveAccountQuota` treats
+`google-antigravity` as observed while the switch is on: the Accounts tab shows each account's last
+observation (or "not observed yet"), and the provider row in the quota bar is the freshest account
+observation (`fetchObservedAntigravityQuota`), since agy rotates across the pool. An account agy has
+not used keeps its last reading and its age. `tests/server/agy-passthrough.test.ts` covers it.
+
 ## Account choice
 
 `src/server/agy-passthrough-accounts.ts` keeps every body valid for the token it is sent with:
@@ -51,7 +66,7 @@ prefix on the public listener only, through one dynamic-import line in
   (`src/adapters/google.ts`), Cloud Code image generation (`src/server/images.ts`), Cloud Code model
   discovery for the catalog (`src/codex/catalog/gather-capture.ts`), quota probes
   (`src/providers/quota/antigravity.ts`) and login/refresh project discovery
-  (`src/oauth/google-antigravity.ts`) refuse or skip before any send. Account import admits a credential
+  (`src/oauth/google-antigravity.ts`) refuse or skip before any send. Quota is observed instead (see Observed quota). Account import admits a credential
   with no project, because the lane learns it from agy's own traffic.
   The Gemini web-search sidecar, sibling model discovery (`src/codex/catalog/antigravity-discovery.ts`,
   `mayResolveModelsOAuth`), the provider connectivity test and Lab live probes skip Antigravity too.
