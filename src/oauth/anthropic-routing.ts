@@ -371,6 +371,8 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
   // methods carry no ambient disk authority; physical consumers recheck their captured config/target.
   function admitted(config: OcxConfig): boolean { return configuredAnthropicInstance(config, instance) === instance; }
   const upstreamHealth = new RoutingMap<string, AccountHealth>();
+  /** The credential each account held when upstream last refused it; a replaced credential starts clean. */
+  const refusedCredential = new Map<string, string>();
   const sessionAffinity = new AnthropicSessionAffinityStore(instance);
   const affinityKey = (key: string | null | undefined) => anthropicAffinityDigest(instance, normalizeAffinityComponent(key));
   // Undefined means this runtime has not admitted a selection yet; null means consumed.
@@ -531,6 +533,7 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
   function clearAnthropicAccountPoolState(): void {
     for (const [id] of upstreamHealth) noteAnthropicCooldownMutation(id);
     upstreamHealth.clear();
+    refusedCredential.clear();
     clearAnthropicRatePauses();
     clearAnthropicFamilyQuota();
     clearAnthropicCooldownGenerations();
@@ -816,7 +819,10 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
       // No probe can measure a setup token (empty refresh grant); only a served request can.
       // Ranked as unknown, it would wait behind every measured seat and never be measured, so one
       // seat would hold every session. Until its first response it ranks as an unused seat.
-      const unusedSetupToken = !known && getAccountCredential(PROVIDER, accountId)?.refresh === "";
+      // A refusal that left no reading (a 403, a 429 without usage headers) is not "unused": that
+      // credential waits behind the measured seats again instead of retaking the front each time its hold lapses.
+      const credential = known ? undefined : getAccountCredential(PROVIDER, accountId);
+      const unusedSetupToken = credential?.refresh === "" && refusedCredential.get(accountId) !== credentialGeneration(credential);
       return {
         accountId,
         hasKnownUsage: known || unusedSetupToken,
@@ -1227,6 +1233,8 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
     rateLimitHeaders?: AnthropicRateLimitHeaders | null,
   ): boolean {
     if (!admitted(config)) return false;
+    const refused = getAccountCredential(PROVIDER, failedAccountId);
+    if (refused) refusedCredential.set(failedAccountId, credentialGeneration(refused));
     // Reactive 429 failover is NOT gated on the pool flag. That flag buys PROACTIVE routing --
     // session affinity, quota-ranked new-session selection, autoSwitchThreshold, strategy -- all
     // of which move a HEALTHY request and stay opt-in. Rotating away from an account upstream has

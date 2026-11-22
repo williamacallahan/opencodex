@@ -17,6 +17,7 @@ import {
   isAnthropicAccountPoolEnabled,
   normalizeAccountPoolQuotaWindow,
   parseAccountPoolQuotaWindow,
+  recordAnthropicAccountRefusal,
   resolveAnthropicAccountForSession,
   resetAnthropicRoutingForManualSelection,
   getAnthropicPoolAccessSnapshot,
@@ -707,6 +708,31 @@ describe("anthropic account pool quota window scoring", () => {
       expect(resolveAnthropicAccountForSession(`measured-token-${window}`, config).accountId).toBe(bId);
     });
   }
+
+  test("a setup-token account that was refused without a reading does not retake the front when its hold lapses", async () => {
+    const { aId, bId } = await seedTwoAccounts();
+    await saveCredential("anthropic", {
+      access: "setup-token-c", refresh: "", expires: Date.now() + 3_600_000, email: "c@example.test", source: "manual",
+    });
+    const { getAccountSet } = await import("../../../src/oauth/store");
+    const cId = getAccountSet("anthropic")!.accounts.find(acc => acc.credential.email === "c@example.test")!.id;
+    await setActiveAccount("anthropic", aId);
+    const now = Date.now();
+    setCachedProviderAccountQuotaForTests("anthropic", aId, { fiveHourPercent: 97, weeklyPercent: 97, updatedAt: now });
+    setCachedProviderAccountQuotaForTests("anthropic", bId, { fiveHourPercent: 10, weeklyPercent: 10, updatedAt: now });
+    const config = cfg(true, 80, { quotaWindow: "max-utilization" });
+    // A 403 account refusal records a ten-minute hold and no usage reading.
+    expect(recordAnthropicAccountRefusal(config, cId, 403, null, now)).toBe(true);
+    const afterHold = now + 11 * 60_000;
+    expect(resolveAnthropicAccountForSession("refused-token", config, afterHold).accountId).toBe(bId);
+
+    // A replaced token is a different credential and starts as an unused seat again.
+    await saveCredential("anthropic", {
+      access: "setup-token-c2", refresh: "", expires: Date.now() + 3_600_000, email: "c@example.test", source: "manual",
+    });
+    await setActiveAccount("anthropic", aId);
+    expect(resolveAnthropicAccountForSession("renewed-token", config, afterHold).accountId).toBe(cId);
+  });
 
   test("five-hour default does not adopt known-before-unknown ranking", async () => {
     // The known-first rule belongs to the opt-in windows. Under the legacy five-hour default

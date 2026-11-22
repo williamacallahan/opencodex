@@ -365,8 +365,15 @@ export function credentialGeneration(cred: OAuthCredentials): string {
 /** Why an existing auth.json cannot be loaded; `read_failed` means the read itself threw. An absent file is not unreadable. */
 export type AuthStoreUnreadableReason = "empty_file" | "invalid_json" | "read_failed";
 
-/** The unreadable auth.json this process already quarantined and reported; null once the store loads, is absent, or is rewritten. */
+/** The unreadable auth.json this process already reported; null once the store loads, is absent, or is rewritten. */
 let reportedUnreadableAuthStore: string | null = null;
+/** The unreadable auth.json this process holds a quarantine copy of; a copy that failed is tried again on the next load. */
+let quarantinedUnreadableAuthStore: string | null = null;
+
+function clearUnreadableAuthStoreRecord(): void {
+  reportedUnreadableAuthStore = null;
+  quarantinedUnreadableAuthStore = null;
+}
 
 function authStoreUnreadableReason(raw: string | undefined): AuthStoreUnreadableReason {
   if (raw === undefined) return "read_failed";
@@ -383,9 +390,10 @@ function reportUnreadableAuthStore(path: string, raw: string | undefined): void 
   if (isPassiveRead()) return;
   const reason = authStoreUnreadableReason(raw);
   const identity = `${path}\0${reason}\0${createHash("sha256").update(raw ?? "").digest("hex")}`;
+  // The copy is the only protection before a later login or import overwrites the file, so a failed copy is not final.
+  if (quarantinedUnreadableAuthStore !== identity && backupInvalidConfig(path) !== null) quarantinedUnreadableAuthStore = identity;
   if (reportedUnreadableAuthStore === identity) return;
   reportedUnreadableAuthStore = identity;
-  backupInvalidConfig(path);
   logOAuthEvent("level=error OAuth account store unreadable; serving an empty pool", { reason });
 }
 
@@ -394,18 +402,20 @@ function loadAuthStoreInternal(): { store: AuthStore; hadLegacy: boolean } {
   const path = getAuthStorePath();
   hardenConfigDir();
   hardenExistingSecret(path);
-  if (!existsSync(path)) { reportedUnreadableAuthStore = null; notifyAuthStoreLoaded({}); return { store: {}, hadLegacy: false }; }
+  if (!existsSync(path)) { clearUnreadableAuthStoreRecord(); notifyAuthStoreLoaded({}); return { store: {}, hadLegacy: false }; }
   let result: { store: AuthStore; hadLegacy: boolean };
   let raw: string | undefined;
   try {
     raw = readFileSync(path, "utf-8");
     result = normalizeAuthStore(JSON.parse(raw));
   } catch {
-    reportUnreadableAuthStore(path, raw);
+    // Removed between the existence check and the read: absent, not unreadable.
+    if (raw === undefined && !existsSync(path)) clearUnreadableAuthStoreRecord();
+    else reportUnreadableAuthStore(path, raw);
     notifyAuthStoreLoaded({});
     return { store: {}, hadLegacy: false };
   }
-  reportedUnreadableAuthStore = null;
+  clearUnreadableAuthStoreRecord();
   // Outside the parse try: roster publication is advisory and must never route a loaded store into the invalid-config backup path.
   notifyAuthStoreLoaded(result.store);
   return result;
@@ -438,12 +448,15 @@ export function normalizeAuthStoreBuffer(buffer: Uint8Array | null): AuthStoreBu
 
 /**
  * Observe-only auth store read for diagnostics (`ocx doctor` / status).
- * Does not chmod paths or backup invalid JSON — corrupt files are treated as empty.
+ * Does not chmod paths or backup invalid JSON — corrupt and unreadable files are treated as empty;
+ * `peekAuthStoreUnreadableReason` is what names the fault.
  */
 export function peekAuthStore(): AuthStore {
   const path = getAuthStorePath();
   if (!existsSync(path)) return {};
-  const snapshot = normalizeAuthStoreBuffer(readFileSync(path));
+  let bytes: Buffer;
+  try { bytes = readFileSync(path); } catch { return {}; }
+  const snapshot = normalizeAuthStoreBuffer(bytes);
   return snapshot.kind === "ready" ? snapshot.store : {};
 }
 
@@ -454,8 +467,9 @@ export function peekAuthStore(): AuthStore {
 export function peekAuthStoreUnreadableReason(): AuthStoreUnreadableReason | null {
   const path = getAuthStorePath();
   if (!existsSync(path)) return null;
-  const raw = readFileSync(path, "utf-8");
-  try { normalizeAuthStore(JSON.parse(raw)); return null; } catch { return authStoreUnreadableReason(raw); }
+  let raw: string | undefined;
+  try { raw = readFileSync(path, "utf-8"); normalizeAuthStore(JSON.parse(raw)); return null; }
+  catch { return raw === undefined && !existsSync(path) ? null : authStoreUnreadableReason(raw); }
 }
 
 /** Atomically write the auth store with owner-only permissions, then hand it to the opt-in decision-quota slot. */
@@ -469,7 +483,7 @@ function persist(store: AuthStore): void {
   }
   hardenConfigDir();
   publishCredentialSync(() => atomicWriteFileStreamed(getAuthStorePath(), fd => writeFileSync(fd, JSON.stringify(store, null, 2) + "\n")));
-  reportedUnreadableAuthStore = null;
+  clearUnreadableAuthStoreRecord();
   notifyAuthStoreLoaded(store);
 }
 
