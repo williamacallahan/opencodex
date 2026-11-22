@@ -112,6 +112,7 @@ import {
   inspectPolicyRefusal,
   isNonReplayableResponse,
   isTransientUpstreamStatus,
+  typedRefusalCodeFromText,
   SendBudgetExhaustedError,
   TRANSIENT_RETRY_MAX_ATTEMPTS,
   type UpstreamSendRecovery,
@@ -229,6 +230,7 @@ import {
 import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel, sendWithConnectionPolicy } from "./fetch-helpers";
 import { requestPacingOverloadResponse } from "./pacing-overload";
 import { responseCredentialMask } from "../../lib/outbound-credential-registry";
+import { validateClientRetryAfterHeader } from "../../lib/retry-after";
 import { shouldRetryCodexPoolAccountQuota, shouldRetryCodexPoolAccountTransient } from "./core-codex-account";
 import { mapCodexAuthContextErrorToResponse, nativeMainRefreshFailureResponse } from "./codex-auth-error";
 import { linkRequestSessionLane, sessionLaneIdFromRequest, reasoningReplayConversationIdFromResponsesRequest, sessionIdHeaderFromRequest } from "../request-log-conversation";
@@ -603,14 +605,38 @@ const COMPACT_PASSTHROUGH_HEADERS = [
   "location",
 ];
 
+const MEDIA_TYPE = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/;
+
 function compactResponseHeaders(upstream: Response, mask: (text: string) => string = text => text): Headers {
-  const headers = new Headers({ "Content-Type": upstream.headers.get("content-type") ?? "application/json" });
+  // Media-type parameters are upstream-controlled text; the body is always re-emitted as UTF-8 bytes.
+  const mediaType = upstream.headers.get("content-type")?.split(";", 1)[0]?.trim() ?? "";
+  const headers = new Headers({ "Content-Type": MEDIA_TYPE.test(mediaType) && mask(mediaType) === mediaType ? mediaType : "application/json" });
   for (const name of COMPACT_PASSTHROUGH_HEADERS) {
     const value = upstream.headers.get(name);
-    // Retry advice is a number the client acts on; a short key must not rewrite it.
-    if (value) headers.set(name, name === "retry-after" ? value : mask(value));
+    if (!value) continue;
+    // Retry advice is rebuilt from a validated value, never relayed as upstream text.
+    if (name === "retry-after") {
+      const advice = validateClientRetryAfterHeader(value, Date.now());
+      if (advice !== undefined) headers.set(name, advice);
+    } else headers.set(name, mask(value));
   }
   return headers;
+}
+
+/** Mask decoded JSON strings (and property names), then serialize; text that is not JSON is masked as text. */
+function maskCompactBody(bytes: Uint8Array, mask: (text: string) => string): string {
+  const text = new TextDecoder().decode(bytes);
+  try {
+    const walk = (value: unknown): unknown => {
+      if (typeof value === "string") return mask(value);
+      if (Array.isArray(value)) return value.map(walk);
+      if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [mask(key), walk(item)]));
+      return value;
+    };
+    return JSON.stringify(walk(JSON.parse(text)));
+  } catch {
+    return mask(text);
+  }
 }
 
 export async function bufferCompactResponse(
@@ -646,7 +672,7 @@ export async function bufferCompactResponse(
     });
     if (signal.aborted) return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");
     if (result.oversized) return compactResponseTooLargeError();
-    return new Response(mask ? mask(new TextDecoder().decode(result.bytes)) : result.bytes, { status: upstream.status, statusText, headers });
+    return new Response(mask ? maskCompactBody(result.bytes, mask) : result.bytes, { status: upstream.status, statusText, headers });
   } catch (error) {
     if (signal.aborted) return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");
     if (error instanceof DOMException && error.name === "TimeoutError") {
@@ -1651,7 +1677,9 @@ export async function handleResponsesCompact(
       && !buffered.ok
       && !explicitQuotaStatus
       && isRateLimitOrQuotaFailureMessage(bufferedErrorText);
-    const quotaFailure = explicitQuotaStatus || bodyInferredQuota;
+    // A typed refusal is the account's own verdict: it never hands the compact to another model.
+    const typedRefusal = !!inspectedPolicyRefusal(upstream) || typedRefusalCodeFromText(bufferedErrorText) !== undefined;
+    const quotaFailure = (explicitQuotaStatus || bodyInferredQuota) && !typedRefusal;
     // Record pool health only after the body is fully delivered (or definitively failed).
     // A premature 200 would clear soft-avoid while the client still sees a buffer 502.
     if (buffered.status === 499) {

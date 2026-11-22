@@ -76,16 +76,32 @@ export async function inspectPolicyRefusal(response: Response, signal?: AbortSig
   if (known || policyInspected.has(response) || response.ok || !response.body || response.bodyUsed) return known;
   try {
     const body = await readBoundedResponseBody(response.clone(), { signal, maxBytes: POLICY_REFUSAL_PEEK_BYTES, totalTimeoutMs: POLICY_REFUSAL_PEEK_MS });
-    if (body.truncated || body.oversized) return undefined;
-    const envelope = JSON.parse(body.text) as { error?: { code?: unknown }; last_error?: { code?: unknown }; response?: { error?: { code?: unknown } } };
-    const code = [envelope.error, envelope.last_error, envelope.response?.error]
-      .map(carrier => carrier?.code).find((candidate): candidate is string => typeof candidate === "string" && isTerminalRefusalCode(candidate));
-    if (code) policyRefusals.set(response, { code });
+    if (!body.truncated && !body.oversized) {
+      const code = typedRefusalCode(JSON.parse(body.text));
+      if (code) policyRefusals.set(response, { code });
+    }
   } catch {
     // An unreadable or non-JSON body carries no typed verdict.
   }
+  // A completed negative verdict (timeout and oversize included) is final; only a caller abort is not.
   if (!signal?.aborted) policyInspected.add(response);
   return policyRefusals.get(response);
+}
+
+/** The typed refusal code in a complete JSON error body, if it carries one. */
+export function typedRefusalCodeFromText(text: string): string | undefined {
+  try { return typedRefusalCode(JSON.parse(text)); } catch { return undefined; }
+}
+
+interface RefusalCarrier { code?: unknown; error?: unknown; last_error?: unknown; response?: unknown }
+/** A terminal refusal code on any carrier the Responses error envelopes use. */
+function typedRefusalCode(payload: unknown): string | undefined {
+  const record = (value: unknown): RefusalCarrier | undefined => value && typeof value === "object" ? value as RefusalCarrier : undefined;
+  const root = record(payload);
+  const nested = record(root?.response);
+  return [root, record(root?.error), record(root?.last_error), nested, record(nested?.error), record(nested?.last_error)]
+    .map(carrier => carrier?.code)
+    .find((code): code is string => typeof code === "string" && isTerminalRefusalCode(code));
 }
 
 /**
@@ -819,6 +835,9 @@ export async function fetchWithTransientRetry(
     // a response whose body we just cancelled.
     if (opts.abortSignal?.aborted) return res;
     if (Date.now() - attemptStart > slowAttemptMs) return res;
+    // A typed refusal is the account's own verdict on this request; resending it cannot change it.
+    if (await inspectPolicyRefusal(res, opts.abortSignal)) return res;
+    if (opts.abortSignal?.aborted) return res;
     const instructedDelay = retryAfterDelayMs(res.headers);
     // The deadline is the CALLER'S, not this module's default. Reading the constant directly
     // broke it in both directions: a caller with a 30s budget slept the full 45s an upstream

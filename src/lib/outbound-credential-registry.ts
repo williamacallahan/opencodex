@@ -93,10 +93,14 @@ export function credentialComponents(value: string): string[] {
   const out = new Set([whole]);
   for (const param of parameterValues(whole)) out.add(param);
   let previous: string | undefined;
+  let first = true;
   for (const part of whole.split(/[\s,;]+/)) {
     if (!part) continue;
     const lower = part.toLowerCase();
-    if (AUTH_SCHEMES.has(lower)) { previous = lower; continue; }
+    // A scheme word is a scheme only in the leading position; later it can be the credential itself.
+    const leading = first;
+    first = false;
+    if (leading && AUTH_SCHEMES.has(lower) && whole.length > part.length) { previous = lower; continue; }
     out.add(part);
     if (previous === "basic" && BASIC_BASE64.test(part)) {
       const decoded = Buffer.from(part, "base64").toString("utf8");

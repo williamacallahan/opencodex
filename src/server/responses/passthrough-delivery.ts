@@ -4,7 +4,8 @@ import { isNativeControlResponse } from "./native-response-control";
 import { guardBufferedComboRequiredTool } from "./combo-required-tool-contract";
 import { createComboRequiredToolStreamGuard } from "./combo-required-tool-stream";
 import { attachResponseToolOwnership } from "./response-tool-ownership";
-import { createOutboundCredentialMask, createTerminalErrorRedactionBlockRewrite, maskTerminalResponseJson } from "./terminal-error-redaction";
+import { createTerminalErrorRedactionBlockRewrite, maskTerminalResponseJson } from "./terminal-error-redaction";
+import { responseCredentialMask } from "../../lib/outbound-credential-registry";
 import type { ResponsesRequestContext, ResponsesAdmissionState } from "./core-options";
 import type { PreparedResponsesRequest } from "./request-prepare";
 import type { ResponsesTransport } from "./request-transport";
@@ -828,7 +829,7 @@ export async function deliverPassthroughResponse(
           return [block];
         }, { dispose: () => plaintextInspector.dispose() })
         : undefined;
-      const maskCredential = createOutboundCredentialMask(nativeExchange.request.headers);
+      const maskCredential = responseCredentialMask(upstreamResponse, nativeExchange.request.headers);
       const requiredStreamEvidence = { replayUnsafe: !!webSearchBridgePlan };
       const normalizeRequiredToolItem = (item: unknown) => {
         item = restoreImageGenCalls(item, imageGenCallAliases).value;
@@ -1392,7 +1393,7 @@ export async function deliverPassthroughResponse(
           : repaired;
         return maskTerminalResponseJson(
           rewriteResponsesIncompleteReasonJson(modelRewritten),
-          createOutboundCredentialMask(nativeExchange.request.headers),
+          responseCredentialMask(upstreamResponse, nativeExchange.request.headers),
         );
       })();
       if (plaintextV2RestoreFailed) {

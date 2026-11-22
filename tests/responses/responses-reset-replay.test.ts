@@ -6,6 +6,9 @@ import {
 } from "../../src/server/responses/reset-replay";
 import { authorizeResendForRecovery } from "../../src/lib/request-resend-gate";
 import { attachCredentialMask, createOutboundCredentialMask, responseCredentialMask } from "../../src/lib/outbound-credential-registry";
+import { credentialComponents } from "../../src/lib/outbound-credential-registry";
+import { inspectPolicyRefusal } from "../../src/lib/upstream-retry";
+import { maskTerminalResponseJson, createTerminalErrorRedactionBlockRewrite } from "../../src/server/responses/terminal-error-redaction";
 import { deferProtocolSafeResetRecovery } from "../../src/server/responses/combo-stream-preflight";
 
 const clientTurn = {
@@ -192,5 +195,51 @@ describe("a reset-recovered stream keeps the credential masks of every body it c
     await published.text();
     expect(mask("fixture-replacement")).toBe("[REDACTED]");
     expect(mask("fixture-original")).toBe("[REDACTED]");
+  });
+});
+
+describe("credential masking keeps protocol syntax and finds every echo", () => {
+  test("a scheme word after the scheme is a credential part", () => {
+    expect(credentialComponents("Bearer negotiate")).toContain("negotiate");
+    expect(credentialComponents("Bearer abc")).not.toContain("Bearer");
+  });
+
+  test("buffered failed JSON masks keys and exact numeric echoes, and keeps counters and output text", () => {
+    const mask = createOutboundCredentialMask({ "x-api-key": "424242" });
+    const json = JSON.stringify({ status: "failed", usage: { input_tokens: 424242 },
+      error: { message: "m", metadata: { "424242": "k", detail: 424242 } },
+      output: [{ type: "message", content: [{ type: "output_text", text: "Authorization: Bearer example" }] }] });
+    const masked = maskTerminalResponseJson(json, mask);
+    expect(JSON.parse(masked).usage.input_tokens).toBe(424242);
+    expect(masked).not.toContain('"424242":');
+    expect(JSON.parse(masked).error.metadata.detail).toBe("[REDACTED]");
+    expect(masked).toContain("Authorization: Bearer example");
+  });
+
+  test("a short credential never rewrites SSE field names", () => {
+    const rewrite = createTerminalErrorRedactionBlockRewrite({ authorization: "Basic YTpi" });
+    const block = 'event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"message":"a b"}}}';
+    expect(rewrite(block)[0]).toMatch(/^event: response\.failed\ndata: /);
+  });
+
+  test("a typed-refusal verdict that timed out is final, not re-peeked", async () => {
+    const slow = new Response(new ReadableStream<Uint8Array>({ start() {} }), { status: 503 });
+    expect(await inspectPolicyRefusal(slow)).toBeUndefined();
+    const started = performance.now();
+    expect(await inspectPolicyRefusal(slow)).toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
+  test("cancelling a deferred reset stream releases a silent source", async () => {
+    let cancelled = false;
+    const silent = new Response(new ReadableStream<Uint8Array>({ start() {}, cancel() { cancelled = true; } }), { headers: { "content-type": "text/event-stream" } });
+    const published = deferProtocolSafeResetRecovery(silent, { model: "m1", provider: "a" }, async () => null);
+    const reader = published.body!.getReader();
+    const pending = reader.read().catch(() => undefined);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await reader.cancel("downstream gone");
+    await pending;
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(cancelled).toBe(true);
   });
 });

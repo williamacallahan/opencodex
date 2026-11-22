@@ -443,6 +443,7 @@ export function deferProtocolSafeResetRecovery(
   let initialization: Promise<void> | undefined;
   let closed = false;
   let replacementResponse: Response | undefined;
+  const preflightAbort = new AbortController();
 
   const cancelBody = (body: ReadableStream<Uint8Array> | null, reason?: unknown): void => {
     try { void body?.cancel(reason).catch(() => {}); } catch { /* already locked or closed */ }
@@ -452,7 +453,7 @@ export function deferProtocolSafeResetRecovery(
       response,
       logCtx,
       () => false,
-      { allowMissingContentType: options?.allowMissingContentType === true, replayReadErrors: true },
+      { allowMissingContentType: options?.allowMissingContentType === true, replayReadErrors: true, signal: preflightAbort.signal },
     );
     let selected = preflight.response;
     if (preflight.kind === "read-error") {
@@ -502,6 +503,8 @@ export function deferProtocolSafeResetRecovery(
     cancel(reason) {
       if (closed) return;
       closed = true;
+      // An in-flight preflight read holds the upstream lock; only aborting it releases the source.
+      preflightAbort.abort(reason);
       if (reader) {
         try { void reader.cancel(reason).catch(() => {}); } catch { /* already closed */ }
         try { reader.releaseLock(); } catch { /* already released */ }

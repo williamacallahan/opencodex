@@ -469,7 +469,8 @@ export async function shouldRetryCodexScopedQuotaOnAlternate(
  * been relayed. It carries no non-replayable marker because nothing could have been observed.
  */
 export function shouldRetryCodexPoolAccountTransient(response: Response): boolean {
-  return !isNonReplayableResponse(response) && isTransientUpstreamStatus(response.status);
+  // A typed refusal (judged by shouldRetryCodexPoolAccountQuota first) belongs to the issuing account.
+  return !isNonReplayableResponse(response) && !inspectedPolicyRefusal(response) && isTransientUpstreamStatus(response.status);
 }
 
 

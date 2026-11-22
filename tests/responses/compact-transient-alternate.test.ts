@@ -180,6 +180,24 @@ describe("native compact moves a surviving transient 5xx to one alternate accoun
     expect(response.headers.get("retry-after")).toBe("12");
   });
 
+  test("an initial typed 503 refusal is not resent by the retry ladder", async () => {
+    upstream(() => Response.json({ error: { code: "cyber_policy", message: "fixture refusal" } }, { status: 503, headers: { "retry-after": "0" } }), compacted);
+    const { body } = await compact();
+    expect(sends).toEqual(["Bearer work-access"]);
+    expect(JSON.parse(body).error.code).toBe("cyber_policy");
+  });
+
+  test("compact rebuilds retry advice and media type and masks decoded JSON fields", async () => {
+    const marker = "work-access";
+    upstream(() => new Response(JSON.stringify({ error: { message: `echo ${marker}`, retry_after: 10 } }), { status: 400,
+      headers: { "content-type": `application/json; note=${marker}`, "retry-after": `soon ${marker}` } }));
+    const { response, body } = await compact();
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(response.headers.get("retry-after")).toBeNull();
+    expect(body).not.toContain(marker);
+    expect(JSON.parse(body).error.retry_after).toBe(10);
+  });
+
   test("B served from the remaining base allowance when A's ladder ended early", async () => {
     upstream(overloadedOnce, compacted);
     const { response } = await compact();

@@ -957,8 +957,10 @@ export async function executeComboResponses(
     logCtx.spendPoolId = targetRoute.providerName;
     // The spend policy freezes at the first target's booking. A key target later in the combo still
     // charges its own key, so identity ceilings must already apply when an earlier target is unkeyed.
-    logCtx.spendIdentityPending = usesApiKeyAccount(targetRoute.provider) || combo.targets.some(target =>
-      usesApiKeyAccount(routeConcreteModel(config, `${target.provider}/${target.model}`).provider));
+    logCtx.spendIdentityPending = usesApiKeyAccount(targetRoute.provider) || combo.targets.some(target => {
+        const provider = config.providers[target.provider];
+        return provider !== undefined && usesApiKeyAccount(provider);
+      });
     // Combo prepays before its child normalizes the route; the parent tracker must
     // already see this target's effective cap rather than a previous target's cap.
     const spendProvider = resolveWireProtocolOverride(targetRoute.providerName, targetRoute.modelId,
