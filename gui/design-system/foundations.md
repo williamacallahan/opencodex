@@ -17,6 +17,11 @@
 | 경고 | `--amber` | `#9a4a08` | `#fbbf24` |
 | 위험 | `--red` | `#b91c1c` | `#f87171` |
 
+위 값은 `gui/src/styles.css`의 레거시 값이다. 실제로 렌더링되는 색은 `gui/src/design/bridge.css`가 각
+이름을 연결하는 `gui/src/design/theme.css`의 `--ocx-*` 토큰이 정한다. 예를 들어 `--faint`는
+`--ocx-fg-subtle`(`#6e6e78` / `#8b8b94`), `--green`은 `--ocx-success`(`#047857` / `#34d399`)이다.
+작은 텍스트에 쓰는 라이트 모드 값은 `#ffffff`와 `#f4f4f5` 위에서 4.5:1 이상을 유지한다.
+
 `--accent`는 기본 액션과 포커스에 사용한다. 활성 토글은 다크 모드에서 트랙과 핸들이
 겹쳐 보이지 않도록 `--toggle-on-bg`와 `--toggle-dot-color`를 사용한다.
 
