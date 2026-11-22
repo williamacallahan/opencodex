@@ -29,6 +29,7 @@ mock.module("node:fs", () => ({
   },
 }));
 const { atomicWriteFileNoFollowStreamed } = await import("../../src/config/atomic-write");
+const { getCredential, saveCredential } = await import("../../src/oauth/store");
 let home: TempHome;
 beforeEach(() => {
   home = createTempHome("ocx-nofollow-streamed-");
@@ -68,4 +69,22 @@ test.skipIf(process.platform === "win32")("a symlinked final entry is replaced w
   expect(native.lstatSync(target).isSymbolicLink()).toBe(false);
   expect(native.readFileSync(target, "utf8")).toBe("replacement");
   expect(native.readFileSync(other, "utf8")).toBe("untouched");
+});
+
+test("OAuth account saves flush credential bytes before publication", async () => {
+  target = home.path("auth.json");
+  await saveCredential("cursor", { access: "old", refresh: "old", expires: 1 });
+  events = [];
+  await saveCredential("cursor", { access: "new", refresh: "new", expires: 2 });
+  expect(getCredential("cursor")?.access).toBe("new");
+  expect(events).toEqual(process.platform === "win32" ? ["fsync:temp", "rename"] : ["fsync:temp", "rename", "fsync:directory"]);
+});
+
+test("a failed OAuth content flush leaves the prior account credentials intact", async () => {
+  target = home.path("auth.json");
+  await saveCredential("cursor", { access: "old", refresh: "old", expires: 1 });
+  events = []; failure = "temp";
+  await expect(saveCredential("cursor", { access: "new", refresh: "new", expires: 2 })).rejects.toThrow("fixture fsync failure");
+  expect(events).toEqual(["fsync:temp"]);
+  expect(getCredential("cursor")?.access).toBe("old");
 });

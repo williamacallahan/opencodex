@@ -1,5 +1,9 @@
 # Generic OAuth Account Pool
 
+`src/oauth/store.ts` flushes the replacement credential file before its atomic rename. A file
+flush failure leaves the prior store in place; the subsequent parent-directory flush is best
+effort on POSIX and unavailable on Windows.
+
 ## Conversation affinity
 
 `src/oauth/generic-session-affinity.ts` owns opt-in generic-pool conversation bindings. Provider-local

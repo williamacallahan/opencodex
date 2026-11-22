@@ -938,7 +938,7 @@ describe("multi-account auth store", () => {
     const started = new Promise<void>(resolve => { entered = resolve; });
     const blocker = mutateStore(async () => { entered(); await gate; });
     await started;
-    const write = spyOn(atomicWrite, "atomicWriteFile");
+    const write = spyOn(atomicWrite, "atomicWriteFileStreamed");
     const pending = oauthStore.commitOAuthAccountSelection("xai", idA, {
       expectedSelection, expectedCredentialGeneration, requireUsableAccount: true,
     });
@@ -977,7 +977,7 @@ describe("multi-account auth store", () => {
       expect(events).toHaveLength(1);
 
       // Only the I/O boundary is faulted; the actual commit, locks, and store stay real.
-      const write = spyOn(atomicWrite, "atomicWriteFile").mockImplementation(() => { throw new Error("selection persist failed"); });
+      const write = spyOn(atomicWrite, "atomicWriteFileStreamed").mockImplementation(() => { throw new Error("selection persist failed"); });
       try {
         await expect(oauthStore.commitOAuthAccountSelection("xai", idB, { expectedSelection: manual })).rejects.toThrow("selection persist failed");
       } finally {

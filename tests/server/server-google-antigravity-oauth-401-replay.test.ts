@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../../src/config";
-import * as configModule from "../../src/config";
+import * as atomicWrites from "../../src/config/atomic-write";
 import { forceRefreshOAuthAccessSnapshot, getValidAccessTokenSnapshot } from "../../src/oauth";
 import { credentialGeneration, getAccountSet, getAuthStorePath, saveCredential, setAccountPaused, setActiveAccount } from "../../src/oauth/store";
 import { startServer } from "../../src/server";
@@ -422,10 +422,10 @@ describe("Google Antigravity OAuth upstream 401 replay", () => {
     ]);
     const server = startServer(0);
     const authPath = getAuthStorePath();
-    const atomicWrite = configModule.atomicWriteFile;
+    const atomicWrite = atomicWrites.atomicWriteFileStreamed;
     let failedWrites = 0;
-    const writeSpy = spyOn(configModule, "atomicWriteFile").mockImplementation((...args) => {
-      if (args[0] === authPath && args[1].includes('"verify_account"')) {
+    const writeSpy = spyOn(atomicWrites, "atomicWriteFileStreamed").mockImplementation((...args) => {
+      if (args[0] === authPath) {
         failedWrites += 1;
         throw new Error(`EACCES ${POSIX_PATH_CANARY} persist-secret-canary`);
       }

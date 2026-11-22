@@ -32,7 +32,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getConfigDir, atomicWriteFile, backupInvalidConfig, hardenConfigDir, hardenExistingSecret, withConfigMutationLockSync, loadConfig } from "../config";
-import { atomicWriteFileNoFollowUnclaimed } from "../config/atomic-write";
+import { atomicWriteFileNoFollowUnclaimed, atomicWriteFileStreamed } from "../config/atomic-write";
 import { assertNotRealHomeUnderTest } from "../lib/test-home-guard";
 import { recordOwnedConfigPath, registerOwnedConfigPath, type OwnedPathRegistration } from "../lib/config-ownership";
 import { statTimeMs } from "../lib/file-identity";
@@ -425,7 +425,7 @@ function persist(store: AuthStore): void {
     try { chmodSync(dir, 0o700); } catch { /* best-effort on existing dir */ }
   }
   hardenConfigDir();
-  publishCredentialSync(() => atomicWriteFile(getAuthStorePath(), JSON.stringify(store, null, 2) + "\n"));
+  publishCredentialSync(() => atomicWriteFileStreamed(getAuthStorePath(), fd => writeFileSync(fd, JSON.stringify(store, null, 2) + "\n")));
   notifyAuthStoreLoaded(store);
 }
 
