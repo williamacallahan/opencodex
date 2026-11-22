@@ -12,7 +12,7 @@ import type { GenerationContext } from "../../lib/state-store-sweeper";
 import { ACCOUNT_QUOTA_TTL_MS, toFiniteNumber } from "../quota-wire";
 import { clearKiroAccountUsageState, hydrateKiroUsageVerdict, kiroPersistableVerdicts, reconcileKiroAccountUsageState } from "../kiro-usage";
 import { kiroEvidenceIdentity, sanitizeKiroQuota, type KiroPersistedQuota } from "../kiro-account-state-disk";
-import { type AnthropicPersistedQuota, cancelPendingAccountQuotaPersist, readPersistedAccountQuotas, readPersistedKiroVerdicts, schedulePersistAccountQuotas } from "../account-quota-disk";
+import { type AnthropicPersistedQuota, cancelPendingAccountQuotaPersist, DISK_MAX_AGE_MS, readPersistedAccountQuotas, readPersistedKiroVerdicts, schedulePersistAccountQuotas } from "../account-quota-disk";
 import type { ProviderAccount } from "../../oauth/types";
 import { replaceCachedProviderQuotas } from "../quota-routing-cache";
 import { getProviderRegistryEntry } from "../registry";
@@ -295,6 +295,10 @@ export function getCachedProviderAccountQuota(provider: string, accountId: strin
   }
   if (isAnthropicInstanceId(provider) ? !anthropicQuotaEntryIsCurrent(provider, accountId, entry)
     : entry?.isCurrent && !entry.isCurrent()) return null;
+  // An agy observation is kept for days so the Accounts tab can show it with its age; routing and
+  // the quota pool keep the usual horizon, so a days-old reading never decides or reports state.
+  if (provider === ANTIGRAVITY_OAUTH_STORE_KEY && entry?.identity && entry.quota
+    && Date.now() - entry.quota.updatedAt > DISK_MAX_AGE_MS) return null;
   return isAnthropicInstanceId(provider) ? normalizeAnthropicQuota(entry?.quota, Date.now()) : entry?.quota ?? null;
 }
 

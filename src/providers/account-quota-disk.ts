@@ -28,13 +28,15 @@ const FILENAME = "provider-account-quota-cache.json";
  * already handles — but a day-old reading of a monthly window has drifted far enough that
  * it should not outrank a fresh probe.
  */
-const DISK_MAX_AGE_MS = 6 * 60 * 60_000;
+export const DISK_MAX_AGE_MS = 6 * 60 * 60_000;
 /**
  * An agy observation is the only Antigravity reading under `nativeHarnessOnly`, and an account agy
  * is not using gets no newer one. It is kept a little past a weekly window, shown with its age,
  * so a hub restart never blanks an idle account.
  */
 const AGY_OBSERVATION_MAX_AGE_MS = 8 * 24 * 60 * 60_000;
+// The longer retention is for display only: getCachedProviderAccountQuota, which routing and the
+// quota pool read, still ignores an agy observation older than DISK_MAX_AGE_MS.
 const PERSIST_DEBOUNCE_MS = 250;
 /** Match the reset ledger's maximum deferral under sustained quota observations. */
 const MAX_PERSIST_DEFERRAL_MS = 1_000;

@@ -3162,7 +3162,7 @@ export const zh: Record<TKey, string> = {
   "pws.currentAccountUsage": "当前账户用量",
   "pws.quotaUnsupported": "此账户不支持查询配额。",
   "pws.quotaUnobserved": "尚未观测到用量。",
-  "pws.agyAccountPolicy": "中枢为每次 agy 登录选择所使用的账户，并让该登录保持在这个账户上，直到 Google 对该账户限流（HTTP 429）、该账户被暂停或需要重新登录，或者该登录已闲置 6 小时；此后 agy 会在下一回合切换到下一个可用账户。账户的配额在 agy 使用过它之后出现，读取自 agy 自己的配额调用（中枢本身不向 Google 发送任何内容），并连同其时效持续显示。“使用中”标示的是仪表盘的默认账户，而不是 agy 正在使用的账户。",
+  "pws.agyAccountPolicy": "中枢为每次 agy 登录分配共享池中的一个账户，并将其保持在该账户上。当 agy 下次询问要使用哪个项目时（每回合至少一次），如果该账户被 Google 限流（HTTP 429）、被暂停或需要重新登录，或者 6 小时内没有请求，中枢可以选择另一个账户；已经指定项目的请求会保留在该项目的账户上。账户的配额在 agy 通过该账户获取其配额之后出现（agy 会在会话开始时这样做）；中枢本身不向 Google 发送任何配额请求。读取值会连同其时效持续显示。“使用中”标示的是仪表盘的默认账户，而不是 agy 正在使用的账户。",
   "pws.quotaLastRead": "上次读取",
   "pws.quotaCheckCompleted": "配额检查完成",
   "pws.modelBreakdown": "模型用量明细",

@@ -1980,7 +1980,7 @@ export const en = {
   "pws.currentAccountUsage": "Current account usage",
   "pws.quotaUnsupported": "Quota lookup is not supported for this account.",
   "pws.quotaUnobserved": "No usage observation yet.",
-  "pws.agyAccountPolicy": "The hub picks the account each agy sign-in uses and keeps that sign-in on it until Google rate-limits the account (HTTP 429), it is paused or needs signing in again, or the sign-in has been idle for 6 hours; agy then moves to the next available account at its next turn. An account's quota appears once agy has used it, read from agy's own quota calls (the hub sends Google nothing itself), and stays shown with its age. \"Active\" marks the dashboard's default account, not the one agy is using.",
+  "pws.agyAccountPolicy": "The hub assigns each agy sign-in one pooled account and keeps it there. It can pick another account when agy next asks which project to use (at least once per turn) if that account is rate-limited by Google (HTTP 429), paused, or needs signing in again, or after 6 hours with no request; requests that already name a project stay with that project's account. An account's quota appears after agy has fetched its quota through that account (agy does this when a session starts); the hub sends Google no quota requests of its own. A reading stays shown with its age. \"Active\" marks the dashboard's default account, not the one agy is using.",
   "pws.quotaLastRead": "Last read",
   "pws.quotaCheckCompleted": "Quota check completed",
   "pws.modelBreakdown": "Model breakdown",
