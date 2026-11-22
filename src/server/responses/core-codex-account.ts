@@ -24,7 +24,7 @@ import { classifyPoolRecoveryDispatch } from "../../routing/probe-lease";
 import { formatErrorResponse } from "../../bridge";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { upstreamErrorMessageFromPayload, isRateLimitOrQuotaFailureMessage } from "../../lib/errors";
-import { isNonReplayableResponse, isTransientUpstreamStatus, SendBudgetExhaustedError } from "../../lib/upstream-retry";
+import { inspectedPolicyRefusal, inspectPolicyRefusal, isNonReplayableResponse, isTransientUpstreamStatus, SendBudgetExhaustedError } from "../../lib/upstream-retry";
 import {
   codexWsPreOutputRefusalHold,
   codexWsPreOutputRefusalOutcomeRecorded,
@@ -409,7 +409,7 @@ export async function shouldRetryCodexPoolAccountQuota(
 ): Promise<boolean> {
   // A post-send WebSocket gateway status must not become a second account's send; the
   // body carries no quota evidence either, but the marker is the contract, not the prose.
-  if (isNonReplayableResponse(response)) return false;
+  if (isNonReplayableResponse(response) || inspectedPolicyRefusal(response) || await inspectPolicyRefusal(response, signal)) return false;
   if (response.status === 402 || response.status === 429) {
     // The response does not identify the organization or project whose quota was exhausted.
     // Resolve the alternate before deciding whether its known workspace identity proves that an

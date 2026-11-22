@@ -5,6 +5,8 @@ import {
   selfContainedResponsesBody,
 } from "../../src/server/responses/reset-replay";
 import { authorizeResendForRecovery } from "../../src/lib/request-resend-gate";
+import { attachCredentialMask, createOutboundCredentialMask, responseCredentialMask } from "../../src/lib/outbound-credential-registry";
+import { deferProtocolSafeResetRecovery } from "../../src/server/responses/combo-stream-preflight";
 
 const clientTurn = {
   store: false,
@@ -161,5 +163,34 @@ describe("ambiguousResendAllowanceFor", () => {
     )!;
     expect(grant.claim()).toBe(true);
     expect(seen).toEqual([2]);
+  });
+});
+
+describe("a reset-recovered stream keeps the credential masks of every body it can relay", () => {
+  const prelude = 'event: response.created\ndata: {"type":"response.created","response":{"id":"first","output":[]}}\n\n';
+  const resetAfterPrelude = (): Response => {
+    let sent = false;
+    return new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent) return Promise.reject(new Error("fixture-reset"));
+        sent = true;
+        controller.enqueue(new TextEncoder().encode(prelude));
+      },
+    }), { headers: { "content-type": "text/event-stream" } });
+  };
+
+  test("the published head masks the original and the replacement key", async () => {
+    const original = attachCredentialMask(resetAfterPrelude(), createOutboundCredentialMask({ "x-api-key": "fixture-original" }));
+    const replacement = attachCredentialMask(
+      new Response(prelude, { headers: { "content-type": "text/event-stream" } }),
+      createOutboundCredentialMask({ "x-api-key": "fixture-replacement" }));
+    const published = deferProtocolSafeResetRecovery(original, { model: "m1", provider: "a" }, async () => replacement);
+    const mask = responseCredentialMask(published);
+    expect(mask("fixture-original")).toBe("[REDACTED]");
+    // The replacement is adopted only after the first pull settles the reset.
+    expect(mask("fixture-replacement")).toBe("fixture-replacement");
+    await published.text();
+    expect(mask("fixture-replacement")).toBe("[REDACTED]");
+    expect(mask("fixture-original")).toBe("[REDACTED]");
   });
 });

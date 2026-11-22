@@ -108,7 +108,10 @@ import {
   fetchWithResetRetry,
   fetchWithTransientRetry,
   applyUpstreamRecoveryInit,
+  inspectedPolicyRefusal,
+  inspectPolicyRefusal,
   isNonReplayableResponse,
+  isTransientUpstreamStatus,
   SendBudgetExhaustedError,
   TRANSIENT_RETRY_MAX_ATTEMPTS,
   type UpstreamSendRecovery,
@@ -225,6 +228,7 @@ import {
 } from "./core";
 import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel, sendWithConnectionPolicy } from "./fetch-helpers";
 import { requestPacingOverloadResponse } from "./pacing-overload";
+import { responseCredentialMask } from "../../lib/outbound-credential-registry";
 import { shouldRetryCodexPoolAccountQuota, shouldRetryCodexPoolAccountTransient } from "./core-codex-account";
 import { mapCodexAuthContextErrorToResponse, nativeMainRefreshFailureResponse } from "./codex-auth-error";
 import { linkRequestSessionLane, sessionLaneIdFromRequest, reasoningReplayConversationIdFromResponsesRequest, sessionIdHeaderFromRequest } from "../request-log-conversation";
@@ -599,11 +603,12 @@ const COMPACT_PASSTHROUGH_HEADERS = [
   "location",
 ];
 
-function compactResponseHeaders(upstream: Response): Headers {
+function compactResponseHeaders(upstream: Response, mask: (text: string) => string = text => text): Headers {
   const headers = new Headers({ "Content-Type": upstream.headers.get("content-type") ?? "application/json" });
   for (const name of COMPACT_PASSTHROUGH_HEADERS) {
     const value = upstream.headers.get(name);
-    if (value) headers.set(name, value);
+    // Retry advice is a number the client acts on; a short key must not rewrite it.
+    if (value) headers.set(name, name === "retry-after" ? value : mask(value));
   }
   return headers;
 }
@@ -614,14 +619,17 @@ export async function bufferCompactResponse(
   stallTimeoutSec?: number,
   localUpstream?: boolean,
 ): Promise<Response> {
-  const headers = compactResponseHeaders(upstream);
+  // A redirect or error can reflect the physical credential. Valid (2xx) compact entities pass untouched.
+  const mask = upstream.ok ? undefined : responseCredentialMask(upstream);
+  const headers = compactResponseHeaders(upstream, mask);
+  const statusText = mask ? mask(upstream.statusText) : upstream.statusText;
   try {
     if (signal.aborted) {
       // No reader is attached yet. Cancellation must not wait for a broken source's cleanup.
       void upstream.body?.cancel(signal.reason).catch(() => undefined);
       return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");
     }
-    if (!upstream.body) return new Response(null, { status: upstream.status, statusText: upstream.statusText, headers });
+    if (!upstream.body) return new Response(null, { status: upstream.status, statusText, headers });
     const declaredLength = Number(upstream.headers.get("content-length"));
     if (Number.isFinite(declaredLength) && declaredLength > COMPACT_RESPONSE_MAX_BYTES) {
       void upstream.body.cancel("compact_response_too_large").catch(() => undefined);
@@ -638,7 +646,7 @@ export async function bufferCompactResponse(
     });
     if (signal.aborted) return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");
     if (result.oversized) return compactResponseTooLargeError();
-    return new Response(result.bytes, { status: upstream.status, statusText: upstream.statusText, headers });
+    return new Response(mask ? mask(new TextDecoder().decode(result.bytes)) : result.bytes, { status: upstream.status, statusText, headers });
   } catch (error) {
     if (signal.aborted) return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");
     if (error instanceof DOMException && error.name === "TimeoutError") {
@@ -1428,12 +1436,20 @@ export async function handleResponsesCompact(
       }
     };
 
+    // A typed policy refusal stays on the issuing account whatever its status. The retry ladder
+    // only probes a non-final 5xx, so a final 503 or any 429 reaches the alternate checks unjudged.
+    if (!upstream.ok && (upstream.status === 429 || upstream.status === 402 || isTransientUpstreamStatus(upstream.status))
+      && !gatewayTransport && usesCodexForwardPoolAuth(authCtx, route.provider) && !authCtx.fixedAccount
+      && route.codexAccountMode && !req.signal.aborted) {
+      await inspectPolicyRefusal(upstream, req.signal);
+    }
     // Bounded same-request alternate: the regular /v1/responses path already does this
     // (core.ts:319-423) and recognizes exactly 429/402. Without it a pool rejection
     // surfaces to the client, which retries the compact task OUTSIDE the logical request
     // — reporting exhausted retries while another pool account sat idle (#913).
     if (
       (upstream.status === 429 || upstream.status === 402 || wasAccountAutoPaused(upstream))
+      && !inspectedPolicyRefusal(upstream)
       // A replay refusal this proxy synthesized carries 429 for the client's benefit only.
       // It is not pool quota evidence, and the alternate account below is another send of a
       // compact turn that may already have been processed.
@@ -1543,6 +1559,7 @@ export async function handleResponsesCompact(
     // the same guards as the quota move, and a 5xx whose body confirms quota keeps today's path.
     if (
       shouldRetryCodexPoolAccountTransient(upstream)
+      && !inspectedPolicyRefusal(upstream)
       && (!storedPool401ReplayAttempted || wasAccountAutoPaused(upstream))
       && !gatewayTransport
       && usesCodexForwardPoolAuth(authCtx, route.provider)

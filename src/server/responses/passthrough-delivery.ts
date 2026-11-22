@@ -4,7 +4,7 @@ import { isNativeControlResponse } from "./native-response-control";
 import { guardBufferedComboRequiredTool } from "./combo-required-tool-contract";
 import { createComboRequiredToolStreamGuard } from "./combo-required-tool-stream";
 import { attachResponseToolOwnership } from "./response-tool-ownership";
-import { createOutboundCredentialMask, createTerminalErrorRedactionBlockRewrite } from "./terminal-error-redaction";
+import { createOutboundCredentialMask, createTerminalErrorRedactionBlockRewrite, maskTerminalResponseJson } from "./terminal-error-redaction";
 import type { ResponsesRequestContext, ResponsesAdmissionState } from "./core-options";
 import type { PreparedResponsesRequest } from "./request-prepare";
 import type { ResponsesTransport } from "./request-transport";
@@ -1390,7 +1390,10 @@ export async function deliverPassthroughResponse(
         const modelRewritten = parsed._responseModelId !== undefined && parsed._responseModelId !== parsed.modelId
           ? rewriteResponsesModelJson(repaired, parsed._responseModelId)
           : repaired;
-        return rewriteResponsesIncompleteReasonJson(modelRewritten);
+        return maskTerminalResponseJson(
+          rewriteResponsesIncompleteReasonJson(modelRewritten),
+          createOutboundCredentialMask(nativeExchange.request.headers),
+        );
       })();
       if (plaintextV2RestoreFailed) {
         return formatErrorResponse(502, "upstream_error", PLAINTEXT_V2_AGENT_MESSAGE_RESTORE_OVERFLOW_MESSAGE);

@@ -6,6 +6,7 @@ import { hasResponseMediaType } from "../../lib/http-response-semantics";
 import type { RequestFailureStage } from "../../lib/request-failure-model";
 import type { RequestLogContext } from "../request-log";
 import { carryResponseToolOwnership } from "./response-tool-ownership";
+import { attachCredentialMask, combineCredentialMasks, physicalCredentialMasks, type CredentialMask } from "../../lib/outbound-credential-registry";
 import { createSseInspector } from "../relay";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
 import { REQUIRED_TOOL_CONTRACT_CODE } from "../../lib/errors";
@@ -441,6 +442,7 @@ export function deferProtocolSafeResetRecovery(
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let initialization: Promise<void> | undefined;
   let closed = false;
+  let replacementResponse: Response | undefined;
 
   const cancelBody = (body: ReadableStream<Uint8Array> | null, reason?: unknown): void => {
     try { void body?.cancel(reason).catch(() => {}); } catch { /* already locked or closed */ }
@@ -458,6 +460,7 @@ export function deferProtocolSafeResetRecovery(
       if (replacement) {
         cancelBody(selected.body, "using protocol-safe replacement stream");
         selected = replacement;
+        replacementResponse = replacement;
       }
     }
     if (closed) {
@@ -514,9 +517,15 @@ export function deferProtocolSafeResetRecovery(
     },
   }, { highWaterMark: 0 });
 
-  return new Response(body, {
+  const published = new Response(body, {
     status: response.status,
     statusText: response.statusText,
     headers: response.headers,
   });
+  // The body is swapped for the replacement's on a reset, so the head masks every body it can relay.
+  if (physicalCredentialMasks.has(response)) {
+    attachCredentialMask(published, combineCredentialMasks(() => [response, replacementResponse]
+      .flatMap((source): CredentialMask[] => { const mask = source && physicalCredentialMasks.get(source); return mask ? [mask] : []; })));
+  }
+  return published;
 }

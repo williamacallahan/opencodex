@@ -162,6 +162,24 @@ describe("native compact moves a surviving transient 5xx to one alternate accoun
     expect(failures(OTHER)).toBe(0);
   });
 
+  for (const status of [429, 503]) test(`compact keeps the final typed ${status} on the issuing account`, async () => {
+    const prior = status === 503 ? [overloaded({ "retry-after": "0" }), overloaded({ "retry-after": "0" })] : [];
+    upstream(...prior, () => Response.json({ error: { code: "cyber_policy", message: "fixture refusal" } }, { status }), compacted);
+    const { body } = await compact();
+    expect(sends).toEqual(Array(prior.length + 1).fill("Bearer work-access"));
+    expect(JSON.parse(body).error.code).toBe("cyber_policy");
+  });
+
+  test("compact delivery removes the physical marker from diagnostic bytes and metadata", async () => {
+    const marker = "work-access";
+    upstream(() => new Response(`fixture ${marker}`, { status: 307, statusText: marker,
+      headers: { location: `/fixture/${marker}`, "x-codex-primary-reset-at": marker, "retry-after": "12" } }));
+    const { response, body } = await compact();
+    expect(response.status).toBe(307);
+    expect([body, response.statusText, response.headers.get("location"), response.headers.get("x-codex-primary-reset-at")].some(field => field?.includes(marker))).toBe(false);
+    expect(response.headers.get("retry-after")).toBe("12");
+  });
+
   test("B served from the remaining base allowance when A's ladder ended early", async () => {
     upstream(overloadedOnce, compacted);
     const { response } = await compact();

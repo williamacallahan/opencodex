@@ -16,7 +16,7 @@
  * of that name is still covered by the configured set. Values are held in memory only: nothing here
  * is serialized, persisted or exposed.
  */
-import { SENSITIVE_KEY_PATTERN } from "./redact";
+import { REDACTED_SECRET, SENSITIVE_KEY_PATTERN } from "./redact";
 
 /** Containment only for credentials long enough that a diagnostic cannot contain one by chance. */
 export const CREDENTIAL_SUBSTRING_MIN_LENGTH = 8;
@@ -174,14 +174,19 @@ export class OutboundCredentialRegistry {
   }
 
   /** Record the components of every value in headers that are about to be sent. */
-  remember(headers: HeadersInit | Headers | undefined): void {
-    if (!headers) return;
-    new Headers(headers).forEach((value, name) => {
-      const strict = isCredentialName(name);
+  remember(headers: HeadersInit | undefined, configured?: Record<string, string>): CredentialMask {
+    const secrets = new Set<string>();
+    const configuredNames = new Set(Object.keys(configured ?? {}).map(name => name.toLowerCase()));
+    (headers instanceof Headers ? headers : new Headers(headers)).forEach((value, name) => {
+      const strict = isCredentialName(name) || configuredNames.has(name);
       if (!strict && CORRELATION_HEADER_NAME.test(name)) return;
       const tier = strict ? this.strict : this.observed;
-      for (const part of credentialComponents(value)) tier.add(part);
+      for (const part of credentialComponents(value)) {
+        tier.add(part);
+        if (strict) secrets.add(part);
+      }
     });
+    return literalMask(secrets);
   }
 
   /** True when value repeats a recorded credential (strict at any length, best effort at 8+). */
@@ -193,6 +198,70 @@ export class OutboundCredentialRegistry {
   complete(): boolean {
     return this.strict.complete;
   }
+}
+
+export type CredentialMask = ((text: string) => string) & { redirectBody(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> };
+
+/** One literal match pass, longest first. Replacement bytes are never scanned again. */
+function literalPattern(secrets: string[]): RegExp {
+  return new RegExp(secrets.sort((a, b) => b.length - a.length).map(s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+}
+const unchanged: CredentialMask = Object.assign((text: string) => text, { redirectBody: (body: ReadableStream<Uint8Array>) => body });
+function literalMask(values: Set<string>): CredentialMask {
+  if (!values.size) return unchanged;
+  const pattern = literalPattern([...values]);
+  return Object.assign((text: string) => text.replace(pattern, REDACTED_SECRET), {
+    redirectBody(body: ReadableStream<Uint8Array>) {
+      // Latin-1 is a one-to-one byte view, including invalid UTF-8. Retain at most a key's
+      // length across chunks; never buffer a redirect until EOF or split a match at a cut.
+      const literals = [...values].map(secret => Buffer.from(secret).toString("latin1"));
+      const bytes = literalPattern(literals);
+      const overlap = literals[0]!.length - 1;
+      let pending = "";
+      return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          const input = pending + Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength).toString("latin1");
+          let end = Math.max(0, input.length - overlap);
+          let cursor = 0;
+          let out = "";
+          bytes.lastIndex = 0;
+          for (let m; (m = bytes.exec(input)) && m.index < end;) {
+            out += input.slice(cursor, m.index) + REDACTED_SECRET;
+            cursor = bytes.lastIndex;
+            end = Math.max(end, cursor);
+          }
+          out += input.slice(cursor, end);
+          if (out) controller.enqueue(Buffer.from(out, "latin1"));
+          pending = input.slice(end);
+        },
+        flush(controller) { if (pending) controller.enqueue(Buffer.from(pending.replace(bytes, REDACTED_SECRET), "latin1")); },
+      }));
+    },
+  });
+}
+
+export function createOutboundCredentialMask(headers?: HeadersInit): CredentialMask {
+  const secrets = new Set<string>();
+  if (headers) new Headers(headers).forEach((value, name) => {
+    if (isCredentialName(name)) for (const part of credentialComponents(value)) secrets.add(part);
+  });
+  return literalMask(secrets);
+}
+
+export const physicalCredentialMasks = new WeakMap<Response, CredentialMask>();
+/** A nested executor or HTTP fallback has the more specific physical identity. */
+export function attachCredentialMask(response: Response, mask: CredentialMask): Response {
+  if (!physicalCredentialMasks.has(response)) physicalCredentialMasks.set(response, mask);
+  return response;
+}
+/** A published head whose body may be swapped later masks every physical body it can relay. */
+export function combineCredentialMasks(masks: () => readonly CredentialMask[]): CredentialMask {
+  return Object.assign((text: string) => masks().reduce((masked, mask) => mask(masked), text), {
+    redirectBody: (body: ReadableStream<Uint8Array>) => masks().reduce((relayed, mask) => mask.redirectBody(relayed), body),
+  });
+}
+export function responseCredentialMask(response: Response, fallbackHeaders?: HeadersInit): CredentialMask {
+  return physicalCredentialMasks.get(response) ?? createOutboundCredentialMask(fallbackHeaders);
 }
 
 let active = new OutboundCredentialRegistry();

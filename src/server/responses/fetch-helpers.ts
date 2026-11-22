@@ -11,6 +11,7 @@ import {
 import type { OcxProviderConfig } from "../../types";
 import type { WsData } from "../ws-bridge";
 import {
+  registerProviderResponseProvenance,
   requestPacingMaxConcurrentRequests,
   sendTrackingRequestSlot,
   trackProviderRequestSlotBody,
@@ -31,10 +32,11 @@ import {
   type ProviderEgressBinding,
 } from "../../lib/provider-egress";
 import { redactSecretString } from "../../lib/redact";
-import { outboundCredentials } from "../../lib/outbound-credential-registry";
+import { attachCredentialMask, outboundCredentials, physicalCredentialMasks } from "../../lib/outbound-credential-registry";
 import { compressUpstreamRequestBody, isCanonicalCodexResponsesUrl } from "./request-compression";
 
 export { withUpstreamHttpVersion };
+registerProviderResponseProvenance(physicalCredentialMasks);
 
 const egressWebsocketDowngradeWarned = new Set<string>();
 /** A provider name is configuration-controlled, so the notice set is bounded like any cache. */
@@ -233,7 +235,7 @@ export function sendWithConnectionPolicy(
   (init as Record<symbol, ((destination: string, headers: Headers) => void) | undefined> | undefined)?.[PHYSICAL_SEND_OBSERVER]?.(target, headers);
   // Final headers, after plugin rewrites: an upstream can only echo what it received here, so the
   // request log refuses any diagnostic that repeats one of these values (see request-log-terminal-status).
-  outboundCredentials().remember(headers);
+  const mask = outboundCredentials().remember(headers, egress?.provider.headers);
   return physicalFetch(input, {
     ...init,
     ...(compressed ? { body: compressed.body } : largeCodexBody ? { body: Buffer.from(body, "utf8") } : {}),
@@ -243,7 +245,7 @@ export function sendWithConnectionPolicy(
     ...egressInit,
     ...(decide || redirectedToLoopback ? { [EGRESS_DECIDED]: true } : {}),
     ...{ [UPSTREAM_REWRITTEN]: true },
-  });
+  }).then(response => attachCredentialMask(response, mask));
 }
 
 interface CodexWsExecutor { provider: OcxProviderConfig; http: typeof globalThis.fetch }

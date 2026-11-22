@@ -17,6 +17,8 @@
  */
 import { clearableDeadline } from "./abort";
 import { redactSecretString } from "./redact";
+import { readBoundedResponseBody } from "./bounded-body";
+import { isTerminalRefusalCode } from "./errors";
 
 /**
  * Responses the origin may already be executing. RFC 9110 §9.2.2 forbids an intermediary
@@ -50,6 +52,40 @@ export function isSameTargetRetryHold(response: Response): boolean {
 
 export function isNonReplayableResponse(response: Response): boolean {
   return nonReplayableResponses.has(response);
+}
+
+/** Bytes of a failed body read for a typed refusal code, and how long the peek may wait for them. */
+const POLICY_REFUSAL_PEEK_BYTES = 16_384;
+const POLICY_REFUSAL_PEEK_MS = 250;
+export interface PolicyRefusal { code: string }
+const policyRefusals = new WeakMap<Response, PolicyRefusal>();
+const policyInspected = new WeakSet<Response>();
+
+/** The verdict an earlier {@link inspectPolicyRefusal} recorded, without reading anything. */
+export function inspectedPolicyRefusal(response: Response): PolicyRefusal | undefined {
+  return policyRefusals.get(response);
+}
+
+/**
+ * One bounded verdict on whether a failed response is a typed content refusal (a terminal code
+ * such as `cyber_policy` on the error envelope). A refusal belongs to the account that issued it,
+ * so no caller may move it to another account; a missing or late body is no verdict.
+ */
+export async function inspectPolicyRefusal(response: Response, signal?: AbortSignal): Promise<PolicyRefusal | undefined> {
+  const known = policyRefusals.get(response);
+  if (known || policyInspected.has(response) || response.ok || !response.body || response.bodyUsed) return known;
+  try {
+    const body = await readBoundedResponseBody(response.clone(), { signal, maxBytes: POLICY_REFUSAL_PEEK_BYTES, totalTimeoutMs: POLICY_REFUSAL_PEEK_MS });
+    if (body.truncated || body.oversized) return undefined;
+    const envelope = JSON.parse(body.text) as { error?: { code?: unknown }; last_error?: { code?: unknown }; response?: { error?: { code?: unknown } } };
+    const code = [envelope.error, envelope.last_error, envelope.response?.error]
+      .map(carrier => carrier?.code).find((candidate): candidate is string => typeof candidate === "string" && isTerminalRefusalCode(candidate));
+    if (code) policyRefusals.set(response, { code });
+  } catch {
+    // An unreadable or non-JSON body carries no typed verdict.
+  }
+  if (!signal?.aborted) policyInspected.add(response);
+  return policyRefusals.get(response);
 }
 
 /**
