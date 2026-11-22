@@ -5,11 +5,13 @@ import { InvalidProviderEgressError, PROVIDER_EGRESS_DIRECT } from "../../src/li
 import { markEgressTransparentExecutor } from "../../src/lib/provider-egress";
 import {
   __resetEgressWebsocketDowngradeNotices,
+  codexWsExecutorBinding,
   providerFetch,
   sendWithConnectionPolicy,
 } from "../../src/server/responses/fetch-helpers";
 import { PROXY_ENV_KEYS } from "../../src/lib/proxy-env";
 import type { OcxProviderConfig } from "../../src/types";
+import { BOUNDED_WS_RUNTIME, streamingInit } from "../helpers/ws-upstream-fixtures";
 
 /**
  * The inference dispatch. Every Responses, Chat, compaction and continuation send reaches the
@@ -54,6 +56,27 @@ function provider(extra: Partial<OcxProviderConfig> = {}): OcxProviderConfig {
 }
 
 describe("per-provider egress on the inference dispatch", () => {
+  test.each([false, true])("HTTP fallback records only an admitted send (refused=%s)", async refused => {
+    for (const key of proxyKeys) delete process.env[key];
+    const events: string[] = [];
+    const configured = Object.assign(provider({ upstreamWebsocket: true }), { fetch: async () => {
+      events.push("HTTP sent");
+      return new Response("fixture");
+    } });
+    const fetchUpstream = providerFetch(configured, BOUNDED_WS_RUNTIME, {
+      ...(refused ? { onPhysicalDispatch: () => { throw new Error("send budget refused"); } } : {}),
+      dispatchOverride: (input, init, execute) => {
+        const binding = codexWsExecutorBinding(execute)!;
+        binding.onSent = () => { events.push("receipt"); };
+        return binding.http(input, init);
+      },
+    });
+    const response = fetchUpstream("https://api.openai.com/v1/responses", streamingInit());
+    if (refused) await expect(response).rejects.toThrow("send budget refused");
+    else expect(await (await response).text()).toBe("fixture");
+    expect(events).toEqual(refused ? [] : ["receipt", "HTTP sent"]);
+  });
+
   test("a provider pinned to direct sends with the runtime's explicit direct connection", async () => {
     for (const key of proxyKeys) delete process.env[key];
     process.env.HTTPS_PROXY = GLOBAL_PROXY;

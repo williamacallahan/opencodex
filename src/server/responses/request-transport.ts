@@ -997,7 +997,9 @@ export async function prepareResponsesTransport(
               if (deferredKeyNote || deferredCopilotNote) commitKeyAttemptSend();
               if (noteResponsesEffort) recordAdapterReasoning(logCtx, wireRequest);
             };
-            if (ws?.provider === route.provider && (deferredKeyNote || deferredCopilotNote || noteResponsesEffort)) ws.onSent = noteSent;
+            const usesWsFallback = ws !== undefined && fetchImpl === ws.http;
+            if (ws && (ws.provider === route.provider || usesWsFallback)
+              && (deferredKeyNote || deferredCopilotNote || noteResponsesEffort)) ws.onSent = noteSent;
             // The WS executor dials its own socket: HTTP connection policy and body coding do not apply.
             // WS eligibility (egress, pacing, URL) was checked for the provider it was built for; a
             // provider reselected above was not, so it takes the HTTP fallback under its own route.
@@ -1005,13 +1007,14 @@ export async function prepareResponsesTransport(
               distributedKeyPhysicalFetch(anthropicBillingPhysicalFetch(fetchImpl, route.providerName, route.provider), route.providerName, route.provider, target),
               input,
               { ...physicalInit, redirect: "manual",
-                ...((deferredKeyNote || (noteResponsesEffort && !deferredCopilotNote))
+                ...(!usesWsFallback && (deferredKeyNote || (noteResponsesEffort && !deferredCopilotNote))
                   ? physicalSendCommitInit(() => { settlePhysicalDispatch(physicalInit); noteSent(); }) : {}),
-                ...physicalSendObserverInit(observeAutoPause, destination instanceof Request ? destination.url : String(destination), deferredCopilotNote ? noteSent : undefined),
+                ...physicalSendObserverInit(observeAutoPause, destination instanceof Request ? destination.url : String(destination), deferredCopilotNote && !usesWsFallback ? noteSent : undefined),
                 ...(hasVertexRequestAuthority(wireRequest) ? physicalSendGuardInit((finalTarget, finalHeaders) => {
                     if (!selectionIsCurrent(requestBindings.get(wireRequest)) || !vertexRequestAuthorityIsCurrent(wireRequest, finalTarget, finalHeaders)) throw new Error("Vertex credential authority changed before dispatch");
                   }) : {}) },
               { providerName: route.providerName, provider: route.provider },
+              usesWsFallback,
             )) as typeof globalThis.fetch;
             response = await fetchWithHeaderTimeout(target, dispatchInit, dispatchInit.signal ?? options.abortSignal ?? req.signal,
               resolveConnectTimeoutMs(config.connectTimeoutMs, { localUpstream: isLocalUpstream(target) }), requestParsed.stream, physicalFetch);

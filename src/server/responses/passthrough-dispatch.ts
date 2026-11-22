@@ -154,6 +154,8 @@ import {
   failoverAccountSnapshot,
 } from "../../oauth/generic-account-failover";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "../../codex/catalog/native-models";
+import { mapRoutedResponsesReasoningEffort, responsesReasoningLog } from "../../adapters/openai-responses/reasoning";
+import { codexEffortRank } from "../../reasoning-effort";
 import {
   type OpaqueBlobRecoveryGuard,
   attemptOpaqueBlobRecovery,
@@ -1760,9 +1762,18 @@ export async function preparePassthroughExchange(
     // model's ladder, not this account's entitlement. Learn each refusal so later turns clamp
     // before dispatch. Direct requests repair once; combo candidates may retry the next lower
     // published rung until it works, the ladder ends, or the send budget is spent.
+    const cap = parsed._reasoningEffortCap;
+    const refusedWireEffort = request.reasoningLog?.effectiveEffort;
     const downgrade = request.responsesEffortOmitted ? undefined
       : await refusedReasoningEffortDowngrade(upstreamResponse, upstream.signal, reasoningEffortDowngradeGuard,
-        options.comboAttempt, { provider: route.provider, modelId: parsed.modelId, requested: request.responsesCappedRung ?? parsed.options.reasoning });
+        options.comboAttempt, {
+          provider: route.provider, modelId: parsed.modelId, requested: request.responsesCappedRung ?? parsed.options.reasoning,
+          acceptsCandidate: cap && refusedWireEffort && route.provider.authMode !== "forward" ? effort => {
+            const { body } = mapRoutedResponsesReasoningEffort({ reasoning: { effort } }, route.provider, parsed.modelId, cap);
+            const candidate = responsesReasoningLog(body)?.effectiveEffort;
+            return candidate !== undefined && codexEffortRank(candidate) < codexEffortRank(refusedWireEffort);
+          } : undefined,
+        });
     if (downgrade && !configuredTransientSendBudgetExhausted()) {
       reasoningEffortDowngradeGuard.attempted = true;
       parsed.options.reasoning = downgrade.effort;

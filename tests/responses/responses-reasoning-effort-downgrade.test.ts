@@ -266,6 +266,28 @@ describe("rejected reasoning rungs", () => {
     expect(outbound).toEqual([{ summary: "auto", ...(expected === undefined ? {} : { effort: expected }) }]);
   });
 
+  test("a capped retry skips a lower rung that maps to the refused wire effort", async () => {
+    const cfg = passthroughConfig();
+    cfg.effortCap = "xhigh";
+    cfg.providers.first!.reasoningEfforts = ["low", "medium", "high", "xhigh", "max"];
+    cfg.providers.first!.reasoningEffortMap = { xhigh: "max", high: "medium" };
+    const sent: unknown[] = [];
+    globalThis.fetch = (async (_input, init) => {
+      const effort = effortOf(JSON.parse(String(init?.body)));
+      sent.push(effort);
+      return effort === "low" ? success() : Response.json({ error: {
+        type: "invalid_request_error", param: "reasoning.effort", message: "Unsupported reasoning effort",
+      } }, { status: 400 });
+    }) as typeof fetch;
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-openai-subagent": "collab_spawn" },
+      body: JSON.stringify({ model: `first/${MODEL}`, input: "go", stream: false, reasoning: { effort: "xhigh" } }),
+    }), cfg, { model: "", provider: "" });
+    expect(response.status, await response.text()).toBe(200);
+    expect(sent).toEqual(["medium", "low"]);
+  });
+
   test.each([false, true])("reports a routed compact effort only if the body was sent (invalid proxy: %s)", async invalidProxy => {
     const cfg = passthroughConfig();
     if (invalidProxy) cfg.providers.first!.proxy = "ftp://egress.example";

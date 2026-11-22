@@ -1515,6 +1515,7 @@ export function planReasoningEffortDowngrade(args: {
   modelId: string;
   requested?: string;
   rejectionText?: string;
+  acceptsCandidate?: (effort: string) => boolean;
 }): { effort: string; recorded: boolean } | undefined {
   if (args.rejectionText && (isHardPolicyOrOriginRefusal(args.rejectionText) || hasConflictingReasoningEffortCode(args.rejectionText))) return undefined;
   const requested = args.requested === "ultra" ? "max" : args.requested;
@@ -1532,8 +1533,8 @@ export function planReasoningEffortDowngrade(args: {
   const candidates = ladder
     .filter(effort => RANKED.indexOf(effort) < RANKED.indexOf(requested))
     .filter(effort => !isReasoningEffortLearnedUnsupported(args.provider, args.modelId, effort));
-  if (candidates.length === 0) return undefined;
-  return { effort: candidates[candidates.length - 1], recorded };
+  const effort = candidates.findLast(candidate => args.acceptsCandidate?.(candidate) ?? true);
+  return effort === undefined ? undefined : { effort, recorded };
 }
 
 /**

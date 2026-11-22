@@ -398,9 +398,8 @@ export function providerFetch(
       const sharedReceipt = (init as Record<symbol, ((body: BodyInit | null | undefined) => void) | undefined> | undefined)?.[WS_FALLBACK_RECEIPT];
       let notified = false;
       const dispatchInit = { ...withUpstreamHttpVersion(input, init, provider), timeout: 0,
-        ...(options.onPhysicalDispatch ? { [PHYSICAL_DISPATCH]: (body: BodyInit | null | undefined) => {
-          if (sharedReceipt) sharedReceipt(body);
-          else if (!notified) { options.onPhysicalDispatch!(body); notified = true; }
+        ...(sharedReceipt ? { [PHYSICAL_DISPATCH]: sharedReceipt } : options.onPhysicalDispatch ? { [PHYSICAL_DISPATCH]: (body: BodyInit | null | undefined) => {
+          if (!notified) { options.onPhysicalDispatch!(body); notified = true; }
         } } : {}),
       };
       return override
