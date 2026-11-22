@@ -681,6 +681,8 @@ describe("Anthropic known-reset expiry", () => {
     now++;
     expect(getCachedProviderAccountQuota("anthropic", id!)).toBeNull();
     expect(quotaEvidenceForCandidate(candidate)).toEqual({ known: false });
+    // Let any probe an idle read started in the background reach the transport before counting.
+    await Bun.sleep(20);
     expect(probes).toBe(0);
     // An explicit account read after a reset re-reads the usage endpoint (7f3e01d9b7) rather than
     // serving the expired window; the guard transport refuses it, so the seat reads unknown.
