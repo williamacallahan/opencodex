@@ -1,5 +1,5 @@
 import { inspectedReserveRefusal } from "./reserve-refusal-body";
-import { comboFailureDecision, comboFailureCooldownScope, comboTargetSkipTrigger, earliestComboCooldownExpiry, getCombo, isComboTargetInCooldown, pickComboTarget, targetKey, type ComboPick } from "../../combos";
+import { comboFailureDecision, comboFailureCooldownScope, comboTargetSkipTrigger, earliestComboCooldownExpiry, getCombo, isComboTargetInCooldown, targetKey, type ComboPick } from "../../combos";
 import type { OcxConfig } from "../../types";
 import type { ConsumedComboFailure } from "./core-options";
 import { consumeComboFailure } from "./core-combo-failure";
@@ -9,7 +9,7 @@ import { isReserveQuotaCode } from "./combo-stream-preflight";
 import { modelHasPoolReserve } from "../../codex/pool-reserve";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { isCodexLbProvider } from "../../providers/quota/codex-lb-url";
-import { routeConcreteModel, type RouteResult } from "../../router";
+import type { RouteResult } from "../../router";
 
 import { stripPreviousResponseId } from "../../adapters/openai-responses/canonical-forward";
 import { closedReasoningPrefix, hasReasoningSummary } from "../../adapters/openai-responses/luna-reasoning";
@@ -175,38 +175,41 @@ export async function portLunaConversationTarget(args: {
   scopedRoute: (target: ComboTarget) => RouteResult | undefined;
   eligible: (target: ComboTarget) => boolean;
   hopAllowed: (from: ComboTarget, to: ComboTarget) => boolean;
-  pickTarget: (opts: { exclude?: Iterable<string>; eligible: (target: ComboTarget) => boolean }) => Promise<ComboPick | null>;
+  pickTarget: (opts: { exclude?: Iterable<string>; eligible: (target: ComboTarget) => boolean; allowCooldownReprobe?: boolean }) => Promise<ComboPick | null>;
   exclude?: readonly string[];
   isPreDispatch?: boolean;
   alreadyReserveOnly: boolean;
   forbidSameTarget?: boolean;
   aborted?: () => boolean;
   now: number;
-}): Promise<{ pick: ComboPick; plan: LunaReserveLegPlan | undefined; reserveOnly: boolean; retryReserve: boolean } | null> {
+}): Promise<{ pick: ComboPick; plan: LunaReserveLegPlan | undefined; reserveOnly: boolean; retryReserve: boolean; lunaStage: "off" | "reserve" | "relay" | "done" } | null> {
   const fromKey = targetKey(args.fromTarget);
   const nativeKey = args.native && targetKey(args.native);
   const plan = args.native ? planLunaReserveLegs(args.combo, args.scopedRoute, args.eligible, args.hopAllowed, args.native) : undefined;
   const skipNativeTarget = args.alreadyReserveOnly
-    || Boolean(args.forbidSameTarget)
+    || (fromKey === nativeKey && Boolean(args.forbidSameTarget))
     || (Boolean(args.isPreDispatch) && fromKey === nativeKey)
     || (fromKey !== nativeKey && Boolean(nativeKey && args.exclude?.includes(nativeKey)));
 
   if (plan && !skipNativeTarget && args.hopAllowed(args.fromTarget, args.native!)) {
     const startNative = await args.pickTarget({
+      exclude: fromKey === nativeKey ? args.exclude?.filter(key => key !== plan.nativeKey) : args.exclude,
+      allowCooldownReprobe: false,
       eligible: target => targetKey(target) === plan.nativeKey && args.eligible(target),
     });
     if (args.aborted?.()) return null;
-    if (startNative) return { pick: startNative, plan, reserveOnly: false, retryReserve: false };
+    if (startNative) return { pick: startNative, plan, reserveOnly: false, retryReserve: false, lunaStage: "reserve" };
   }
 
   const retryReserve = !skipNativeTarget
     && canWalkRemainingNativeReserve(args.config, args.comboId, args.fromTarget, nativeKey, args.alreadyReserveOnly, args.now);
   if (retryReserve) {
     const nativeRetry = await args.pickTarget({
+      allowCooldownReprobe: false,
       eligible: target => targetKey(target) === nativeKey && args.eligible(target),
     });
     if (args.aborted?.()) return null;
-    if (nativeRetry) return { pick: nativeRetry, plan: undefined, reserveOnly: true, retryReserve: true };
+    if (nativeRetry) return { pick: nativeRetry, plan: undefined, reserveOnly: true, retryReserve: true, lunaStage: "done" };
   }
 
   const relayKey = plan?.relayKey;
@@ -220,7 +223,7 @@ export async function portLunaConversationTarget(args: {
     ? await args.pickTarget({ exclude: args.exclude, eligible: target => targetKey(target) === relayKey && args.eligible(target) })
     : null;
   if (args.aborted?.()) return null;
-  if (relayPick) return { pick: relayPick, plan, reserveOnly: false, retryReserve: false };
+  if (relayPick) return { pick: relayPick, plan, reserveOnly: false, retryReserve: false, lunaStage: "relay" };
 
   const skipKeys = [
     ...(args.exclude ?? []),
@@ -236,7 +239,8 @@ export async function portLunaConversationTarget(args: {
   const fallbackKey = targetKey(fallback.target);
   const lunaLegs = plan && (fallbackKey === plan.nativeKey || fallbackKey === plan.relayKey) ? plan : undefined;
   const reserveOnly = !lunaLegs && nativeKey !== undefined && fallbackKey === nativeKey;
-  return { pick: fallback, plan: lunaLegs, reserveOnly, retryReserve: false };
+  const lunaStage = lunaLegs ? (fallbackKey === lunaLegs.nativeKey ? "reserve" : "relay") : "off";
+  return { pick: fallback, plan: lunaLegs, reserveOnly, retryReserve: false, lunaStage };
 }
 
 export function onlyReplayIncompatibleTargetsRemain(
@@ -255,35 +259,6 @@ export function onlyReplayIncompatibleTargetsRemain(
   return remaining.length > 0 && remaining.every(target => !reasoningReplayEligible(target));
 }
 
-export async function selectPortedLunaOwnerPick(args: {
-  cause: "excluded" | "refused";
-  ownerKey: string;
-  combo: Combo;
-  comboId: string;
-  config: OcxConfig;
-  native: ComboTarget;
-  scopedRoute: (target: ComboTarget) => RouteResult | undefined;
-  eligible: (target: ComboTarget) => boolean;
-  hopAllowed: (from: ComboTarget, to: ComboTarget) => boolean;
-  pickReserveWithWait: (nativeKey: string) => Promise<ComboPick | null>;
-}): Promise<{ pick: ComboPick; plan: LunaReserveLegPlan; lunaStage: "relay" | "reserve" } | null> {
-  const plan = planLunaReserveLegs(args.combo, args.scopedRoute, args.eligible, args.hopAllowed, args.native);
-  if (!plan) return null;
-  const reserve = args.cause === "refused" ? await args.pickReserveWithWait(plan.nativeKey) : null;
-  const next = reserve ?? pickComboTarget(args.config, args.comboId, {
-    routeConcreteModel,
-    allowCooldownReprobe: false,
-    eligible: target => (args.cause === "excluded" && targetKey(target) === plan.nativeKey
-      || targetKey(target) === plan.relayKey && (args.cause === "excluded" || args.ownerKey !== plan.relayKey)) && args.eligible(target),
-  });
-  if (!next) return null;
-  return {
-    pick: next,
-    plan,
-    lunaStage: targetKey(next.target) === plan.relayKey ? "relay" : "reserve",
-  };
-}
-
 export async function portCoolingLunaOwnerBeforeDispatch(args: {
   config: OcxConfig;
   comboId: string;
@@ -294,11 +269,11 @@ export async function portCoolingLunaOwnerBeforeDispatch(args: {
   scopedRoute: (target: ComboTarget) => RouteResult | undefined;
   eligible: (target: ComboTarget) => boolean;
   hopAllowed: (from: ComboTarget, to: ComboTarget) => boolean;
-  pickTarget: (opts: { exclude?: Iterable<string>; eligible: (target: ComboTarget) => boolean }) => Promise<ComboPick | null>;
+  pickTarget: (opts: { exclude?: Iterable<string>; eligible: (target: ComboTarget) => boolean; allowCooldownReprobe?: boolean }) => Promise<ComboPick | null>;
   prepareReplayEligibility: () => void;
   aborted: () => boolean;
   now: number;
-}): Promise<{ pick: ComboPick; plan: LunaReserveLegPlan | undefined; reserveOnly: boolean } | null> {
+}): Promise<{ pick: ComboPick; plan: LunaReserveLegPlan | undefined; reserveOnly: boolean; lunaStage: "off" | "reserve" | "relay" | "done" } | null> {
   const coolingOwner = coolingLunaOwnerTarget(args.config, args.comboId, args.ownerKey, args.now)
     ?? (args.owner && !args.config.providers[args.owner.provider]?.disabled && args.ownerKey === targetKey(args.owner)
       && (isComboTargetInCooldown(args.comboId, args.owner) || comboTargetSkipTrigger(args.config, args.owner) === "quota_exhausted")

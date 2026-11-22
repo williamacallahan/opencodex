@@ -38,10 +38,10 @@ async function seed(count: number): Promise<string[]> {
   return ids;
 }
 
-function transient429(): Response {
+function transient429(retryAfterSeconds = "5"): Response {
   return Response.json(
     { type: "error", error: { type: "rate_limit_error", message: "synthetic transient rate limit" } },
-    { status: 429, headers: { "retry-after": "5" } },
+    { status: 429, headers: { "retry-after": retryAfterSeconds } },
   );
 }
 
@@ -137,10 +137,10 @@ test("200 OK on /v1/responses resets Anthropic 429 escalation back to base 15s a
   let mode: "fail0" | "succeed0" | "fail0-again" | "check0" = "fail0";
   const cfg = configFor(token => {
     const isAcct0 = token === `Bearer ${credential(0).access}`;
-    if (mode === "fail0") return isAcct0 ? transient429() : answered("fallback1");
+    if (mode === "fail0") return isAcct0 ? transient429("15") : answered("fallback1");
     if (mode === "succeed0") return isAcct0 ? answered("recovered0") : spent5h();
-    if (mode === "fail0-again") return isAcct0 ? transient429() : answered("fallback2");
-    return isAcct0 ? answered("admitted-at-15s") : transient429();
+    if (mode === "fail0-again") return isAcct0 ? transient429("15") : answered("fallback2");
+    return isAcct0 ? answered("admitted-at-15s") : transient429("15");
   });
 
   // 1. Account 0 hits strike-1 transient 429 (15s admission pause) and fails over to account 1.

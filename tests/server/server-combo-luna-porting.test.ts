@@ -377,5 +377,94 @@ describe("combo Luna Reserve owner cooling and store-mismatch porting (#1299)", 
     expect(turn2Cooling.text).toContain("backup ok");
     expect(calls.map(c => c.target)).toEqual(["backup"]);
     expect(JSON.stringify(calls[0]!.body)).not.toContain("relay-secret-1");
+
+    // Case 3: non-native relay owner hits store-mismatch 409 while native Reserve is healthy -> ports to native Reserve.
+    clearComboTargetCooldowns("luna");
+    clearKeyCooldowns();
+    const cfgHealthyNative = makeRelayCfg();
+    const cfgRelayFirst: OcxConfig = {
+      ...cfgHealthyNative,
+      combos: {
+        luna: {
+          strategy: "failover",
+          waitForCooldownMs: 0,
+          targets: [
+            { provider: "relay", model: "gpt-6-luna" },
+            { provider: "openai", model: "gpt-6-luna" },
+            { provider: "backup", model: "gpt-6-luna" },
+          ],
+        },
+      },
+    };
+    calls = [];
+    seedSpentReserveSeats();
+    expect((await post(cfgRelayFirst, { tools, input: "step 1" }, "luna-relay-store-mismatch")).status).toBe(200);
+    cfgRelayFirst.providers.relay!.apiKeyPool![0]!.disabled = true;
+    calls = [];
+    const turn2Native = await post(cfgRelayFirst, {
+      tools,
+      input: [
+        {
+          type: "reasoning",
+          id: "rs_relay_1",
+          summary: [{ type: "summary_text", text: "relay reasoning" }],
+          encrypted_content: "relay-secret-1",
+        },
+        { type: "function_call", id: "fc_1", call_id: "call_3", name: "get_weather", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_3", output: "rainy" },
+      ],
+    }, "luna-relay-store-mismatch");
+    expect({ status: turn2Native.status, text: turn2Native.text, calls }).toMatchObject({ status: 200 });
+    expect(turn2Native.text).toContain("native ok");
+    expect(calls.map(c => c.target)).toEqual(["native"]);
+    expect(JSON.stringify(calls[0]!.body)).not.toContain("relay-secret-1");
+  });
+
+  test("post-dispatch porting to relay sets lunaStage so a relay 429 advances to native ordinary Luna", async () => {
+    const cfg = config();
+    cfg.codexMainAccountHardLock = false;
+    cfg.accountPoolStrategy = "quota";
+    cfg.autoSwitchThreshold = 0;
+    seedSpentReserveSeats([A, B]);
+    native = () => sse("gpt-reserve", "turn1", { reasoningId: "rs_native_3", encrypted: "native-secret-3", callId: "call_4" });
+    expect((await post(cfg, { tools, input: "step 1" }, "luna-post-dispatch-relay")).status).toBe(200);
+
+    for (const id of [A, B]) {
+      updateAccountQuota(id, 40, now + 86_400_000);
+      setAccountQuotaFromParsed(id, {
+        customWindows: [{ label: "Luna Reserve", percent: 100, resetAt: now + 604_800_000, observedAt: now }],
+      });
+    }
+    calls = [];
+    let nativeCalls = 0;
+    native = (_url, body) => {
+      nativeCalls += 1;
+      if (nativeCalls === 1) {
+        return Response.json({ error: { code: "usage_limit_reached", message: "Reserve spent" } },
+          { status: 429, headers: { "x-should-retry": "false" } });
+      }
+      return sse(String(body.model), "ordinary native ok");
+    };
+    relay = () => Response.json({ error: { code: "usage_limit_reached", message: "relay spent" } },
+      { status: 429, headers: { "x-should-retry": "false" } });
+
+    const turn2 = await post(cfg, {
+      tools,
+      input: [
+        {
+          type: "reasoning",
+          id: "rs_native_3",
+          summary: [{ type: "summary_text", text: "checked owner" }],
+          encrypted_content: "native-secret-3",
+        },
+        { type: "function_call", id: "fc_1", call_id: "call_4", name: "get_weather", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_4", output: "sunny" },
+      ],
+    }, "luna-post-dispatch-relay");
+
+    expect({ status: turn2.status, text: turn2.text, calls }).toMatchObject({ status: 200 });
+    expect(turn2.text).toContain("ordinary native ok");
+    expect(calls.map(c => c.target)).toEqual(["native", "relay", "native"]);
+    expect(calls.at(-1)!.body.model).toBe("gpt-6-luna");
   });
 });

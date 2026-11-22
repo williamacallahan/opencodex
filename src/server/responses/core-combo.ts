@@ -135,7 +135,7 @@ import {
 } from "../relay";
 import { preflightComboStreamResponse } from "./combo-stream-preflight";
 import { isOwnerCapacityRefusal } from "./owner-capacity-refusal";
-import { advanceLunaLegAfterFailure, isReserveSeatQuotaRefusal, nativeLunaTarget, onlyReplayIncompatibleTargetsRemain, planLunaReserveLegs, portCoolingLunaOwnerBeforeDispatch, portLunaConversationTarget, portSpentLunaReasoning, prepareLunaReplay, relayProvedNotStarted, selectPortedLunaOwnerPick } from "./combo-luna-legs";
+import { advanceLunaLegAfterFailure, isReserveSeatQuotaRefusal, nativeLunaTarget, onlyReplayIncompatibleTargetsRemain, planLunaReserveLegs, portCoolingLunaOwnerBeforeDispatch, portLunaConversationTarget, portSpentLunaReasoning, prepareLunaReplay, relayProvedNotStarted } from "./combo-luna-legs";
 import { createPoolReserveWalk, modelHasPoolReserve, type PoolCapacityIntent } from "../../codex/pool-reserve";
 import { requiredToolContractOf } from "./combo-required-tool-contract";
 import {
@@ -830,26 +830,6 @@ export async function executeComboResponses(
     waitForCooldownMs: combo.waitForCooldownMs,
     abortSignal: options.abortSignal,
   });
-  // Release the owner only if the scrubbed transcript has an authorized next leg.
-  const pickForPortedOwner = async (cause: "excluded" | "refused"): Promise<ComboPick | null> => {
-    const ownerKey = boundTargetKey;
-    if (ported === undefined || !lunaPair || !native || !ownerKey || options.abortSignal?.aborted || req.signal.aborted) return null;
-    replayEligibilityBody = ported;
-    boundTargetKey = undefined;
-    const selected = await selectPortedLunaOwnerPick({
-      cause, ownerKey, combo, comboId, config, native, scopedRoute,
-      eligible: targetEligible, hopAllowed: comboHopAllowed,
-      pickReserveWithWait: nativeKey => pickWithWait({ eligible: target => targetKey(target) === nativeKey && targetEligible(target) }),
-    });
-    if (selected && !options.abortSignal?.aborted && !req.signal.aborted) {
-      dispatchBody = ported; lunaReplay = { kind: "portable", body: ported }; lunaLegs = selected.plan;
-      lunaStage = selected.lunaStage;
-      return selected.pick;
-    }
-    boundTargetKey = ownerKey;
-    replayEligibilityBody = body;
-    return null;
-  };
   let pick = conversationPin ?? await pickWithWait({
     eligible: targetEligible,
     now: initialNow,
@@ -1803,6 +1783,8 @@ export async function executeComboResponses(
         if (reserveWalk) reserveWalk = createPoolReserveWalk(config);
         dispatchBody = ported; lunaReplay = { kind: "portable", body: ported };
         lunaLegs = selected.plan; portedReserveOnly = selected.reserveOnly;
+        lunaStage = selected.lunaStage;
+        evaluatedStrictReserve = selected.lunaStage !== "off";
         logCtx.routeDecision = { ...logCtx.routeDecision!, selected: { ...logCtx.routeDecision!.selected, reason: "luna-owner-spent-ported" } };
         pick = selected.retryReserve ? selected.pick : { ...selected.pick, attempted: [...new Set([...failedPick.attempted, ...selected.pick.attempted])] };
         continue;
