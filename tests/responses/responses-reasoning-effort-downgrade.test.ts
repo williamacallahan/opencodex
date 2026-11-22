@@ -331,6 +331,25 @@ describe("rejected reasoning rungs", () => {
     expect(logCtx.activeAttempt?.recoveryKinds).toEqual(["reasoning-effort-downgrade"]);
   });
 
+  test("does not retry or learn a refusal for effort omitted from the Responses wire", async () => {
+    writeSnapshot(["low", "high", "max"]);
+    const cfg = passthroughConfig();
+    const provider = cfg.providers.first!;
+    provider.reasoningEffortMap = { max: "__omit__" };
+    const outbound: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      outbound.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(REFUSAL, { status: 400, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const response = await handleResponses(request(true), cfg, { model: "", provider: "" });
+    await response.text();
+
+    expect(response.status).toBe(400);
+    expect(outbound).toHaveLength(1);
+    expect(effortOf(outbound[0])).toBeUndefined();
+    expect(isReasoningEffortLearnedUnsupported(provider, MODEL, "max")).toBe(false);
+  });
+
   test.each(["openai-chat", "openai-responses"] as const)(
     "replays once on requested reasoning effort not supported phrasing (%s)",
     async (adapter) => {

@@ -573,6 +573,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         method: "POST",
         headers,
         body,
+        responsesEffortOmitted: !(isPlainObject(wireBody) && isPlainObject(wireBody.reasoning) && typeof wireBody.reasoning.effort === "string"),
         hostedToolSubstitutions,
         ...(isPlainObject(wireBody) && typeof wireBody.model === "string" ? { outboundModelId: wireBody.model } : {}),
         releaseBodyObservation,

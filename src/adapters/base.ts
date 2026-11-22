@@ -157,6 +157,8 @@ export interface AdapterRequest {
     convertedMuseToolNameAliases?: ReadonlyMap<string, string>;
     /** Releases observation of a serialized request body after its final fetch attempt settles. */
     releaseBodyObservation?: () => void;
+    /** The final Responses payload has no effort field; its upstream default cannot reject a caller-supplied rung. */
+    responsesEffortOmitted?: boolean;
     /** Exact reasoning parameter emitted by the adapter, for request-log diagnostics only. */
     reasoningLog?:
       | {
