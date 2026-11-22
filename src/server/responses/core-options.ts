@@ -294,6 +294,7 @@ export interface HandleResponsesOptions {
     sourceBody: unknown;
     previousResponseInputExpanded: boolean;
     projectForeignReasoning?: "portable" | "owner";
+    statelessReasoningReplay?: boolean;
     recordedResponsesStore?: string;
     issuedReasoningProofs?: LookupItemIssuer;
     providerContinuation: OcxProviderContinuationState | undefined;

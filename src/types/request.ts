@@ -109,6 +109,8 @@ export interface OcxParsedRequest {
   _previousResponseInputExpanded?: boolean;
   /** Preserve the original reasoning only at its proven serving identity. */
   _lunaProjectForeignReasoning?: "portable" | "owner";
+  /** The combo proved that removing opaque reasoning leaves a self-contained store:false turn. */
+  _lunaStatelessReasoningReplay?: boolean;
   /** Digests only: final Responses endpoint/credential and the store recorded at completion. */
   _responsesStore?: string;
   _recordedResponsesStore?: string;
