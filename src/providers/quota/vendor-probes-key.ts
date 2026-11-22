@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { resolveProviderApiKey } from "../key-store";
 import { getProviderRegistryEntry, registryEntryForProviderDestination } from "../registry";
 import { isCanonicalOllamaCloudUrl } from "../../adapters/ollama-native-url";
@@ -20,9 +21,26 @@ import { markDisplayOnlyQuota } from "../quota-types";
 import type { OcxProviderConfig } from "../../types";
 
 // A quota probe must use the provider's inference route so it neither reports a false healthy path nor leaks a key through another exit.
+/** Scoped to one per-key quota read: whether any of its requests had the credential refused (401/403). */
+const keyReadRefusal = new AsyncLocalStorage<{ credentialRejected: boolean }>();
+
+/**
+ * Run one per-key quota read and report whether the provider refused the credential. A terminal
+ * probe result alone cannot say why (an uncapped key or inconsistent counters are terminal too),
+ * so only an observed 401 or 403 may be reported as a denial.
+ */
+export async function readWithCredentialRefusal<T>(read: () => Promise<T>): Promise<{ result: T; credentialRejected: boolean }> {
+  const state = { credentialRejected: false };
+  const result = await keyReadRefusal.run(state, read);
+  return { result, credentialRejected: state.credentialRejected };
+}
+
 async function quotaFetch(providerName: string, config: OcxProviderConfig, url: string, init: RequestInit): Promise<Response> {
   const egress = resolveProviderEgress({ providerName, provider: config, url });
-  return configuredOutboundFetch(url, { ...init, ...providerEgressFetchInit(egress) });
+  const response = await configuredOutboundFetch(url, { ...init, ...providerEgressFetchInit(egress) });
+  const refusal = keyReadRefusal.getStore();
+  if (refusal && (response.status === 401 || response.status === 403)) refusal.credentialRejected = true;
+  return response;
 }
 
 const KIMI_CODE_BASE_URL = "https://api.kimi.com/coding/v1";
@@ -398,7 +416,7 @@ async function fetchOpenRouterQuota(provider: string, config: OcxProviderConfig)
   const usage = toFiniteNumber(data.usage);
   // A successful no-cap response is a DELIBERATE change, not a transient
   // failure: the old capped row must be dropped, not preserved as last-good.
-  if (limit === undefined || limit <= 0) return TERMINAL_QUOTA_FAILURE;
+  if (limit === undefined || limit <= 0) return AUTHORITATIVE_EMPTY_QUOTA;
   // Prefer the authoritative remaining-cap value when present: `usage` is
   // lifetime accumulated spend and overstates a reset or re-capped key.
   const used = limitRemaining !== undefined

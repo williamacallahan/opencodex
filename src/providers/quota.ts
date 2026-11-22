@@ -72,7 +72,7 @@ import {
   fetchPassiveProviderQuota,
   fetchXaiQuota,
 } from "./quota/vendor-probes-oauth";
-import { fetchCommandCodeQuota, fetchKimiQuota, keyQuotaReaderForProvider } from "./quota/vendor-probes-key";
+import { fetchCommandCodeQuota, fetchKimiQuota, keyQuotaReaderForProvider, readWithCredentialRefusal } from "./quota/vendor-probes-key";
 import { antigravityQuotaDiagnosticIdentity, fetchAntigravityQuota, probeAntigravityUsageQuota } from "./quota/antigravity";
 import { persistKiroAccountState } from "./kiro-account-state-disk";
 import { kiroProbeCurrent, kiroProbeIdentity } from "./quota/kiro-account-probe";
@@ -109,8 +109,9 @@ export async function fetchProviderApiKeyQuotas(config: OcxConfig, name: string,
   const provider = config.providers[name];
   if (!provider || !keyQuotaReaderForProvider(name, provider)) return [];
   return readProviderApiKeyQuotas(config, name, forceRefresh, async (isolatedProvider, isolatedConfig) => {
-    const result = await maybeFetchProviderQuota(name, isolatedProvider, isolatedConfig, false);
-    if (result === TERMINAL_QUOTA_FAILURE) return { kind: "terminal" };
+    const { result, credentialRejected } = await readWithCredentialRefusal(
+      () => maybeFetchProviderQuota(name, isolatedProvider, isolatedConfig, false));
+    if (result === TERMINAL_QUOTA_FAILURE) return credentialRejected ? { kind: "terminal", failure: "access_denied" } : { kind: "terminal" };
     if (result === AUTHORITATIVE_EMPTY_QUOTA) return { kind: "empty" };
     return result ? { kind: "quota", quota: result.quota, source: result.source } : { kind: "unavailable" };
   });

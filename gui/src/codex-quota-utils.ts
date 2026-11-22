@@ -7,6 +7,8 @@ export interface QuotaWindowReading {
   percent: number;
   resetAt?: number;
   modelId?: string;
+  /** A model-family limit (Anthropic Opus, Sonnet, Fable), not a provider-wide one. */
+  scope?: "model";
   /** Share of the weekly limit this model family may use ("up to 50% of your weekly limit"). */
   weeklyAllowancePercent?: number;
 }

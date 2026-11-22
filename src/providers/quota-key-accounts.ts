@@ -9,13 +9,14 @@ import { ACCOUNT_QUOTA_TTL_MS } from "./quota-wire";
 const MAX_ENTRIES = 256;
 const LAST_GOOD_MS = 30 * 60_000;
 /**
- * `unread` marks a synthesized row: no read happened, so `ts` is not a read time. `terminal` marks a
- * read the provider refused outright (a rejected key), which is not a transient outage.
+ * `unread` marks a synthesized row: no read happened, so `ts` is not a read time. `quotaFailure`
+ * names why a terminal read failed when the probe observed the cause (a refused credential).
  */
-type Entry = { ts: number; quota: ProviderQuota | null; source?: string; unavailable?: true; unread?: true; terminal?: true };
+type Entry = { ts: number; quota: ProviderQuota | null; source?: string; unavailable?: true; unread?: true; quotaFailure?: QuotaFailureCode };
 export type KeyQuotaProbeOutcome =
   | { kind: "quota"; quota: ProviderQuota; source?: string }
-  | { kind: "empty" | "terminal" | "unavailable" };
+  | { kind: "terminal"; failure?: QuotaFailureCode }
+  | { kind: "empty" | "unavailable" };
 export interface ProviderApiKeyQuota {
   keyId: string;
   quota: ProviderQuota | null;
@@ -149,7 +150,7 @@ async function readEntry(
             quota: result.kind !== "terminal" && lastGood && Date.now() - lastGood.updatedAt < LAST_GOOD_MS ? lastGood : null,
             source: previous?.source,
             unavailable: true,
-            ...(result.kind === "terminal" ? { terminal: true as const } : {}),
+            ...(result.kind === "terminal" && result.failure ? { quotaFailure: result.failure } : {}),
           };
     if (isCurrent()) remember(key, entry);
     return entry;
@@ -204,7 +205,8 @@ export async function readProviderApiKeyQuotas(
       quota: current ? entry.quota : null,
       ...(!current || entry.unavailable ? { unavailable: true as const } : {}),
       ...(current && !entry.unread ? { readAt: entry.ts } : {}),
-      ...(current && entry.terminal ? { quotaFailure: "access_denied" as const } : {}),
+      // A diagnosis expires like a last-good reading, so a paused key never shows an old denial as current.
+      ...(current && entry.quotaFailure && Date.now() - entry.ts < LAST_GOOD_MS ? { quotaFailure: entry.quotaFailure } : {}),
     };
     return Object.defineProperty(result, "isCurrent", { value: isCurrent }) as ProviderApiKeyQuota;
   });

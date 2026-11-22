@@ -29,7 +29,7 @@ describe("quota summary", () => {
       { provider: "xai", updatedAt: now, quota: { fiveHourPercent: 40, updatedAt: now } },
       { provider: "gemini", label: "Google", updatedAt: now, quota: { customWindows: [{ label: "Daily", percent: 8 }, { label: "Hourly", percent: 30 }], updatedAt: now } },
     ], now);
-    const rows = buildQuotaSummary(reports, name);
+    const rows = buildQuotaSummary(reports, name, now);
     expect(rows.map(row => [row.label, row.headline.id, row.headline.percent, row.severity])).toEqual([
       ["OpenAI", "quota.weeklyLimit", 31, "normal"],
       ["Claude", "quota.monthlyLimit", 22, "normal"],
@@ -47,7 +47,7 @@ describe("quota summary", () => {
       { provider: "warn", updatedAt: now, quota: { fiveHourPercent: 75, weeklyPercent: 31, monthlyPercent: 72, updatedAt: now } },
       { provider: "fullest", updatedAt: now, quota: { weeklyPercent: 92, monthlyPercent: 100, updatedAt: now } },
     ], now);
-    const rows = buildQuotaSummary(reports, name);
+    const rows = buildQuotaSummary(reports, name, now);
     expect(rows.map(row => [row.provider, row.headline.id, row.headline.percent, row.severity])).toEqual([
       ["opencode-go", "quota.monthlyLimit", 100, "critical"],
       ["mistral", "Vibe budget", 100, "critical"],
@@ -68,7 +68,7 @@ describe("quota summary", () => {
       { provider: "stale", updatedAt: now - 60 * 60_000, quota: { weeklyPercent: 50, updatedAt: now } },
       { provider: "credits", updatedAt: now, quota: { creditsUsd: { used: 91, limit: 100, remaining: 9, percent: 91 }, updatedAt: now } },
     ], now);
-    const rows = buildQuotaSummary(reports, name);
+    const rows = buildQuotaSummary(reports, name, now);
     expect(rows.map(row => [row.provider, row.headline.id, row.severity])).toEqual([
       ["credits", "quotaSummary.credits", "critical"],
     ]);
@@ -88,7 +88,7 @@ describe("quota summary", () => {
       { provider: "zero-total", updatedAt: now, quota: { updatedAt: now, workbuddyCredits: balance(0, 0, 0) } },
       { provider: "malformed", updatedAt: now, quota: { updatedAt: now, workbuddyCredits: { total: 100, used: 0 } } },
     ], now);
-    const rows = buildQuotaSummary(reports, name);
+    const rows = buildQuotaSummary(reports, name, now);
     expect(rows.map(row => [row.provider, row.headline.labelKey, row.headline.percent, row.severity])).toEqual([
       ["workbuddy-ai", "quotaSummary.creditsUnavailable", 75, "normal"],
       ["frozen", "quotaSummary.creditsUnavailable", 100, "normal"],
@@ -145,7 +145,7 @@ describe("quota summary", () => {
       { provider: "mixed", updatedAt: now, quota: { updatedAt: now, weeklyPercent: 25, workbuddyCredits: balance(110) } },
       { provider: "roundoff", updatedAt: now, quota: { updatedAt: now, workbuddyCredits: balance(100 + 1e-12) } },
     ], now);
-    const rows = buildQuotaSummary(reports, name);
+    const rows = buildQuotaSummary(reports, name, now);
     expect(rows.map(row => [row.provider, row.headline.percent])).toEqual([["mixed", 25], ["roundoff", 0]]);
     expect(rows[0]!.windows.map(window => window.labelKey)).toEqual(["quota.weeklyLimit"]);
   });
@@ -183,20 +183,36 @@ describe("quota summary", () => {
   });
 
   test("provider labels that match fixed ids do not take fixed-window precedence", () => {
-    const creditsUsd = { used: 100, limit: 100, remaining: 0, percent: 100 };
+    // Every window is equally severe, so only label precedence can decide the headline.
     const reports = freshQuotaReportsFromResponse([
-      { provider: "weekly", updatedAt: now, quota: { monthlyPercent: 7, customWindows: [{ label: "quota.weeklyLimit", percent: 30 }], creditsUsd } },
-      { provider: "monthly", updatedAt: now, quota: { fiveHourPercent: 7, customWindows: [{ label: "quota.monthlyLimit", percent: 30 }], creditsUsd } },
-      { provider: "five-hour", updatedAt: now, quota: { customWindows: [{ label: "Daily", percent: 7 }, { label: "quota.fiveHourLimit", percent: 30 }], creditsUsd } },
+      { provider: "weekly", updatedAt: now, quota: { monthlyPercent: 7, customWindows: [{ label: "quota.weeklyLimit", percent: 30 }] } },
+      { provider: "monthly", updatedAt: now, quota: { fiveHourPercent: 7, customWindows: [{ label: "quota.monthlyLimit", percent: 30 }] } },
+      { provider: "five-hour", updatedAt: now, quota: { customWindows: [{ label: "Daily", percent: 7 }, { label: "quota.fiveHourLimit", percent: 30 }] } },
       { provider: "custom-only", updatedAt: now, quota: { customWindows: [{ label: "Daily", percent: 7 }, { label: "quota.weeklyLimit", percent: 30 }] } },
     ], now);
-    const rows = buildQuotaSummary(reports, name);
+    const rows = buildQuotaSummary(reports, name, now);
     expect(rows.map(row => [row.provider, row.headline.labelKey, row.headline.label, row.headline.percent])).toEqual([
-      ["weekly", "quotaSummary.credits", undefined, 100],
-      ["monthly", "quotaSummary.credits", undefined, 100],
-      ["five-hour", "quotaSummary.credits", undefined, 100],
+      ["weekly", "quota.monthlyLimit", undefined, 7],
+      ["monthly", "quota.fiveHourLimit", undefined, 7],
+      ["five-hour", undefined, "Daily", 7],
       ["custom-only", undefined, "Daily", 7],
     ]);
+  });
+
+  test("model-family windows and windows past their reset never headline the provider", () => {
+    const reports = freshQuotaReportsFromResponse([
+      { provider: "anthropic", updatedAt: now, quota: { weeklyPercent: 20, customWindows: [{ label: "Opus", scope: "model", percent: 100 }], updatedAt: now } },
+      { provider: "reset", updatedAt: now, quota: { weeklyPercent: 0, monthlyPercent: 100, monthlyResetAt: now - 60_000, updatedAt: now } },
+      { provider: "all-elapsed", updatedAt: now, quota: { weeklyPercent: 40, weeklyResetAt: now - 60_000, updatedAt: now } },
+    ], now);
+    const rows = buildQuotaSummary(reports, name, now);
+    expect(rows.map(row => [row.provider, row.headline.id, row.headline.percent, row.severity])).toEqual([
+      ["anthropic", "quota.weeklyLimit", 20, "normal"],
+      ["reset", "quota.weeklyLimit", 0, "normal"],
+      ["all-elapsed", "quota.weeklyLimit", 40, "normal"],
+    ]);
+    const opus = rows[0]!.windows.find(window => window.label === "Opus");
+    expect([opus?.scope, opus?.percent, opus?.severity]).toEqual(["model", 100, "normal"]);
   });
 
   test("colliding and suffixed provider labels stay distinct from actual windows and credits", () => {
@@ -213,7 +229,7 @@ describe("quota summary", () => {
       { provider: "malformed", updatedAt: now, quota: { monthlyPercent: 7, customWindows, creditsUsd: { percent: NaN } } },
     ], now);
     expect(accountQuotaFromReport(reports.unlimited)?.creditsUsd).toEqual({ used: 100, limit: 100, remaining: 0, percent: 100, unlimited: true });
-    const rows = buildQuotaSummary(reports, name);
+    const rows = buildQuotaSummary(reports, name, now);
     expect(rows.map(row => [row.provider, row.headline.labelKey, row.headline.percent])).toEqual([
       ["real-credits", "quotaSummary.credits", 100],
       ["unlimited", "quota.monthlyLimit", 7],

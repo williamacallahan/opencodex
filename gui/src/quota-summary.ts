@@ -18,6 +18,8 @@ export type QuotaSummarySeverity = "normal" | "warn" | "critical";
 export interface QuotaSummaryWindow {
   id: string;
   modelId?: string;
+  /** A model-family limit: shown in the details, never the provider-wide headline or severity. */
+  scope?: "model";
   /** Fixed window label (5h / weekly / monthly / credits). */
   labelKey?: TKey;
   /** Provider-named window label, shown verbatim. */
@@ -81,9 +83,11 @@ function summaryWindows(quota: AccountQuota): QuotaSummaryWindow[] {
     const percent = finite(window.percent) ? window.percent : undefined;
     const resetMs = resetTimestamp(window.reset);
     const modelId = "modelId" in window ? window.modelId : undefined;
+    const modelScoped = modelId !== undefined || ("scope" in window && window.scope === "model");
     return {
       id: window.id,
       ...(modelId !== undefined ? { modelId } : {}),
+      ...("scope" in window && window.scope === "model" ? { scope: "model" as const } : {}),
       ...("key" in window && window.key ? { labelKey: window.key } : {}),
       ...("label" in window && typeof window.label === "string" ? { label: window.label } : {}),
       ...("displayLabel" in window && typeof window.displayLabel === "string" && window.displayLabel.trim()
@@ -92,7 +96,7 @@ function summaryWindows(quota: AccountQuota): QuotaSummaryWindow[] {
       ...(percent !== undefined ? { percent } : {}),
       ...("unknownBudget" in window && window.unknownBudget === true ? { unknownBudget: true as const } : {}),
       ...(resetMs !== null ? { resetAt: resetMs } : {}),
-      severity: modelId === undefined ? quotaSeverity(percent) : "normal",
+      severity: modelScoped ? "normal" : quotaSeverity(percent),
     };
   });
   const credits = quota.creditsUsd;
@@ -148,10 +152,13 @@ function headlinePreference(window: QuotaSummaryWindow): number {
  * The headline is the binding window: the most severe one, so a spent 30-day or budget window is
  * never hidden behind a 0% weekly window. Among critical windows the fullest wins, except that
  * credits yield to a critical plan window; equal severity otherwise follows `headlinePreference`.
+ * Model-family windows never headline, and a window whose reset has passed yields to a current one,
+ * because its reading predates the reset.
  */
-function pickHeadline(windows: QuotaSummaryWindow[]): QuotaSummaryWindow | undefined {
-  const measured = windows.filter(window => window.modelId === undefined && window.percent !== undefined);
-  const ranked = measured
+function pickHeadline(windows: QuotaSummaryWindow[], now: number): QuotaSummaryWindow | undefined {
+  const measured = windows.filter(window => window.modelId === undefined && window.scope === undefined && window.percent !== undefined);
+  const current = measured.filter(window => window.resetAt === undefined || window.resetAt > now);
+  const ranked = (current.length > 0 ? current : measured)
     .map((window, order) => ({ window, order }))
     .sort((a, b) => severityRank(b.window.severity) - severityRank(a.window.severity)
       || Number(a.window.labelKey === "quotaSummary.credits") - Number(b.window.labelKey === "quotaSummary.credits")
@@ -169,13 +176,14 @@ function pickHeadline(windows: QuotaSummaryWindow[]): QuotaSummaryWindow | undef
 export function buildQuotaSummary(
   reports: Record<string, ProviderQuotaReportView>,
   displayName: (provider: string) => string,
+  now = Date.now(),
 ): QuotaSummaryRow[] {
   const rows: QuotaSummaryRow[] = [];
   for (const [provider, report] of Object.entries(reports)) {
     const quota = accountQuotaFromReport(report);
     if (!quota) continue;
     const windows = summaryWindows(quota);
-    const headline = pickHeadline(windows);
+    const headline = pickHeadline(windows, now);
     if (!headline) continue;
     rows.push({
       provider,

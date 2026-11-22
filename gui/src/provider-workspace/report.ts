@@ -156,6 +156,7 @@ function windowsFromUnknown(value: unknown): QuotaWindowView[] {
           percent: row.percent as number,
           ...(finite(row.resetAt) !== undefined ? { resetAt: row.resetAt as number } : {}),
           ...(typeof row.modelId === "string" && row.modelId.length <= 128 ? { modelId: row.modelId } : {}),
+          ...(row.scope === "model" ? { scope: "model" as const } : {}),
           ...(weeklyAllowance(row.weeklyAllowancePercent) !== undefined
             ? { weeklyAllowancePercent: weeklyAllowance(row.weeklyAllowancePercent) } : {}),
         }];

@@ -330,3 +330,42 @@ test("a key the provider rejects is reported as access denied, not as a temporar
   expect(valid.quotaFailure).toBeUndefined();
   expect(rejected).toMatchObject({ id: "rejected", quota: null, quotaUnavailable: true, quotaFailure: "access_denied" });
 });
+
+test("only a refused credential is reported as access denied; other terminal reads carry no diagnosis", async () => {
+  const mistral: OcxConfig = { port: 0, defaultProvider: "mistral", providers: { mistral: {
+    adapter: "openai-chat", authMode: "key", baseUrl: "https://api.mistral.ai/v1", apiKey: "fixture-key",
+  } } };
+  globalThis.fetch = (async () => new Response(null, { status: 404 })) as typeof fetch;
+  const missing = (await (await read("/api/providers/keys?name=mistral&quota=1&refresh=1", mistral)).json()).keys[0];
+  expect(missing).toMatchObject({ quota: null, quotaUnavailable: true });
+  expect(missing.quotaFailure).toBeUndefined();
+
+  // A successful read of a key with no spending cap reports no balance; it is not a failure.
+  globalThis.fetch = (async () => Response.json({ data: { usage: 3, is_free_tier: false } })) as typeof fetch;
+  const uncapped = (await (await read("/api/providers/keys?name=openrouter&quota=1&refresh=1", keyConfig())).json()).keys[0];
+  expect(uncapped).toMatchObject({ quota: null, quotaUnavailable: false, quotaUnknownReason: "not_reported" });
+  expect(uncapped.quotaFailure).toBeUndefined();
+});
+
+test("a paused key's denial expires instead of being reported as current indefinitely", async () => {
+  const pool = [{ id: "denied", key: "fixture-denied" }] as NonNullable<OcxProviderConfig["apiKeyPool"]>;
+  const config: OcxConfig = { port: 0, defaultProvider: "mistral", providers: { mistral: {
+    adapter: "openai-chat", authMode: "key", baseUrl: "https://api.mistral.ai/v1", apiKey: "fixture-denied", apiKeyPool: pool,
+  } } };
+  globalThis.fetch = (async () => Response.json({ detail: "Invalid API Key" }, { status: 401 })) as typeof fetch;
+  const denied = (await (await read("/api/providers/keys?name=mistral&quota=1&refresh=1", config)).json()).keys[0];
+  expect(denied.quotaFailure).toBe("access_denied");
+  pool[0]!.disabled = true;
+  const start = Date.now();
+  const clock = spyOn(Date, "now");
+  try {
+    clock.mockReturnValue(start + 60_000);
+    expect((await (await read("/api/providers/keys?name=mistral&quota=1&refresh=1", config)).json()).keys[0].quotaFailure).toBe("access_denied");
+    clock.mockReturnValue(start + 31 * 60_000);
+    const later = (await (await read("/api/providers/keys?name=mistral&quota=1&refresh=1", config)).json()).keys[0];
+    expect(later.quotaUnavailable).toBe(true);
+    expect(later.quotaFailure).toBeUndefined();
+  } finally {
+    clock.mockRestore();
+  }
+});
