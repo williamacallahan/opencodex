@@ -24,11 +24,10 @@ afterEach(() => {
   home = "";
 });
 
-async function withRelay(run: (patch: (body: unknown) => Promise<Response>, list: () => Promise<Response>) => Promise<void>): Promise<void> {
+async function withRelay(run: (patch: (body: unknown) => Promise<Response>, list: () => Promise<Response>) => Promise<void>, relay: OcxProviderConfig = { adapter: "openai-chat", baseUrl: "https://relay.example/v1" }): Promise<void> {
   home = mkdtempSync(join(tmpdir(), "ocx-provider-patch-fields-"));
   process.env.OPENCODEX_HOME = home;
   const base = config("127.0.0.1");
-  const relay: OcxProviderConfig = { adapter: "openai-chat", baseUrl: "https://relay.example/v1" };
   saveConfig({ ...base, providers: { ...base.providers, relay } });
   const server = startServer(0);
   const resolved = spyOn(destinationPolicy, "providerDestinationResolvedError").mockResolvedValue(null);
@@ -71,6 +70,15 @@ describe("provider PATCH field mask", () => {
       expect((await patch({ modelSamplingDefaults: { model: null } })).status).toBe(200);
       expect(loadConfig().providers.relay?.modelSamplingDefaults).toEqual({ other: { temperature: 0 } });
     });
+  });
+
+  test.each(["https://api.openai.com/v1", "https://relay.example/backend-api/codex"])("refuses ineffective sampling defaults for Sol at %s", async baseUrl => {
+    await withRelay(async (patch, list) => {
+      const response = await patch({ modelSamplingDefaults: { "gpt-6.2-sol": { temperature: 0.2 } } });
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toContain("temperature");
+      expect((await (await list()).json()).find((row: {name: string}) => row.name === "relay").modelSamplingDefaults).toBeUndefined();
+    }, { adapter: "openai-responses", baseUrl });
   });
 
   test("sets, displays, validates, and clears the provider proxy", async () => {

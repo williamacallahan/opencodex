@@ -1,6 +1,16 @@
 import { modelInList, type OcxProviderConfig } from "../types";
+import { isCanonicalOpenAiForwardProvider, isOpenAiOperatedResponsesDestination } from "../providers/openai-tiers-destination";
+import { isCodexLbResponsesEndpoint } from "../providers/quota/codex-lb-url";
 
 type Sampling = { temperature?: number | null; topP?: number | null };
+
+export function rejectsSamplingDefaults(provider: OcxProviderConfig, modelId: string): boolean {
+  if (isCanonicalOpenAiForwardProvider(provider)) return true;
+  // OpenAI's GPT-6.2 migration guide explicitly excludes both sampling fields.
+  // A relay can also route other models to external sources; don't assume they reject sampling.
+  return (modelId === "gpt-6.2-sol" || modelId === "gpt-6.2-astra")
+    && (isOpenAiOperatedResponsesDestination(provider) || isCodexLbResponsesEndpoint(provider, provider.adapter));
+}
 
 export function applyChatSamplingDefaults(
   body: Record<string, unknown>, provider: OcxProviderConfig, modelId: string, client: Sampling,
@@ -21,7 +31,7 @@ export function resolveSamplingDefaults(
   client: Sampling,
   catalogModelId?: string,
 ): { temperature?: number; topP?: number } {
-  const records = provider.modelSamplingDefaults;
+  const records = rejectsSamplingDefaults(provider, modelId) ? undefined : provider.modelSamplingDefaults;
   const defaults = records && (Object.hasOwn(records, modelId) ? records[modelId]
     : catalogModelId && Object.hasOwn(records, catalogModelId) ? records[catalogModelId] : undefined);
   return {

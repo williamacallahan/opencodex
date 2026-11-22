@@ -1,5 +1,6 @@
 import { providerRelativeSendPathConfigError } from "../config/provider-relative-send-path";
 import { contextTierRecordConfigError, modelCapabilitiesConfigError, providerInputModalitiesConfigError } from "../config/provider-validation";
+import { rejectsSamplingDefaults } from "../adapters/sampling-defaults";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { affinityDigest } from "../codex/routing/thread-affinity-store";
 import { initialModelSelection } from "../providers/initial-model-selection";
@@ -924,6 +925,10 @@ export function providerManagementConfigError(
     return `provider ${name} must not include codexAccountMode`;
   }
   const typed = provider as unknown as OcxProviderConfig;
+  if (typed.modelSamplingDefaults && Object.entries(typed.modelSamplingDefaults).some(([model, sampling]) =>
+    (sampling?.temperature !== undefined || sampling?.topP !== undefined) && rejectsSamplingDefaults(typed, model))) {
+    return "modelSamplingDefaults cannot set temperature or topP for a model that does not support sampling on this destination";
+  }
   const markerError = anthropicOAuthInstanceConfigError({ providers: { [name]: provider } });
   if (markerError) return markerError;
   // Every write path (POST, PUT, reload, both PATCH passes) funnels through here, so a PATCH
