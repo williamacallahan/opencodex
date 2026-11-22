@@ -1,5 +1,6 @@
 import { inspectedReserveRefusal } from "./reserve-refusal-body";
-import { comboFailureDecision, comboFailureCooldownScope, targetKey, type getCombo } from "../../combos";
+import { comboFailureDecision, comboFailureCooldownScope, comboTargetSkipTrigger, earliestComboCooldownExpiry, getCombo, isComboTargetInCooldown, targetKey, type ComboPick } from "../../combos";
+import type { OcxConfig } from "../../types";
 import type { ConsumedComboFailure } from "./core-options";
 import { consumeComboFailure } from "./core-combo-failure";
 import { isNonReplayableResponse } from "../../lib/upstream-retry";
@@ -134,3 +135,181 @@ export function planLunaReserveLegs(
 
 /** Only evidence that the relay never received the turn lets native ordinary Luna send it again. */
 export const relayProvedNotStarted = (attemptLog: object, sendCount: number): boolean => sendCount === 0 || notStarted.has(attemptLog);
+
+/** Return the enabled owner target only when it is specifically blocked by combo cooldown (#1299). */
+export function coolingLunaOwnerTarget(
+  config: OcxConfig,
+  comboId: string,
+  ownerKey: string | undefined,
+  now: number,
+): ComboTarget | undefined {
+  if (!ownerKey) return undefined;
+  const owner = getCombo(config, comboId)?.targets.find(target => targetKey(target) === ownerKey);
+  if (!owner || config.providers[owner.provider]?.disabled) return undefined;
+  return earliestComboCooldownExpiry(comboId, [owner], now) !== undefined ? owner : undefined;
+}
+
+/** True when a bound native seat may still release its turn to other Reserve seats even while relay is cooling. */
+export function canWalkRemainingNativeReserve(
+  config: OcxConfig,
+  comboId: string,
+  target: ComboTarget,
+  nativeKey: string | undefined,
+  alreadyReserveOnly: boolean,
+  now: number,
+): boolean {
+  return nativeKey !== undefined
+    && targetKey(target) === nativeKey
+    && !alreadyReserveOnly
+    && !isComboTargetInCooldown(comboId, target, now)
+    && (config.codexAccounts?.length ?? 0) > 1;
+}
+
+/** Pick the successor target when porting a spent or incompatible Luna owner conversation (#1299). */
+export async function portLunaConversationTarget(args: {
+  config: OcxConfig;
+  comboId: string;
+  combo: Combo;
+  fromTarget: ComboTarget;
+  native: ComboTarget | undefined;
+  scopedRoute: (target: ComboTarget) => RouteResult | undefined;
+  eligible: (target: ComboTarget) => boolean;
+  hopAllowed: (from: ComboTarget, to: ComboTarget) => boolean;
+  pickTarget: (opts: { exclude?: Iterable<string>; eligible: (target: ComboTarget) => boolean; allowCooldownReprobe?: boolean }) => Promise<ComboPick | null>;
+  exclude?: readonly string[];
+  isPreDispatch?: boolean;
+  alreadyReserveOnly: boolean;
+  forbidSameTarget?: boolean;
+  aborted?: () => boolean;
+  now: number;
+}): Promise<{ pick: ComboPick; plan: LunaReserveLegPlan | undefined; reserveOnly: boolean; retryReserve: boolean; lunaStage: "off" | "reserve" | "relay" | "done" } | null> {
+  const fromKey = targetKey(args.fromTarget);
+  const nativeKey = args.native && targetKey(args.native);
+  const plan = args.native ? planLunaReserveLegs(args.combo, args.scopedRoute, args.eligible, args.hopAllowed, args.native) : undefined;
+  const skipNativeTarget = args.alreadyReserveOnly
+    || (fromKey === nativeKey && Boolean(args.forbidSameTarget))
+    || (Boolean(args.isPreDispatch) && fromKey === nativeKey)
+    || (fromKey !== nativeKey && Boolean(nativeKey && args.exclude?.includes(nativeKey)));
+
+  if (plan && !skipNativeTarget && args.hopAllowed(args.fromTarget, args.native!)) {
+    const startNative = await args.pickTarget({
+      exclude: fromKey === nativeKey ? args.exclude?.filter(key => key !== plan.nativeKey) : args.exclude,
+      allowCooldownReprobe: false,
+      eligible: target => targetKey(target) === plan.nativeKey && args.eligible(target),
+    });
+    if (args.aborted?.()) return null;
+    if (startNative) return { pick: startNative, plan, reserveOnly: false, retryReserve: false, lunaStage: "reserve" };
+  }
+
+  const retryReserve = !skipNativeTarget
+    && canWalkRemainingNativeReserve(args.config, args.comboId, args.fromTarget, nativeKey, args.alreadyReserveOnly, args.now);
+  if (retryReserve) {
+    const nativeRetry = await args.pickTarget({
+      allowCooldownReprobe: false,
+      eligible: target => targetKey(target) === nativeKey && args.eligible(target),
+    });
+    if (args.aborted?.()) return null;
+    if (nativeRetry) return { pick: nativeRetry, plan: undefined, reserveOnly: true, retryReserve: true, lunaStage: "done" };
+  }
+
+  const relayKey = plan?.relayKey;
+  const relayTarget = relayKey ? args.combo.targets.find(target => targetKey(target) === relayKey) : undefined;
+  const canUseRelay = relayTarget !== undefined
+    && relayKey !== fromKey
+    && !(relayKey && args.exclude?.includes(relayKey))
+    && args.hopAllowed(args.fromTarget, relayTarget)
+    && !coolingLunaOwnerTarget(args.config, args.comboId, relayKey, args.now);
+  const relayPick = canUseRelay
+    ? await args.pickTarget({ exclude: args.exclude, eligible: target => targetKey(target) === relayKey && args.eligible(target) })
+    : null;
+  if (args.aborted?.()) return null;
+  if (relayPick) return { pick: relayPick, plan, reserveOnly: false, retryReserve: false, lunaStage: "relay" };
+
+  const skipKeys = [
+    ...(args.exclude ?? []),
+    fromKey,
+    ...(skipNativeTarget && nativeKey ? [nativeKey] : []),
+    ...(relayKey && !relayPick ? [relayKey] : []),
+  ];
+  const fallback = await args.pickTarget({
+    exclude: skipKeys,
+    eligible: target => args.eligible(target) && args.hopAllowed(args.fromTarget, target),
+  });
+  if (!fallback) return null;
+  const fallbackKey = targetKey(fallback.target);
+  const lunaLegs = plan && (fallbackKey === plan.nativeKey || fallbackKey === plan.relayKey) ? plan : undefined;
+  const reserveOnly = !lunaLegs && nativeKey !== undefined && fallbackKey === nativeKey;
+  const lunaStage = lunaLegs ? (fallbackKey === lunaLegs.nativeKey ? "reserve" : "relay") : "off";
+  return { pick: fallback, plan: lunaLegs, reserveOnly, retryReserve: false, lunaStage };
+}
+
+export function onlyReplayIncompatibleTargetsRemain(
+  targets: readonly ComboTarget[],
+  config: OcxConfig,
+  excluded: Iterable<string>,
+  payloadEligible: (target: ComboTarget) => boolean,
+  reasoningReplayEligible: (target: ComboTarget) => boolean,
+): boolean {
+  const excludedKeys = new Set(excluded);
+  const remaining = targets.filter(target =>
+    config.providers[target.provider]?.disabled !== true
+    && !excludedKeys.has(targetKey(target))
+    && payloadEligible(target),
+  );
+  return remaining.length > 0 && remaining.every(target => !reasoningReplayEligible(target));
+}
+
+export async function portCoolingLunaOwnerBeforeDispatch(args: {
+  config: OcxConfig;
+  comboId: string;
+  combo: Combo;
+  owner: ComboTarget | undefined;
+  ownerKey: string;
+  native: ComboTarget | undefined;
+  scopedRoute: (target: ComboTarget) => RouteResult | undefined;
+  eligible: (target: ComboTarget) => boolean;
+  hopAllowed: (from: ComboTarget, to: ComboTarget) => boolean;
+  pickTarget: (opts: { exclude?: Iterable<string>; eligible: (target: ComboTarget) => boolean; allowCooldownReprobe?: boolean }) => Promise<ComboPick | null>;
+  prepareReplayEligibility: () => void;
+  aborted: () => boolean;
+  now: number;
+}): Promise<{ pick: ComboPick; plan: LunaReserveLegPlan | undefined; reserveOnly: boolean; lunaStage: "off" | "reserve" | "relay" | "done" } | null> {
+  const coolingOwner = coolingLunaOwnerTarget(args.config, args.comboId, args.ownerKey, args.now)
+    ?? (args.owner && !args.config.providers[args.owner.provider]?.disabled && args.ownerKey === targetKey(args.owner)
+      && (isComboTargetInCooldown(args.comboId, args.owner) || comboTargetSkipTrigger(args.config, args.owner) === "quota_exhausted")
+      ? args.owner : undefined);
+  if (!coolingOwner) return null;
+  args.prepareReplayEligibility();
+  return portLunaConversationTarget({
+    config: args.config, comboId: args.comboId, combo: args.combo, fromTarget: coolingOwner,
+    native: args.native, scopedRoute: args.scopedRoute, eligible: args.eligible,
+    hopAllowed: args.hopAllowed, pickTarget: args.pickTarget, exclude: [args.ownerKey],
+    isPreDispatch: true, alreadyReserveOnly: false, aborted: args.aborted, now: args.now,
+  });
+}
+
+export async function advanceLunaLegAfterFailure(args: {
+  lunaStage: "off" | "reserve" | "relay" | "done";
+  failedTargetKey: string;
+  legs: LunaReserveLegPlan;
+  pick: ComboPick | null;
+  unavailableOrdinaryTarget: string | undefined;
+  attemptedTargets: readonly string[];
+  aborted: boolean;
+  pickOrdinary: (exclude: string[]) => Promise<ComboPick | null>;
+}): Promise<{ lunaStage: "off" | "reserve" | "relay" | "done"; pick: ComboPick | null }> {
+  if (!(args.lunaStage === "reserve" && args.failedTargetKey === args.legs.nativeKey
+    || args.lunaStage === "relay" && args.failedTargetKey === args.legs.relayKey)) {
+    return { lunaStage: args.lunaStage, pick: args.pick };
+  }
+  const afterReserve = args.lunaStage === "reserve";
+  const ordinaryNext = afterReserve
+    ? !args.pick || targetKey(args.pick.target) !== args.legs.relayKey
+    : args.unavailableOrdinaryTarget !== args.legs.nativeKey;
+  const nextStage: "relay" | "done" = afterReserve && args.pick && targetKey(args.pick.target) === args.legs.relayKey
+    ? "relay" : "done";
+  const ordinaryPick = ordinaryNext && !args.aborted
+    ? await args.pickOrdinary(args.attemptedTargets.filter(key => key !== args.legs.nativeKey))
+    : null;
+  return { lunaStage: nextStage, pick: ordinaryPick ?? args.pick };
+}

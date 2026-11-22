@@ -93,6 +93,7 @@ import {
 import { stampApiKeyAccountLabel } from "../providers/label";
 import { publicOAuthErrorPresentation, OAuthAccountPausedError, OAuthLoginRequiredError, publicOAuthAuthenticationErrorMessage } from "../oauth";
 import { AnthropicAccountCooldownError, formatAnthropicProviderForLog, anthropicRoutingFor } from "../oauth/anthropic-routing";
+import { anthropicRatePolicyFor } from "../oauth/anthropic-rate-limit-policy";
 import { configuredAnthropicInstance } from "../providers/anthropic-instance";
 import { resolveProtocolSettings } from "../protocols/settings";
 import { addProtocolEntryReason, markProtocolBlocked } from "../protocols/trace";
@@ -911,6 +912,8 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
           },
         });
       } catch { /* Passive settlement must preserve the first upstream response. */ }
+    } else if (response.ok && oauthBinding) {
+      anthropicRatePolicyFor(oauthBinding.instance).noteAnthropicRateSuccess(oauthBinding.snapshot.accountId);
     }
     if (!options.integrity) {
     let retryPolicy: ReturnType<typeof rateLimitRetryPolicyFor> | undefined;
@@ -1030,6 +1033,9 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
       rebuildFor(oauthProvider(oauthBinding));
       logCtx.provider = formatAnthropicProviderForLog(route.providerName, oauthBinding.snapshot.accountId, config);
       response = await send(recovery);
+    }
+    if (response.ok && oauthBinding) {
+      anthropicRatePolicyFor(oauthBinding.instance).noteAnthropicRateSuccess(oauthBinding.snapshot.accountId);
     }
     }
   } catch (error) {

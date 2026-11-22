@@ -99,6 +99,8 @@ import { recordAnthropicAccountQuotaFromHeadersForInstance, hasPassiveAccountQuo
 import { checkOutboundBodySize, describeOutboundBodyRefusal } from "./outbound-body-guard";
 import { formatErrorResponse } from "../../bridge";
 import { bindRouteReasoningReplayScope, couldServeResponsesStore, PreviousResponseOwnerUnavailable } from "./core-replay";
+import { markLunaStoreMismatchResponse } from "../../codex/account-cooldown-response";
+import { requestPacingOverloadResponse } from "./pacing-overload";
 import { assignNativeLogConversationId, sessionIdHeaderFromRequest, normalizeLogConversationId } from "../request-log-conversation";
 import { redactSecretString } from "../../lib/redact";
 import { captureAccountAutoPauseAttempt } from "../../oauth/account-auto-pause";
@@ -1319,7 +1321,18 @@ export async function prepareResponsesTransport(
   try {
     proactiveKeyProvider = pickKey(route.provider);
   } catch (err) {
-    if (err instanceof BoundApiKeyUnavailableError) return markProxyError(formatErrorResponse(409, "invalid_request_error", "No available key owns this conversation state."));
+    if (err instanceof BoundApiKeyUnavailableError) {
+      const response = markProxyError(formatErrorResponse(409, "invalid_request_error", "No available key owns this conversation state."));
+      markLunaStoreMismatchResponse(response);
+      return response;
+    }
+    if (err instanceof RequestPacingQueueOverloadError && err.reason === "keys_exhausted" && ownerStore) {
+      const response = requestPacingOverloadResponse(err);
+      if (response) {
+        markLunaStoreMismatchResponse(response);
+        return response;
+      }
+    }
     if (err instanceof OAuthAccountPausedError) {
       return markProxyError(formatErrorResponse(403, "permission_error", publicOAuthAuthenticationErrorMessage(err)), publicOAuthErrorPresentation(err));
     }

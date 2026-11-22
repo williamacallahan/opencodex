@@ -1334,6 +1334,7 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
       // and measured exhaustion of the bound account always outranks a recent throttle.
       const preservePausedAffinity = bound && bound.accountId !== accountId
         && !(options.model && anthropicModelExhausted(bound.accountId, options.model))
+        && (!hasKnownUsage(options.config, bound.accountId, options.model) || isActiveUnderFillFirstThreshold(options.config, bound.accountId, options.model))
         && (anthropicRatePauseUntil(bound.accountId) !== undefined || anthropicRatePausedRecently(bound.accountId)
           || anthropicFamilyRejected(bound.accountId, options.model));
       if (key && bound && (preserveExcludedAffinity || preservePausedAffinity)) sessionAffinity.set(key, { ...bound, lastUsedAt: Date.now() });

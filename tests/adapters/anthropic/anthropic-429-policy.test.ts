@@ -154,7 +154,7 @@ function deferred<T>() {
 import { classifyAnthropic429, anthropicRetryAfterMs, anthropicRatePauseUntil } from "../../../src/oauth/anthropic-rate-limit-policy";
 import { bindAnthropicRefusalCredential, rotateAnthropicAccountOnResponse } from "../../../src/oauth/anthropic-account-refusal";
 import { credentialGeneration, getAccountCredential } from "../../../src/oauth/store";
-import { bindAnthropicSessionAffinity, resolveAnthropicAccountForSession } from "../../../src/oauth/anthropic-routing";
+import { bindAnthropicSessionAffinity, recordAnthropicAccount429, resolveAnthropicAccountForSession } from "../../../src/oauth/anthropic-routing";
 
 test.each([
   [{}, "request-scoped-unknown"],
@@ -310,4 +310,49 @@ test.each([false, true])("early throttle timer retries unless a concurrent pause
     expect(await retry).toBe(extended ? null : a!);
     expect(anthropicRatePauseUntil(a!)).toBe(extended ? start + 200 : undefined);
   } finally { now.mockRestore(); }
+});
+
+test("repeated headerless 429s across requests escalate admission pause and move to an eligible sibling", async () => {
+  const [a, b] = await seed(2);
+  const config = configFor(() => refused());
+  config.anthropicAccountPool = { enabled: true };
+  bindAnthropicSessionAffinity("repeated-headerless-session", a!);
+  const headers = { "x-claude-code-session-id": "repeated-headerless-session" };
+  // First request tries A twice inline (per headerless policy), then ends with 429.
+  const first = await handleResponses(new Request("http://localhost/v1/responses", {
+    method: "POST", headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify({ model: "anthropic/claude-sonnet-4-5", input: "turn 1", stream: false }),
+  }), config, { model: "", provider: "" });
+  expect(first.status).toBe(429);
+  expect(sent).toHaveLength(2);
+  // Second request hitting A again escalates admission pause and detours to B without pinning back onto A.
+  sent.length = 0;
+  const okConfig = configFor(body => sent.at(-1)?.authorization?.includes("access-0") ? refused() : answer(body.stream === true));
+  okConfig.anthropicAccountPool = { enabled: true };
+  const second = await handleResponses(new Request("http://localhost/v1/responses", {
+    method: "POST", headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify({ model: "anthropic/claude-sonnet-4-5", input: "turn 2", stream: false }),
+  }), okConfig, { model: "", provider: "" });
+  expect(second.status).toBe(200);
+  expect(sent.some(row => row.authorization === `Bearer ${credential(1).access}`)).toBe(true);
+  expect(anthropicRatePauseUntil(a!)).toBeDefined();
+  expect(resolveAnthropicAccountForSession("repeated-headerless-session", okConfig).accountId).toBe(b!);
+});
+
+test("over-threshold sticky account does not reclaim session affinity after a transient detour", async () => {
+  const { setCachedProviderAccountQuotaForTests } = await import("../../../src/providers/quota");
+  const { captureOAuthAccountSelection } = await import("../../../src/oauth/store");
+  const { promoteAnthropicActiveAccount } = await import("../../../src/oauth/anthropic-routing");
+  const [a, b] = await seed(2);
+  const config = configFor(() => answer(false));
+  config.anthropicAccountPool = { enabled: true, autoSwitchThreshold: 80, quotaWindow: "max-utilization" };
+  setCachedProviderAccountQuotaForTests("anthropic", a!, { weeklyPercent: 83 });
+  setCachedProviderAccountQuotaForTests("anthropic", b!, { fiveHourPercent: 1, weeklyPercent: 73 });
+  const now = Date.now();
+  bindAnthropicSessionAffinity("over-threshold-sticky", a!, now);
+  expect(recordAnthropicAccount429(config, a!, "0.01", now)).toBe(false);
+  await promoteAnthropicActiveAccount(b!, captureOAuthAccountSelection("anthropic"), {
+    config, sessionKey: "over-threshold-sticky", model: "claude-opus-5-5",
+  });
+  expect(resolveAnthropicAccountForSession("over-threshold-sticky", config, now + 50, null, "claude-opus-5-5").accountId).toBe(b!);
 });

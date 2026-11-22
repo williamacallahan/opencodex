@@ -12,7 +12,7 @@ import { buildResponsesTransport } from "../../adapters/openai-responses/transpo
 import { isMetaAiResponsesDestination } from "../../responses/muse-tool-name-alias";
 import { chatCanPreserveMandatoryToolChoice, hasMandatoryToolChoice } from "./combo-required-tool-contract";
 import { isPolicyCandidateRefusal, isMandatoryToolChoiceRefusal } from "./policy-request-scope";
-import { isCodexAccountCooldownResponse, isIssuerCapacityRefusal } from "../../codex/account-cooldown-response";
+import { isCodexAccountCooldownResponse, isIssuerCapacityRefusal, isLunaStoreMismatchResponse } from "../../codex/account-cooldown-response";
 import { resolveWireProtocolOverride } from "../adapter-resolve";
 import { parseSyntheticRowId } from "../fast-row";
 import { resolveOpenAiVirtualModel } from "../../providers/openai-virtual-models";
@@ -135,7 +135,7 @@ import {
 } from "../relay";
 import { preflightComboStreamResponse } from "./combo-stream-preflight";
 import { isOwnerCapacityRefusal } from "./owner-capacity-refusal";
-import { isReserveSeatQuotaRefusal, nativeLunaTarget, planLunaReserveLegs, portSpentLunaReasoning, prepareLunaReplay, relayProvedNotStarted } from "./combo-luna-legs";
+import { advanceLunaLegAfterFailure, isReserveSeatQuotaRefusal, nativeLunaTarget, onlyReplayIncompatibleTargetsRemain, planLunaReserveLegs, portCoolingLunaOwnerBeforeDispatch, portLunaConversationTarget, portSpentLunaReasoning, prepareLunaReplay, relayProvedNotStarted } from "./combo-luna-legs";
 import { createPoolReserveWalk, modelHasPoolReserve, type PoolCapacityIntent } from "../../codex/pool-reserve";
 import { requiredToolContractOf } from "./combo-required-tool-contract";
 import {
@@ -732,7 +732,7 @@ export async function executeComboResponses(
     && body.input.some(entry => isPlainObject(entry) && entry.type === "compaction_trigger"));
   let lunaReplay = handleOwner || projectStore || unresolvedPrevious ? prepareLunaReplay(body, comboReplaySnapshot.previousResponseInputExpanded && !localExpansion,
     req.headers, unreadableEncryptedAgentTask && encryptedTaskRecoveryAdmitted) : undefined;
-  const ported = native && lunaReplay?.kind === "bound" && lunaReplay.reason === "encrypted-reasoning"
+  const ported = (native || lunaCandidate) && lunaReplay?.kind === "bound" && lunaReplay.reason === "encrypted-reasoning"
     ? portSpentLunaReasoning(body, comboReplaySnapshot.previousResponseInputExpanded && !localExpansion, req.headers) : undefined;
   const statelessReasoningReplay = ported !== undefined && isPlainObject(body) && body.store === false
     && body.previous_response_id == null && body.background !== true && !Object.hasOwn(body, "stream_id");
@@ -766,16 +766,6 @@ export async function executeComboResponses(
     && (!lunaLegs || targetKey(recalledPick.target) === lunaLegs.nativeKey) ? recalledPick : undefined;
   let evaluatedStrictReserve = false;
   let lunaStage: "off" | "reserve" | "relay" | "done" = "off";
-  const onlyReplayIncompatibleTargetsRemain = (excluded: Iterable<string> = []): boolean => {
-    const excludedKeys = new Set(excluded);
-    const remaining = combo.targets.filter(target => {
-      const provider = config.providers[target.provider];
-      return provider?.disabled !== true
-        && !excludedKeys.has(targetKey(target))
-        && payloadEligible(target);
-    });
-    return remaining.length > 0 && remaining.every(target => !reasoningReplayEligible(target));
-  };
   let encryptedTaskRecoveryAttempted = false;
   let recoveryFailureReason: AgentTaskRecoveryFailureReason | undefined;
   let storedPool401ReplayDispatched = false;
@@ -840,30 +830,6 @@ export async function executeComboResponses(
     waitForCooldownMs: combo.waitForCooldownMs,
     abortSignal: options.abortSignal,
   });
-  // Release the owner only if the scrubbed transcript has an authorized next leg.
-  const pickForPortedOwner = async (cause: "excluded" | "refused"): Promise<ComboPick | null> => {
-    const ownerKey = boundTargetKey;
-    if (ported === undefined || !lunaPair || !native || !ownerKey || options.abortSignal?.aborted || req.signal.aborted) return null;
-    replayEligibilityBody = ported;
-    boundTargetKey = undefined;
-    const plan = planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed, native);
-    if (plan) {
-      // After a refusal, retain the bounded wait for strict Reserve; before dispatch the
-      // bound pick has already waited. Never immediately retry the relay that just refused.
-      const reserve = cause === "refused" ? await pickWithWait({ eligible: target => targetKey(target) === plan.nativeKey && targetEligible(target) }) : null;
-      const next = reserve ?? pickComboTarget(config, comboId, { routeConcreteModel, allowCooldownReprobe: false,
-        eligible: target => (cause === "excluded" && targetKey(target) === plan.nativeKey
-          || targetKey(target) === plan.relayKey && (cause === "excluded" || ownerKey !== plan.relayKey)) && targetEligible(target) });
-      if (next && !options.abortSignal?.aborted && !req.signal.aborted) {
-        dispatchBody = ported; lunaReplay = { kind: "portable", body: ported }; lunaLegs = plan;
-        lunaStage = targetKey(next.target) === plan.relayKey ? "relay" : "reserve";
-        return next;
-      }
-    }
-    boundTargetKey = ownerKey;
-    replayEligibilityBody = body;
-    return null;
-  };
   let pick = conversationPin ?? await pickWithWait({
     eligible: targetEligible,
     now: initialNow,
@@ -873,11 +839,23 @@ export async function executeComboResponses(
     ? undefined
     : jevSessionPinScope({ combo, comboId, admission: options.admission, lane: comboLane });
 
-  const owner = recorded?.target;
-  if (!pick && owner && !config.providers[owner.provider]?.disabled && boundTargetKey === targetKey(owner) && ported !== undefined && lunaPair
-    && (boundTargetKey === lunaPair.nativeKey || boundTargetKey === lunaPair.relayKey)
-    && (isComboTargetInCooldown(comboId, owner) || comboTargetSkipTrigger(config, owner) === "quota_exhausted")) {
-    pick = await pickForPortedOwner("excluded");
+  let portedBeforeDispatch = false;
+  let portedReserveOnly = false;
+  if (!pick && !handleOwner && boundTargetKey && ported !== undefined && !unreadableEncryptedAgentTask) {
+    const savedBoundKey = boundTargetKey;
+    const selected = await portCoolingLunaOwnerBeforeDispatch({
+      config, comboId, combo, owner: recorded?.target, ownerKey: savedBoundKey, native, scopedRoute,
+      eligible: targetEligible, hopAllowed: comboHopAllowed, pickTarget: pickWithWait,
+      prepareReplayEligibility: () => { replayEligibilityBody = ported; boundTargetKey = undefined; },
+      aborted: () => Boolean(options.abortSignal?.aborted || req.signal.aborted), now: initialNow,
+    });
+    if (options.abortSignal?.aborted || req.signal.aborted) return clientCancelledResponse();
+    if (selected) {
+      pick = selected.pick; dispatchBody = ported; lunaReplay = { kind: "portable", body: ported };
+      lunaLegs = selected.plan; portedBeforeDispatch = true; portedReserveOnly = selected.reserveOnly;
+    } else {
+      boundTargetKey = savedBoundKey; replayEligibilityBody = body;
+    }
   }
   if (!pick && (handleOwner || boundTargetKey && !unreadableEncryptedAgentTask)) return unavailableOwner();
   if (unreadableEncryptedAgentTask && !pick) {
@@ -913,7 +891,7 @@ export async function executeComboResponses(
     // Every enabled candidate skipped as unrepresentable: the ingress refusal, with no send.
     const protocolRefusal = protocolLanes?.refusal();
     if (protocolRefusal) return protocolRefusal;
-    if (onlyReplayIncompatibleTargetsRemain()) return targetIncompatibleResponse();
+    if (onlyReplayIncompatibleTargetsRemain(combo.targets, config, [], payloadEligible, reasoningReplayEligible)) return targetIncompatibleResponse();
     if (!options.abortSignal?.aborted && onlyMuseToolIncompatible()) {
       return comboUnavailableResponse("No available targets for combo; targets cannot preserve mandatory tool_choice");
     }
@@ -1073,7 +1051,7 @@ export async function executeComboResponses(
   const decision = comboRouteDecisionTrace(config, comboId, pick, responseModel);
   const selectedReason = options.memoryModelPhase
     ? memoryModelRouteReason(options.memoryModelPhase)
-    : ported !== undefined && dispatchBody === ported ? "luna-owner-spent-ported"
+    : portedBeforeDispatch || (ported !== undefined && dispatchBody === ported) ? "luna-owner-spent-ported"
     : lunaReplay?.kind === "bound" ? `luna-owner-${lunaReplay.reason}`
     : lunaLegs?.nativeKey === targetKey(pick.target) ? "luna-reserve-first"
     : conversationPin ? COMBO_CONVERSATION_PIN_REASON : jevDecision?.pinned ? JEV_SESSION_PIN_ROUTE_REASON : undefined;
@@ -1178,7 +1156,7 @@ export async function executeComboResponses(
       ? Math.trunc(callerBudget) : undefined);
   const comboLegCount = boundTargetKey && ported !== undefined && lunaPair ? lunaPair.legCount + 1 : lunaLegs?.legCount ?? combo.targets.length;
   let reserveWalk = isRequestExecutionBudget(options.sendBudget)
-    && (lunaLegs || ported !== undefined && lunaPair)
+    && (lunaLegs || portedBeforeDispatch || ported !== undefined && (lunaPair || lunaCandidate))
     ? createPoolReserveWalk(config) : undefined;
   const ordinaryPoolSends = 1 + CODEX_TEXT_GUARDED_BUDGET_POLICY.maxAlternateTargetSends;
   // A previously charged ledger can still visit unreported seats, but cannot grow its send limit.
@@ -1196,6 +1174,7 @@ export async function executeComboResponses(
       evaluatedStrictReserve = true;
     }
     const legIntent: PoolCapacityIntent | undefined = boundTargetKey && boundTargetKey === nativeKey ? "owner-only"
+      : portedReserveOnly && legTargetKey === nativeKey ? "reserve-only"
       : legTargetKey !== lunaLegs?.nativeKey ? undefined
       : lunaStage === "reserve" ? "reserve-only" : lunaStage === "done" ? "ordinary-only" : undefined;
     // The physical destination after provider aliases and blockedModelRedirects: hops are
@@ -1785,16 +1764,33 @@ export async function executeComboResponses(
       }
       return lastFailure;
     }
-    if (boundTargetKey && ported !== undefined && !failure.nonReplayable && !spentReplacement
-      && (attempt.sendCount === 0 ? isIssuerCapacityRefusal(failure.response) : isOwnerCapacityRefusal(failure.response.status, failure))) {
-      const next = await pickForPortedOwner("refused");
+    if (ported !== undefined && !handleOwner && boundTargetKey && !spentReplacement && (native || lunaCandidate)
+      && (attempt.sendCount === 0
+        ? ((!failure.nonReplayable && isIssuerCapacityRefusal(failure.response)) || isLunaStoreMismatchResponse(failure.response))
+        : (!failure.nonReplayable && isOwnerCapacityRefusal(failure.response.status, failure)))) {
+      const failedPick: ComboPick = pick;
+      replayEligibilityBody = ported;
+      boundTargetKey = undefined;
+      const selected = await portLunaConversationTarget({
+        config, comboId, combo, fromTarget: failedPick.target, native, scopedRoute,
+        eligible: targetEligible, hopAllowed: comboHopAllowed, pickTarget: pickWithWait,
+        exclude: [...failedPick.attempted, legTargetKey], isPreDispatch: false, alreadyReserveOnly: portedReserveOnly,
+        forbidSameTarget: isLunaStoreMismatchResponse(failure.response),
+        aborted: () => Boolean(options.abortSignal?.aborted || req.signal.aborted), now: Date.now(),
+      });
       if (options.abortSignal?.aborted || req.signal.aborted) return clientCancelledResponse();
-      if (next) {
+      if (selected) {
         if (reserveWalk) reserveWalk = createPoolReserveWalk(config);
+        dispatchBody = ported; lunaReplay = { kind: "portable", body: ported };
+        lunaLegs = selected.plan; portedReserveOnly = selected.reserveOnly;
+        lunaStage = selected.lunaStage;
+        evaluatedStrictReserve = selected.lunaStage !== "off";
         logCtx.routeDecision = { ...logCtx.routeDecision!, selected: { ...logCtx.routeDecision!.selected, reason: "luna-owner-spent-ported" } };
-        pick = next;
+        pick = selected.retryReserve ? selected.pick : { ...selected.pick, attempted: [...new Set([...failedPick.attempted, ...selected.pick.attempted])] };
         continue;
       }
+      boundTargetKey = legTargetKey;
+      replayEligibilityBody = body;
     }
     if (failureDecision === "stop") {
       adoptFailedChildLog(childLog);
@@ -1915,23 +1911,21 @@ export async function executeComboResponses(
         if (pick) cooldownRetryGeneration = writerGeneration;
       }
     }
-    if (activeLunaLegs && failureDecision === "hop"
-      && (lunaStage === "reserve" && failedTargetKey === activeLunaLegs.nativeKey || lunaStage === "relay" && failedTargetKey === activeLunaLegs.relayKey)) {
+    if (activeLunaLegs && failureDecision === "hop") {
       // After the strict Reserve leg the relay is next; after the relay, native ordinary Luna is next only on proof the relay never got the turn.
-      const afterReserve: boolean = lunaStage === "reserve";
-      const ordinaryNext = afterReserve ? !pick || targetKey(pick.target) !== activeLunaLegs.relayKey
-        : unavailableOrdinaryTarget !== activeLunaLegs.nativeKey;
-      lunaStage = afterReserve && pick && targetKey(pick.target) === activeLunaLegs.relayKey ? "relay" : "done";
-      const ordinaryPick: ComboPick | null = ordinaryNext && !options.abortSignal?.aborted ? await pickWithWait({
-        exclude: attemptedTargets.filter(key => key !== activeLunaLegs.nativeKey),
-        eligible: target => targetKey(target) === activeLunaLegs.nativeKey && targetEligible(target),
-        now: failureNow,
-      }) : null;
-      if (ordinaryPick) pick = ordinaryPick;
+      const next = await advanceLunaLegAfterFailure({
+        lunaStage, failedTargetKey, legs: activeLunaLegs, pick, unavailableOrdinaryTarget, attemptedTargets,
+        aborted: Boolean(options.abortSignal?.aborted),
+        pickOrdinary: exclude => pickWithWait({
+          exclude, eligible: target => targetKey(target) === activeLunaLegs.nativeKey && targetEligible(target), now: failureNow,
+        }),
+      });
+      lunaStage = next.lunaStage;
+      pick = next.pick;
     }
     if (!pick) {
       if (options.abortSignal?.aborted) return clientCancelledResponse();
-      if (onlyReplayIncompatibleTargetsRemain(attemptedTargets)) {
+      if (onlyReplayIncompatibleTargetsRemain(combo.targets, config, attemptedTargets, payloadEligible, reasoningReplayEligible)) {
         if (contextFailure) return exhaustedFailure();
         adoptFailedChildLog(childLog);
         return targetIncompatibleResponse();
