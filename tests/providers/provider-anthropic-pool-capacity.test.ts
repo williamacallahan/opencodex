@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import { clearAnthropicAccountPoolState } from "../../src/oauth/anthropic-routing";
 import { getAccountSet, saveCredential, setAccountPaused, setActiveAccount } from "../../src/oauth/store";
-import { clearAccountQuotaCache, clearProviderQuotaCache, fetchProviderQuotaReports, flushProviderQuotaObservationsForTests, setCachedProviderAccountQuotaForTests } from "../../src/providers/quota";
+import { clearAccountQuotaCache, clearProviderQuotaCache, fetchProviderQuotaReports, flushProviderQuotaObservationsForTests, setCachedProviderAccountQuotaForTests, setProviderQuotaBeforePublishForTests } from "../../src/providers/quota";
 import type { QuotaResetEvent } from "../../src/quota/reset-detector";
 import { setQuotaResetSink } from "../../src/quota/reset-observer";
 import { resetQuotaResetNotifyCacheForTests } from "../../src/quota/reset-notify-config";
@@ -98,6 +98,22 @@ test("a cold pool waits for its inactive accounts instead of publishing an activ
 
   expect(result?.quota.fiveHourPercent).toBe(40);
   expect(result?.aggregation).toMatchObject({ includedAccounts: 3, excludedAccounts: 0, incomplete: false });
+});
+
+test("a new observation of the same quota does not remove the pool report during publication", async () => {
+  const [, sibling] = ids as [string, string];
+  const quota = { fiveHourPercent: 20, weeklyPercent: 35, updatedAt: Date.now() - 100 };
+  setCachedProviderAccountQuotaForTests("anthropic", sibling, quota);
+  setProviderQuotaBeforePublishForTests(() => {
+    setCachedProviderAccountQuotaForTests("anthropic", sibling, { ...quota, updatedAt: Date.now() });
+  });
+  try {
+    const row = (await fetchProviderQuotaReports(config(true))).reports.find(report => report.provider === "anthropic");
+    expect(row?.quota.fiveHourPercent).toBeCloseTo(100 / 3);
+    expect(row?.aggregation?.includedAccounts).toBe(3);
+  } finally {
+    setProviderQuotaBeforePublishForTests(null);
+  }
 });
 
 test("a recently checked seat is refreshed when its five-hour window rolls over", async () => {

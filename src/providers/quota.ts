@@ -109,8 +109,7 @@ export async function fetchProviderApiKeyQuotas(config: OcxConfig, name: string,
   const provider = config.providers[name];
   if (!provider || !keyQuotaReaderForProvider(name, provider)) return [];
   return readProviderApiKeyQuotas(config, name, forceRefresh, async (isolatedProvider, isolatedConfig) => {
-    const { result, credentialRejected } = await readWithCredentialRefusal(
-      () => maybeFetchProviderQuota(name, isolatedProvider, isolatedConfig, false));
+    const { result, credentialRejected } = await readWithCredentialRefusal(() => maybeFetchProviderQuota(name, isolatedProvider, isolatedConfig, false));
     if (result === TERMINAL_QUOTA_FAILURE) return credentialRejected ? { kind: "terminal", failure: "access_denied" } : { kind: "terminal" };
     if (result === AUTHORITATIVE_EMPTY_QUOTA) return { kind: "empty" };
     return result ? { kind: "quota", quota: result.quota, source: result.source } : { kind: "unavailable" };
@@ -229,7 +228,7 @@ function notifyProviderQuotaSnapshot(
     .map(report => ({
     scope: report.provider,
     accountKey: providerObservationAccountKey(report.provider, config, report),
-    quota: observedQuotaFor.get(report) ?? report.quota,
+    quota: observedQuotaFor.get(report) ?? report.quota, retainAbsentShortWindow: report.source === "anthropic:oauth-usage",
     ...(report.source === "mistral:budget" ? { retainUnknownWindows: mistralUnknownBudgetWindows(report.quota) } : {}),
   }));
   if (observations.length === 0) return;
@@ -238,7 +237,7 @@ function notifyProviderQuotaSnapshot(
       const observer = await import("../quota/reset-observer");
       if (!observer.hasQuotaResetSink()) return;
       const { providerWindowObservations } = await import("../quota/window-mapping");
-      for (const observation of observations) observer.observeQuotaSnapshot({ scope: observation.scope, accountKey: observation.accountKey, windows: providerWindowObservations(observation.quota), ...(observation.retainUnknownWindows ? { retainUnknownWindows: observation.retainUnknownWindows } : {}) });
+      for (const observation of observations) observer.observeQuotaSnapshot({ scope: observation.scope, accountKey: observation.accountKey, windows: providerWindowObservations(observation.quota), retainAbsentShortWindow: observation.retainAbsentShortWindow, ...(observation.retainUnknownWindows ? { retainUnknownWindows: observation.retainUnknownWindows } : {}) });
     })
     .catch(() => {
       // Best-effort; a rejected link would also poison every later one in the chain.

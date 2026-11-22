@@ -300,10 +300,14 @@ export async function fetchAnthropicQuota(
   if (!initial?.accounts.length) return null;
   const scopeCurrent = () => targetCurrent() && epoch === captureProviderAccountQuotaEpoch(instance)
     && poolEnabled === isAnthropicPoolEnabledFor(config, instance);
-  const accountsToRead = initial.accounts.filter(row => !row.paused && !row.needsReauth
-    && (poolEnabled || row.id === initial.activeAccountId))
-    .toSorted((a, b) => Number(b.id === initial.activeAccountId) - Number(a.id === initial.activeAccountId));
-  const eligibleAtStart = new Map(accountsToRead.map(row => [row.id, row]));
+  hydrateAccountQuotaCache();
+  const nowAtStart = Date.now();
+  const eligible = initial.accounts.filter(row => !row.paused && !row.needsReauth
+    && (poolEnabled || row.id === initial.activeAccountId));
+  const eligibleAtStart = new Map(eligible.map(row => [row.id, row]));
+  const accountsToRead = eligible.filter(row => !resetPoll || row.id === initial.activeAccountId)
+    .map(row => ({ row, age: nowAtStart - (getCachedProviderAccountQuota(instance, row.id)?.updatedAt ?? 0) }))
+    .sort((a, b) => Number(b.row.id === initial.activeAccountId) - Number(a.row.id === initial.activeAccountId) || b.age - a.age);
   // The dashboard and account endpoints share each seat's cached reading and in-flight probe.
   // Bound the whole wait: a large pool must not block every other provider's report.
   let deadlineReached = false;
@@ -311,9 +315,9 @@ export async function fetchAnthropicQuota(
   let activeProbeSucceeded = false;
   try {
     await Promise.race([
-      mapQuotaRoster(accountsToRead, async row => {
+      mapQuotaRoster(accountsToRead, async ({ row }) => {
         if (deadlineReached || !scopeCurrent()) return;
-        const reading = await fetchAnthropicAccountQuota(instance, row.id, force && (!resetPoll || row.id === initial.activeAccountId), config);
+        const reading = await fetchAnthropicAccountQuota(instance, row.id, force, config);
         if (row.id === initial.activeAccountId) {
           activeProbeSucceeded = !reading.unavailable && reading.isCurrent?.() !== false && !!reading.quota;
         }
@@ -367,16 +371,19 @@ export async function fetchAnthropicQuota(
   const rosterIdentity = (set: NonNullable<typeof roster>) => JSON.stringify([set.activeAccountId,
     set.accounts.map(row => [row.id, row.paused === true, row.needsReauth === true, row.pauseRevision, credentialGeneration(row.credential)])]);
   const identity = rosterIdentity(roster);
+  const quotaEvidence = (quota: ProviderQuota | null, at: number) => {
+    if (!quota) return null;
+    const { updatedAt, ...windows } = quota;
+    return JSON.stringify([at - updatedAt < CODEX_CAPACITY_MAX_QUOTA_AGE_MS, windows]);
+  };
   const evidence = roster.accounts.flatMap((row, index) =>
     !row.paused && !row.needsReauth && (pooled || row.id === roster.activeAccountId)
-      ? [{ id: row.id, quota: rows[index]?.quota ?? null }] : []);
+      ? [{ id: row.id, quota: quotaEvidence(rows[index]?.quota ?? null, now) }] : []);
   accountReportCurrent.set(quotaReport, () => {
     const current = getAccountSet(instance);
+    const checkedAt = Date.now();
     return !!current && scopeCurrent() && rosterIdentity(current) === identity
-      && evidence.every(({ id, quota }) => {
-        const latest = getCachedProviderAccountQuota(instance, id);
-        return latest === quota || JSON.stringify(latest) === JSON.stringify(quota);
-      });
+      && evidence.every(({ id, quota }) => quotaEvidence(getCachedProviderAccountQuota(instance, id), checkedAt) === quota);
   });
   return quotaReport;
 }

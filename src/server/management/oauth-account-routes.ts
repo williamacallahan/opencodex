@@ -46,7 +46,7 @@ import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/ke
 import { deriveProviderPresets } from "../../providers/derive";
 import { providerCodexAccountMode } from "../../providers/registry";
 import { routedSlug, slugEquals } from "../../providers/slug-codec";
-import { clearAccountQuotaCache, clearProviderQuotaCache, clearProviderQuotaCacheFor, fetchProviderAccountQuotas, fetchProviderApiKeyQuotas, fetchProviderQuotaReports, providerOAuthAccountQuotaMode, providerApiKeyQuotaMode, readPassiveProviderAccountQuotas } from "../../providers/quota";
+import { clearAccountQuotaCache, clearProviderQuotaCache, clearProviderQuotaCacheFor, fetchProviderAccountQuotas, fetchProviderApiKeyQuotas, fetchProviderQuotaReports, providerOAuthAccountQuotaMode, providerApiKeyQuotaMode, readPassiveProviderAccountQuotas, getCachedProviderAccountQuota } from "../../providers/quota";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { clearThreadAccountMap } from "../../codex/routing";
 import { shownCodexCredits } from "../../codex/credits";
@@ -538,6 +538,8 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
           const accountLabel = accountDisplayLabel(full?.credential.email, maskEmails);
           return { ...summary, ...(maskedLabel ? { maskedLabel } : {}), ...(accountLabel ? { accountLabel } : {}),
             ...oauthAccountHealthFields(provider, summary.id, health), quotaMode,
+            ...(isAnthropicOAuthInstance(provider) && quotaMode === "probe" && full?.credential.refresh === ""
+              ? { quota: getCachedProviderAccountQuota(provider, summary.id), quotaMode: "passive" as const } : {}),
             ...(supportsPause ? { paused: full?.paused === true, ...(full?.pauseDetails ? { pauseDetails: full.pauseDetails } : {}) } : {}),
             ...(isAnthropicOAuthInstance(provider) && supportsPause ? { autoSwitchThresholdOverride: full?.autoSwitchThresholdOverride ?? null,
               effectiveAutoSwitchThreshold: effectiveAnthropicAccountThresholdForInstance(provider as AnthropicInstanceId, config, full),
@@ -567,6 +569,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     return jsonResponse({
       ...(provider === "anthropic2" ? { provider } : {}), activeAccountId: projected.activeAccountId,
       accounts: projected.accounts.map(account => {
+        if (quotaMode === "probe" && account.quotaMode === "passive") return account;
         const row = byId.get(account.id);
         // #8397: a passive provider with no observation for this account yet says so.
         if (!row) return passiveQuota ? { ...account, quotaUnknownReason: "passive_not_observed" } : account;

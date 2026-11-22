@@ -57,11 +57,9 @@ unknown, their reading is stale, or the account is paused or needs reauthenticat
 
 Business Premium seats reported as `self_serve_business_prolite` count as five Standard-seat units in this estimate. This display weight does not select accounts or create a five-hour window when the upstream reports only weekly usage. The calibration follows the [official Business usage limits](https://help.openai.com/en/articles/12003714-chatgpt-business-models-and-limits), checked 2026-10-20. OpenAI publishes no Codex usage multiplier for Pro 500, so seats reported as `promax` count the same as Pro seats: the request spend that fills a seat's weekly allowance measured the same on both plans. Unknown plans continue to count at the baseline with the unknown-plan count disclosed.
 
-For an enabled Anthropic OAuth pool with at least two accounts, the overview waits for the
-account quota reads before showing an equal-weight pool estimate. Setup-token accounts contribute
-only from usage observed in response headers. The overview marks missing readings as incomplete
-coverage rather than guessing. The provider's Usage tab shows only the selected account's usage,
-not the pool estimate.
+The overview estimates enabled Anthropic OAuth pools by weighting measured accounts equally.
+Setup-token accounts contribute only from response headers. The Usage tab shows the selected
+account's reading, not the pool estimate.
 
 A **partial window coverage** warning means some included accounts reported one quota window but
 not another. The overview keeps those windows separate and marks each affected window incomplete

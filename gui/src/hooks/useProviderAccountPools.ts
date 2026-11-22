@@ -50,16 +50,20 @@ function selectionRows<T extends { id: string; active: boolean }>(rows: T[], id:
 /** An invalidation read changes membership/selection, not quota probe state. */
 function mergeRosterRows<T extends QuotaRow>(rows: T[], previous: T[]): T[] {
   const prior = new Map(previous.map(row => [row.id, row]));
-  return mergeQuotaRows(rows, previous, false).map(row => supportsQuotaRead(row) ? {
-    ...row,
-    quotaPending: prior.get(row.id)?.quotaPending ?? false,
-    quotaUnavailable: prior.get(row.id)?.quotaMode === row.quotaMode ? prior.get(row.id)?.quotaUnavailable ?? false : false,
-    // #8397: the roster read carries no read time; keep the last reading's reason and time.
-    quotaReadAt: prior.get(row.id)?.quotaMode === row.quotaMode ? prior.get(row.id)?.quotaReadAt : undefined,
-    quotaUnknownReason: prior.get(row.id)?.quotaMode === row.quotaMode ? prior.get(row.id)?.quotaUnknownReason : undefined,
-    quotaFailure: row.quotaMode === "probe" && prior.get(row.id)?.quotaMode === row.quotaMode && prior.get(row.id)?.quotaUnavailable
-      ? parseQuotaFailureCode(prior.get(row.id)?.quotaFailure) : undefined,
-  } : row);
+  return mergeQuotaRows(rows, previous, false).map((row, index) => {
+    if (!supportsQuotaRead(row) || row.quotaMode === "passive" && rows[index]?.quota !== undefined) return row;
+    const previousReading = prior.get(row.id);
+    const sameMode = previousReading?.quotaMode === row.quotaMode;
+    return {
+      ...row,
+      quotaPending: sameMode ? previousReading?.quotaPending ?? false : false,
+      quotaUnavailable: sameMode ? previousReading?.quotaUnavailable ?? false : false,
+      quotaReadAt: sameMode ? previousReading?.quotaReadAt : undefined,
+      quotaUnknownReason: sameMode ? previousReading?.quotaUnknownReason : undefined,
+      quotaFailure: row.quotaMode === "probe" && sameMode && previousReading?.quotaUnavailable
+        ? parseQuotaFailureCode(previousReading.quotaFailure) : undefined,
+    };
+  });
 }
 
 /** A probe started before a newer roster may update quota only on surviving IDs. */
