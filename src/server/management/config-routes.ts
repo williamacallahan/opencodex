@@ -151,6 +151,7 @@ import { displayCodexRuntimePath, effortClampAppliesToRuntime, getCodexRuntimeSn
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
 import type { ManagementContext } from "./context";
+import { hasHumanDashboardSession } from "./consent-session";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 
 function quotaAutoRefreshSettings(config: OcxConfig) {
@@ -617,6 +618,16 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
     }
     if (body.codexPendingValidationByAdminRefresh !== undefined && typeof body.codexPendingValidationByAdminRefresh !== "boolean") {
       return jsonResponse({ error: "codexPendingValidationByAdminRefresh boolean is required" }, 400);
+    }
+    // The setting is consent FOR the admin token, so the admin token (and a remembered session,
+    // which derives from it) must not be able to grant it to itself. Off stays open to every caller.
+    if (body.codexPendingValidationByAdminRefresh === true && !hasHumanDashboardSession(ctx)) {
+      return jsonResponse({
+        ok: false,
+        code: "agent_consent_required",
+        error: "codexPendingValidationByAdminRefresh can be turned on only from a paired dashboard session.",
+        message: "Refused: this request carries no human dashboard session. The operator turns this on in a paired dashboard session, or with `ocx config set codexPendingValidationByAdminRefresh true` before the proxy starts.",
+      }, 403);
     }
     if (body.oauthOpenBrowser !== undefined && typeof body.oauthOpenBrowser !== "boolean") {
       return jsonResponse({ error: "oauthOpenBrowser boolean is required" }, 400);

@@ -136,38 +136,79 @@ describe("standing admin-token consent for pending Codex account validation", ()
     try {
       let warmup = () => new Response("upstream unavailable", { status: 500 });
       const sent = fakeUpstream(weeklyUsage(12), () => warmup());
+      // The first failure is recorded by a clock running five minutes ahead.
+      clock.mockImplementation(() => start + 5 * 60_000);
       await refresh(config, "admin-token");
       expect(sent.warmups).toBe(1);
       expect(readCodexAccountRecord(ACCOUNT_ID)?.codexValidationPending).toBe(true);
 
+      // Stepped back, the clock reads earlier than that failure: the future time holds nothing.
+      clock.mockImplementation(() => start);
+      await refresh(config, "admin-token");
+      expect(sent.warmups).toBe(2);
+
       clock.mockImplementation(() => start + PENDING_VALIDATION_RETRY_BACKOFF_MS - 1);
       await refresh(config, "admin-token");
-      expect(sent.warmups).toBe(1);
+      expect(sent.warmups).toBe(2);
 
       await refresh(config, "gui-session");
-      expect(sent.warmups).toBe(2);
+      expect(sent.warmups).toBe(3);
 
       // The dashboard attempt failed too, so the backoff now runs from that attempt.
       clock.mockImplementation(() => start + 2 * PENDING_VALIDATION_RETRY_BACKOFF_MS - 2);
       await refresh(config, "admin-token");
-      expect(sent.warmups).toBe(2);
+      expect(sent.warmups).toBe(3);
 
       warmup = completedWarmup;
       clock.mockImplementation(() => start + 2 * PENDING_VALIDATION_RETRY_BACKOFF_MS - 1);
       await refresh(config, "admin-token");
-      expect(sent.warmups).toBe(3);
+      expect(sent.warmups).toBe(4);
       expect(readCodexAccountRecord(ACCOUNT_ID)?.codexValidationPending).toBeUndefined();
       expect(readCodexAccountRecord(ACCOUNT_ID)?.lastCodexValidationAttemptFailedAt).toBeUndefined();
     } finally { clock.mockRestore(); }
   });
 
-  test("a warm-up refused with HTTP 403 is paced like any other failure", async () => {
+  test("a warm-up refused with HTTP 403 is not re-sent by admin-token refreshes at any age, only by a dashboard session", async () => {
     const config = pendingPool(true);
-    const sent = fakeUpstream(weeklyUsage(12), () => new Response("forbidden", { status: 403 }));
-    await refresh(config, "admin-token");
-    await refresh(config, "admin-token");
-    expect(sent.warmups).toBe(1);
-    expect(readCodexAccountRecord(ACCOUNT_ID)).toMatchObject({ codexValidationPending: true, lastCodexValidationError: "http_status:403" });
+    const start = Date.now();
+    const clock = spyOn(Date, "now").mockImplementation(() => start);
+    try {
+      const sent = fakeUpstream(weeklyUsage(12), () => new Response("forbidden", { status: 403 }));
+      await refresh(config, "admin-token");
+      expect(sent.warmups).toBe(1);
+      expect(readCodexAccountRecord(ACCOUNT_ID)).toMatchObject({ codexValidationPending: true, lastCodexValidationError: "http_status:403" });
+      clock.mockImplementation(() => start + 10 * PENDING_VALIDATION_RETRY_BACKOFF_MS);
+      await refresh(config, "admin-token");
+      expect(sent.warmups).toBe(1);
+      await refresh(config, "gui-session");
+      expect(sent.warmups).toBe(2);
+    } finally { clock.mockRestore(); }
+  });
+
+  test("a repeated skip is logged once per account until the outcome changes or a failure intervenes", async () => {
+    const config = pendingPool(true);
+    const incomplete = () => Response.json({ plan_type: "pro", rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 18_000 } } });
+    let usage: () => Response = incomplete;
+    fakeUpstream(() => usage(), () => new Response("upstream unavailable", { status: 500 }));
+    const warnings = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await refresh(config, "admin-token");
+      await refresh(config, "admin-token");
+      usage = weeklyUsage(100);
+      await refresh(config, "gui-session");
+      await refresh(config, "gui-session");
+      usage = weeklyUsage(12);
+      await refresh(config, "gui-session");
+      usage = weeklyUsage(100);
+      await refresh(config, "gui-session");
+      const prefix = `[codex] pool validation account=\u2026${ACCOUNT_ID.slice(-4)} `;
+      expect(warnings.mock.calls.map(call => String(call[0])).filter(line => line.startsWith(prefix)).map(line => line.slice(prefix.length))).toEqual([
+        "skipped reason=usage_incomplete",
+        "skipped reason=usage_exhausted window=weekly",
+        "failed reason=http_status:500",
+        "skipped reason=usage_exhausted window=weekly",
+      ]);
+    } finally { warnings.mockRestore(); }
   });
 
   test.each([
@@ -190,7 +231,7 @@ describe("standing admin-token consent for pending Codex account validation", ()
     expect(readCodexAccountRecord(ACCOUNT_ID)?.codexValidationPending).toBe(true);
   });
 
-  test("PUT /api/settings turns the setting on and off, and GET reads it back", async () => {
+  test("GET /api/settings reports the setting; a caller without a dashboard session can turn it off but not on", async () => {
     const config = pendingPool(false);
     const settings = async (body?: unknown) => {
       const req = new Request("http://127.0.0.1:10100/api/settings", {
@@ -198,17 +239,21 @@ describe("standing admin-token consent for pending Codex account validation", ()
         headers: { host: "127.0.0.1:10100", "content-type": "application/json" },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
-      const response = await handleManagementAPI(req, new URL(req.url), config, { getCachedStartupHealth: async () => startupHealthFixture() });
-      return { status: response!.status, body: await response!.json() as { codexPendingValidationByAdminRefresh?: boolean; error?: string } };
+      const response = await handleManagementAPI(req, new URL(req.url), config, { getCachedStartupHealth: async () => startupHealthFixture() }, "admin-token");
+      return { status: response!.status, body: await response!.json() as { codexPendingValidationByAdminRefresh?: boolean; code?: string } };
     };
     expect((await settings()).body.codexPendingValidationByAdminRefresh).toBe(false);
     expect((await settings({ codexPendingValidationByAdminRefresh: "yes" })).status).toBe(400);
+    const refused = await settings({ codexPendingValidationByAdminRefresh: true });
+    expect(refused.status).toBe(403);
+    expect(refused.body.code).toBe("agent_consent_required");
+    expect(config.codexPendingValidationByAdminRefresh).toBeUndefined();
     expect(loadConfig().codexPendingValidationByAdminRefresh).toBeUndefined();
 
-    expect((await settings({ codexPendingValidationByAdminRefresh: true })).body.codexPendingValidationByAdminRefresh).toBe(true);
+    // What `ocx config set codexPendingValidationByAdminRefresh true` leaves for the next start.
+    config.codexPendingValidationByAdminRefresh = true;
+    saveConfig(config);
     expect((await settings()).body.codexPendingValidationByAdminRefresh).toBe(true);
-    expect(loadConfig().codexPendingValidationByAdminRefresh).toBe(true);
-
     expect((await settings({ codexPendingValidationByAdminRefresh: false })).body.codexPendingValidationByAdminRefresh).toBe(false);
     expect(Object.hasOwn(loadConfig(), "codexPendingValidationByAdminRefresh")).toBe(false);
   });

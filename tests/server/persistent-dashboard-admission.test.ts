@@ -423,6 +423,28 @@ test("standing consent lets a remembered session and the admin token validate pe
   expect(validations).toEqual([[true, true], [true, true], [true, false]]);
 });
 
+test("only a paired dashboard session turns on standing consent for pending account validation; any caller turns it off", async () => {
+  const on = { codexPendingValidationByAdminRefresh: true }, off = { codexPendingValidationByAdminRefresh: false };
+  const admin = await dispatch(request("/api/settings", { method: "PUT", body: on }));
+  expect(admin.status).toBe(403);
+  expect(await admin.json()).toEqual({
+    ok: false,
+    code: "agent_consent_required",
+    error: "codexPendingValidationByAdminRefresh can be turned on only from a paired dashboard session.",
+    message: "Refused: this request carries no human dashboard session. The operator turns this on in a paired dashboard session, or with `ocx config set codexPendingValidationByAdminRefresh true` before the proxy starts.",
+  });
+  const device = await remember("http://127.0.0.1:10100");
+  expect((await dispatch(deviceRequest(device, "/api/settings", { method: "PUT", body: on }))).status).toBe(403);
+  expect(config.codexPendingValidationByAdminRefresh).toBeUndefined();
+  config.hostname = "127.0.0.1";
+  const session = issueGuiSession(request("/", { origin: device.origin, method: "GET", token: null }), config, state)!;
+  const paired = await dispatch(deviceRequest({ ...device, cookie: "", body: { session } }, "/api/settings", { method: "PUT", body: on }));
+  expect(paired.status).toBe(200);
+  expect(config.codexPendingValidationByAdminRefresh).toBe(true);
+  expect((await dispatch(request("/api/settings", { origin: device.origin, method: "PUT", body: off }))).status).toBe(200);
+  expect(Object.hasOwn(config, "codexPendingValidationByAdminRefresh")).toBe(false);
+});
+
 test("remembered sessions cannot pair, reveal data keys, or authorize local links", async () => {
   const device = await remember("http://127.0.0.1:10100");
   const req = deviceRequest(device, "/api/keys/reveal", { body: { id: "fixture" } });

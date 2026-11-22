@@ -350,9 +350,15 @@ export function markCodexAccountValidationFailed(
   });
 }
 
+/** A pending account whose warm-up was refused with HTTP 401/403; a completed validation or a new sign-in clears it. */
+export function isCodexValidationAuthRefused(record: CodexAccountCredentialRecord): boolean {
+  return record.codexValidationPending === true && record.lastCodexValidationStatus === "failed"
+    && (record.lastCodexValidationError === "http_status:401" || record.lastCodexValidationError === "http_status:403");
+}
+
 /**
- * Record when a pending account's warm-up failed, so an unattended refresh can pace its next
- * attempt. Fenced like the verdict writers: a late failure must not
+ * Record when a pending account's warm-up failed without an auth verdict, so an unattended
+ * refresh can pace its next attempt. Fenced like the verdict writers: a late failure must not
  * land on a credential the caller never observed.
  */
 export function markCodexAccountValidationAttemptFailed(id: string, atMs: number, expectedGeneration: number): void {

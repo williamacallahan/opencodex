@@ -164,8 +164,16 @@ operator's consent. That consent has two forms:
 - The hub setting `codexPendingValidationByAdminRefresh` (default off) is
   standing consent the operator gives once. While it is on, an admin-token
   `POST /api/codex-auth/accounts/refresh` (the CLI, a remembered device, or an
-  unattended refresh job) also validates pending accounts, and it waits 30
-  minutes after a failed validation request before sending that account another.
+  unattended refresh job) also validates pending accounts. It waits 30 minutes
+  after a failed validation request before sending that account another, and
+  never re-sends one the provider refused with HTTP 401 or 403.
+
+The admin token cannot grant itself that consent: `PUT /api/settings` accepts
+`codexPendingValidationByAdminRefresh: true` only from a paired dashboard
+session and answers `403 agent_consent_required` to an admin token or a
+remembered device. An operator without a dashboard session runs
+`ocx config set codexPendingValidationByAdminRefresh true`, which applies when
+the proxy next starts. Any management caller may turn it off.
 
 With the setting off, CLI and raw-admin refreshes read usage without validating
 pending accounts. Turning the setting on is the operator's decision: do not set

@@ -42,7 +42,7 @@ export interface CodexAccountCredentialRecord {
   lastCodexValidationError?: string;
   /** OAuth succeeded while quota was exhausted; never route until deferred validation succeeds. */
   codexValidationPending?: boolean;
-  /** When the last pending-validation warm-up failed; paces unattended retries. */
+  /** When the last pending-validation warm-up failed without an auth verdict; paces unattended retries. */
   lastCodexValidationAttemptFailedAt?: number;
   /**
    * Set when the recorded failure is TERMINAL: the OAuth grant itself was revoked or has

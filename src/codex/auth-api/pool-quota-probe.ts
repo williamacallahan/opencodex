@@ -1,7 +1,7 @@
 import { parseCodexCredits, rememberCodexCredits } from "../credits";
 import { fetchCodexUsage } from "../quota-query-backoff";
 import type { CodexUsageOwner } from "../quota-query-backoff";
-import { capturePoolQuotaWriter, getValidCodexToken, isCodexAccountGenerationLive, forceRefreshCodexPoolToken, markCodexAccountValidated, markCodexAccountValidationAttemptFailed, markCodexAccountValidationFailed, readCodexAccountRecord, isTerminalCodexPoolRefreshFailure, CodexCredentialGenerationConflictError, CodexCredentialRefreshLockTimeoutError, CodexCredentialRefreshBusyError, CodexCredentialRefreshStaleError, TokenRefreshError } from "../account-store";
+import { capturePoolQuotaWriter, getValidCodexToken, isCodexAccountGenerationLive, forceRefreshCodexPoolToken, isCodexValidationAuthRefused, markCodexAccountValidated, markCodexAccountValidationAttemptFailed, markCodexAccountValidationFailed, readCodexAccountRecord, isTerminalCodexPoolRefreshFailure, CodexCredentialGenerationConflictError, CodexCredentialRefreshLockTimeoutError, CodexCredentialRefreshBusyError, CodexCredentialRefreshStaleError, TokenRefreshError } from "../account-store";
 import type { PoolQuotaWriter } from "../quota-types";
 import { isValidWhamHistoryObservation, exhaustedCodexQuotaWindows, getAccountQuota, isCodexQuotaExhausted, isCompleteCodexQuotaRecoverySnapshot, parseUsageQuota, poolWhamPolicyObservation, setAccountQuotaFromParsed } from "../quota";
 import type { StoredAccountQuota, WhamUsageResponse } from "../quota";
@@ -25,7 +25,7 @@ export const POOL_CACHE_TTL = 5 * 60_000;
 const poolQuotaAttemptAt = new Map<string, number>();
 const MAX_TRACKED_POOL_QUOTA_ATTEMPTS = 512;
 
-export function resetPoolQuotaAttemptsForTests(): void { poolQuotaAttemptAt.clear(); }
+export function resetPoolQuotaAttemptsForTests(): void { poolQuotaAttemptAt.clear(); lastLoggedValidationSkip.clear(); }
 
 function notePoolQuotaAttempt(accountId: string, at: number): void {
   poolQuotaAttemptAt.delete(accountId);
@@ -580,14 +580,36 @@ export const PENDING_VALIDATION_RETRY_BACKOFF_MS = 30 * 60_000;
  */
 export function pendingValidationRetryHeld(accountId: string, now: number = Date.now()): boolean {
   const record = readCodexAccountRecord(accountId);
-  const failedAt = record?.codexValidationPending ? record.lastCodexValidationAttemptFailedAt : undefined;
-  if (failedAt === undefined || now - failedAt >= PENDING_VALIDATION_RETRY_BACKOFF_MS) return false;
+  if (!record?.codexValidationPending) return false;
+  // A 401/403 verdict does not age out: only a new sign-in or a dashboard click retries it.
+  if (isCodexValidationAuthRefused(record)) {
+    notePendingValidation(accountId, "skipped reason=reauth_required");
+    return true;
+  }
+  const failedAt = record.lastCodexValidationAttemptFailedAt;
+  // A failure time ahead of the clock (the clock was stepped back) must not extend the hold.
+  if (failedAt === undefined || failedAt > now || now - failedAt >= PENDING_VALIDATION_RETRY_BACKOFF_MS) return false;
   notePendingValidation(accountId, "skipped reason=retry_backoff");
   return true;
 }
 
-/** One line per dashboard validation outcome; names the account by its id suffix only. */
+/** The last `skipped ...` outcome logged per account, so an unattended refresh does not repeat it every pass. */
+const lastLoggedValidationSkip = new Map<string, string>();
+
+/**
+ * One line per validation outcome; names the account by its id suffix only. A skip is logged
+ * when it differs from that account's last logged outcome; `completed` and `failed` always log.
+ */
 function notePendingValidation(accountId: string, outcome: string): void {
+  if (outcome.startsWith("skipped ")) {
+    if (lastLoggedValidationSkip.get(accountId) === outcome) return;
+    lastLoggedValidationSkip.delete(accountId);
+    lastLoggedValidationSkip.set(accountId, outcome);
+    const oldest = lastLoggedValidationSkip.keys().next();
+    if (lastLoggedValidationSkip.size > MAX_TRACKED_POOL_QUOTA_ATTEMPTS && !oldest.done) lastLoggedValidationSkip.delete(oldest.value);
+  } else {
+    lastLoggedValidationSkip.delete(accountId);
+  }
   console.warn(`[codex] pool validation account=\u2026${accountId.slice(-4)} ${outcome}`);
 }
 
@@ -708,10 +730,9 @@ export async function fetchPoolAccountQuota(
         if (reason === "http_status:401" || reason === "http_status:403") {
           markCodexAccountValidationFailed(accountId, reason, { expectedGeneration: generation });
           markAccountNeedsReauth(accountId, captureConfigGeneration(), generation);
+        } else {
+          markCodexAccountValidationAttemptFailed(accountId, Date.now(), generation);
         }
-        // Every failure, the auth verdicts included: the account stays pending either way, and
-        // an unattended refresh would otherwise send it another warm-up on its next pass.
-        markCodexAccountValidationAttemptFailed(accountId, Date.now(), generation);
       }
     }
     return result;
