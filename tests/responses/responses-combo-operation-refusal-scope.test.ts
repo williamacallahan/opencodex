@@ -17,13 +17,15 @@ afterEach(() => { release?.(); clearComboSelectionState(); clearComboTargetCoold
 const config: OcxConfig = {
   port: 0, defaultProvider: "lb",
   providers: {
-    lb: { adapter: "openai-responses", authMode: "key", apiKey: "lb", baseUrl: "https://lb.invalid/v1" },
+    // The codex-lb base path makes the hub treat this target as a pooled relay, as in production.
+    lb: { adapter: "openai-responses", authMode: "key", apiKey: "lb", baseUrl: "https://lb.invalid/backend-api/codex" },
     pool: { adapter: "openai-responses", authMode: "key", apiKey: "pool", baseUrl: "https://pool.invalid/v1" },
   },
   combos: { sol: { strategy: "failover", targets: [{ provider: "lb", model: "sol" }, { provider: "pool", model: "sol" }] } },
 };
 
 const served: string[] = [];
+let threadARefusalCode = "";
 async function upstream(req: Request): Promise<Response> {
   const body = await req.clone().json() as { model?: string; input?: unknown };
   const provider = String(body.model).split("/")[0];
@@ -35,7 +37,7 @@ async function upstream(req: Request): Promise<Response> {
   }
   if (thread === "A") {
     return Response.json({ error: {
-      type: "server_error", code: "upstream_operation_status_unknown",
+      type: "server_error", code: threadARefusalCode,
       message: "The previous response operation may still be running; retry after the cooldown.",
     } }, { status: 503, headers: { "retry-after": "30" } });
   }
@@ -58,9 +60,20 @@ async function send(thread: string) {
 
 test("one thread's ambiguous-operation refusal leaves the target open to other threads", async () => {
   served.length = 0;
-  const refused = await send("A");
-  expect(refused.status).toBeGreaterThanOrEqual(400);
+  threadARefusalCode = "upstream_operation_status_unknown";
+  expect((await send("A")).status).toBeGreaterThanOrEqual(400);
   const other = await send("B");
   expect(other.status).toBe(200);
-  expect(served).toContain("lb:B");
+  expect(served).toEqual(["lb:A", "pool:A", "lb:B"]);
+});
+
+// Control: the same fixture still cools a target on an ordinary overload, so the case above
+// proves the refusal is exempt rather than that this harness never writes a cooldown.
+test("an ordinary overload from the same target still cools it for other threads", async () => {
+  served.length = 0;
+  threadARefusalCode = "server_is_overloaded";
+  expect((await send("A")).status).toBeGreaterThanOrEqual(400);
+  const other = await send("B");
+  expect(other.text).toContain("combo_unavailable");
+  expect(served).toEqual(["lb:A", "pool:A"]);
 });
