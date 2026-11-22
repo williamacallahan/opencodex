@@ -50,9 +50,20 @@ export interface RequestSpendTracker extends RequestSendObserver, RequestSpendSe
 }
 
 // A denial scoped to one keyed identity or pool leaves other targets fundable; every other
-// refusal (root, undurable ledger, tracking capacity) is request-wide.
-const scopedSpendDenials = new WeakSet<object>();
-export const isScopedSpendDenial = (logCtx: object): boolean => scopedSpendDenials.has(logCtx);
+// refusal (root, undurable ledger, tracking capacity) is request-wide. Each entry keeps the log
+// fields that denial overwrote, so a combo that hops past it leaves no refusal on a served row.
+type SpendRefusalStamp = Partial<Pick<RequestLogContext, "localTerminalReason" | "terminalSource" | "errorCode" | "spendRefusalDetail">>;
+const scopedSpendDenials = new WeakMap<object, SpendRefusalStamp>();
+/**
+ * Claim the identity or pool denial of the attempt that just failed, once. Returns a restore that
+ * puts back the log fields the denial stamped, or undefined when the attempt had no such denial.
+ */
+export function takeScopedSpendDenial(logCtx: SpendRefusalStamp): (() => void) | undefined {
+  const prior = scopedSpendDenials.get(logCtx);
+  if (!prior) return undefined;
+  scopedSpendDenials.delete(logCtx);
+  return () => { Object.assign(logCtx, prior); };
+}
 /** A pre-dispatch spend refusal that no spent root explains is an identity or pool denial. */
 export const isScopedSpendRefusal = (response: Response, rootId: string | undefined): boolean =>
   response.headers.get(WORKFLOW_LOCAL_REFUSAL_HEADER) === "workflow_spend_exhausted"
@@ -235,7 +246,10 @@ export function createRequestSpendTracker(
           }
           : undefined;
         lastRefusal = { reason, ...(detail ? { spend: detail } : {}) };
-        if (detail && (detail.scope === "identity" || detail.scope === "pool")) scopedSpendDenials.add(logCtx);
+        if (detail && (detail.scope === "identity" || detail.scope === "pool")) {
+          const { localTerminalReason, terminalSource, errorCode, spendRefusalDetail } = logCtx;
+          scopedSpendDenials.set(logCtx, { localTerminalReason, terminalSource, errorCode, spendRefusalDetail });
+        }
         const summary = workflowDenialSummary(reason, detail);
         if (terminal) {
           markLocalRequestLogRefusal(logCtx, summary.code);

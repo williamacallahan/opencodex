@@ -148,6 +148,8 @@ for (const scope of ["identity", "pool"] as const) test(`an unsent ${scope} deni
   expect(visited).toEqual(["earlier", "later"]);
   expect(f.wire).toEqual([]);
   expect(isComboTargetInCooldown("selected", member)).toBe(false);
+  // The served row carries no trace of the skipped member's local refusal.
+  expect([f.log.localTerminalReason, f.log.terminalSource, f.log.errorCode]).toEqual([undefined, undefined, undefined]);
   expect(result.chargedSends).toBe(2);
 });
 

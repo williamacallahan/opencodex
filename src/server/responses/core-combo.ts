@@ -66,7 +66,7 @@ import {
 } from "../../combos";
 import { formatErrorResponse } from "../../bridge";
 import { SEND_BUDGET_EXHAUSTED_CODE } from "../../lib/errors";
-import { isScopedSpendDenial, isScopedSpendRefusal } from "./request-spend";
+import { isScopedSpendRefusal, takeScopedSpendDenial } from "./request-spend";
 import {
   expandPreviousResponseInput,
   previousResponseRestoredPrefixLength,
@@ -1655,10 +1655,13 @@ export async function executeComboResponses(
     }
     const localBudgetDenial = attempt.sendCount === 0 && isProxyError(failure.response) && failure.upstreamCode === SEND_BUDGET_EXHAUSTED_CODE;
     // An identity or pool denial is this target's only: skip it uncooled, keep the earlier real failure.
+    const restoreSpendStamp = takeScopedSpendDenial(logCtx);
     const scopedDenial = attempt.sendCount === 0 && isProxyError(failure.response)
-      && (localBudgetDenial ? isScopedSpendDenial(logCtx) : isScopedSpendRefusal(failure.response, inboundClientThreadId));
+      && (localBudgetDenial ? restoreSpendStamp !== undefined : isScopedSpendRefusal(failure.response, inboundClientThreadId));
+    if (scopedDenial) restoreSpendStamp?.();
     if (localBudgetDenial && !scopedDenial && lastFailure) { attemptRetained = true; return exhaustedFailure(); }
     attemptRetained = true;
+    const keepsEarlierFailure = scopedDenial && lastFailure !== null;
     if (!(scopedDenial && lastFailure)) {
       lastFailure = failure.response;
       lastFailureUpstreamCode = failure.upstreamCode;
@@ -1671,10 +1674,12 @@ export async function executeComboResponses(
       quotaFailure = lastFailure;
       quotaFailedChildLog = childLog;
     }
-    lastFailedChildLog = childLog;
-    // The failed child's resolved destination, so the next hop compares physical targets.
-    lastFailedTarget = { provider: targetRoute.providerName, model: targetRoute.modelId };
-    lastFailedRetryAfter = failure.retryAfter;
+    if (!keepsEarlierFailure) {
+      lastFailedChildLog = childLog;
+      // The failed child's resolved destination, so the next hop compares physical targets.
+      lastFailedTarget = { provider: targetRoute.providerName, model: targetRoute.modelId };
+      lastFailedRetryAfter = failure.retryAfter;
+    }
     const hardRefusal = failure.wsPreludeVerdict && failure.wsPreludeVerdict === "hard-stop";
     if (hardRefusal && restoredRefusal) {
       adoptFailedChildLog(childLog);
