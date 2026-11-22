@@ -1,7 +1,7 @@
 import { namespacedToolName, type AdapterEvent, type OcxParsedRequest, type OcxProviderConfig, type OcxUsage, type TierDecision } from "../../types";
 import { catalogModelSupportsReasoningSummaries } from "../../codex/catalog";
 import { decodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../../responses/reasoning-envelope";
-import { configuredReasoningEfforts, mapReasoningEffort, modelRecordValue } from "../../reasoning-effort";
+import { configuredReasoningEfforts, isReasoningEffortOmitted, mapReasoningEffort, modelRecordValue, reasoningEffortMapFor } from "../../reasoning-effort";
 import { isPlainObject } from "./internal";
 
 /** Drop only replayed Responses reasoning items; all other continuation input stays untouched. */
@@ -373,8 +373,8 @@ export function normalizeConfiguredReasoningSummaryDelivery(
 
 /**
  * Apply the routed provider's real effort ladder to an existing Responses reasoning field.
- * Native forward requests keep the server-owned native clamp; unknown third-party ladders stay
- * byte-equivalent instead of acquiring a policy from this adapter.
+ * Native forward requests keep the server-owned native clamp. On other routes an explicit wire
+ * alias works without a ladder; absent both, the requested effort is left intact.
  */
 export function mapRoutedResponsesReasoningEffort(
   body: unknown,
@@ -382,19 +382,20 @@ export function mapRoutedResponsesReasoningEffort(
   modelId: string,
 ): unknown {
   if (provider.authMode === "forward") return body;
-  if (configuredReasoningEfforts(provider, modelId) === undefined) return body;
   if (!isPlainObject(body) || !isPlainObject(body.reasoning)) return body;
+  const requested = body.reasoning.effort;
+  if (typeof requested !== "string") return body;
+  const wireMap = reasoningEffortMapFor(provider, modelId);
+  if ((!wireMap || !Object.hasOwn(wireMap, requested === "ultra" ? "max" : requested))
+    && configuredReasoningEfforts(provider, modelId) === undefined) return body;
   const declaredEfforts = modelRecordValue(provider.modelReasoningEfforts, modelId) ?? provider.reasoningEfforts;
   // An explicitly empty ladder means no effort control, not no reasoning output.
   // Omit only effort so the upstream default applies; unknown/non-rankable ladders stay untouched.
-  if (declaredEfforts?.length === 0 && Object.hasOwn(body.reasoning, "effort")) {
+  const mapped = declaredEfforts?.length === 0 ? "__omit__" : mapReasoningEffort(provider, modelId, requested, true);
+  if (isReasoningEffortOmitted(mapped)) {
     const { effort: _effort, ...reasoning } = body.reasoning;
     return { ...body, reasoning: Object.keys(reasoning).length > 0 ? reasoning : undefined };
   }
-  const requested = body.reasoning.effort;
-  if (typeof requested !== "string") return body;
-
-  const mapped = mapReasoningEffort(provider, modelId, requested);
   if (!mapped || mapped === requested) return body;
   return { ...body, reasoning: { ...body.reasoning, effort: mapped } };
 }

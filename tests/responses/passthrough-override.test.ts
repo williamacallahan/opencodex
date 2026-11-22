@@ -9,6 +9,19 @@ const createResponsesPassthroughAdapter = (...args: Parameters<typeof createResp
 
 const forwardProvider = { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" as const };
 
+test("Responses effort maps work without a ladder and omit only the mapped effort", () => {
+  const model = "custom-test-reasoner";
+  const build = (settings: Partial<OcxProviderConfig>, effort = "xhigh") => {
+    const adapter = createResponsesPassthroughAdapter({ adapter: "openai-responses", baseUrl: "https://relay.example/v1", ...settings });
+    return JSON.parse(String(adapter.buildRequest({ modelId: model, stream: false, context: { messages: [] }, options: {},
+      _rawBody: { model, input: "hi", reasoning: { effort, summary: "auto" } } }, { headers: new Headers() }).body)).reasoning;
+  };
+  expect(build({ reasoningEffortMap: { xhigh: "high" } })).toEqual({ effort: "high", summary: "auto" });
+  expect(build({ modelReasoningEffortMap: { [model]: { xhigh: "__omit__" } } })).toEqual({ summary: "auto" });
+  expect(build({ reasoningEfforts: ["high"], reasoningEffortMap: { high: "__omit__" } })).toEqual({ summary: "auto" });
+  expect(build({ reasoningEffortMap: { xhigh: "high" } }, "provider-specific")).toEqual({ effort: "provider-specific", summary: "auto" });
+});
+
 describe("Responses sampling defaults", () => {
   test("fills missing values without replacing explicit sampling and preserves canonical stripping", () => {
     const model = "deepseek-v4-1-flash-1017";

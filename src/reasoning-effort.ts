@@ -240,7 +240,7 @@ export function reasoningEffortMapFor(provider: OcxProviderConfig, modelId: stri
  * Translate Codex's reasoning label into the provider's real wire value. Prefer identity labels
  * (`xhigh` stays `xhigh`, `max` stays `max`); provider maps are only for real upstream aliases.
  */
-export function mapReasoningEffort(provider: OcxProviderConfig, modelId: string, requested: string | undefined): string | undefined {
+export function mapReasoningEffort(provider: OcxProviderConfig, modelId: string, requested: string | undefined, preserveOmission = false): string | undefined {
   if (!requested) return undefined;
   if (modelInList(provider.noReasoningModels, modelId)) return undefined;
 
@@ -252,7 +252,7 @@ export function mapReasoningEffort(provider: OcxProviderConfig, modelId: string,
   const wireMap = reasoningEffortMapFor(provider, modelId);
   if (wireMap && Object.prototype.hasOwnProperty.call(wireMap, boundary)) {
     const mapped = wireMap[boundary];
-    return mapped === REASONING_EFFORT_OMIT_SENTINEL ? undefined : mapped;
+    return !preserveOmission && isReasoningEffortOmitted(mapped) ? undefined : mapped;
   }
 
   const supported = configuredReasoningEfforts(provider, modelId);
@@ -267,7 +267,7 @@ export function mapReasoningEffort(provider: OcxProviderConfig, modelId: string,
   const wire = codexEffort === "ultra" ? "max" : codexEffort;
   if (wireMap && Object.prototype.hasOwnProperty.call(wireMap, wire)) {
     const mapped = wireMap[wire];
-    return mapped === REASONING_EFFORT_OMIT_SENTINEL ? undefined : mapped;
+    return !preserveOmission && isReasoningEffortOmitted(mapped) ? undefined : mapped;
   }
   if (wire === REASONING_EFFORT_OMIT_SENTINEL) return undefined;
   return wire;
