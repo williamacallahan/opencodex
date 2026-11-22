@@ -566,6 +566,14 @@ single-flight/lock files can be created under `OPENCODEX_HOME`, non-healthy OAut
 accounts (redacted ids) with a recovery `Action:`, and a static OK that the Codex forward path does
 not fabricate official-client metadata. Doctor never mutates credentials or applies repairs.
 
+An `auth.json` that exists but is empty or not valid JSON is a `FAIL` in this section, naming
+`empty_file` or `invalid_json`, and `ocx doctor` exits nonzero. The proxy serves an empty OAuth
+account pool from such a file, so Claude and other OAuth providers answer as if no account were
+signed in; the accounts did not sign out, and restoring the file brings them back. The proxy keeps
+one `auth.json.invalid-<timestamp>` copy of each such file and logs
+`OAuth account store unreadable; serving an empty pool` once for it. A missing `auth.json` is a
+normal installation with no OAuth accounts and is not reported.
+
 ## Catalog sync
 
 ### Read saved state separately from synchronization

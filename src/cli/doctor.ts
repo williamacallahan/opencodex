@@ -76,7 +76,7 @@ import {
   resolveCodexRuntime,
 } from "../codex/runtime";
 import { CODEX_REAUTH_ACTION, collectOAuthHealthEntriesForCli, MASKED_ACCOUNT_FALLBACK, type OAuthHealthEntry } from "../oauth/health";
-import { getAuthRefreshIntentLockPath, getAuthStorePath } from "../oauth/store";
+import { getAuthRefreshIntentLockPath, getAuthStorePath, peekAuthStoreUnreadableReason } from "../oauth/store";
 import {
   fetchBoundLocalManagementRead,
   type LocalManagementReadDeps,
@@ -331,6 +331,15 @@ export async function collectOAuthDoctorChecks(
       level: "WARN",
       message:
         "OAuth credential storage directory is not writable. Action: fix permissions on OPENCODEX_HOME so ocx can create temp files and rename auth.json",
+    });
+  }
+
+  const unreadableStore = peekAuthStoreUnreadableReason();
+  if (unreadableStore) {
+    checks.push({
+      level: "FAIL",
+      message:
+        `OAuth account store auth.json is unreadable (${unreadableStore}); the proxy serves an empty OAuth account pool until the file is replaced. The accounts did not sign out. Action: restore auth.json from a backup, or import or sign in to the accounts again`,
     });
   }
 

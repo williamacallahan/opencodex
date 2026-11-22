@@ -36,6 +36,7 @@ import { atomicWriteFileNoFollowUnclaimed, atomicWriteFileStreamed } from "../co
 import { assertNotRealHomeUnderTest } from "../lib/test-home-guard";
 import { recordOwnedConfigPath, registerOwnedConfigPath, type OwnedPathRegistration } from "../lib/config-ownership";
 import { statTimeMs } from "../lib/file-identity";
+import { isPassiveRead } from "../lib/passive-read";
 import { MAX_PENDING_OAUTH_MUTATIONS } from "../lib/translator-budget";
 import { publishAccountSelection, publishOAuthAccountPauseChange, prepareOAuthCredentialRotation, publishOAuthAccountRoutingPolicyChange } from "../lib/account-selection-events";
 import {
@@ -46,6 +47,7 @@ import { validateCopilotApiBaseUrl } from "./github-copilot";
 import { validateDevinApiBaseUrl } from "./devin/api-base";
 import { REFRESH_SKEW_MS } from "./refresh-policy";
 import { parseAnthropicAccountThreshold } from "./anthropic-account-threshold";
+import { logOAuthEvent } from "./log";
 import type { OAuthAccountSelection, OAuthCredentialSource, OAuthCredentials, ProviderAccount, ProviderAccountSet } from "./types";
 
 export type AuthStore = Record<string, ProviderAccountSet>;
@@ -360,20 +362,50 @@ export function credentialGeneration(cred: OAuthCredentials): string {
   return createHash("sha256").update(JSON.stringify([cred.refresh, cred.access, cred.expires, ...(cred.workbuddy ? [cred.workbuddy] : [])])).digest("hex");
 }
 
+/** Why an existing auth.json cannot be loaded; `read_failed` means the read itself threw. An absent file is not unreadable. */
+export type AuthStoreUnreadableReason = "empty_file" | "invalid_json" | "read_failed";
+
+/** The unreadable auth.json this process already quarantined and reported; null once the store loads, is absent, or is rewritten. */
+let reportedUnreadableAuthStore: string | null = null;
+
+function authStoreUnreadableReason(raw: string | undefined): AuthStoreUnreadableReason {
+  if (raw === undefined) return "read_failed";
+  return raw.length === 0 ? "empty_file" : "invalid_json";
+}
+
+/**
+ * Quarantine and report an unreadable auth.json once per distinct file content, never once per load:
+ * requests load the store continuously, so a copy per load fills the config directory and a line per
+ * load buries the one an operator needs. The line carries the closed reason and no file content.
+ */
+function reportUnreadableAuthStore(path: string, raw: string | undefined): void {
+  // A passive read leaves the file for the Home's own load to quarantine and report (#6959).
+  if (isPassiveRead()) return;
+  const reason = authStoreUnreadableReason(raw);
+  const identity = `${path}\0${reason}\0${createHash("sha256").update(raw ?? "").digest("hex")}`;
+  if (reportedUnreadableAuthStore === identity) return;
+  reportedUnreadableAuthStore = identity;
+  backupInvalidConfig(path);
+  logOAuthEvent("level=error OAuth account store unreadable; serving an empty pool", { reason });
+}
+
 /** Load and normalize the OAuth auth store with hardened permissions, and hand the result to the opt-in decision-quota slot (a no-op unless JEV quota signals are active). */
 function loadAuthStoreInternal(): { store: AuthStore; hadLegacy: boolean } {
   const path = getAuthStorePath();
   hardenConfigDir();
   hardenExistingSecret(path);
-  if (!existsSync(path)) { notifyAuthStoreLoaded({}); return { store: {}, hadLegacy: false }; }
+  if (!existsSync(path)) { reportedUnreadableAuthStore = null; notifyAuthStoreLoaded({}); return { store: {}, hadLegacy: false }; }
   let result: { store: AuthStore; hadLegacy: boolean };
+  let raw: string | undefined;
   try {
-    result = normalizeAuthStore(JSON.parse(readFileSync(path, "utf-8")));
+    raw = readFileSync(path, "utf-8");
+    result = normalizeAuthStore(JSON.parse(raw));
   } catch {
-    backupInvalidConfig(path);
+    reportUnreadableAuthStore(path, raw);
     notifyAuthStoreLoaded({});
     return { store: {}, hadLegacy: false };
   }
+  reportedUnreadableAuthStore = null;
   // Outside the parse try: roster publication is advisory and must never route a loaded store into the invalid-config backup path.
   notifyAuthStoreLoaded(result.store);
   return result;
@@ -415,6 +447,17 @@ export function peekAuthStore(): AuthStore {
   return snapshot.kind === "ready" ? snapshot.store : {};
 }
 
+/**
+ * Observe-only verdict for diagnostics (`ocx doctor`): why the on-disk auth.json would load as an
+ * empty pool, or null when it is absent or loads. Same parse as the loader; quarantines and logs nothing.
+ */
+export function peekAuthStoreUnreadableReason(): AuthStoreUnreadableReason | null {
+  const path = getAuthStorePath();
+  if (!existsSync(path)) return null;
+  const raw = readFileSync(path, "utf-8");
+  try { normalizeAuthStore(JSON.parse(raw)); return null; } catch { return authStoreUnreadableReason(raw); }
+}
+
 /** Atomically write the auth store with owner-only permissions, then hand it to the opt-in decision-quota slot. */
 function persist(store: AuthStore): void {
   const dir = getConfigDir();
@@ -426,6 +469,7 @@ function persist(store: AuthStore): void {
   }
   hardenConfigDir();
   publishCredentialSync(() => atomicWriteFileStreamed(getAuthStorePath(), fd => writeFileSync(fd, JSON.stringify(store, null, 2) + "\n")));
+  reportedUnreadableAuthStore = null;
   notifyAuthStoreLoaded(store);
 }
 

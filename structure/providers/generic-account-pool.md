@@ -4,6 +4,23 @@
 flush failure leaves the prior store in place; the subsequent parent-directory flush is best
 effort on POSIX and unavailable on Windows.
 
+An `auth.json` that exists but cannot be loaded serves an empty account pool, which is otherwise
+indistinguishable from every account having signed out. `loadAuthStoreInternal` in
+`src/oauth/store.ts` therefore copies it to `auth.json.invalid-<timestamp>` and prints
+`[opencodex] level=error OAuth account store unreadable; serving an empty pool reason=<reason>`
+once per distinct unreadable content, not once per load: requests load the store continuously, and
+a copy per load fills the config directory. `reason` is `empty_file` (zero bytes), `invalid_json`
+(bytes that do not parse) or `read_failed` (the read itself threw); the line never carries file
+content. A load that succeeds, an absent file and any store write clear that record, so a file
+that goes bad again is copied and reported again. An absent file stays a silent empty pool, and a
+passive read leaves the file for the Home's own load.
+
+`GET /readyz` does not report this. Its status is the startup-sync enum of `src/server/readiness.ts`
+and a holding gate in front of a hub treats `pending` as a drain, so a not-ready answer would stop
+every provider, including those that never read `auth.json`. `ocx doctor` reports it instead:
+`collectOAuthDoctorChecks` in `src/cli/doctor.ts` reads the file observe-only through
+`peekAuthStoreUnreadableReason` and adds a `FAIL` check naming the reason, which fails the command.
+
 ## Conversation affinity
 
 `src/oauth/generic-session-affinity.ts` owns opt-in generic-pool conversation bindings. Provider-local

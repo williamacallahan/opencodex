@@ -39,9 +39,10 @@ function isForbiddenFieldKey(key: string): boolean {
 
 export function logOAuthEvent(
   event: string,
-  fields: { provider: string; accountId?: string; [key: string]: unknown },
+  fields: { provider?: string; accountId?: string; [key: string]: unknown },
 ): void {
-  const parts = [`[opencodex] ${event}`, `provider=${fields.provider}`];
+  const parts = [`[opencodex] ${event}`];
+  if (fields.provider) parts.push(`provider=${fields.provider}`);
   if (fields.accountId) parts.push(`account=${maskAccountId(fields.accountId)}`);
   for (const [key, value] of Object.entries(fields)) {
     if (key === "provider" || key === "accountId") continue;

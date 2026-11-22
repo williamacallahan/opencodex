@@ -368,6 +368,9 @@ describe("Remote Link management relay on the Home", () => {
       startOwnedLifecycle: () => { throw new Error("fixture: not activated"); },
     });
     nativeStartup.__resetNativeMainOwnershipRetries();
+    // A malformed store no Home load has seen: the Home backs each distinct one up once, so the
+    // one written at setup is already backed up and could not show a passive read doing it.
+    writeFileSync(join(testHome, "auth.json"), "{ not json either", { mode: 0o644 });
     const durableBefore = durableState();
     upstreamHits = 0;
     passiveEffects = [];
