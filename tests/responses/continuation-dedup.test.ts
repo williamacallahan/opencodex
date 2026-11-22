@@ -95,12 +95,19 @@ describe("replay overlap: skips a verbatim client-carried history", () => {
     expect(replayOverlapSkipsForTests()).toBe(1);
   });
 
-  test("still expands when the typed resend carries different text", () => {
+  // A user `output_text` part parses as empty and a `text` part does not close a Luna turn, and the
+  // 8 KiB cap judges the item as sent, so none of these may match the stored string turn.
+  test.each([
+    ["different text", "question one", "input_text", "question ONE"],
+    ["an output_text tag", "question one", "output_text", "question one"],
+    ["a text tag", "question one", "text", "question one"],
+    ["an over-cap typed form", "x".repeat(8150), "input_text", "x".repeat(8150)],
+  ])("still expands when the typed resend carries %s", (_label, stored, partType, resent) => {
     const first = identifiedResponse("resp_typed_diff", "answer one");
-    rememberResponseState({ model: "m", input: "question one", store: true }, first);
+    rememberResponseState({ model: "m", input: stored, store: true }, first);
 
     const clientInput = [
-      { type: "message", role: "user", content: [{ type: "input_text", text: "question ONE" }] },
+      { type: "message", role: "user", content: [{ type: partType, text: resent }] },
       first.output[0],
       { role: "user", content: "question two" },
     ];

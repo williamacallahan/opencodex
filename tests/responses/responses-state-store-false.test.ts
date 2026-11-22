@@ -60,6 +60,16 @@ describe("Responses unforced store:false ephemeral function call state", () => {
     expect(allowsUnforcedStoreFalseReplay([call], 0, [result], 0)).toBe(true);
   });
 
+  test("an older carried result does not answer a newer call that reuses its call_id", () => {
+    const oldCall = { type: "function_call", id: "fc_old", call_id: "c", name: "probe", arguments: "{}" };
+    const oldResult = { type: "function_call_output", call_id: "c", output: "old" };
+    const newCall = { type: "function_call", id: "fc_new", call_id: "c", name: "probe", arguments: "{}" };
+    const newResult = { type: "function_call_output", call_id: "c", output: "new" };
+    const stored = [{ role: "user", content: "ask" }, oldCall, oldResult, newCall];
+    // The client carries the whole stored history, then answers the new call.
+    expect(allowsUnforcedStoreFalseReplay(stored, 1, [...stored, newResult], stored.length)).toBe(true);
+  });
+
   for (const spilled of [false, true]) {
     for (const boundary of [undefined, -1, 0.5, "1", null, 1000]) {
       test(`restricted ${spilled ? "spill" : "resident"} snapshot rejects boundary ${String(boundary)}`, async () => {

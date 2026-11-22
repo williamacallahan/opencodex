@@ -22,26 +22,31 @@ export function allowsUnforcedStoreFalseReplay(
   if (typeof providerOutputStart !== "number" || !Number.isSafeInteger(providerOutputStart)
     || providerOutputStart < 0 || providerOutputStart > stored.length) return false;
   const anchor = providerOutputStart;
-  const pendingCallIds = new Map<string, string>();
-  for (const item of stored.slice(anchor)) {
+  // call_id -> expected output type and the stored index of the call it answers.
+  const pendingCallIds = new Map<string, { outputType: string; index: number }>();
+  stored.slice(anchor).forEach((item, offset) => {
     if (item && typeof item === "object") {
       const outputType = clientToolOutputType((item as { type?: unknown }).type);
       const callId = (item as { call_id?: unknown }).call_id;
-      if (outputType && typeof callId === "string" && callId) pendingCallIds.set(callId, outputType);
+      if (outputType && typeof callId === "string" && callId) pendingCallIds.set(callId, { outputType, index: anchor + offset });
     }
-  }
+  });
+  // A carried result answers a pending call only when it comes after that call: a provider can reuse
+  // a call_id, and an older result for the earlier call must not clear the new one.
   for (let i = 0; i < carried; i++) {
     const item = clientInput[i];
     if (item && typeof item === "object") {
       const callId = (item as { call_id?: unknown }).call_id;
-      if (typeof callId === "string" && pendingCallIds.get(callId) === (item as { type?: unknown }).type) pendingCallIds.delete(callId);
+      const pending = typeof callId === "string" ? pendingCallIds.get(callId) : undefined;
+      if (pending && pending.outputType === (item as { type?: unknown }).type && i > pending.index) {
+        pendingCallIds.delete(callId as string);
+      }
     }
   }
   return clientInput.slice(carried).some(item => {
     if (item && typeof item === "object") {
       const callId = (item as { call_id?: unknown }).call_id;
-      return typeof callId === "string" && pendingCallIds.has(callId)
-        && pendingCallIds.get(callId) === (item as { type?: unknown }).type;
+      return typeof callId === "string" && pendingCallIds.get(callId)?.outputType === (item as { type?: unknown }).type;
     }
     return false;
   });
