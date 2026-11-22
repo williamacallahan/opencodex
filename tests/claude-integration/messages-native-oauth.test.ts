@@ -20,6 +20,7 @@ import { clearAnthropicAccountPoolState, resetAnthropicRoutingForManualSelection
 import { captureOAuthAccountSelection, getAccountCredential, getAccountSet, markAccountNeedsReauth, replaceProviderAccountSet, saveAccountCredential, saveCredential, setAccountPaused, setActiveAccount } from "../../src/oauth/store";
 import { clearUpstreamHostHealth, getUpstreamHostHealth, upstreamHostHealthKey } from "../../src/codex/upstream-host-health";
 import { handleClaudeMessages } from "../../src/server/claude-messages";
+import { clearComboRecallForTests } from "../../src/server/responses/combo-session-recall";
 import * as familyQuota from "../../src/oauth/anthropic-model-quota";
 import { anthropicSessionAffinitySizeForTests } from "../../src/oauth/anthropic-routing";
 import { nativeOAuthBindingIsCurrent, resolveNativeOAuthBinding } from "../../src/server/messages-native-oauth";
@@ -1045,6 +1046,7 @@ describe("strict Messages OAuth public HTTP transport", () => {
       await upstream?.stop(true); upstream = undefined;
       await drainAndRemoveFixtureRoots({ roots: [], restoreEnvironment() {} });
     } finally {
+      clearComboRecallForTests();
       if (previousClaude === undefined) delete process.env.CLAUDE_CONFIG_DIR;
       else process.env.CLAUDE_CONFIG_DIR = previousClaude;
       if (previousCodex === undefined) delete process.env.CODEX_HOME;
