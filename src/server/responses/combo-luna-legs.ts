@@ -87,7 +87,7 @@ export function prepareLunaReplay(body: unknown, expanded: boolean, headers: Hea
 
 export function portSpentLunaReasoning(body: unknown, expanded: boolean, headers: Headers): unknown | undefined {
   const full = stripPreviousResponseId(body, expanded);
-  if (!isPlainObject(full) || !Array.isArray(full.input)) return undefined;
+  if (!isPlainObject(full) || full.store === true || !Array.isArray(full.input)) return undefined;
   const boundary = closedReasoningPrefix(full.input);
   const input: unknown[] = [];
   for (const [index, item] of full.input.entries()) {

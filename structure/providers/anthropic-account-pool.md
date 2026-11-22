@@ -412,8 +412,10 @@ without clearing affinity; a request gets one same-account wait up to one second
 one eligible sibling detour. Repeated consecutive 429 refusals without an intervening success escalate
 the admission pause (15s to 120s), clear sticky detour grace when a sibling is eligible, and permit
 headerless refusals to detour on later requests; non-retryable single-send refusals (`canRetry: false`)
-apply the same admission backoff floor and release affinity when an alternate exists without marking
-shared-quota health. Timer rounding at the captured retry deadline permits that
+apply the admission backoff floor and release affinity when an alternate exists without marking
+shared-quota health. A first headerless refusal without an eligible alternate stays request-local;
+a valid Retry-After always sets its deadline, including on an inline retry. Success clears strikes
+only for the credential generation that physically sent it. Timer rounding at the captured retry deadline permits that
 retry, while a concurrent admission-pause extension still blocks it. Headerless/invalid-hint
 refusals get at most one short same-account
 retry and never cool the roster or invent a client Retry-After. Main, pre-output continuation

@@ -246,6 +246,39 @@ afterEach(async () => {
 const tools = [{ type: "function", name: "get_weather", description: "Weather", parameters: { type: "object", properties: {} } }];
 
 describe("combo Luna Reserve owner cooling and store-mismatch porting (#1299)", () => {
+  test("stored encrypted tool turn never moves to another store when owner and relay cool", async () => {
+    const cfg = config();
+    seedSpentReserveSeats();
+    native = () => sse("gpt-reserve", "turn1", { reasoningId: "rs_stored", callId: "call_stored" });
+    expect((await post(cfg, { tools, input: "step 1" }, "stored-owner")).status).toBe(200);
+    coolComboTarget("luna", { provider: "openai", model: "gpt-6-luna" }, { now, status: 503, retryAfter: "300" });
+    coolComboTarget("luna", { provider: "relay", model: "gpt-6-luna" }, { now, status: 503, retryAfter: "300" });
+    calls = [];
+    await post(cfg, { store: true, tools, input: [
+      { type: "reasoning", id: "rs_stored", encrypted_content: "native-secret-blob", summary: [] },
+      { type: "function_call", id: "fc_1", call_id: "call_stored", name: "get_weather", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_stored", output: "sunny" },
+    ] }, "stored-owner");
+    expect(calls).toEqual([]);
+  });
+  test("later owned reasoning cannot erase foreign reasoning across an outstanding tool call", async () => {
+    const cfg = config();
+    seedSpentReserveSeats();
+    native = () => sse("gpt-reserve", "first", { reasoningId: "rs_native", encrypted: "native-cipher", callId: "first" });
+    relay = () => sse("gpt-6-luna", "second", { reasoningId: "rs_relay", encrypted: "relay-cipher", callId: "second" });
+    expect((await post(cfg, { tools, input: "start" }, "mixed-owner")).status).toBe(200);
+    coolComboTarget("luna", { provider: "openai", model: "gpt-6-luna" }, { now, status: 503, retryAfter: "300" });
+    const foreign = { type: "reasoning", id: "rs_native", encrypted_content: "native-cipher", summary: [] };
+    const pending = { type: "function_call", call_id: "first", name: "get_weather", arguments: "{}" };
+    expect((await post(cfg, { tools, input: [foreign, pending, { type: "function_call_output", call_id: "first", output: "sunny" }] }, "mixed-owner")).status).toBe(200);
+    calls = [];
+    const result = await post(cfg, { tools, input: [foreign, pending,
+      { type: "reasoning", id: "rs_relay", encrypted_content: "relay-cipher", summary: [] },
+    ] }, "mixed-owner");
+    expect(result.status).toBe(409);
+    expect(calls).toEqual([]);
+  });
+
   test("cooling owner and cooling relay port cleanly to 3rd backup without 503 or foreign reasoning leak", async () => {
     const cfg = config();
     seedSpentReserveSeats();
