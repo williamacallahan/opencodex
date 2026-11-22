@@ -12,6 +12,7 @@ import type { ResponsesAdmissionState } from "./core-options";
 import { guardOpenGatewayCompletion } from "./opengateway-completion-guard";
 import { parseOutboundRequestBody } from "./outbound-request-body";
 import { carryResponseToolOwnership } from "./response-tool-ownership";
+import { carryCredentialMask } from "../../lib/outbound-credential-registry";
 
 export { parseOutboundRequestBody } from "./outbound-request-body";
 
@@ -80,7 +81,7 @@ export function selectPassthroughResetResponse(
     && response.status === 200 && response.body !== null;
   const stallMs = resolveStallTimeoutMs(options.config.stallTimeoutSec, { localUpstream: isLocalUpstream(options.request.url) });
   const protect = (source: Response): Response =>
-    carryResponseToolOwnership(source, guardResponseBodyInactivity(source, options.signal, stallMs).response);
+    carryCredentialMask(source, carryResponseToolOwnership(source, guardResponseBodyInactivity(source, options.signal, stallMs).response));
   const quotaOwner = (): MainQuotaDispatch | undefined =>
     admission.authCtx.kind === "main" ? admission.authCtx.mainQuotaDispatch : undefined;
   const originalOwner = quotaOwner();

@@ -18,6 +18,7 @@ import type { RequestFailureStage } from "../../lib/request-failure-model";
 import type { RequestLogContext } from "../request-log";
 import { carryProviderResponseProvenance } from "../../providers/request-pacing";
 import { carryResponseToolOwnership } from "./response-tool-ownership";
+import { attachCredentialMask, carryCredentialMask, combineCredentialMasks, physicalCredentialMasks, type CredentialMask } from "../../lib/outbound-credential-registry";
 import { createSseInspector } from "../relay";
 import { sseDataPayload } from "../sse-payload-rewrite";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
@@ -1165,6 +1166,11 @@ function createResetSelection(
     statusText: response.statusText,
     headers: response.headers,
   }));
+  // The head published here may later relay a replacement body; its mask must follow the body.
+  if (physicalCredentialMasks.has(response)) {
+    attachCredentialMask(held, combineCredentialMasks(() => [response, selection?.owner === "replacement" ? selection.response : undefined]
+      .flatMap((source): CredentialMask[] => { const mask = source && physicalCredentialMasks.get(source); return mask ? [mask] : []; })));
+  }
 
   if (!early) {
     if (signal?.aborted) onAbort();
@@ -1179,7 +1185,7 @@ function createResetSelection(
       if (deadline !== undefined) clearTimeout(deadline);
       endInspectionWindow();
       // A published selection owns its own body; the hold and its abort hook are finished.
-      if (published !== held) detach();
+      if (published !== held) { detach(); if (owner === "original") carryCredentialMask(response, published); }
       try { options?.onCommit?.(published, owner); } finally { resolve(published); }
     };
     if (signal?.aborted) {

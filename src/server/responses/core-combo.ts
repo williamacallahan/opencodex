@@ -66,6 +66,7 @@ import {
 } from "../../combos";
 import { formatErrorResponse } from "../../bridge";
 import { SEND_BUDGET_EXHAUSTED_CODE } from "../../lib/errors";
+import { isScopedSpendDenial, isScopedSpendRefusal } from "./request-spend";
 import {
   expandPreviousResponseInput,
   previousResponseRestoredPrefixLength,
@@ -1653,15 +1654,20 @@ export async function executeComboResponses(
       localAdmissionRefusals = undefined;
     }
     const localBudgetDenial = attempt.sendCount === 0 && isProxyError(failure.response) && failure.upstreamCode === SEND_BUDGET_EXHAUSTED_CODE;
-    if (localBudgetDenial && lastFailure) { attemptRetained = true; return exhaustedFailure(); }
+    // An identity or pool denial is this target's only: skip it uncooled, keep the earlier real failure.
+    const scopedDenial = attempt.sendCount === 0 && isProxyError(failure.response)
+      && (localBudgetDenial ? isScopedSpendDenial(logCtx) : isScopedSpendRefusal(failure.response, inboundClientThreadId));
+    if (localBudgetDenial && !scopedDenial && lastFailure) { attemptRetained = true; return exhaustedFailure(); }
     attemptRetained = true;
-    lastFailure = failure.response;
-    lastFailureUpstreamCode = failure.upstreamCode;
+    if (!(scopedDenial && lastFailure)) {
+      lastFailure = failure.response;
+      lastFailureUpstreamCode = failure.upstreamCode;
+    }
     toolChoiceRefusalsOnly = (toolChoiceRefusalsOnly ?? true) && isMandatoryToolChoiceRefusal(failure.response);
     // A real target failure ends the session pin; the next turn is decided afresh (#7525).
     jevPin?.forget();
     // A strict Reserve refusal is this leg's own typed answer, not the ladder's quota evidence.
-    if (!quotaFailure && legIntent !== "reserve-only" && (lastFailure.status === 429 || lastFailure.status === 402)) {
+    if (!quotaFailure && !scopedDenial && legIntent !== "reserve-only" && (lastFailure.status === 429 || lastFailure.status === 402)) {
       quotaFailure = lastFailure;
       quotaFailedChildLog = childLog;
     }
@@ -1687,7 +1693,7 @@ export async function executeComboResponses(
     }
     // A non-replayable failure (the answer to a spent ambiguous-reset replacement) may follow a
     // send that already ran the turn, so no later target may receive it, whatever its status says.
-    const failureDecision = localBudgetDenial || boundTargetKey !== undefined || hardRefusal || failure.nonReplayable || spentReplacement
+    const failureDecision = scopedDenial ? "hop" : localBudgetDenial || boundTargetKey !== undefined || hardRefusal || failure.nonReplayable || spentReplacement
       ? "stop"
       : isPolicyCandidateRefusal(failure.response) ? "hop"
       : comboFailureDecision(failure.response.status, failure.classificationText, {
@@ -1802,7 +1808,7 @@ export async function executeComboResponses(
     const pooledRelay = hasUpstreamSeatPool(targetRoute, childLog.providerAdapter);
     const relayCooldown = pooledRelay
       ? relayFailureCooldownMs(failure.response.status, failure.relayRetryAfterHeader, combo.cooldownMs, failureNow) : undefined;
-    const failureCooldownScope = reserveCapacityRefused || isPolicyCandidateRefusal(failure.response) ? "none"
+    const failureCooldownScope = reserveCapacityRefused || scopedDenial || isPolicyCandidateRefusal(failure.response) ? "none"
       : relayCooldown !== undefined && classifiedScope === "provider" ? "target" : classifiedScope;
     const failedTargetKey = targetKey(pick.target);
     let failedTargetCooled = false;

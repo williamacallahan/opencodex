@@ -779,6 +779,20 @@ function preventsTransientResend(res: Response, bytes: Uint8Array, complete: boo
   return isDefiniteContextOverflow(res.status, prefix, retryContextOverflowMessage);
 }
 
+const policyInspected = new WeakSet<Response>();
+/**
+ * One bounded verdict on whether a failed response is a typed policy refusal. Reuses any completed
+ * inspection, so an alternate-account send is never decided on a missing verdict (the final
+ * same-account attempt and a 429 never pass through the retry loop's own probe).
+ */
+export async function inspectPolicyRefusal(response: Response, signal?: AbortSignal): Promise<PolicyRefusal | undefined> {
+  const known = policyRefusals.get(response);
+  if (known || policyInspected.has(response) || response.ok || !response.body || response.bodyUsed) return known;
+  await bodyPreventsTransientResend(response, CONTEXT_OVERFLOW_PEEK_MS, signal);
+  if (!signal?.aborted) policyInspected.add(response);
+  return policyRefusals.get(response);
+}
+
 /** Inspect one bounded clone. Context verdicts can use a prefix; policy requires the complete document. */
 async function bodyPreventsTransientResend(res: Response, deadlineMs: number, signal?: AbortSignal): Promise<boolean> {
   const reader = res.clone().body?.getReader();

@@ -3,7 +3,7 @@ import type { RequestSendObserver } from "../../lib/request-execution-budget";
 import { sharedSpendLedger, sharedSpendPolicy, type SpendReservationLedger, type SpendScopes, type SpendSeed, type SpendReservationProof, type SpendAdmissionPolicy } from "../../lib/spend-reservation-ledger";
 import { SpendLedgerOwnerError } from "../../lib/spend-ledger-owner";
 import { markLocalRequestLogRefusal, type RequestLogContext } from "../request-log";
-import { chargeWorkflowSends, recordWorkflowRefusalEvent, reserveWorkflowSend, workflowDenialSummary, type WorkflowDenial, type WorkflowSpendDenialDetail } from "../../lib/workflow-budget";
+import { chargeWorkflowSends, recordWorkflowRefusalEvent, reserveWorkflowSend, workflowDenialSummary, workflowSpendCeilingReached, WORKFLOW_LOCAL_REFUSAL_HEADER, type WorkflowDenial, type WorkflowSpendDenialDetail } from "../../lib/workflow-budget";
 import { currentWorkflowBudgetPolicy } from "../../lib/workflow-budget-config";
 
 /** The terminal usage a request reported, in the only two fields the ledger books. */
@@ -48,6 +48,15 @@ export interface RequestSpendTracker extends RequestSendObserver, RequestSpendSe
   reportFromSeed(seed: SpendSeed, ordinal: number): void;
   requestFinalSettlement(usage: TerminalSpendUsage | undefined): void;
 }
+
+// A denial scoped to one keyed identity or pool leaves other targets fundable; every other
+// refusal (root, undurable ledger, tracking capacity) is request-wide.
+const scopedSpendDenials = new WeakSet<object>();
+export const isScopedSpendDenial = (logCtx: object): boolean => scopedSpendDenials.has(logCtx);
+/** A pre-dispatch spend refusal that no spent root explains is an identity or pool denial. */
+export const isScopedSpendRefusal = (response: Response, rootId: string | undefined): boolean =>
+  response.headers.get(WORKFLOW_LOCAL_REFUSAL_HEADER) === "workflow_spend_exhausted"
+  && (rootId === undefined || workflowSpendCeilingReached(rootId) === undefined);
 
 /**
  * One request's entries in the durable spend ledger (#4707).
@@ -201,6 +210,7 @@ export function createRequestSpendTracker(
   };
   const refusal = (denial: import("../../lib/spend-reservation-ledger").SpendDenial, terminal = true): void => {
         refusals += 1;
+        scopedSpendDenials.delete(logCtx);
         // Preserve the PR's explicit unresolved-history refusal and its distinct operator code.
         if (denial.reason === "pool-history-unresolved") {
           lastRefusal = { reason: "workflow-pool-history-unresolved" };
@@ -225,6 +235,7 @@ export function createRequestSpendTracker(
           }
           : undefined;
         lastRefusal = { reason, ...(detail ? { spend: detail } : {}) };
+        if (detail && (detail.scope === "identity" || detail.scope === "pool")) scopedSpendDenials.add(logCtx);
         const summary = workflowDenialSummary(reason, detail);
         if (terminal) {
           markLocalRequestLogRefusal(logCtx, summary.code);
@@ -238,6 +249,7 @@ export function createRequestSpendTracker(
   const claimWorkflowSend = (terminal = true): boolean => {
     if (reserveWorkflowSend(rootId, currentWorkflowBudgetPolicy())) return true;
     refusals++;
+    scopedSpendDenials.delete(logCtx);
     lastRefusal = { reason: "workflow-sends-exhausted" };
     const summary = workflowDenialSummary("workflow-sends-exhausted");
     if (terminal) { markLocalRequestLogRefusal(logCtx, summary.code); logCtx.errorCode = summary.code; }
@@ -346,7 +358,9 @@ export function createRequestSpendTracker(
         rebindTarget(target, ordinal) {
           const entry = physical.get(ordinal);
           const owned = starts.find(start => start.ordinal === ordinal);
-          if (closed || !entry || !owned || entry.sendId) throw new Error("Invalid spend reporter rebind");
+          if (closed || !entry || !owned) throw new Error("Invalid spend reporter rebind");
+          // A committed send stays on the key that issued it; the next start binds its own target.
+          if (entry.sendId || entry.reportPending || entry.reportComplete) return true;
           const old = seedState(entry.seed)!;
           // A helper start is provisional until selection reaches the executor. If this is
           // the first start on its seed, abandon/rebind at NORMAL capacity before the wire.
