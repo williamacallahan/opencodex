@@ -5,6 +5,7 @@ import { providerRequestPacingStatus, resetProviderRequestPacingForTest, waitFor
 import type { OcxConfig } from "../../src/types";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { clearKeyCooldowns } from "../../src/providers/key-failover";
+import type { RequestLogContext } from "../../src/server/request-log";
 
 for (const trigger of ["queued", "key-rotation"] as const) for (const adapter of ["openai-chat", "openai-responses", "command-code"] as const) test.each([
   { initial: "http://127.0.0.1:8000/v1", final: "https://gateway.example/v1", clocks: 1 },
@@ -28,10 +29,12 @@ for (const trigger of ["queued", "key-rotation"] as const) for (const adapter of
   const headers = Promise.withResolvers<void>();
   const parent = new AbortController();
   const sends: string[] = [];
-  globalThis.fetch = (async input => {
+  const wireEfforts: string[] = [];
+  globalThis.fetch = (async (input, init) => {
     sends.push(String(input));
+    if (adapter === "openai-responses") wireEfforts.push(JSON.parse(String(init?.body)).reasoning.effort);
     if (trigger === "key-rotation" && sends.length === 1) {
-      config.providers.fixture = { ...config.providers.fixture!, baseUrl: row.final };
+      config.providers.fixture = { ...config.providers.fixture!, baseUrl: row.final, reasoningEffortMap: { high: "low" } };
       saveConfig(config);
       return Response.json({ error: { message: "fixture rejected credential" } }, { status: adapter === "openai-responses" ? 429 : 401 });
     }
@@ -43,16 +46,19 @@ for (const trigger of ["queued", "key-rotation"] as const) for (const adapter of
   const config: OcxConfig = { defaultProvider: "fixture", providers: { fixture: {
     adapter, authMode: "key", apiKey: "fixture-key", baseUrl: row.initial,
     models: ["fixture-model"], allowPrivateNetwork: true, apiKeySelectionRevision: "initial",
+    reasoningEfforts: ["low", "high"],
     ...(trigger === "key-rotation" ? { apiKeyPool: [{ id: "first", key: "fixture-key" }, { id: "second", key: "fixture-refreshed-key" }] } : {}),
     requestPacing: { enabled: true, maxConcurrentRequests: 1 },
   } } };
   saveConfig(config);
   const provider = config.providers.fixture!;
   const held = trigger === "queued" ? await waitForProviderRequestSlot("fixture", provider, "fixture-model") : undefined;
+  const log: RequestLogContext = { model: "", provider: "" };
   const pending = handleResponses(new Request("http://localhost/v1/responses", {
     method: "POST", headers: { "content-type": "application/json" }, signal: parent.signal,
-    body: JSON.stringify({ model: "fixture/fixture-model", input: "fixture", stream: false }),
-  }), config, { model: "", provider: "" });
+    body: JSON.stringify({ model: "fixture/fixture-model", input: "fixture", stream: false,
+      ...(adapter === "openai-responses" ? { reasoning: { effort: "high" } } : {}) }),
+  }), config, log);
   let settled: Response | undefined;
   void pending.then(response => { settled = response; });
   try {
@@ -73,6 +79,10 @@ for (const trigger of ["queued", "key-rotation"] as const) for (const adapter of
     const body = await response.text();
     expect(response.status, body).toBe(200);
     expect(body).toContain("fixture reply");
+    if (adapter === "openai-responses" && trigger === "key-rotation") {
+      expect(wireEfforts).toEqual(["high", "low"]);
+      expect(log.attempts?.map(attempt => attempt.reasoningWireValue)).toEqual(wireEfforts);
+    }
   } finally {
     parent.abort(); headers.resolve(); held?.release(); await pending.catch(() => {});
     globalThis.fetch = originalFetch; timerSpy.mockRestore(); timers.forEach(clearTimeout);

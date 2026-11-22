@@ -226,7 +226,8 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         outBody,
         forward ? stripRoutedIdentity : (text: string) => nameRoutedIdentity(text, parsed.modelId),
       );
-      outBody = mapRoutedResponsesReasoningEffort(outBody, provider, parsed.modelId);
+      const effortMapping = mapRoutedResponsesReasoningEffort(outBody, provider, parsed.modelId, parsed._reasoningEffortCap);
+      outBody = effortMapping.body;
       // stripPreviousResponseId() intentionally returns its input on a no-op. Detach before the
       // tier write so a force-fast/default decision can never mutate parsed._rawBody.
       outBody = applyTierDecisionToResponsesBody(outBody, parsed.options?.tierDecision);
@@ -574,6 +575,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         headers,
         body,
         responsesEffortOmitted: !(isPlainObject(wireBody) && isPlainObject(wireBody.reasoning) && typeof wireBody.reasoning.effort === "string"),
+        responsesCappedRung: effortMapping.cappedRung,
         reasoningLog: responsesReasoningLog(wireBody),
         hostedToolSubstitutions,
         ...(isPlainObject(wireBody) && typeof wireBody.model === "string" ? { outboundModelId: wireBody.model } : {}),

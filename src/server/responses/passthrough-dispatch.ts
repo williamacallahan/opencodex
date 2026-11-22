@@ -765,7 +765,7 @@ export async function preparePassthroughExchange(
         { wireModel: request.outboundModelId }),
       next => replayGuard.sendHandler(() => {
         next?.();
-        recordAdapterReasoning(logCtx, request);
+        if (route.provider.authMode === "forward") recordAdapterReasoning(logCtx, request);
       }),
     );
     /**
@@ -1762,7 +1762,7 @@ export async function preparePassthroughExchange(
     // published rung until it works, the ladder ends, or the send budget is spent.
     const downgrade = request.responsesEffortOmitted ? undefined
       : await refusedReasoningEffortDowngrade(upstreamResponse, upstream.signal, reasoningEffortDowngradeGuard,
-        options.comboAttempt, { provider: route.provider, modelId: parsed.modelId, requested: parsed.options.reasoning });
+        options.comboAttempt, { provider: route.provider, modelId: parsed.modelId, requested: request.responsesCappedRung ?? parsed.options.reasoning });
     if (downgrade && !configuredTransientSendBudgetExhausted()) {
       reasoningEffortDowngradeGuard.attempted = true;
       parsed.options.reasoning = downgrade.effort;

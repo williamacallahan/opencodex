@@ -113,6 +113,7 @@ import {
   beginRequestAttempt,
   sealRequestAttemptIdentity,
   recordAttemptCredentialSource,
+  recordAdapterReasoning,
   recordAdapterTierMetadata,
   noteProviderAttemptSend,
   recordKeyAttemptFailure,
@@ -991,7 +992,12 @@ export async function prepareResponsesTransport(
             // may still refuse at the HTTP executor. Its note follows that final admission.
             const deferredCopilotNote = route.providerName === "github-copilot" && route.provider.authMode !== "forward";
             const deferredKeyNote = usesApiKeyAccount(route.provider) && !deferredCopilotNote;
-            if (ws?.provider === route.provider && deferredKeyNote) ws.onSent = commitKeyAttemptSend;
+            const noteResponsesEffort = wireRequest.responsesEffortOmitted !== undefined;
+            const noteSent = () => {
+              if (deferredKeyNote || deferredCopilotNote) commitKeyAttemptSend();
+              if (noteResponsesEffort) recordAdapterReasoning(logCtx, wireRequest);
+            };
+            if (ws?.provider === route.provider && (deferredKeyNote || deferredCopilotNote || noteResponsesEffort)) ws.onSent = noteSent;
             // The WS executor dials its own socket: HTTP connection policy and body coding do not apply.
             // WS eligibility (egress, pacing, URL) was checked for the provider it was built for; a
             // provider reselected above was not, so it takes the HTTP fallback under its own route.
@@ -999,8 +1005,9 @@ export async function prepareResponsesTransport(
               distributedKeyPhysicalFetch(anthropicBillingPhysicalFetch(fetchImpl, route.providerName, route.provider), route.providerName, route.provider, target),
               input,
               { ...physicalInit, redirect: "manual",
-                ...(deferredKeyNote ? physicalSendCommitInit(() => { settlePhysicalDispatch(physicalInit); commitKeyAttemptSend(); }) : {}),
-                ...physicalSendObserverInit(observeAutoPause, destination instanceof Request ? destination.url : String(destination), deferredCopilotNote ? commitKeyAttemptSend : undefined),
+                ...((deferredKeyNote || (noteResponsesEffort && !deferredCopilotNote))
+                  ? physicalSendCommitInit(() => { settlePhysicalDispatch(physicalInit); noteSent(); }) : {}),
+                ...physicalSendObserverInit(observeAutoPause, destination instanceof Request ? destination.url : String(destination), deferredCopilotNote ? noteSent : undefined),
                 ...(hasVertexRequestAuthority(wireRequest) ? physicalSendGuardInit((finalTarget, finalHeaders) => {
                     if (!selectionIsCurrent(requestBindings.get(wireRequest)) || !vertexRequestAuthorityIsCurrent(wireRequest, finalTarget, finalHeaders)) throw new Error("Vertex credential authority changed before dispatch");
                   }) : {}) },

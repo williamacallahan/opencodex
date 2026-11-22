@@ -159,6 +159,8 @@ export interface AdapterRequest {
     releaseBodyObservation?: () => void;
     /** The final Responses payload has no effort field; its upstream default cannot reject a caller-supplied rung. */
     responsesEffortOmitted?: boolean;
+    /** The lower logical rung selected by the Responses wire cap, for refusal attribution. */
+    responsesCappedRung?: string;
     /** Exact reasoning parameter emitted by the adapter, for request-log diagnostics only. */
     reasoningLog?:
       | {

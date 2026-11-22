@@ -362,6 +362,8 @@ Caps only lower effort. They snap to the highest advertised rung at or below the
 no effort control or no supported rung fits, opencodex removes the effort and lets the provider default
 apply. `max` and `ultra` are accepted, while the dashboard offers `low` through `xhigh`.
 
+On routed Responses requests, a provider alias to a standard effort above the ceiling falls back to a lower supported effort that fits. If none fits, OpenCodex omits the effort field and the provider chooses its default. The ceiling cannot rank provider-specific labels or guarantee compute when the effort is omitted.
+
 Configured caps also apply to eligible native Chat Completions turns that carry no model effort pin. Provider wire mapping runs when a pin is applied or when a cap changes the value; a native caller value keeps its original wire spelling when neither happens.
 
 For a beginner-oriented explanation of v1, default, and v2 behavior, see

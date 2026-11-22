@@ -360,9 +360,11 @@ export async function applyFinalRouteRequestNormalization(args: {
         if (Object.keys(raw.reasoning).length === 0) delete raw.reasoning;
       }
     }
-    const { applyEffortCap, effortCapAppliesTo, supportedLadderFor } = await import("../effort-policy");
+    const { applyEffortCap, effortCapAppliesTo, effortCapFor, isThreadSpawnRequest } = await import("../effort-policy");
     const surface = collabSurface(parsed);
-    if (effortCapAppliesTo(surface, req.headers, config, parsed._compactionRequest === true)) {
+    const capApplies = effortCapAppliesTo(surface, req.headers, config, parsed._compactionRequest === true);
+    parsed._reasoningEffortCap = capApplies ? effortCapFor(config, isThreadSpawnRequest(req.headers)) : undefined;
+    if (capApplies) {
       const capped = applyEffortCap(parsed, req.headers, config, supportedLadderFor(route));
       if (capped) {
         logCtx.requestedEffort = `${capped.from}->${capped.to}`;

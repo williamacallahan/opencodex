@@ -36,7 +36,7 @@ export function createSteeringSettingsNormalizer(
       const clamp = shouldApplyNativeEffortClamp(route.providerName, route.provider, route.modelId)
         ? nativeEffortClamp(route.modelId, candidate.options.reasoning) : null;
       if (clamp && record(body.reasoning)) body.reasoning.effort = clamp;
-      body = mapRoutedResponsesReasoningEffort(body, route.provider, route.modelId) as Frame;
+      body = mapRoutedResponsesReasoningEffort(body, route.provider, route.modelId).body as Frame;
       body.reasoning = stripEmptyLadderEffort(body.reasoning, supportedLadderFor(route));
     }
     body = stripDisabledVerbosity(stripDisabledReasoningSummaries(

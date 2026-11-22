@@ -239,6 +239,57 @@ afterEach(() => {
 });
 
 describe("rejected reasoning rungs", () => {
+  test.each([
+    { cap: "high", mapped: "xhigh", ladder: ["low", "medium", "high", "xhigh"], expected: "medium", combo: false },
+    { cap: "high", mapped: "xhigh", ladder: ["low", "medium", "high", "xhigh"], expected: "medium", combo: true },
+    { cap: "high", mapped: "xhigh", ladder: ["high", "xhigh"], expected: undefined, combo: false },
+    { cap: "high", mapped: "provider-deep", ladder: ["low", "high", "xhigh"], expected: "provider-deep", combo: false },
+    { cap: undefined, mapped: "xhigh", ladder: ["low", "high", "xhigh"], expected: "xhigh", combo: false },
+  ])("honors the cap after a Responses wire alias (%j)", async ({ cap, mapped, ladder, expected, combo }) => {
+    const cfg = passthroughConfig();
+    cfg.effortCap = cap;
+    cfg.providers.first!.reasoningEfforts = [...ladder];
+    cfg.providers.first!.reasoningEffortMap = { high: mapped };
+    if (combo) cfg.combos = { effort: { strategy: "failover", targets: [{ provider: "first", model: MODEL }] } };
+    const outbound: unknown[] = [];
+    globalThis.fetch = (async (_input, init) => {
+      outbound.push(JSON.parse(String(init?.body)).reasoning);
+      return success();
+    }) as typeof fetch;
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-openai-subagent": "collab_spawn" },
+      body: JSON.stringify({ model: combo ? "combo/effort" : `first/${MODEL}`, input: "go", stream: false,
+        reasoning: { effort: "high", summary: "auto" } }),
+    }), cfg, { model: "", provider: "" });
+    expect(response.status, await response.text()).toBe(200);
+    expect(outbound).toEqual([{ summary: "auto", ...(expected === undefined ? {} : { effort: expected }) }]);
+  });
+
+  test.each([false, true])("reports a routed compact effort only if the body was sent (invalid proxy: %s)", async invalidProxy => {
+    const cfg = passthroughConfig();
+    if (invalidProxy) cfg.providers.first!.proxy = "ftp://egress.example";
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const sent: unknown[] = [];
+    globalThis.fetch = (async (_input, init) => {
+      sent.push(effortOf(JSON.parse(String(init?.body))));
+      return Response.json({ id: "resp-compact", object: "response", status: "completed", output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "handoff" }] },
+      ] });
+    }) as typeof fetch;
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: `first/${MODEL}`, stream: false, reasoning: { effort: "high" }, input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "go" }] }, { type: "compaction_trigger" },
+      ] }),
+    }), cfg, logCtx);
+    const result = await response.text();
+    if (invalidProxy) expect(response.ok, result).toBe(false);
+    else expect(response.status, result).toBe(200);
+    expect(sent).toEqual(invalidProxy ? [] : ["high"]);
+    expect(logCtx.reasoningWireValue).toBe(invalidProxy ? undefined : "high");
+  });
+
   test("clamps a rung the model does not publish before dispatch", async () => {
     writeSnapshot(["minimal", "low", "medium", "high", "xhigh"]);
     const outbound: Array<Record<string, unknown>> = [];

@@ -1,7 +1,7 @@
-import { namespacedToolName, type AdapterEvent, type OcxParsedRequest, type OcxProviderConfig, type OcxUsage, type TierDecision } from "../../types";
+import type { OcxProviderConfig } from "../../types";
 import { catalogModelSupportsReasoningSummaries } from "../../codex/catalog";
 import { decodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../../responses/reasoning-envelope";
-import { configuredReasoningEfforts, isDeclaredReasoningEffort, isReasoningEffortOmitted, mapReasoningEffort, modelRecordValue, reasoningEffortMapFor } from "../../reasoning-effort";
+import { codexEffortRank, configuredReasoningEfforts, isDeclaredReasoningEffort, isReasoningEffortOmitted, mapReasoningEffort, modelRecordValue, REASONING_EFFORT_OMIT_SENTINEL, reasoningEffortMapFor } from "../../reasoning-effort";
 import type { AdapterRequest } from "../base";
 import { isPlainObject } from "./internal";
 
@@ -387,22 +387,39 @@ export function mapRoutedResponsesReasoningEffort(
   body: unknown,
   provider: OcxProviderConfig,
   modelId: string,
-): unknown {
-  if (provider.authMode === "forward") return body;
-  if (!isPlainObject(body) || !isPlainObject(body.reasoning)) return body;
+  cap?: string,
+): { body: unknown; cappedRung?: string } {
+  if (provider.authMode === "forward") return { body };
+  if (!isPlainObject(body) || !isPlainObject(body.reasoning)) return { body };
   const requested = body.reasoning.effort;
-  if (typeof requested !== "string") return body;
+  if (typeof requested !== "string") return { body };
   const wireMap = reasoningEffortMapFor(provider, modelId);
-  if ((!wireMap || !Object.hasOwn(wireMap, requested === "ultra" ? "max" : requested))
-    && configuredReasoningEfforts(provider, modelId) === undefined) return body;
+  const explicitAlias = wireMap && Object.hasOwn(wireMap, requested === "ultra" ? "max" : requested);
+  if (!explicitAlias && configuredReasoningEfforts(provider, modelId) === undefined) return { body };
   const declaredEfforts = modelRecordValue(provider.modelReasoningEfforts, modelId) ?? provider.reasoningEfforts;
   // An explicitly empty ladder means no effort control, not no reasoning output.
   // Omit only effort so the upstream default applies; unknown/non-rankable ladders stay untouched.
-  const mapped = declaredEfforts?.length === 0 ? "__omit__" : mapReasoningEffort(provider, modelId, requested, true);
+  let mapped = declaredEfforts?.length === 0 ? REASONING_EFFORT_OMIT_SENTINEL : mapReasoningEffort(provider, modelId, requested, true);
+  let cappedRung: string | undefined;
+  if (cap && mapped && codexEffortRank(mapped) > codexEffortRank(cap)) {
+    // A provider alias can undo the earlier logical clamp. Only choose a lower,
+    // supported label whose wire strength is known to fit; opaque aliases are not ranked.
+    const maxRank = Math.min(codexEffortRank(cap), codexEffortRank(requested) - 1);
+    mapped = REASONING_EFFORT_OMIT_SENTINEL;
+    for (const rung of configuredReasoningEfforts(provider, modelId)?.toReversed() ?? []) {
+      if (codexEffortRank(rung) > maxRank) continue;
+      const wire = mapReasoningEffort(provider, modelId, rung, true);
+      if (wire !== undefined && isDeclaredReasoningEffort(wire) && codexEffortRank(wire) <= codexEffortRank(cap)) {
+        mapped = wire;
+        cappedRung = rung;
+        break;
+      }
+    }
+  }
   if (isReasoningEffortOmitted(mapped)) {
     const { effort: _effort, ...reasoning } = body.reasoning;
-    return { ...body, reasoning: Object.keys(reasoning).length > 0 ? reasoning : undefined };
+    return { body: { ...body, reasoning: Object.keys(reasoning).length > 0 ? reasoning : undefined } };
   }
-  if (!mapped || mapped === requested) return body;
-  return { ...body, reasoning: { ...body.reasoning, effort: mapped } };
+  if (!mapped || mapped === requested) return { body, cappedRung };
+  return { body: { ...body, reasoning: { ...body.reasoning, effort: mapped } }, cappedRung };
 }

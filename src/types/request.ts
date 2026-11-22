@@ -206,6 +206,8 @@ export interface OcxParsedRequest {
    * Process-local; never forwarded.
    */
   _structuredOutputConformance?: boolean;
+  /** The qualifying turn's ceiling, also enforced after routed Responses effort mapping. */
+  _reasoningEffortCap?: string;
   /**
    * True when the input carried `{type:"compaction_trigger"}` — Codex remote compaction v2 asking
    * this turn to produce a `{type:"compaction"}` output item. Routed adapters can't natively;

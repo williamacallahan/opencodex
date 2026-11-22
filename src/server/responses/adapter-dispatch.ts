@@ -343,7 +343,7 @@ export async function prepareAdapterExchange(
       abortSignal: upstream.signal,
     });
     refreshRequestToolAliases(initialRequest);
-    recordAdapterReasoning(logCtx, initialRequest);
+    if (initialRequest.responsesEffortOmitted === undefined) recordAdapterReasoning(logCtx, initialRequest);
     recordAdapterTier(logCtx, initialRequest);
     inputTokenEstimate = typeof initialRequest.usageLog?.inputTokens === "number"
       ? initialRequest.usageLog.inputTokens
@@ -528,6 +528,9 @@ export async function prepareAdapterExchange(
                   compactPrepaidUsed = true;
                 }
                 reserve?.noteInitial(builtInitialRequest, recovery);
+                if (builtInitialRequest.responsesEffortOmitted !== undefined && route.provider.authMode === "forward") {
+                  recordAdapterReasoning(logCtx, builtInitialRequest);
+                }
               },
               beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
                 ? createCodexAuthDispatchGuard(admissionState.authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
@@ -672,7 +675,7 @@ export async function prepareAdapterExchange(
             abortSignal: upstream.signal,
             ...(transportState.imageTierBias > 0 ? { imageTierBias: transportState.imageTierBias } : {}),
           });
-          recordAdapterReasoning(logCtx, retryRequest);
+          if (retryRequest.responsesEffortOmitted === undefined) recordAdapterReasoning(logCtx, retryRequest);
           recordAdapterTier(logCtx, retryRequest);
         } catch (err) {
           const authRefusal = options.abortSignal?.aborted ? undefined : codexAdapterBuildRefusal(err, admissionState.authCtx, route.codexAccountNamespace, () => { cleanupUpstreamAbort(); upstream.abort(); });
