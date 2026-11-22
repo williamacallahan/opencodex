@@ -1606,4 +1606,67 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     } finally { ws.close(); await server.stop(true); }
     expect(calls).toEqual(["native:gpt-reserve", "relay:gpt-6-luna", "native:gpt-6-luna"]);
   });
+  test("a ported conversation continues past superseded foreign reasoning during a tool loop without 409 (#1299)", async () => {
+    const cfg = config(), lane = { "thread-id": "ported-tool-loop-mixed-history" }; seats(false);
+    relay = refusedConnect;
+    const oldItem = { type: "reasoning", id: "rs_old_native", encrypted_content: "native-old-cipher", summary: [{ type: "summary_text", text: "prior native step" }] };
+    native = body => issuedReasoning(body.model, oldItem);
+    expect((await post(cfg, {}, lane)).status).toBe(200);
+    clearComboTargetCooldowns("luna", ["relay/gpt-6-luna"]);
+    recordCodexUpstreamOutcome(cfg, A, 429, { modelId: "gpt-6-luna", retryAfter: "180", now });
+    const relayItem = { type: "reasoning", id: "rs_new_relay", encrypted_content: "relay-new-cipher", summary: [] };
+    relay = (_req, body) => issuedReasoning(body.model, relayItem);
+    expect((await post(cfg, { input: [oldItem, { role: "user", content: "port off A" }] }, lane)).status).toBe(200);
+    let sentInput: unknown[] = [];
+    relay = (_req, body) => { sentInput = ((body as unknown as { input?: unknown[] }).input) ?? []; return sse(body.model, "ok"); };
+    const toolTurn = [
+      { ...oldItem, summary: [] },
+      { type: "function_call", id: "fc_1", call_id: "call_1", name: "lookup", arguments: "{}" },
+      relayItem,
+      { type: "function_call_output", call_id: "call_1", output: "done" },
+      { role: "user", content: "finish" },
+    ];
+    const next = await post(cfg, { input: toolTurn }, lane);
+    expect(next.status).toBe(200);
+    expect(JSON.stringify(sentInput)).not.toContain(oldItem.encrypted_content);
+    expect(JSON.stringify(sentInput)).toContain(relayItem.encrypted_content);
+  });
+  test("a cooling combo owner ports off to an eligible target instead of returning 503 (#1299)", async () => {
+    const cfg = config(), lane = { "thread-id": "cooling-combo-owner-ports" }; seats(false);
+    relay = refusedConnect;
+    const item = { type: "reasoning", id: "rs_cooled_owner", encrypted_content: "cooled-owner-cipher", summary: [] };
+    native = body => issuedReasoning(body.model, item);
+    expect((await post(cfg, {}, lane)).status).toBe(200);
+    clearComboTargetCooldowns("luna", ["relay/gpt-6-luna"]);
+    coolComboTarget("luna", { provider: "openai", model: "gpt-6-luna" }, { now, status: 503, retryAfter: "180" });
+    calls.length = 0;
+    let wire = "";
+    relay = (_req, body) => { wire = JSON.stringify(body); return sse(body.model, "ok"); };
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const result = await post(cfg, { input: [item, { role: "user", content: "continue" }] }, lane, undefined, { logCtx });
+    expect(result.status).toBe(200);
+    expect(calls).toEqual(["relay:gpt-6-luna"]);
+    expect(wire).not.toContain(item.encrypted_content);
+    expect(logCtx.routeDecision?.selected.reason).toBe("luna-owner-spent-ported");
+  });
+  test("a cooling native owner seat still walks remaining Reserve seats when relay is in cooldown (#1299)", async () => {
+    const cfg = config(), lane = { "thread-id": "cooling-relay-reserve-walk" };
+    seats(false);
+    relay = refusedConnect;
+    const item = { type: "reasoning", id: "rs_seat_a_only", encrypted_content: "seat-a-cipher", summary: [] };
+    native = body => issuedReasoning(body.model, item);
+    expect((await post(cfg, {}, lane)).status).toBe(200);
+    clearComboTargetCooldowns("luna", ["relay/gpt-6-luna"]);
+    seats();
+    coolComboTarget("luna", { provider: "relay", model: "gpt-6-luna" }, { now, status: 503, retryAfter: "180" });
+    recordCodexUpstreamOutcome(cfg, A, 429, { modelId: "gpt-6-luna", retryAfter: "180", now })?.();
+    calls.length = 0; nativeAccounts.length = 0;
+    let wire = "";
+    native = body => { wire = JSON.stringify(body); return sse(body.model, "ok"); };
+    const result = await post(cfg, { input: [item, { role: "user", content: "continue" }] }, lane);
+    expect(result.status).toBe(200);
+    expect(calls).toEqual(["native:gpt-reserve"]);
+    expect(nativeAccounts).toEqual([`fixture-workspace-${B}`]);
+    expect(wire).not.toContain(item.encrypted_content);
+  });
 });

@@ -9,7 +9,7 @@ import { credentialGeneration, getAccountCredentialWithStatus, markAccountNeedsR
 import type { OAuthAccessSnapshot } from "./index";
 import type { OcxConfig } from "../types";
 import type { AnthropicRouteDecision } from "./anthropic-model-routes";
-import { anthropicRoutingFor } from "./anthropic-routing";
+import { anthropicRoutingFor, formatAnthropicAccountOrdinal } from "./anthropic-routing";
 import { configuredAnthropicInstance } from "../providers/anthropic-instance";
 import type { AnthropicInstanceId } from "../providers/anthropic-instance-id";
 import { captureAnthropicPhysicalSendOwnership, anthropicPhysicalSendOwnershipIsCurrent,
@@ -18,6 +18,7 @@ import { captureAnthropicPhysicalSendOwnership, anthropicPhysicalSendOwnershipIs
 const responseCredentials = new WeakMap<Response, AnthropicPhysicalSendOwnership & { providerAccountUuid?: string; checkProviderUuid: boolean }>();
 type RetryState = { firstAccountId: string; sameAccount: boolean; detour: boolean };
 const retryStatesByInstance = new Map<AnthropicInstanceId, WeakMap<object, RetryState>>();
+const strikeCountedRequests = new WeakMap<object, Set<string>>();
 const verdicts = new WeakMap<Response, Promise<boolean>>();
 
 /** Legacy compatibility only; physical callers must capture ownership before fetch and use ForSend. */
@@ -117,8 +118,13 @@ export async function rotateAnthropicAccountOnResponseForInstance(
     || configuredAnthropicInstance(options.config, instance) !== instance) return null;
   const sent = responseCredentials.get(response);
   if (!sent || sent.provider !== instance || sent.accountId !== options.accountId) return null;
+  const ratePolicy = anthropicRatePolicyFor(instance);
+  if (response.ok) {
+    ratePolicy.noteAnthropicRateSuccess(sent.accountId);
+    return null;
+  }
   const routing = anthropicRoutingFor(instance);
-  const { pauseAnthropicRateAdmission, anthropicRatePauseUntil } = anthropicRatePolicyFor(instance);
+  const { pauseAnthropicRateAdmission, anthropicRatePauseUntil, recordAnthropicRateRefusal } = ratePolicy;
   const { recordAnthropicAccountRefusal, rotateAnthropicAccountOnRefusal,
     hasAnthropicFailoverQuorum, isAnthropicAccountPoolEnabled, pickAlternateAnthropicAccount } = routing;
   if (wasAccountAutoPaused(response)) {
@@ -165,18 +171,50 @@ export async function rotateAnthropicAccountOnResponseForInstance(
   if (response.status === 429) {
     const current = ownedCurrent();
     if (!current) return null;
-    options.currentDecision?.();
+    const decision = options.currentDecision ? options.currentDecision() : options.decision ?? null;
     const kind = classifyAnthropic429(response.headers);
-    if (kind === "family-quota") {
-      if (anthropicModelFamily(options.model) !== "Fable" || !options.canRetry || options.allow429Recovery === false) return null;
-      return pickAlternateAnthropicAccount(options.config, sent.accountId, Date.now(), (options.currentDecision ? options.currentDecision() : options.decision ?? null), options.model, options.excludedAccountIds);
+    if (kind === "family-quota" && anthropicModelFamily(options.model) === "Fable") {
+      if (!options.canRetry || options.allow429Recovery === false) return null;
+      return pickAlternateAnthropicAccount(options.config, sent.accountId, Date.now(), decision, options.model, options.excludedAccountIds);
     }
     if (kind !== "shared-quota") {
       if (!isAnthropicAccountPoolEnabled(options.config) && !hasAnthropicFailoverQuorum() && !current.paused) return null;
       const now = Date.now();
-      const delay = anthropicRetryAfterMs(response.headers.get("retry-after"), now) ?? ANTHROPIC_SHORT_RETRY_MS;
-      if (kind === "transient-rate") pauseAnthropicRateAdmission(sent.accountId, now + delay);
-      if (!options.canRetry || options.allow429Recovery === false || !options.requestKey) return null;
+      const parsedDelay = anthropicRetryAfterMs(response.headers.get("retry-after"), now);
+      const countStrike = !options.canRetry || !options.requestKey
+        || !(strikeCountedRequests.get(options.requestKey)?.has(sent.accountId));
+      if (options.requestKey && countStrike) {
+        let seen = strikeCountedRequests.get(options.requestKey);
+        if (!seen) { seen = new Set(); strikeCountedRequests.set(options.requestKey, seen); }
+        seen.add(sent.accountId);
+      }
+      const alternate = pickAlternateAnthropicAccount(options.config, sent.accountId, now, decision, options.model, options.excludedAccountIds);
+      if (!options.canRetry || options.allow429Recovery === false) {
+        if (!options.canRetry && options.allow429Recovery !== false) {
+          const strike = recordAnthropicRateRefusal(sent.accountId, now, {
+            minPauseMs: Math.max(parsedDelay ?? 0, 15_000),
+            clearDetourGrace: alternate !== null,
+          });
+          if (alternate) routing.clearAnthropicSessionAffinityForAccount(sent.accountId);
+          const pauseSeconds = strike?.pauseUntil ? Math.max(1, Math.ceil((strike.pauseUntil - now) / 1000)) : 15;
+          console.warn(
+            `[${instance}-pool] ${decision ? `route:#${decision.position} ` : ""}429 (${kind}) on ${formatAnthropicAccountOrdinal(sent.accountId)};`
+            + ` pausing ${pauseSeconds}s${alternate ? ` (next: ${formatAnthropicAccountOrdinal(alternate)})` : ""}`,
+          );
+        } else if (kind === "transient-rate") {
+          pauseAnthropicRateAdmission(sent.accountId, now + (parsedDelay ?? ANTHROPIC_SHORT_RETRY_MS));
+        }
+        return null;
+      }
+      const strike = countStrike
+        ? recordAnthropicRateRefusal(sent.accountId, now, {
+          minPauseMs: kind === "transient-rate" ? (parsedDelay ?? ANTHROPIC_SHORT_RETRY_MS) : 0,
+        })
+        : undefined;
+      const repeated = (strike?.strikes ?? 1) >= 2;
+      if (repeated && alternate) routing.clearAnthropicSessionAffinityForAccount(sent.accountId);
+      if (!options.requestKey) return null;
+      const delay = parsedDelay ?? ANTHROPIC_SHORT_RETRY_MS;
       let retryStates = retryStatesByInstance.get(instance);
       if (!retryStates) { retryStates = new WeakMap(); retryStatesByInstance.set(instance, retryStates); }
       let state = retryStates.get(options.requestKey);
@@ -197,9 +235,16 @@ export async function rotateAnthropicAccountOnResponseForInstance(
         options.currentDecision?.();
         return sent.accountId;
       }
-      if (kind === "transient-rate" && !state.detour) {
+      if ((kind === "transient-rate" || repeated) && !state.detour) {
         state.detour = true;
-        return pickAlternateAnthropicAccount(options.config, sent.accountId, Date.now(), (options.currentDecision ? options.currentDecision() : options.decision ?? null), options.model, options.excludedAccountIds);
+        const detour = pickAlternateAnthropicAccount(options.config, sent.accountId, Date.now(), (options.currentDecision ? options.currentDecision() : options.decision ?? null), options.model, options.excludedAccountIds);
+        if (detour && repeated) {
+          console.warn(
+            `[${instance}-pool] ${decision ? `route:#${decision.position} ` : ""}repeated 429 (${kind}) on ${formatAnthropicAccountOrdinal(sent.accountId)};`
+            + ` moving to ${formatAnthropicAccountOrdinal(detour)}`,
+          );
+        }
+        return detour;
       }
       return null;
     }

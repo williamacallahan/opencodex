@@ -3,7 +3,9 @@ import { issuedReasoningMatcher } from "../../responses/reasoning-replay-cache";
 import type { OcxParsedRequest } from "../../types";
 
 export class LunaReasoningOwnerError extends Error {
-  constructor() { super("This destination cannot replay the required reasoning item. No request was sent to it."); }
+  constructor(readonly reason: "store-mismatch" | "foreign-item" = "foreign-item") {
+    super("This destination cannot replay the required reasoning item. No request was sent to it.");
+  }
 }
 
 export function hasReasoningSummary(item: Record<string, unknown>): boolean {
@@ -32,10 +34,26 @@ export function projectLunaReasoning(parsed: OcxParsedRequest, stripsReasoning: 
   const bound = parsed._lunaProjectForeignReasoning === "owner";
   // Owner mode without a recorded store is admitted only under a verified turn-state handle.
   const sameStore = parsed._recordedResponsesStore ? parsed._responsesStore === parsed._recordedResponsesStore : bound;
-  if (bound && !sameStore) throw new LunaReasoningOwnerError();
+  if (bound && !sameStore) throw new LunaReasoningOwnerError("store-mismatch");
   if (!isPlainObject(body) || !Array.isArray(body.input)) return body;
   let issued: ReturnType<typeof issuedReasoningMatcher> | undefined;
   let boundary: number | undefined;
+  // Once the active owner has issued a later reasoning item in the same history, earlier foreign
+  // reasoning items from a prior seat/owner are already superseded across tool loops (#1299).
+  let lastOwnIndex = -1;
+  if (bound && sameStore && !stripsReasoning && !parsed._stripReasoningEncryptedContent && !parsed._dropForeignReasoningItemIds) {
+    issued ??= issuedReasoningMatcher(parsed._reasoningReplayScope, parsed._issuedReasoningProofs);
+    for (let idx = body.input.length - 1; idx >= 0; idx--) {
+      const candidate = body.input[idx];
+      if (!isPlainObject(candidate) || candidate.type !== "reasoning") continue;
+      const cid = typeof candidate.id === "string" ? candidate.id : "";
+      const cblob = typeof candidate.encrypted_content === "string" ? candidate.encrypted_content : "";
+      if ((cid || cblob) && issued(cid, cblob) === "own") {
+        lastOwnIndex = idx;
+        break;
+      }
+    }
+  }
   const dropped = Symbol();
   let input: unknown[] | undefined;
   for (const [i, item] of body.input.entries()) {
@@ -51,11 +69,12 @@ export function projectLunaReasoning(parsed: OcxParsedRequest, stripsReasoning: 
     // summarized item from another issuer indispensable. Check the item, not the pin.
     boundary ??= parsed._lunaProjectForeignReasoning === "portable" ? body.input.length : closedReasoningPrefix(body.input);
     if (i >= boundary || !hasReasoningSummary(item)) {
-      if (issuer === "unknown" && bound && parsed._recordedResponsesStore) {
+      if ((issuer === "unknown" && bound && parsed._recordedResponsesStore)
+        || (issuer === "foreign" && i < lastOwnIndex && !hasReasoningSummary(item))) {
         (input ??= body.input.slice())[i] = dropped;
         continue;
       }
-      throw new LunaReasoningOwnerError();
+      if (!(issuer === "foreign" && i < lastOwnIndex)) throw new LunaReasoningOwnerError("foreign-item");
     }
     const { id: _id, encrypted_content: _blob, ...readable } = item;
     (input ??= body.input.slice())[i] = readable;

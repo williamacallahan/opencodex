@@ -2,6 +2,7 @@ import { releaseCodexAuthContextProbeLease, type CodexAuthContext } from "../../
 import { formatErrorResponse } from "../../bridge";
 import { redactSecretString } from "../../lib/redact";
 import { LunaReasoningOwnerError } from "../../adapters/openai-responses/luna-reasoning";
+import { markLunaStoreMismatchResponse } from "../../codex/account-cooldown-response";
 import { markResponseNonReplayable } from "../../lib/upstream-retry";
 import { markProxyError } from "../../lib/client-error-body";
 import { NamespaceToolCollisionError } from "../../responses/namespace-tool-compat";
@@ -18,6 +19,7 @@ export function passthroughBuildErrorResponse(error: unknown, accountSelector?: 
   if (refusal) return refusal;
   if (error instanceof LunaReasoningOwnerError) {
     const response = markProxyError(formatErrorResponse(409, "invalid_request_error", error.message));
+    if (error.reason === "store-mismatch") markLunaStoreMismatchResponse(response);
     markResponseNonReplayable(response);
     return response;
   }

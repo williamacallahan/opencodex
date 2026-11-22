@@ -11,7 +11,7 @@ import { bindAnthropicRejectionResponse } from "../../adapters/anthropic-rejecti
 import { deferPhysicalSendReporter } from "./deferred-send-reporter";
 import { usesApiKeyAccount } from "../../providers/label";
 import { spendLedgerStorageErrorResponse } from "./spend-storage-error";
-import { classifyAnthropic429 } from "../../oauth/anthropic-rate-limit-policy";
+import { anthropicRatePolicyFor, classifyAnthropic429 } from "../../oauth/anthropic-rate-limit-policy";
 import { rotateAnthropicAccountOnResponseForInstance } from "../../oauth/anthropic-account-refusal";
 import { authorizeResendForRecovery } from "../../lib/request-resend-gate";
 import { ambiguousResendAllowanceFor, selfContainedResponsesBody } from "./reset-replay";
@@ -1965,6 +1965,9 @@ export async function prepareAdapterExchange(
         },
       ));
     }
+  }
+  if (anthropicInstance && transportState.anthropicPoolAccountId) {
+    anthropicRatePolicyFor(anthropicInstance).noteAnthropicRateSuccess(transportState.anthropicPoolAccountId);
   }
 
   bindAnthropicRejectionResponse(transportState.sameTargetRequest, upstreamResponse);

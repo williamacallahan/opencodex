@@ -36,6 +36,7 @@ function createAnthropicRatePolicy(instance: AnthropicInstanceId) {
   // Accounts paused within the detour grace window, by credential generation. Bounded by the
   // stored account set (one row per account) and pruned with the pauses.
   let recent: Map<string, { at: number; generation: string }> | undefined;
+  let strikes: Map<string, { count: number; lastAt: number; generation: string }> | undefined;
   function pauseAnthropicRateAdmission(accountId: string, until: number): void {
     const credential = getAccountCredential(instance, accountId);
     if (!credential) return;
@@ -48,6 +49,35 @@ function createAnthropicRatePolicy(instance: AnthropicInstanceId) {
     const marks = recent ??= new Map();
     for (const [id, mark] of marks) if (now - mark.at > ANTHROPIC_DETOUR_GRACE_MS) marks.delete(id);
     marks.set(accountId, { at: now, generation });
+  }
+  /** Record consecutive 429 refusal strikes (reset on 2xx) and escalate admission backoff across repeats. */
+  function recordAnthropicRateRefusal(
+    accountId: string,
+    now: number,
+    options?: { minPauseMs?: number; clearDetourGrace?: boolean },
+  ): { strikes: number; pauseUntil: number | undefined } | undefined {
+    const credential = getAccountCredential(instance, accountId);
+    if (!credential) return undefined;
+    const generation = credentialGeneration(credential);
+    const table = strikes ??= new Map();
+    for (const [id, row] of table) if (now - row.lastAt > ANTHROPIC_DETOUR_GRACE_MS) table.delete(id);
+    const prev = table.get(accountId);
+    const count = prev && prev.generation === generation && now - prev.lastAt <= ANTHROPIC_DETOUR_GRACE_MS ? prev.count + 1 : 1;
+    table.set(accountId, { count, lastAt: now, generation });
+    const baseMs = options?.minPauseMs ?? 0;
+    const strictEscalatedMs = baseMs >= 15_000 && count >= 2 ? Math.min(120_000, 15_000 * 2 ** (count - 1)) : 0;
+    const repeatEscalatedMs = count >= 2 ? Math.min(120_000, 15_000 * 2 ** (count - 2)) : 0;
+    const pauseMs = Math.max(baseMs, strictEscalatedMs, repeatEscalatedMs);
+    let pauseUntil: number | undefined;
+    if (pauseMs > 0) {
+      pauseUntil = now + pauseMs;
+      pauseAnthropicRateAdmission(accountId, pauseUntil);
+    }
+    if (options?.clearDetourGrace || count >= 2) recent?.delete(accountId);
+    return { strikes: count, pauseUntil };
+  }
+  function noteAnthropicRateSuccess(accountId: string): void {
+    strikes?.delete(accountId);
   }
   function anthropicRatePauseUntil(accountId: string, now = Date.now()): number | undefined {
     const pause = pauses?.get(accountId);
@@ -68,7 +98,7 @@ function createAnthropicRatePolicy(instance: AnthropicInstanceId) {
     }
     return true;
   }
-  function clearAnthropicRatePauses(): void { pauses = undefined; recent = undefined; }
+  function clearAnthropicRatePauses(): void { pauses = undefined; recent = undefined; strikes = undefined; }
   function reconcileAnthropicRatePauses(context: GenerationContext): number {
     let removed = 0;
     for (const id of pauses?.keys() ?? []) {
@@ -76,15 +106,18 @@ function createAnthropicRatePolicy(instance: AnthropicInstanceId) {
       pauses!.delete(id); removed++;
     }
     for (const id of recent?.keys() ?? []) if (!context.oauthAccountKeys.has(`${instance}\0${id}`)) recent!.delete(id);
+    for (const id of strikes?.keys() ?? []) if (!context.oauthAccountKeys.has(`${instance}\0${id}`)) strikes!.delete(id);
     return removed;
   }
   function sweepExpiredAnthropicRatePauses(now = Date.now()): number {
     let removed = 0;
     for (const [id, pause] of pauses ?? []) if (pause.until <= now) { pauses!.delete(id); removed++; }
     for (const [id, mark] of recent ?? []) if (now - mark.at > ANTHROPIC_DETOUR_GRACE_MS) recent!.delete(id);
+    for (const [id, row] of strikes ?? []) if (now - row.lastAt > ANTHROPIC_DETOUR_GRACE_MS) strikes!.delete(id);
     return removed;
   }
-  return Object.freeze({ instance, pauseAnthropicRateAdmission, anthropicRatePauseUntil, anthropicRatePausedRecently,
+  return Object.freeze({ instance, pauseAnthropicRateAdmission, recordAnthropicRateRefusal, noteAnthropicRateSuccess,
+    anthropicRatePauseUntil, anthropicRatePausedRecently,
     clearAnthropicRatePauses, reconcileAnthropicRatePauses, sweepExpiredAnthropicRatePauses });
 }
 export type AnthropicRatePolicy = ReturnType<typeof createAnthropicRatePolicy>;

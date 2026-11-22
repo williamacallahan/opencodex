@@ -12,7 +12,7 @@ import { buildResponsesTransport } from "../../adapters/openai-responses/transpo
 import { isMetaAiResponsesDestination } from "../../responses/muse-tool-name-alias";
 import { chatCanPreserveMandatoryToolChoice, hasMandatoryToolChoice } from "./combo-required-tool-contract";
 import { isPolicyCandidateRefusal, isMandatoryToolChoiceRefusal } from "./policy-request-scope";
-import { isCodexAccountCooldownResponse, isIssuerCapacityRefusal } from "../../codex/account-cooldown-response";
+import { isCodexAccountCooldownResponse, isIssuerCapacityRefusal, isLunaStoreMismatchResponse } from "../../codex/account-cooldown-response";
 import { resolveWireProtocolOverride } from "../adapter-resolve";
 import { parseSyntheticRowId } from "../fast-row";
 import { resolveOpenAiVirtualModel } from "../../providers/openai-virtual-models";
@@ -135,7 +135,7 @@ import {
 } from "../relay";
 import { preflightComboStreamResponse } from "./combo-stream-preflight";
 import { isOwnerCapacityRefusal } from "./owner-capacity-refusal";
-import { isReserveSeatQuotaRefusal, nativeLunaTarget, planLunaReserveLegs, portSpentLunaReasoning, prepareLunaReplay, relayProvedNotStarted } from "./combo-luna-legs";
+import { coolingLunaOwnerTarget, isReserveSeatQuotaRefusal, nativeLunaTarget, planLunaReserveLegs, portLunaConversationTarget, portSpentLunaReasoning, prepareLunaReplay, relayProvedNotStarted } from "./combo-luna-legs";
 import { createPoolReserveWalk, modelHasPoolReserve, type PoolCapacityIntent } from "../../codex/pool-reserve";
 import { requiredToolContractOf } from "./combo-required-tool-contract";
 import {
@@ -732,7 +732,7 @@ export async function executeComboResponses(
     && body.input.some(entry => isPlainObject(entry) && entry.type === "compaction_trigger"));
   let lunaReplay = handleOwner || projectStore || unresolvedPrevious ? prepareLunaReplay(body, comboReplaySnapshot.previousResponseInputExpanded && !localExpansion,
     req.headers, unreadableEncryptedAgentTask && encryptedTaskRecoveryAdmitted) : undefined;
-  const ported = native && lunaReplay?.kind === "bound" && lunaReplay.reason === "encrypted-reasoning"
+  const ported = (native || lunaCandidate) && lunaReplay?.kind === "bound" && lunaReplay.reason === "encrypted-reasoning"
     ? portSpentLunaReasoning(body, comboReplaySnapshot.previousResponseInputExpanded && !localExpansion, req.headers) : undefined;
   if (ported !== undefined) replayEligibilityBody = ported;
   const lunaPair = native && !unreadableEncryptedAgentTask ? planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed, native) : undefined;
@@ -848,6 +848,29 @@ export async function executeComboResponses(
     ? undefined
     : jevSessionPinScope({ combo, comboId, admission: options.admission, lane: comboLane });
 
+  let portedBeforeDispatch = false;
+  let portedReserveOnly = false;
+  if (!pick && !handleOwner && boundTargetKey && ported !== undefined && !unreadableEncryptedAgentTask) {
+    const coolingOwner = coolingLunaOwnerTarget(config, comboId, boundTargetKey, initialNow);
+    if (coolingOwner) {
+      const savedBoundKey = boundTargetKey;
+      replayEligibilityBody = ported;
+      boundTargetKey = undefined;
+      const selected = await portLunaConversationTarget({
+        config, comboId, combo, fromTarget: coolingOwner, native, scopedRoute,
+        eligible: targetEligible, hopAllowed: comboHopAllowed, pickTarget: pickWithWait,
+        exclude: [savedBoundKey], isPreDispatch: true, alreadyReserveOnly: false,
+        aborted: () => Boolean(options.abortSignal?.aborted || req.signal.aborted), now: initialNow,
+      });
+      if (options.abortSignal?.aborted || req.signal.aborted) return clientCancelledResponse();
+      if (selected) {
+        pick = selected.pick; dispatchBody = ported; lunaReplay = { kind: "portable", body: ported };
+        lunaLegs = selected.plan; portedBeforeDispatch = true; portedReserveOnly = selected.reserveOnly;
+      } else {
+        boundTargetKey = savedBoundKey; replayEligibilityBody = body;
+      }
+    }
+  }
   if (!pick && (handleOwner || boundTargetKey && !unreadableEncryptedAgentTask)) return unavailableOwner();
   if (unreadableEncryptedAgentTask && !pick) {
     pick = await pickWithWait({
@@ -1042,6 +1065,7 @@ export async function executeComboResponses(
   const decision = comboRouteDecisionTrace(config, comboId, pick, responseModel);
   const selectedReason = options.memoryModelPhase
     ? memoryModelRouteReason(options.memoryModelPhase)
+    : portedBeforeDispatch ? "luna-owner-spent-ported"
     : lunaReplay?.kind === "bound" ? `luna-owner-${lunaReplay.reason}`
     : lunaLegs?.nativeKey === targetKey(pick.target) ? "luna-reserve-first"
     : conversationPin ? COMBO_CONVERSATION_PIN_REASON : jevDecision?.pinned ? JEV_SESSION_PIN_ROUTE_REASON : undefined;
@@ -1145,7 +1169,7 @@ export async function executeComboResponses(
     ?? (typeof callerBudget === "number" && Number.isFinite(callerBudget) && callerBudget > 0
       ? Math.trunc(callerBudget) : undefined);
   let reserveWalk = isRequestExecutionBudget(options.sendBudget)
-    && (lunaLegs || ported !== undefined && lunaPair)
+    && (lunaLegs || portedBeforeDispatch || ported !== undefined && (lunaPair || lunaCandidate))
     ? createPoolReserveWalk(config) : undefined;
   const ordinaryPoolSends = 1 + CODEX_TEXT_GUARDED_BUDGET_POLICY.maxAlternateTargetSends;
   // A previously charged ledger can still visit unreported seats, but cannot grow its send limit.
@@ -1163,6 +1187,7 @@ export async function executeComboResponses(
       evaluatedStrictReserve = true;
     }
     const legIntent: PoolCapacityIntent | undefined = boundTargetKey && boundTargetKey === nativeKey ? "owner-only"
+      : portedReserveOnly && legTargetKey === nativeKey ? "reserve-only"
       : legTargetKey !== lunaLegs?.nativeKey ? undefined
       : lunaStage === "reserve" ? "reserve-only" : lunaStage === "done" ? "ordinary-only" : undefined;
     // The physical destination after provider aliases and blockedModelRedirects: hops are
@@ -1752,18 +1777,27 @@ export async function executeComboResponses(
       }
       return lastFailure;
     }
-    if (ported !== undefined && lunaPair && boundTargetKey && !failure.nonReplayable && !spentReplacement && native
-      && (attempt.sendCount === 0 ? isIssuerCapacityRefusal(failure.response) : isOwnerCapacityRefusal(failure.response.status, failure))) {
+    if (ported !== undefined && !handleOwner && boundTargetKey && !spentReplacement && (native || lunaCandidate)
+      && (attempt.sendCount === 0
+        ? ((!failure.nonReplayable && isIssuerCapacityRefusal(failure.response)) || isLunaStoreMismatchResponse(failure.response))
+        : (!failure.nonReplayable && isOwnerCapacityRefusal(failure.response.status, failure)))) {
+      const failedPick: ComboPick = pick;
       replayEligibilityBody = ported;
       boundTargetKey = undefined;
-      const plan = planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed, native);
-      const next = plan ? await pickWithWait({ eligible: target => targetKey(target) === plan.nativeKey && targetEligible(target) }) : null;
+      const selected = await portLunaConversationTarget({
+        config, comboId, combo, fromTarget: failedPick.target, native, scopedRoute,
+        eligible: targetEligible, hopAllowed: comboHopAllowed, pickTarget: pickWithWait,
+        exclude: [...failedPick.attempted, legTargetKey], isPreDispatch: false, alreadyReserveOnly: portedReserveOnly,
+        forbidSameTarget: isLunaStoreMismatchResponse(failure.response),
+        aborted: () => Boolean(options.abortSignal?.aborted || req.signal.aborted), now: Date.now(),
+      });
       if (options.abortSignal?.aborted || req.signal.aborted) return clientCancelledResponse();
-      if (plan && next) {
+      if (selected) {
         if (reserveWalk) reserveWalk = createPoolReserveWalk(config);
-        dispatchBody = ported; lunaReplay = { kind: "portable", body: ported }; lunaLegs = plan;
+        dispatchBody = ported; lunaReplay = { kind: "portable", body: ported };
+        lunaLegs = selected.plan; portedReserveOnly = selected.reserveOnly;
         logCtx.routeDecision = { ...logCtx.routeDecision!, selected: { ...logCtx.routeDecision!.selected, reason: "luna-owner-spent-ported" } };
-        pick = next;
+        pick = selected.retryReserve ? selected.pick : { ...selected.pick, attempted: [...new Set([...failedPick.attempted, ...selected.pick.attempted])] };
         continue;
       }
       boundTargetKey = legTargetKey;

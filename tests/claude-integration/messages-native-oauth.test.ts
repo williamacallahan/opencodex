@@ -1309,4 +1309,28 @@ describe("strict Messages OAuth public HTTP transport", () => {
       await reader.cancel().catch(() => {});
     }
   }, 10_000);
+
+  for (const kind of ["headerless", "short-transient"] as const) {
+    test(`strict OAuth rotates subsequent requests away after ${kind} 429 even past short delays`, async () => {
+      await seed(2);
+      await launch(() => captured.length === 2 ? new Response(JSON.stringify({
+        type: "error", error: { type: "rate_limit_error", message: "rate limited" },
+      }), {
+        status: 429,
+        headers: { "content-type": "application/json", ...(kind === "short-transient" ? { "retry-after": "0", "anthropic-ratelimit-unified-status": "allowed" } : {}) },
+      }) : new Response(answer, { headers: { "content-type": "application/json" } }));
+      const sticky = { "x-claude-code-session-id": `strict-${kind}-429` };
+      const warm = await post("/v1/messages", raw, undefined, sticky);
+      expect(warm.status).toBe(200); await warm.arrayBuffer();
+      const refused = await post("/v1/messages", raw, undefined, sticky);
+      expect(refused.status).toBe(429); await refused.arrayBuffer();
+      const firstBearer = captured[0]!.headers.get("authorization");
+      expect(captured[1]!.headers.get("authorization")).toBe(firstBearer);
+      await Bun.sleep(150);
+      const next = await post("/v1/messages", raw, undefined, sticky);
+      expect(next.status).toBe(200); await next.arrayBuffer();
+      expect(captured).toHaveLength(3);
+      expect(captured[2]!.headers.get("authorization")).not.toBe(firstBearer);
+    });
+  }
 });

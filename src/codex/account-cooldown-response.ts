@@ -17,7 +17,15 @@ export function isCodexAccountCooldownResponse(response: Response): boolean {
 }
 
 /** Preserve provenance across the combo's bounded error-body reconstruction. */
+const lunaStoreMismatchResponses = new WeakSet<Response>();
+export function markLunaStoreMismatchResponse(response: Response): Response {
+  lunaStoreMismatchResponses.add(response);
+  return response;
+}
+export const isLunaStoreMismatchResponse = (response: Response): boolean => lunaStoreMismatchResponses.has(response);
+
 export function carryCodexAccountCooldownResponse(from: Response, to: Response): void {
   if (issuerCapacityResponses.has(from)) issuerCapacityResponses.add(to);
   if (accountCooldownResponses.has(from)) accountCooldownResponses.add(to);
+  if (lunaStoreMismatchResponses.has(from)) lunaStoreMismatchResponses.add(to);
 }

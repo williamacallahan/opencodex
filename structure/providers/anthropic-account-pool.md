@@ -409,7 +409,11 @@ credential's account, including the final budget refusal. An aggregate-only refu
 its unified reset or the sixty-second default; Retry-After retains precedence. Family-only
 rejection does not assert shared exhaustion. A transient Retry-After pauses account admission
 without clearing affinity; a request gets one same-account wait up to one second and at most
-one eligible sibling detour. Timer rounding at the captured retry deadline permits that
+one eligible sibling detour. Repeated consecutive 429 refusals without an intervening success escalate
+the admission pause (15s to 120s), clear sticky detour grace when a sibling is eligible, and permit
+headerless refusals to detour on later requests; non-retryable single-send refusals (`canRetry: false`)
+apply the same admission backoff floor and release affinity when an alternate exists without marking
+shared-quota health. Timer rounding at the captured retry deadline permits that
 retry, while a concurrent admission-pause extension still blocks it. Headerless/invalid-hint
 refusals get at most one short same-account
 retry and never cool the roster or invent a client Retry-After. Main, pre-output continuation
@@ -531,7 +535,7 @@ removal/re-add, pause and reauthentication invalidate it. Invalid, oversized, fu
 the newest 2,000 entries survive, with a 24-hour idle lifetime. A restored binding precedes the startup active
 preference; a confirmed management selection clears bindings and persists the reset.
 
-Temporary throttle and model-route/family detours retain a valid original binding and refresh its idle timestamp.
+Temporary throttle and model-route/family detours retain a valid original binding and refresh its idle timestamp while the bound account stays below its configured usage threshold.
 Commit preserves a binding excluded by the route, an active admission pause or family rejection, or a transient
 pause recorded within `ANTHROPIC_DETOUR_GRACE_MS` (five minutes), even if that pause expired during preparation.
 Measured shared or model-specific exhaustion rebinds to the committed replacement; shared-quota and entitlement
