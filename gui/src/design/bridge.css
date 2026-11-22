@@ -18,7 +18,7 @@
   --hover: light-dark(rgb(9 9 11 / 0.035), rgb(255 255 255 / 0.04));
   --text: var(--ocx-fg);
   --muted: var(--ocx-fg-muted);
-  --faint: light-dark(#71717a, #8b8b94);
+  --faint: var(--ocx-fg-subtle);
 
   /* the accent is the inverse primary (white on dark); rings and links take the sky highlight */
   --accent: var(--ocx-accent);
