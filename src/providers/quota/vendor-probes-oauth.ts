@@ -343,6 +343,15 @@ export async function fetchAnthropicQuota(provider: string, config: OcxConfig = 
   const selection = captureOAuthAccountSelection(instance);
   const probedAccountId = selection?.accountId;
   const initialRow = getAccountSet(instance)?.accounts.find(row => row.id === probedAccountId);
+  // The active seat holds a setup token, which the usage endpoint refuses: report from the reading
+  // response headers recorded for it, and send nothing.
+  if (probedAccountId && initialRow?.credential.refresh === "") {
+    const headerQuota = getCachedProviderAccountQuota(instance, probedAccountId) as ProviderQuota | null;
+    if (!headerQuota) return null;
+    const pooledHeaderReport = anthropicPoolReport(provider, instance, config, probedAccountId, headerQuota);
+    if (pooledHeaderReport) observedQuotaFor.set(pooledHeaderReport, headerQuota);
+    return pooledHeaderReport ?? report(provider, "anthropic:oauth-usage", headerQuota);
+  }
   const epoch = captureProviderAccountQuotaEpoch(instance);
   const incarnation = probedAccountId ? recovery.reserveAnthropicAccountIncarnation(probedAccountId) : undefined;
   const probedAccountKey = probedAccountId ? accountCacheKey(instance, probedAccountId) : null;

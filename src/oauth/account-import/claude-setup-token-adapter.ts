@@ -1,4 +1,4 @@
-import { getAccountSet, upsertCredentialByIdentity } from "../store";
+import { upsertCredentialByEmailSlot, type EmailSlotUpsert } from "../store";
 import type { OAuthCredentials, ProviderAccount } from "../types";
 import { isPlainRecord, parseAccountImportDocument, validEmail, validToken } from "./parser";
 import {
@@ -26,14 +26,17 @@ export function parseClaudeSetupTokenDocument(document: unknown): AccountImportD
   return parseAccountImportDocument(document, parseSetupTokenRecord);
 }
 
-export interface ClaudeSetupTokenImportAdapterDeps {
-  accounts(): readonly ProviderAccount[];
-  upsert(credential: OAuthCredentials): Promise<"inserted" | "updated">;
-  now(): number;
+/**
+ * A working renewable login outlives any setup token, so only a slot that already needs a new
+ * sign-in, or already holds a setup token, gives way to an imported one.
+ */
+function yieldsToSetupToken(slot: ProviderAccount): boolean {
+  return slot.credential.refresh === "" || slot.needsReauth === true;
 }
 
-function sameEmail(account: ProviderAccount, email: string): boolean {
-  return account.credential.email?.trim().toLowerCase() === email;
+export interface ClaudeSetupTokenImportAdapterDeps {
+  upsert(credential: OAuthCredentials, replaceable: (slot: ProviderAccount) => boolean): Promise<EmailSlotUpsert>;
+  now(): number;
 }
 
 /**
@@ -43,8 +46,7 @@ function sameEmail(account: ProviderAccount, email: string): boolean {
  */
 export function createClaudeSetupTokenImportAdapter(
   deps: ClaudeSetupTokenImportAdapterDeps = {
-    accounts: () => getAccountSet(CLAUDE_SETUP_TOKEN_IMPORT_PROVIDER)?.accounts ?? [],
-    upsert: credential => upsertCredentialByIdentity(CLAUDE_SETUP_TOKEN_IMPORT_PROVIDER, credential),
+    upsert: (credential, replaceable) => upsertCredentialByEmailSlot(CLAUDE_SETUP_TOKEN_IMPORT_PROVIDER, credential, replaceable),
     now: Date.now,
   },
 ): AccountImportAdapter<ClaudeSetupTokenRecord> {
@@ -54,28 +56,23 @@ export function createClaudeSetupTokenImportAdapter(
     async importRecord(record: ClaudeSetupTokenRecord, signal?: AbortSignal) {
       throwIfAccountImportAborted(signal);
       if (record.expiresAt <= deps.now() + MINIMUM_REMAINING_LIFETIME_MS) return { status: "failed", code: "credential_rejected" };
-      const slots = deps.accounts().filter(account => sameEmail(account, record.email));
-      if (slots.length > 1) return { status: "failed", code: "identity_mismatch" };
-      const slot = slots[0];
-      // A working renewable login outlives any setup token; only a slot that already needs a
-      // new sign-in, or already holds a setup token, is replaced.
-      if (slot && slot.credential.refresh !== "" && slot.needsReauth !== true) return { status: "failed", code: "persist_failed" };
+      let disposition: EmailSlotUpsert;
       try {
-        const disposition = await deps.upsert({
+        disposition = await deps.upsert({
           access: record.setupToken,
           refresh: "",
           expires: record.expiresAt,
           email: record.email,
           source: "manual",
-          // The slot's verified account id keeps the import on that slot instead of opening a second one.
-          ...(slot?.credential.accountId ? { accountId: slot.credential.accountId } : {}),
-          ...(slot?.credential.plan !== undefined ? { plan: slot.credential.plan } : {}),
-        });
-        return disposition === "updated"
-          ? { status: "updated", code: "updated" }
-          : { status: "imported", code: "imported" };
+        }, yieldsToSetupToken);
       } catch {
         return { status: "failed", code: "persist_failed" };
+      }
+      switch (disposition) {
+        case "inserted": return { status: "imported", code: "imported" };
+        case "updated": return { status: "updated", code: "updated" };
+        case "login-kept": return { status: "failed", code: "login_kept" };
+        case "ambiguous-email": return { status: "failed", code: "identity_mismatch" };
       }
     },
   };

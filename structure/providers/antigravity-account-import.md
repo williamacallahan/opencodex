@@ -42,15 +42,17 @@ through `parseAccountImportDocument`; a record allows only `email`, `setup_token
 - **No upstream call.** A setup token is inference-only: the profile and usage endpoints refuse it,
   and the hub sends no inference of its own. The operator-supplied email is the identity, and the
   first genuine Claude Code request is what proves the token.
-- **Slot.** The email selects the pool slot. A slot marked for a new sign-in, or one already
-  holding a setup token, is replaced in place and keeps its account id and plan label. A slot
-  holding a working renewable login is left alone and the record fails `persist_failed`. Two slots
-  with one email fail `identity_mismatch`. No slot means a new account.
+- **Slot.** The email selects the pool slot, under the store lock (`upsertCredentialByEmailSlot`).
+  A slot marked for a new sign-in, or one already holding a setup token, is replaced in place and
+  keeps its account id and plan label. A slot holding a working renewable login is left alone and
+  the record fails `login_kept`. Two slots with one email fail `identity_mismatch`. No slot means a
+  new account stored by email alone, and a later browser sign-in as the same person takes that
+  slot instead of opening a second one.
 - **Stored shape.** `refresh` is empty, `expires` is the record's `expires_at`, `source` is
   `manual`. A token inside one minute of its expiry fails `credential_rejected`.
 - **Life in the pool.** `detectOAuthWarning` reports the row healthy while unexpired;
-  `accountQuotaProbeSkip` keeps it off the usage endpoint, so its quota comes from response
-  headers; at expiry `refreshAnthropicAccountWithLock` marks it for a new token and posts no grant.
+  `fetchAnthropicAccountQuota` and `fetchAnthropicQuota` never send it to the usage endpoint and
+  serve the reading response headers recorded, so a 429 cooldown on it cannot lift early; at expiry `refreshAnthropicAccountWithLock` marks it for a new token and posts no grant.
   Importing a new token for the same email clears that mark.
 - **Limits.** A token Anthropic rejects before its stated expiry is marked only when the refusal
   is the revoked-token answer; any other 401 leaves the row selectable until it is paused or

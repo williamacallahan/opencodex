@@ -30,6 +30,7 @@ export type AccountImportCode =
   | "credential_rejected"
   | "identity_mismatch"
   | "missing_project"
+  | "login_kept"
   | "persist_failed";
 
 export interface AccountImportRecordResult {
@@ -99,7 +100,7 @@ export type AccountImportRecordOutcome =
   | { status: "updated"; code: "updated" }
   | {
     status: "failed";
-    code: "credential_rejected" | "identity_mismatch" | "missing_project" | "persist_failed";
+    code: "credential_rejected" | "identity_mismatch" | "missing_project" | "login_kept" | "persist_failed";
   };
 
 export interface AccountImportAdapter<AccountRecord = CockpitAccountRecord> {

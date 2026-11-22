@@ -134,6 +134,7 @@ const COCKPIT_STATUS_CODES: Record<string, ReadonlySet<string>> = {
     "credential_rejected",
     "identity_mismatch",
     "missing_project",
+    "login_kept",
     "persist_failed",
   ]),
   unsupported: new Set(["unsupported_provider", "unsupported_format"]),

@@ -659,6 +659,13 @@ function clearAutomaticPauseForLogin(set: ProviderAccountSet, account: ProviderA
 }
 
 /** Allocate a persisted slot id without reusing any existing account's ownership key. */
+/** A slot stored with an email and no account id, compared by that email. */
+function isEmailOnlySlotFor(account: ProviderAccount, cred: OAuthCredentials): boolean {
+  if (account.credential.accountId) return false;
+  return Boolean(cred.email && account.credential.email
+    && account.credential.email.trim().toLowerCase() === cred.email.trim().toLowerCase());
+}
+
 function distinctAccountId(cred: OAuthCredentials, accounts: readonly ProviderAccount[]): string {
   const base = newAccountId(cred);
   const occupied = new Set(accounts.map(account => account.id));
@@ -1004,7 +1011,9 @@ export async function saveCredentialWithReceipt(
       // same-session whoami email (#6641); the helper never guesses between identified users.
       const existing = provider === "kiro"
         ? findKiroAccountForLogin(set.accounts, safe)
-        : set.accounts.find(a => (a.credential.accountId ?? a.credential.email) === identity);
+        : set.accounts.find(a => (a.credential.accountId ?? a.credential.email) === identity)
+          // An imported setup token is stored by email alone; the same person's sign-in takes that slot.
+          ?? (isAnthropicInstanceId(provider) ? set.accounts.find(a => isEmailOnlySlotFor(a, safe)) : undefined);
       if (existing) {
         const incoming = provider === "kiro" ? withRetainedKiroUser(safe, existing.credential) : safe;
         // Same identity: a login whose tier read failed keeps the stored label (plan absent),
@@ -1220,14 +1229,7 @@ export async function upsertCredentialByIdentity(
     if (provider === "anthropic2") assertAnthropicInstanceLoginConfig(loadConfig(), provider);
     if (isAnthropicInstanceId(provider)) assertNoCrossAnthropicRegistration(store, provider, safe);
     const set = store[provider];
-    const matchesEmailOnly = (account: ProviderAccount): boolean => {
-      if (account.credential.accountId) return false;
-      return Boolean(
-        safe.email
-        && account.credential.email
-        && account.credential.email.trim().toLowerCase() === safe.email.trim().toLowerCase(),
-      );
-    };
+    const matchesEmailOnly = (account: ProviderAccount): boolean => isEmailOnlySlotFor(account, safe);
     const existing = safe.accountId
       ? set?.accounts.find(account => account.credential.accountId === safe.accountId)
         ?? set?.accounts.find(matchesEmailOnly)
@@ -1249,6 +1251,50 @@ export async function upsertCredentialByIdentity(
       store[provider] = { activeAccountId: id, accounts: [account] };
     }
     return "inserted";
+  }, [provider, safe], { assertBeforePersist: registrationPersistGuard(provider) });
+}
+
+export type EmailSlotUpsert = "inserted" | "updated" | "login-kept" | "ambiguous-email";
+
+/**
+ * Insert or replace a credential that names its account by email alone (an imported setup token).
+ * The slot is chosen and judged under the store lock, so a sign-in that lands between a caller's
+ * read and this write is seen. An existing slot is replaced only when `replaceable` accepts it,
+ * and then keeps its account id and plan label.
+ */
+export async function upsertCredentialByEmailSlot(
+  provider: string,
+  cred: OAuthCredentials,
+  replaceable: (slot: ProviderAccount) => boolean,
+): Promise<EmailSlotUpsert> {
+  if (isAnthropicInstanceId(provider)) assertAnthropicCredentialSource(provider, cred);
+  const safe = normalizeCredential(cred);
+  if (!safe?.email) throw new Error("Refusing to persist OAuth credential without verified identity");
+  const email = safe.email.trim().toLowerCase();
+  return await mutateStore((store): EmailSlotUpsert => {
+    if (provider === "anthropic2") assertAnthropicInstanceLoginConfig(loadConfig(), provider);
+    if (isAnthropicInstanceId(provider)) assertNoCrossAnthropicRegistration(store, provider, safe);
+    const set = store[provider];
+    const slots = set?.accounts.filter(account => account.credential.email?.trim().toLowerCase() === email) ?? [];
+    if (slots.length > 1) return "ambiguous-email";
+    const slot = slots[0];
+    if (!slot) {
+      const id = distinctAccountId(safe, set?.accounts ?? []);
+      if (set) {
+        set.accounts.push({ id, credential: safe, addedAt: Date.now() });
+        set.activeAccountId ??= id;
+      } else {
+        store[provider] = { activeAccountId: id, accounts: [{ id, credential: safe, addedAt: Date.now() }] };
+      }
+      return "inserted";
+    }
+    if (!replaceable(slot)) return "login-kept";
+    const { accountId, plan } = slot.credential;
+    slot.credential = { ...safe, ...(accountId ? { accountId } : {}), ...(plan !== undefined ? { plan } : {}) };
+    delete slot.needsReauth;
+    delete slot.needsReauthReason;
+    delete slot.refreshAttentionGeneration;
+    return "updated";
   }, [provider, safe], { assertBeforePersist: registrationPersistGuard(provider) });
 }
 

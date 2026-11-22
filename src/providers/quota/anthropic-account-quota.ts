@@ -49,9 +49,13 @@ export async function fetchAnthropicAccountQuota(
   // A row routing cannot see (a revoked flight, or headers recorded under a credential a token
   // refresh has since replaced) is a miss: serving it as fresh left routing blind until the TTL.
   const cached = anthropicQuotaEntryIsCurrent(instance, accountId, candidate) ? candidate : undefined;
-  if (!force && cached && Date.now() - cached.ts < ACCOUNT_QUOTA_TTL_MS) {
+  // A setup token (no refresh grant) is inference-only and the usage endpoint refuses it. Its only
+  // readings are the ones response headers recorded, so every reader gets those and nothing is sent.
+  const headerOnly = initialRow.credential.refresh === "";
+  if (cached && (headerOnly || !force && Date.now() - cached.ts < ACCOUNT_QUOTA_TTL_MS)) {
     return { ...cached, quota: normalizeAnthropicQuota(cached.quota, Date.now()) };
   }
+  if (headerOnly) return unavailable();
   let token: string;
   try { token = await getTokenForAccountQuotaProbe(instance, accountId); }
   catch {

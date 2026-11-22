@@ -33,6 +33,8 @@ import {
   ACCOUNT_IMPORT_FORMAT,
   ACCOUNT_IMPORT_MAX_BYTES,
   ACCOUNT_IMPORT_PROVIDER,
+  CLAUDE_SETUP_TOKEN_IMPORT_FORMAT,
+  CLAUDE_SETUP_TOKEN_IMPORT_PROVIDER,
   type AccountImportCode,
   type AccountImportRecordResult,
   type AccountImportResult,
@@ -151,7 +153,7 @@ async function readBoundedImportStdin(deps: AccountDeps): Promise<string> {
 const IMPORT_STATUSES = new Set<AccountImportStatus>(["imported", "updated", "failed", "unsupported"]);
 const IMPORT_CODES = new Set<AccountImportCode>([
   "imported", "updated", "import_cancelled", "unsupported_provider", "unsupported_format", "invalid_document",
-  "invalid_record", "credential_rejected", "identity_mismatch", "missing_project", "persist_failed",
+  "invalid_record", "credential_rejected", "identity_mismatch", "missing_project", "login_kept", "persist_failed",
 ]);
 const IMPORT_RESULT_FIELDS = new Set([
   "totalCount", "importedCount", "updatedCount", "failedCount", "unsupportedCount", "results",
@@ -160,7 +162,7 @@ const IMPORT_RECORD_FIELDS = new Set(["index", "status", "code"]);
 const IMPORT_STATUS_CODES: Record<AccountImportStatus, ReadonlySet<AccountImportCode>> = {
   imported: new Set(["imported"]),
   updated: new Set(["updated"]),
-  failed: new Set(["invalid_record", "credential_rejected", "identity_mismatch", "missing_project", "persist_failed"]),
+  failed: new Set(["invalid_record", "credential_rejected", "identity_mismatch", "missing_project", "login_kept", "persist_failed"]),
   unsupported: new Set(["unsupported_provider", "unsupported_format"]),
 };
 
@@ -562,13 +564,10 @@ export async function cmdImport(args: string[], deps: AccountDeps): Promise<numb
 
   // Admission happens before source I/O. In particular, an inline JSON positional argument is
   // rejected without inspecting or echoing it, keeping secrets out of any subsequent surface.
-  if (
-    provider !== ACCOUNT_IMPORT_PROVIDER
-    || formatArg.value !== ACCOUNT_IMPORT_FORMAT
-    || formatArg.found !== true
-  ) {
-    const code = provider === ACCOUNT_IMPORT_PROVIDER ? "unsupported_format" : "unsupported_provider";
-    console.error(`Error: ${code}`);
+  const providerFormat = provider === ACCOUNT_IMPORT_PROVIDER ? ACCOUNT_IMPORT_FORMAT
+    : provider === CLAUDE_SETUP_TOKEN_IMPORT_PROVIDER ? CLAUDE_SETUP_TOKEN_IMPORT_FORMAT : undefined;
+  if (providerFormat === undefined || formatArg.found !== true || formatArg.value !== providerFormat) {
+    console.error(`Error: ${providerFormat === undefined ? "unsupported_provider" : "unsupported_format"}`);
     return 1;
   }
   const hasFile = fileArg.found && typeof fileArg.value === "string" && fileArg.value.length > 0;

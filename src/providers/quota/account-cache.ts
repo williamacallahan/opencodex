@@ -588,14 +588,11 @@ export async function getTokenForAccountQuotaProbe(provider: string, accountId: 
 /**
  * Rows that must not be probed: an unsupported provider reads as unavailable, and a paused
  * account returns its last reading unchanged (its `ts` shows the age) or an unavailable row,
- * without writing the cache. An Anthropic setup token (no refresh grant) is inference-only and the
- * usage endpoint refuses it, so it is treated the same way and its readings come from response
- * headers. Undefined means "probe normally".
+ * without writing the cache. Undefined means "probe normally".
  */
 export function accountQuotaProbeSkip(provider: string, accountId: string): AccountQuotaCacheEntry | undefined {
   if (!supportsPerAccountQuota(provider)) return { ts: Date.now(), quota: null, unavailable: true };
-  const row = getAccountCredentialWithStatus(provider, accountId);
-  if (row?.paused !== true && !(isAnthropicInstanceId(provider) && row?.credential.refresh === "")) return undefined;
+  if (getAccountCredentialWithStatus(provider, accountId)?.paused !== true) return undefined;
   const cached = accountQuotaCache.get(accountCacheKey(provider, accountId));
   const current = isAnthropicInstanceId(provider) ? anthropicQuotaEntryIsCurrent(provider, accountId, cached)
     : cached?.isCurrent?.() !== false;

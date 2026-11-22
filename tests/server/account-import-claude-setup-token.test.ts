@@ -15,9 +15,13 @@ import {
   getAccountCredential,
   getAccountSet,
   markAccountNeedsReauthIfGeneration,
+  saveCredential,
+  setActiveAccount,
   upsertCredentialByIdentity,
 } from "../../src/oauth/store";
-import { accountQuotaProbeSkip } from "../../src/providers/quota/account-cache";
+import { clearAccountQuotaCache } from "../../src/providers/quota/account-cache";
+import { fetchAnthropicAccountQuota } from "../../src/providers/quota/anthropic-account-quota";
+import { fetchAnthropicQuota } from "../../src/providers/quota/vendor-probes-oauth";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const CANARY = "setup-token-canary-DO-NOT-LEAK";
@@ -119,9 +123,22 @@ describe("Claude setup-token import", () => {
     const slotId = await seedRenewableLogin(false);
     const before = getAccountCredential("anthropic", slotId);
     const imported = await importSetupTokens([record()]);
-    expect(imported.ok && imported.result.results).toEqual([{ index: 0, status: "failed", code: "persist_failed" }]);
+    expect(imported.ok && imported.result.results).toEqual([{ index: 0, status: "failed", code: "login_kept" }]);
     expect(getAccountCredential("anthropic", slotId)).toEqual(before);
     expect(getAccountSet("anthropic")!.accounts).toHaveLength(1);
+  });
+
+  test("a later sign-in as the same person takes the imported account's slot", async () => {
+    await importSetupTokens([record()]);
+    const slotId = getAccountSet("anthropic")!.accounts[0]!.id;
+    await saveCredential("anthropic", {
+      access: "login-access", refresh: "login-refresh", expires: Date.now() + 3600_000,
+      email: "User@Example.com", accountId: "account-uuid-a", source: "oauth",
+    });
+    const accounts = getAccountSet("anthropic")!.accounts;
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]!.id).toBe(slotId);
+    expect(accounts[0]!.credential).toMatchObject({ refresh: "login-refresh", accountId: "account-uuid-a" });
   });
 
   test("an already expired token is refused and a second import replaces the first token", async () => {
@@ -139,12 +156,31 @@ describe("Claude setup-token import", () => {
 });
 
 describe("a pool account holding a setup token", () => {
-  test("is healthy while unexpired and is never sent to the usage endpoint", async () => {
+  test("is healthy while unexpired", async () => {
     await importSetupTokens([record()]);
     const account = getAccountSet("anthropic")!.accounts[0]!;
     expect(detectOAuthWarning("anthropic", account, true)).toBeUndefined();
     expect(detectOAuthWarning("anthropic", account, true, account.credential.expires + 1)).toBe("stale_credentials");
-    expect(accountQuotaProbeSkip("anthropic", account.id)).toMatchObject({ quota: null, unavailable: true });
+  });
+
+  test("is never sent to the usage endpoint, by the account reader or the provider reader", async () => {
+    // Control: the same readers do reach the usage endpoint for a renewable login.
+    await upsertCredentialByIdentity("anthropic", {
+      access: "login-access", refresh: "login-refresh", expires: Date.now() + 3600_000,
+      email: "login@example.com", accountId: "account-uuid-login", source: "oauth",
+    });
+    const loginId = getAccountSet("anthropic")!.accounts[0]!.id;
+    await fetchAnthropicAccountQuota("anthropic", loginId, true);
+    expect(upstreamRequests).toBeGreaterThan(0);
+
+    await importSetupTokens([record()]);
+    const tokenAccount = getAccountSet("anthropic")!.accounts.find(account => account.credential.refresh === "")!;
+    expect(await setActiveAccount("anthropic", tokenAccount.id)).toBe(true);
+    clearAccountQuotaCache();
+    upstreamRequests = 0;
+    expect(await fetchAnthropicAccountQuota("anthropic", tokenAccount.id, true)).toMatchObject({ quota: null, unavailable: true });
+    expect(await fetchAnthropicQuota("anthropic")).toBeNull();
+    expect(upstreamRequests).toBe(0);
   });
 
   test("needs a new token at expiry instead of posting an empty refresh grant", async () => {

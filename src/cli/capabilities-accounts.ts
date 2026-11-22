@@ -85,10 +85,10 @@ export const ACCOUNT_CAPABILITIES: readonly Capability[] = [
     details: ["API-key providers only. Requires non-TTY stdin and reads one secret line; never put plaintext keys in command arguments or agent transcripts. This imports an upstream credential, not an OpenCodex access-key creation workflow."],
   },
   {
-    command: ["account", "import"], summary: "Import Google Antigravity accounts from a bounded Cockpit Tools document.",
-    usage: "ocx account import google-antigravity --format cockpit-tools (--file <path>|--stdin) [--json]",
+    command: ["account", "import"], summary: "Import Google Antigravity accounts from a bounded Cockpit Tools document, or Claude setup tokens into the Anthropic pool.",
+    usage: "ocx account import (google-antigravity --format cockpit-tools|anthropic --format claude-setup-token) (--file <path>|--stdin) [--json]",
     routes: [{ method: "POST", path: "/api/oauth/accounts/import" }],
-    flags: [{ name: "--format", value: "string", required: true, summary: "Only cockpit-tools is supported." }, { name: "--file", value: "string", summary: "Bounded source document; exclusive with --stdin." }, { name: "--stdin", value: "boolean", summary: "Read the document from non-TTY stdin." }, { name: "--json", value: "boolean", summary: "Emit sanitized per-record import outcomes." }], mutates: true, json: "envelope",
+    flags: [{ name: "--format", value: "string", required: true, summary: "cockpit-tools for google-antigravity; claude-setup-token for anthropic." }, { name: "--file", value: "string", summary: "Bounded source document; exclusive with --stdin." }, { name: "--stdin", value: "boolean", summary: "Read the document from non-TTY stdin." }, { name: "--json", value: "boolean", summary: "Emit sanitized per-record import outcomes." }], mutates: true, json: "envelope",
     details: ["Human-controlled credential handoff: choose exactly one source. Unsupported providers/formats are refused before source I/O. Partial failures or unsupported records return nonzero; do not echo the document."],
   },
   {

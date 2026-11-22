@@ -559,9 +559,9 @@ State-changing: yes. JSON mode: `envelope`.
 
 ### `ocx account import`
 
-Usage: `ocx account import google-antigravity --format cockpit-tools (--file <path>|--stdin) [--json]`
+Usage: `ocx account import (google-antigravity --format cockpit-tools|anthropic --format claude-setup-token) (--file <path>|--stdin) [--json]`
 
-Import Google Antigravity accounts from a bounded Cockpit Tools document.
+Import Google Antigravity accounts from a bounded Cockpit Tools document, or Claude setup tokens into the Anthropic pool.
 
 State-changing: yes. JSON mode: `envelope`.
 
@@ -571,7 +571,7 @@ State-changing: yes. JSON mode: `envelope`.
 
 | Flag | Value | Meaning |
 |---|---|---|
-| `--format` | string | Only cockpit-tools is supported. |
+| `--format` | string | cockpit-tools for google-antigravity; claude-setup-token for anthropic. |
 | `--file` | string | Bounded source document; exclusive with --stdin. |
 | `--stdin` | boolean | Read the document from non-TTY stdin. |
 | `--json` | boolean | Emit sanitized per-record import outcomes. |
