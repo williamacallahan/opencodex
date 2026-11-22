@@ -51,9 +51,11 @@ fallback. `tests/server/agy-passthrough.test.ts` and
 
 `src/server/agy-passthrough-accounts.ts` keeps every body valid for the token it is sent with:
 
-- A body naming `project` goes to the account that owns that project: the stored
+- A body naming `project` goes to an account that owns that project: the stored
   `credential.projectId`, or the project Google returned on a `loadCodeAssist` this lane relayed for
-  that account. An unowned project is a local 400; a paused or reauth-marked owner is a local 503.
+  that account. Google can hand several accounts the same project (two pooled sign-ins shared one on
+  2026-11-22), so among owners the caller's own account wins, then the first usable owner. An
+  unowned project is a local 400; a project whose owners are all paused or reauth-marked is a local 503.
 - A project-less call (`loadCodeAssist`, `writeTrajectoryAcls`) stays on the account this caller last
   used, keyed by a SHA-256 of the caller's own bearer, unless that account is cooling down; otherwise it
   takes the next eligible account in rotation. agy calls `loadCodeAssist` at least once per turn, so a

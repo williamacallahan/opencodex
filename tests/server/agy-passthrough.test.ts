@@ -242,6 +242,25 @@ describe("agy pass-through public HTTP lane", () => {
     expect(observedIds()).toEqual([]);
   });
 
+  test("when Google hands several accounts the same project, a caller keeps its own account", async () => {
+    await launch();
+    const { mergeAccountCredential } = await import("../../src/oauth/store");
+    let served = "";
+    reply = captured => { served = captured.headers.get("authorization")!; return Response.json({ cloudaicompanionProject: "shared-project" }); };
+    // The rotation hands a second caller the pool's second account.
+    await post("loadCodeAssist", "{}", { authorization: "Bearer first-caller" });
+    await post("loadCodeAssist", "{}", { authorization: "Bearer second-caller" });
+    const own = served;
+    expect(own).not.toBe(tokens["synthetic-project-one"]);
+    // Every pooled account now owns the same project, the first one in the roster included.
+    for (const row of getAccountSet("google-antigravity")!.accounts) {
+      await mergeAccountCredential("google-antigravity", row.id, { ...row.credential, projectId: "shared-project" });
+    }
+    reply = captured => { served = captured.headers.get("authorization")!; return new Response(sse, { headers: { "content-type": "text/event-stream" } }); };
+    expect((await post("streamGenerateContent?alt=sse", '{"project":"shared-project"}', { authorization: "Bearer second-caller" })).status).toBe(200);
+    expect(served).toBe(own);
+  });
+
   test("a 429 passes through unchanged; only loadCodeAssist moves the caller, trajectory writes stay put", async () => {
     await launch();
     let served = "";

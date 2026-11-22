@@ -2,8 +2,10 @@
  * Which pooled Antigravity account serves one `agy` request on the pass-through lane.
  *
  * The request body is never rewritten, so the account must match what the body already says.
- * Every Cloud Code call except `loadCodeAssist` and `writeTrajectoryAcls` names a `project`, and a
- * project belongs to exactly one account, so a project-bearing call goes to its owner. A project-less
+ * Every Cloud Code call except `loadCodeAssist` and `writeTrajectoryAcls` names a `project`, so a
+ * project-bearing call goes to an account that owns it. Google can hand several accounts the same
+ * project (two pooled Antigravity sign-ins measured on 2026-11-22 shared one), so among owners the
+ * caller's own account wins; otherwise the first usable owner does. A project-less
  * call keeps the account this caller last used. Only `loadCodeAssist` (agy's per-turn "which project
  * am I?" call) may move a caller off a cooling account; that answer hands agy the new account's
  * project, so every later body matches the token the hub sends with it. A `writeTrajectoryAcls`
@@ -56,9 +58,11 @@ export function chooseAgyAccount(request: AgyAccountRequest, now = Date.now()): 
   if (roster.length === 0) return { kind: "pool-empty" };
   const usable = (accountId: string) => roster.some(row => row.id === accountId && row.paused !== true && row.needsReauth !== true);
   if (request.project !== undefined) {
-    const owner = roster.find(row => (learnedProjects.get(row.id) ?? row.credential?.projectId) === request.project);
-    if (!owner) return { kind: "project-unowned" };
-    if (!usable(owner.id)) return { kind: "project-account-unavailable" };
+    const owners = roster.filter(row => (learnedProjects.get(row.id) ?? row.credential?.projectId) === request.project);
+    if (owners.length === 0) return { kind: "project-unowned" };
+    const callerAccount = callerAccounts.get(request.callerKey)?.accountId;
+    const owner = owners.find(row => row.id === callerAccount && usable(row.id)) ?? owners.find(row => usable(row.id));
+    if (!owner) return { kind: "project-account-unavailable" };
     rememberCaller(request.callerKey, owner.id, now);
     return { kind: "account", accountId: owner.id };
   }
