@@ -93,6 +93,10 @@ export function formatErrorResponse(
   // run-turn combo children pass an adapter event's own code here, so only the boundary that
   // verified the refusal marks the envelope (`markVerifiedModelNotInPlanResponse`).
   if (options?.code === MODEL_NOT_IN_PLAN_CODE) error.code = options.code;
+  if (status === 404 && options?.code === "model_not_found" && ["invalid_request_error", "upstream_error"].includes(error.code ?? "")) {
+    error.type = "not_found_error";
+    error.code = "model_not_found";
+  }
   // Only the allowlisted transport verdicts survive this formatter. Do not forward
   // arbitrary provider codes, and preserve the existing cyber-policy precedence.
   const replayBlocked = error.code !== CYBER_POLICY_ERROR_CODE

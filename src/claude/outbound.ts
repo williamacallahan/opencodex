@@ -17,7 +17,8 @@ import { ADVISOR_SERVER_TOOL_NAME, isAdvisorCallInput, isAdvisorResultContent } 
  *  - errors: {type:"error", error:{type,message}}; may arrive mid-stream after HTTP 200.
  */
 import { createHash } from "node:crypto";
-import { httpStatusFromTerminalError, UNDECLARED_TOOL_CALL_ERROR_CODE } from "../lib/errors";
+import { httpStatusFromTerminalError, isThroughputLimitText, UNDECLARED_TOOL_CALL_ERROR_CODE } from "../lib/errors";
+export { isThroughputLimitText } from "../lib/errors";
 import { isTransientUpstreamStatus, REASONING_LOOP_ERROR_CODE } from "../lib/upstream-retry";
 import {
   isTranslatorBudgetExceededError,
@@ -124,17 +125,6 @@ export function claudeOverflowSsePayload(payload: string): string {
   if (!(error.code === "context_length_exceeded" || isContextOverflowText(message))) return payload;
   const next = claudePromptTooLongMessage(message);
   return next === message ? payload : JSON.stringify({ ...parsed, error: { ...error, message: next } });
-}
-
-/**
- * A throughput limit that the shared classifier files under context_length_exceeded (its "too many
- * tokens" match also catches "too many tokens per minute"). Worded as an overflow it would make
- * Claude Code compact a conversation that only needs to wait, so it keeps its own text.
- */
-const THROUGHPUT_LIMIT_TEXT_RE = /\bper (?:second|minute|hour|day)\b|\brate limit|\bquota\b|\btpm\b/i;
-
-export function isThroughputLimitText(message: string): boolean {
-  return THROUGHPUT_LIMIT_TEXT_RE.test(message);
 }
 
 /** Codes that say nothing about the cause, so the message decides (#8127). */

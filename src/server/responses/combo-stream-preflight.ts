@@ -635,7 +635,9 @@ function failedTerminalResponse(
     status: (logCtx.terminalHttpStatus !== 400 && logCtx.terminalHttpStatus !== 422
       && isProviderModerationRefusal(400, JSON.stringify(terminalPayload), undefined, true))
       ? 400
-      : logCtx.terminalHttpStatus ?? bareErrorStatus(terminalPayload) ?? 502,
+      : terminalPayload.type === "error"
+        ? bareErrorStatus(terminalPayload) ?? logCtx.terminalHttpStatus ?? 502
+        : logCtx.terminalHttpStatus ?? 502,
     headers,
   });
 }
