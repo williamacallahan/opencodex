@@ -168,6 +168,31 @@ test.each([
   expect(classifyAnthropic429(new Headers(headers))).toBe(expected);
 });
 
+test("a second same-request refusal extends its admission deadline", async () => {
+  const [a] = await seed();
+  const config = configFor(() => answer(false));
+  config.anthropicAccountPool = { enabled: true };
+  const cred = getAccountCredential("anthropic", a!)!;
+  const requestKey = {};
+  for (const delay of ["0.001", "60"]) {
+    const response = refused({ "retry-after": delay });
+    bindAnthropicRefusalCredential(response, { provider: "anthropic", accountId: a!, accessToken: cred.access, generation: credentialGeneration(cred) });
+    await rotateAnthropicAccountOnResponse(response, { config, accountId: a!, canRetry: true, requestKey });
+  }
+  expect((anthropicRatePauseUntil(a!) ?? 0) - Date.now()).toBeGreaterThan(50_000);
+});
+
+test("a strict headerless refusal with no eligible sibling leaves admission open", async () => {
+  const [a, b] = await seed();
+  const config = configFor(() => answer(false));
+  config.anthropicAccountPool = { enabled: true };
+  const cred = getAccountCredential("anthropic", a!)!;
+  const response = refused();
+  bindAnthropicRefusalCredential(response, { provider: "anthropic", accountId: a!, accessToken: cred.access, generation: credentialGeneration(cred) });
+  await rotateAnthropicAccountOnResponse(response, { config, accountId: a!, canRetry: false, excludedAccountIds: new Set([b!]) });
+  expect(anthropicRatePauseUntil(a!)).toBeUndefined();
+});
+
 test("Retry-After validates dates, fractions and invalid deadlines", () => {
   const now = Date.UTC(2026, 9, 2);
   expect(anthropicRetryAfterMs("0.25", now)).toBe(250);

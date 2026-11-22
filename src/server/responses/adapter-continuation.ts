@@ -2,7 +2,6 @@ import { carryProxyError, proxyErrorPresentation, isProxyError, rememberProxyErr
 import { bindAnthropicRejectionResponse } from "../../adapters/anthropic-rejection-memo";
 import { deferPhysicalSendReporter } from "./deferred-send-reporter";
 import { responsesSpendTarget } from "./request-spend-target";
-import { anthropicRatePolicyFor } from "../../oauth/anthropic-rate-limit-policy";
 import { rotateAnthropicAccountOnResponseForInstance } from "../../oauth/anthropic-account-refusal";
 import type { ResponsesRequestContext } from "./core-options";
 import type { PreparedResponsesRequest } from "./request-prepare";
@@ -731,10 +730,6 @@ export function createAdapterContinuations(
           : isNonReplayableUpstreamCode(normalized.code) ? { code: normalized.code, retryable: false } : {}),
       }, maskCredential);
       return;
-    }
-
-    if (anthropicInstance && transportState.anthropicPoolAccountId) {
-      anthropicRatePolicyFor(anthropicInstance).noteAnthropicRateSuccess(transportState.anthropicPoolAccountId);
     }
 
     try {
