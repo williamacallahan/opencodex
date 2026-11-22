@@ -261,6 +261,22 @@ describe("agy pass-through public HTTP lane", () => {
     expect(served).toBe(own);
   });
 
+  test("a days-old agy observation stays on the Accounts tab but never reaches routing or the quota pool", async () => {
+    await launch();
+    const { getCachedProviderAccountQuota, observedAntigravityAccountQuota, recordPassiveAccountQuota } = await import("../../src/providers/quota/account-cache");
+    const { antigravityLoginIdentity } = await import("../../src/providers/antigravity-quota-identity");
+    const [fresh, old] = getAccountSet("google-antigravity")!.accounts;
+    const record = (row: typeof fresh, age: number) => recordPassiveAccountQuota("google-antigravity", row!.id,
+      { customWindows: [{ label: "Gem", percent: 100 }], updatedAt: Date.now() - age }, Number.MAX_SAFE_INTEGER,
+      antigravityLoginIdentity(row!.id, row!.credential));
+    record(fresh, 60_000);
+    record(old, 2 * 24 * 60 * 60_000);
+    expect(observedAntigravityAccountQuota(fresh!.id)?.customWindows?.[0]?.percent).toBe(100);
+    expect(getCachedProviderAccountQuota("google-antigravity", fresh!.id)?.customWindows?.[0]?.percent).toBe(100);
+    expect(observedAntigravityAccountQuota(old!.id)?.customWindows?.[0]?.percent).toBe(100);
+    expect(getCachedProviderAccountQuota("google-antigravity", old!.id)).toBeNull();
+  });
+
   test("a 429 passes through unchanged; only loadCodeAssist moves the caller, trajectory writes stay put", async () => {
     await launch();
     let served = "";

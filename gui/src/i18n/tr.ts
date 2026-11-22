@@ -1965,7 +1965,7 @@ export const tr: Record<TKey, string> = {
   "pws.currentAccountUsage": "Geçerli hesabın kullanımı",
   "pws.quotaUnsupported": "Bu hesap için kota sorgulama desteklenmiyor.",
   "pws.quotaUnobserved": "Henüz kullanım gözlemi yok.",
-  "pws.agyAccountPolicy": "Hub, her agy oturum açışının kullandığı hesabı seçer ve Google bu hesabın hızını sınırlayana (HTTP 429), hesap duraklatılana veya yeniden oturum açmayı gerektirene ya da oturum açış 6 saat boyunca boşta kalana kadar o oturum açışını bu hesapta tutar; agy ardından bir sonraki turunda sıradaki kullanılabilir hesaba geçer. Bir hesabın kotası, agy onu kullandıktan sonra görünür, agy’nin kendi kota çağrılarından okunur (hub kendisi Google’a hiçbir şey göndermez) ve yaşıyla birlikte gösterilmeye devam eder. “Aktif”, gösterge panelinin varsayılan hesabını işaretler, agy’nin kullandığı hesabı değil.",
+  "pws.agyAccountPolicy": "Hub, her agy oturum açışına havuzdan bir hesap atar ve onu bu hesapta tutar. agy bir sonraki sefer hangi projenin kullanılacağını sorduğunda (en az her turda bir kez), o hesap Google tarafından hız sınırına takılmışsa (HTTP 429), duraklatılmışsa veya yeniden oturum açmayı gerektiriyorsa ya da 6 saat boyunca istek olmazsa başka bir hesap seçebilir; zaten bir proje belirten istekler o projenin hesabında kalır. Bir hesabın kotası, agy kendi kotasını o hesap üzerinden getirdikten sonra görünür (agy bunu bir oturum başladığında yapar); hub kendisi Google’a hiçbir kota isteği göndermez. Bir okuma, yaşıyla birlikte gösterilmeye devam eder. “Aktif”, gösterge panelinin varsayılan hesabını işaretler, agy’nin kullandığı hesabı değil.",
   "pws.quotaLastRead": "Son okuma",
   "pws.quotaCheckCompleted": "Kota kontrolü tamamlandı",
   "pws.modelBreakdown": "Model dağılımı",

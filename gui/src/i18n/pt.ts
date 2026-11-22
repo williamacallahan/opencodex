@@ -1963,7 +1963,7 @@ export const pt: Record<TKey, string> = {
   "pws.currentAccountUsage": "Uso da conta atual",
   "pws.quotaUnsupported": "A consulta de cota não é compatível com esta conta.",
   "pws.quotaUnobserved": "Nenhuma observação de uso ainda.",
-  "pws.agyAccountPolicy": "O hub escolhe a conta usada por cada login do agy e mantém esse login nela até que o Google limite a taxa da conta (HTTP 429), ela seja pausada ou precise de um novo login, ou o login fique inativo por 6 horas; o agy então passa para a próxima conta disponível no seu próximo turno. A cota de uma conta aparece depois que o agy a usa, lida a partir das próprias chamadas de cota do agy (o hub não envia nada ao Google por conta própria), e permanece exibida com a sua idade. “Ativa” marca a conta padrão do painel, não a que o agy está usando.",
+  "pws.agyAccountPolicy": "O hub atribui a cada login do agy uma conta do pool e a mantém nela. Ele pode escolher outra conta quando o agy perguntar a seguir qual projeto usar (pelo menos uma vez por turno), se essa conta estiver limitada por taxa pelo Google (HTTP 429), pausada ou precisar de um novo login, ou após 6 horas sem requisição; as requisições que já nomeiam um projeto permanecem na conta desse projeto. A cota de uma conta aparece depois que o agy busca sua cota por meio dessa conta (o agy faz isso quando uma sessão começa); o hub não envia nenhuma requisição de cota ao Google por conta própria. Uma leitura permanece exibida com a sua idade. “Ativa” marca a conta padrão do painel, não a que o agy está usando.",
   "pws.quotaLastRead": "Última leitura",
   "pws.quotaCheckCompleted": "Verificação de cota concluída",
   "pws.modelBreakdown": "Detalhamento por modelo",

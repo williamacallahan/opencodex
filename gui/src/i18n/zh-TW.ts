@@ -1642,7 +1642,7 @@ export const zhTW: Record<TKey, string> = {
   "pws.currentAccountUsage": "目前帳戶用量",
   "pws.quotaUnsupported": "此帳戶不支援查詢配額。",
   "pws.quotaUnobserved": "尚未觀測到用量。",
-  "pws.agyAccountPolicy": "中樞為每次 agy 登入選擇要使用的帳戶，並讓該登入保持在此帳戶上，直到 Google 對該帳戶限流（HTTP 429）、該帳戶被暫停或需要重新登入，或者該登入已閒置 6 小時；之後 agy 會在下一個回合切換到下一個可用帳戶。帳戶的配額會在 agy 使用過後出現，讀取自 agy 自己的配額呼叫（中樞本身不會向 Google 傳送任何內容），並連同其時效持續顯示。“使用中”標示的是儀表板的預設帳戶，而不是 agy 正在使用的帳戶。",
+  "pws.agyAccountPolicy": "中樞為每次 agy 登入分配共享集區中的一個帳戶，並將其保持在該帳戶上。當 agy 下次詢問要使用哪個專案時（每回合至少一次），如果該帳戶被 Google 限流（HTTP 429）、被暫停或需要重新登入，或者 6 小時內沒有請求，中樞可以選擇另一個帳戶；已經指定專案的請求會保留在該專案的帳戶上。帳戶的配額在 agy 透過該帳戶取得其配額之後出現（agy 會在工作階段開始時這樣做）；中樞本身不向 Google 傳送任何配額請求。讀取值會連同其時效持續顯示。“使用中”標示的是儀表板的預設帳戶，而不是 agy 正在使用的帳戶。",
   "pws.quotaLastRead": "上次讀取",
   "pws.quotaCheckCompleted": "配額檢查完成",
   "pws.modelBreakdown": "模型用量明細",
