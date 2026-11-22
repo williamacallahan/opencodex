@@ -22,6 +22,17 @@ import type { ProviderQuota, ProviderRoutingQuota } from "../quota-types";
 export const LAST_GOOD_MAX_AGE_MS = CODEX_CAPACITY_MAX_QUOTA_AGE_MS;
 const nativeMainReportGenerations = new WeakMap<ProviderQuotaReport, number>();
 export const accountReportCurrent = new WeakMap<ProviderQuotaReport, () => boolean>();
+/** Account reports can be rebuilt locally when a reading changes without an identity change. */
+export const accountReportProjection = new WeakMap<ProviderQuotaReport, {
+  isFresh: () => boolean;
+  project: () => ProviderQuotaReport | null;
+}>();
+
+export function refreshCollectedAccountReport(report: ProviderQuotaReport): ProviderQuotaReport[] {
+  const projection = accountReportProjection.get(report);
+  const latest = projection && !projection.isFresh() ? projection.project() : report;
+  return latest ? [latest] : [];
+}
 /** The measured quota a reset detector should observe when the shown quota is an estimate (pooled rows). */
 export const observedQuotaFor = new WeakMap<ProviderQuotaReport, ProviderQuota>();
 export const routingEvidence = new WeakMap<ProviderQuotaReport, ProviderQuotaRoutingEvidence>();
@@ -56,7 +67,7 @@ export function validateJoinedReports(response: ProviderQuotaResponse, config: O
     const provider = config.providers[item.provider];
     return !!provider && !provider.disabled && isProviderQuotaReportCurrent(item)
       && keyReportCredentialCurrent(item, provider);
-  }) };
+  }).flatMap(refreshCollectedAccountReport) };
 }
 /** Only the live Antigravity probe binds this projection; display/last-good rows cannot create it. */
 export const antigravityEvidence = new WeakMap<ProviderQuotaReport, { receipt: AntigravityQuotaReceipt; windows: readonly DecisionQuotaWindow[] }>();
@@ -441,6 +452,6 @@ export function heldProviderQuotaReports(config: OcxConfig): ProviderQuotaRespon
     reports: (held?.reports ?? []).filter(item => {
       const provider = config.providers[item.provider];
       return !!provider && isProviderQuotaReportCurrent(item) && keyReportCredentialCurrent(item, provider, true);
-    }),
+    }).flatMap(refreshCollectedAccountReport),
   };
 }

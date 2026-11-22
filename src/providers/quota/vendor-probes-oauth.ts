@@ -21,7 +21,7 @@ import { aggregateCodexPoolCapacity, CODEX_CAPACITY_MAX_QUOTA_AGE_MS, type Codex
 import { asRecord, normalizePercent, normalizeResetAt, readQuotaJson, REQUEST_TIMEOUT_MS, toFiniteNumber } from "../quota-wire";
 import { providerCodexAccountMode } from "../registry";
 import {
-  accountReportCurrent, observedQuotaFor,
+  accountReportCurrent, accountReportProjection, observedQuotaFor,
   AUTHORITATIVE_EMPTY_QUOTA,
   TERMINAL_QUOTA_FAILURE,
   providerLabel,
@@ -342,51 +342,59 @@ export async function fetchAnthropicQuota(
   if (roster.accounts.some(row => !row.paused && !row.needsReauth
     && (pooled || row.id === roster.activeAccountId) && !belongsToBatch(row))) return null;
 
-  const now = Date.now();
-  const rows = roster.accounts.map(row => ({
-    isMain: false,
-    active: row.id === roster.activeAccountId,
-    weight: 1,
-    paused: row.paused === true,
-    needsReauth: row.needsReauth === true,
-    quota: getCachedProviderAccountQuota(instance, row.id),
-  }));
-  const activeQuota = rows.find(row => row.active && !row.paused && !row.needsReauth)?.quota ?? null;
-  const source = "anthropic:oauth-usage";
-  const capacity = pooled ? aggregateCodexPoolCapacity(rows, now) : null;
-  const quotaReport = capacity?.aggregation ? {
-    provider,
-    label: providerLabel(provider),
-    source,
-    quota: capacity.quota ?? { updatedAt: now },
-    updatedAt: capacity.quota?.updatedAt ?? now,
-    aggregation: publicCapacityAggregation(capacity.aggregation, capacity.quota ? "aggregate" : "coverage-only"),
-  } : activeQuota && now - activeQuota.updatedAt < CODEX_CAPACITY_MAX_QUOTA_AGE_MS
-    ? report(provider, source, activeQuota) : null;
-  if (!quotaReport) return null;
-  // The pool estimate must never become the reset detector's reading of its active account.
-  if (pooled || !activeProbeSucceeded) {
-    observedQuotaFor.set(quotaReport, activeProbeSucceeded && roster.activeAccountId === initial.activeAccountId
-      ? activeQuota ?? { updatedAt: now } : { updatedAt: now });
-  }
   const rosterIdentity = (set: NonNullable<typeof roster>) => JSON.stringify([set.activeAccountId,
     set.accounts.map(row => [row.id, row.paused === true, row.needsReauth === true, row.pauseRevision, credentialGeneration(row.credential)])]);
   const identity = rosterIdentity(roster);
-  const quotaEvidence = (quota: ProviderQuota | null, at: number) => {
-    if (!quota) return null;
-    const { updatedAt, ...windows } = quota;
-    return JSON.stringify([at - updatedAt < CODEX_CAPACITY_MAX_QUOTA_AGE_MS, windows]);
+  const current = () => {
+    const latest = getAccountSet(instance);
+    return !!latest && scopeCurrent() && rosterIdentity(latest) === identity;
   };
-  const evidence = roster.accounts.flatMap((row, index) =>
-    !row.paused && !row.needsReauth && (pooled || row.id === roster.activeAccountId)
-      ? [{ id: row.id, quota: quotaEvidence(rows[index]?.quota ?? null, now) }] : []);
-  accountReportCurrent.set(quotaReport, () => {
-    const current = getAccountSet(instance);
-    const checkedAt = Date.now();
-    return !!current && scopeCurrent() && rosterIdentity(current) === identity
-      && evidence.every(({ id, quota }) => quotaEvidence(getCachedProviderAccountQuota(instance, id), checkedAt) === quota);
-  });
-  return quotaReport;
+  const project = (): ProviderQuotaReport | null => {
+    if (!current()) return null;
+    const now = Date.now();
+    const rows = roster.accounts.map(row => ({
+      isMain: false,
+      active: row.id === roster.activeAccountId,
+      weight: 1,
+      paused: row.paused === true,
+      needsReauth: row.needsReauth === true,
+      quota: getCachedProviderAccountQuota(instance, row.id),
+    }));
+    const activeQuota = rows.find(row => row.active && !row.paused && !row.needsReauth)?.quota ?? null;
+    const source = "anthropic:oauth-usage";
+    const capacity = pooled ? aggregateCodexPoolCapacity(rows, now) : null;
+    const quotaReport = capacity?.aggregation ? {
+      provider,
+      label: providerLabel(provider),
+      source,
+      quota: capacity.quota ?? { updatedAt: now },
+      updatedAt: capacity.quota?.updatedAt ?? now,
+      aggregation: publicCapacityAggregation(capacity.aggregation, capacity.quota ? "aggregate" : "coverage-only"),
+    } : activeQuota && now - activeQuota.updatedAt < CODEX_CAPACITY_MAX_QUOTA_AGE_MS
+      ? report(provider, source, activeQuota) : null;
+    if (!quotaReport) return null;
+    // A changed measurement calls for re-projection, not rejection as a different account.
+    accountReportCurrent.set(quotaReport, current);
+    const quotaEvidence = (quota: ProviderQuota | null, at: number) => {
+      if (!quota) return null;
+      const { updatedAt, ...windows } = quota;
+      return JSON.stringify([at - updatedAt < CODEX_CAPACITY_MAX_QUOTA_AGE_MS, windows]);
+    };
+    const evidence = roster.accounts.flatMap((row, index) =>
+      !row.paused && !row.needsReauth && (pooled || row.id === roster.activeAccountId)
+        ? [{ id: row.id, quota: quotaEvidence(rows[index]?.quota ?? null, now) }] : []);
+    accountReportProjection.set(quotaReport, { project, isFresh: () => {
+      const checkedAt = Date.now();
+      return evidence.every(({ id, quota }) => quotaEvidence(getCachedProviderAccountQuota(instance, id), checkedAt) === quota);
+    } });
+    // The pool estimate must never become the reset detector's reading of its active account.
+    if (pooled || !activeProbeSucceeded) {
+      observedQuotaFor.set(quotaReport, activeProbeSucceeded && roster.activeAccountId === initial.activeAccountId
+        ? activeQuota ?? { updatedAt: now } : { updatedAt: now });
+    }
+    return quotaReport;
+  };
+  return project();
 }
 
 /**

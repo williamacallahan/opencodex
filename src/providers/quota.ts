@@ -22,7 +22,7 @@ import type { OcxConfig, OcxProviderConfig } from "../types";
 import { isPassiveRead } from "../lib/passive-read";
 import { CODEX_LB_USAGE_SOURCE, type ProviderQuota, type QuotaFailureCode } from "./quota-types";
 import {
-  accountReportCurrent, observedQuotaFor,
+  accountReportCurrent, observedQuotaFor, refreshCollectedAccountReport,
   AUTHORITATIVE_EMPTY_QUOTA,
   bumpProviderQuotaInvalidationEpoch,
   captureProviderReportEpochs, providerReportEpochChanged,
@@ -265,17 +265,14 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
   const claudeSignIn = forceRefresh ? undefined : refreshClaudeCliSignIn(config);
   if (claudeSignIn) await claudeSignIn;
   const now = Date.now();
-  // The fast path must not extend a preserved last-good row past its bound. An OBSERVED row is
-  // exempt: it carries the observation time and never becomes fresher on its own, so without
-  // the exemption one passive provider would force every poll to re-probe the others.
-  // The cache key is only a discriminator; the stored response is re-validated before serving.
+  // A passive observation keeps its original time and does not trigger another upstream probe.
   const currentCache = getProviderQuotaReportCache();
   const cacheFresh = currentCache && currentCache.key === key && now - currentCache.ts < CACHE_TTL_MS
     && currentCache.response.reports.every(item =>
       (item.observed === true || now - item.updatedAt < LAST_GOOD_MAX_AGE_MS)
       && (config.providers[item.provider]?.adapter === "claude-cli" || isProviderQuotaReportCurrent(item)) && keyReportCredentialCurrent(item, config.providers[item.provider]));
   if (!forceRefresh && cacheFresh) {
-    const response = currentCache!.response, reports = refreshHeldClaudeCliReports(config, response.reports);
+    const response = currentCache!.response, reports = refreshHeldClaudeCliReports(config, response.reports.flatMap(refreshCollectedAccountReport));
     return reports === response.reports ? response : { ...response, reports };
   }
   const joinable = inflight.get(key);
@@ -304,7 +301,7 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
     });
     const fresh = probeResults.filter((item): item is ProviderQuotaReport => (
       item !== null && item !== TERMINAL_QUOTA_FAILURE && item !== AUTHORITATIVE_EMPTY_QUOTA
-    ));
+    )).flatMap(refreshCollectedAccountReport);
     // Both sentinels suppress the previous row; null alone keeps the last-good row.
     const terminalFailures = new Set(Object.keys(config.providers).filter((_, index) => (
       probeResults[index] === TERMINAL_QUOTA_FAILURE || probeResults[index] === AUTHORITATIVE_EMPTY_QUOTA
@@ -315,8 +312,7 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
     const cutoff = Date.now() - LAST_GOOD_MAX_AGE_MS;
     const byProvider = new Map<string, ProviderQuotaReport>();
     const generationMismatchedProviders = new Set<string>();
-    for (const item of previous) {
-      // Same observed-row exemption as the fast path.
+    for (const item of previous.flatMap(refreshCollectedAccountReport)) {
       if (item.observed !== true && item.updatedAt < cutoff) continue;
       if (isProviderQuotaReportCurrent(item) && keyReportCredentialCurrent(item, config.providers[item.provider])) byProvider.set(item.provider, item);
       else generationMismatchedProviders.add(item.provider);
