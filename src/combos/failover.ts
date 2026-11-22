@@ -854,6 +854,10 @@ const REQUEST_SHAPE_FAILURE_CODES = new Set([
   // A request whose token cap was reached before output was produced is request-specific;
   // the candidate remains healthy for subsequent requests with larger limits.
   "zero_output_token_limit",
+  // codex-lb's refusal of one exact parent-and-body resend whose earlier dispatch may still be
+  // running. Its Retry-After belongs to that operation; cooling the target on it refused every
+  // other thread as combo_unavailable (2026-11-22 00:37-00:39Z).
+  "upstream_operation_status_unknown",
 ]);
 
 /** Credential/billing failures that every target sharing the provider inherits. */
