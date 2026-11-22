@@ -607,12 +607,27 @@ mod tests {
         let settings = json!({"settings":{"menuBarMetric":"quota"}});
         let usage = json!({});
         for (reports, expected) in [
-            (json!([{"provider":"a","quota":{"weeklyPercent":0,"monthlyPercent":100}}]), "100%"),
-            (json!([{"provider":"a","quota":{"weeklyPercent":0,"monthlyPercent":100}},{"provider":"b","quota":{"weeklyPercent":30}}]), "30%"),
-            (json!([{"provider":"a","quota":{"weeklyPercent":20,"customWindows":[{"scope":"model","percent":100}]}}]), "20%"),
-            (json!([{"provider":"a","quota":{"weeklyPercent":20,"customWindows":[{"modelId":"m","percent":100}]}}]), "20%"),
+            (
+                json!([{"provider":"a","quota":{"weeklyPercent":0,"monthlyPercent":100}}]),
+                "100%",
+            ),
+            (
+                json!([{"provider":"a","quota":{"weeklyPercent":0,"monthlyPercent":100}},{"provider":"b","quota":{"weeklyPercent":30}}]),
+                "30%",
+            ),
+            (
+                json!([{"provider":"a","quota":{"weeklyPercent":20,"customWindows":[{"scope":"model","percent":100}]}}]),
+                "20%",
+            ),
+            (
+                json!([{"provider":"a","quota":{"weeklyPercent":20,"customWindows":[{"modelId":"m","percent":100}]}}]),
+                "20%",
+            ),
         ] {
-            assert_eq!(render_title(&settings, &usage, &json!({"reports":reports})), Some(expected.into()));
+            assert_eq!(
+                render_title(&settings, &usage, &json!({"reports":reports})),
+                Some(expected.into())
+            );
         }
     }
 
