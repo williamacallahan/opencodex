@@ -21,6 +21,7 @@ import { isCanonicalCommandCodeBaseUrl, isCanonicalKimiCodeBaseUrl } from "./ven
 import { isWeeklyAllowancePercent, type AccountQuotaMode, type ProviderQuota, type ProviderQuotaWindow, type QuotaFailureCode } from "../quota-types";
 import type { OcxConfig, OcxProviderConfig } from "../../types";
 import { nativeHarnessOnly } from "../../lib/native-harness";
+import { ANTIGRAVITY_OAUTH_STORE_KEY, antigravityLoginIdentity } from "../antigravity-quota-identity";
 
 /** Match oauth/index REFRESH_SKEW_MS — use stored access without refresh when still fresh. */
 const ACCOUNT_TOKEN_SKEW_MS = 60_000;
@@ -163,13 +164,17 @@ export function hydrateAccountQuotaCache(): void {
     // Disk stores observation time, not the Anthropic usage probe's clock.
     if (!accountQuotaCache.has(key)) {
       const anthropic = isAnthropicAccountCacheKey(key);
+      const agy = key.startsWith(`${ANTIGRAVITY_OAUTH_STORE_KEY}\0`);
       const { anthropicCredentialGeneration, ...bars } = quota as AnthropicPersistedQuota;
+      const { identity: agyLogin, ...observed } = quota as KiroPersistedQuota;
       accountQuotaCache.set(key, {
         ts: anthropic ? 0 : quota.updatedAt,
         quota: anthropic ? normalizeAnthropicQuota(bars, now)
-          : key.startsWith("kiro\0") ? sanitizeKiroQuota(quota) : quota,
+          : key.startsWith("kiro\0") ? sanitizeKiroQuota(quota) : agy ? observed : quota,
         ...(anthropic ? { anthropicCredentialGeneration } : {}),
         ...(key.startsWith("kiro\0") ? { identity: (quota as KiroPersistedQuota).identity } : {}),
+        // The agy sign-in an observation belongs to rides on disk beside it, never in the quota.
+        ...(agy && typeof agyLogin === "string" ? { identity: agyLogin } : {}),
       });
     }
   }
@@ -195,6 +200,8 @@ export function persistAccountQuotaCache(): void {
         const instance = key.slice(0, separator) as AnthropicInstanceId;
         if (entry.anthropicCredentialGeneration && anthropicQuotaEntryIsCurrent(instance, key.slice(separator + 1), entry))
           yield [key, { ...quota, anthropicCredentialGeneration: entry.anthropicCredentialGeneration }] as [string, AnthropicPersistedQuota];
+      } else if (quota && entry.identity && key.startsWith(`${ANTIGRAVITY_OAUTH_STORE_KEY}\0`)) {
+        yield [key, { ...quota, identity: entry.identity }] as [string, KiroPersistedQuota];
       } else if (quota) yield [key, quota] as [string, ProviderQuota];
     }
   }, () => kiroPersistableVerdicts());
@@ -425,6 +432,8 @@ export function recordPassiveAccountQuota(
   accountId: string,
   quota: ProviderQuota,
   writerGeneration: number,
+  /** The sign-in this observation belongs to; Antigravity readers ignore a row without the current one. */
+  identity?: string,
 ): void {
   if (!hasPassiveAccountQuota(provider) || !accountId) return;
   const key = accountCacheKey(provider, accountId);
@@ -436,7 +445,7 @@ export function recordPassiveAccountQuota(
   // them. A probe writer cannot hit this because its own read hydrates first; an
   // observation arrives unprompted, so it must hydrate itself.
   hydrateAccountQuotaCache();
-  accountQuotaCache.set(key, { ts: Date.now(), quota });
+  accountQuotaCache.set(key, { ts: Date.now(), quota, ...(identity ? { identity } : {}) });
   // Persisted so a restart keeps the last observation: with no probe to re-establish it,
   // a forgotten row stays forgotten until the user happens to run another streaming turn.
   persistAccountQuotaCache();
@@ -464,10 +473,23 @@ export function readPassiveProviderAccountQuotas(provider: string): ProviderAcco
   if (!set) return [];
   const rows: ProviderAccountQuota[] = [];
   for (const account of set.accounts) {
-    const entry = accountQuotaCache.get(accountCacheKey(provider, account.id));
-    if (entry?.quota) rows.push({ accountId: account.id, quota: entry.quota });
+    const quota = provider === ANTIGRAVITY_OAUTH_STORE_KEY ? observedAntigravityAccountQuota(account.id)
+      : accountQuotaCache.get(accountCacheKey(provider, account.id))?.quota;
+    if (quota) rows.push({ accountId: account.id, quota });
   }
   return rows;
+}
+
+/**
+ * An Antigravity account's agy observation, only while it belongs to the slot's current sign-in.
+ * A row probed before `nativeHarnessOnly` carries no sign-in and is never shown as an observation.
+ */
+export function observedAntigravityAccountQuota(accountId: string): ProviderQuota | null {
+  hydrateAccountQuotaCache();
+  const entry = accountQuotaCache.get(accountCacheKey(ANTIGRAVITY_OAUTH_STORE_KEY, accountId));
+  const credential = getAccountCredential(ANTIGRAVITY_OAUTH_STORE_KEY, accountId);
+  return entry?.quota && entry.identity && credential && entry.identity === antigravityLoginIdentity(accountId, credential)
+    ? entry.quota : null;
 }
 
 export function sweepExpiredProviderAccountQuotaRows(now = Date.now()): number {

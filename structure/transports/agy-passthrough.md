@@ -31,14 +31,21 @@ Under `nativeHarnessOnly` the hub sends Google no quota probe, so the pool's quo
 Google's answers to agy's own quota calls. `src/server/agy-passthrough.ts` copies a 2xx answer to
 `retrieveUserQuotaSummary` or `fetchAvailableModels` (and `loadCodeAssist`, for its project) with a
 `tee`, reads at most 4 MiB of the copy, and leaves agy's bytes untouched. The reading is parsed by
-`antigravityQuotaFromRelayedAnswer` (`src/providers/quota/antigravity.ts`) and recorded for the
-serving account with `recordPassiveAccountQuota`, fenced by the config generation captured at the
-account choice. A per-model reading does not replace that account's summary for 30 minutes, because
-only the summary reports the 5-hour and weekly family buckets. `hasPassiveAccountQuota` treats
-`google-antigravity` as observed while the switch is on: the Accounts tab shows each account's last
-observation (or "not observed yet"), and the provider row in the quota bar is the freshest account
-observation (`fetchObservedAntigravityQuota`), since agy rotates across the pool. An account agy has
-not used keeps its last reading and its age. `tests/server/agy-passthrough.test.ts` covers it.
+`antigravityQuotaFromRelayedAnswer` (`src/providers/quota/antigravity.ts`); a models answer keeps only
+its per-model rows, because its Gem/Cla rows copy one model's counter. The reading is recorded for
+the serving account with `recordPassiveAccountQuota`, fenced by the config generation captured at the
+account choice and bound to that slot's sign-in (`antigravityLoginIdentity`, which an access-token
+refresh keeps and another login in the slot changes). The sign-in is rechecked before the write and
+rides beside the row on disk (the cache entry's `identity`), and `observedAntigravityAccountQuota`
+returns a row only while it matches the slot's current sign-in, so a probe-era row or another login's
+row is never shown as an observation. A models answer does not replace a summary the account kept less
+than 30 minutes ago. `hasPassiveAccountQuota` treats `google-antigravity` as observed while the switch
+is on: the Accounts tab shows each account's last observation (or "not observed yet"), and the quota
+bar's provider row (`fetchObservedAntigravityQuota`) is the freshest observation with family windows,
+since agy rotates across the pool; reset detection skips that display row. The hub's own probe
+rechecks the switch before every physical send, so turning it on mid-probe stops the retry and the
+fallback. `tests/server/agy-passthrough.test.ts` and
+`tests/providers/provider-antigravity-quota-retry.test.ts` cover it.
 
 ## Account choice
 

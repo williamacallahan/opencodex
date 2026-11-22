@@ -57,6 +57,25 @@ describe("Antigravity quota summary 403 compatibility retry (#5940)", () => {
     });
   }
 
+  test("nativeHarnessOnly turning on while a probe is in flight stops its retry and fallback", async () => {
+    const { bindNativeHarnessConfig } = await import("../../src/lib/native-harness");
+    const calls: string[] = [];
+    setAntigravityAccountQuotaTransportForTests({
+      resolveAddresses: async () => ({ hostname: "daily-cloudcode-pa.googleapis.com", addresses: [{ address: "142.250.0.1", family: 4 }], privateNetwork: false }),
+      pinnedPost: async url => {
+        calls.push(url);
+        bindNativeHarnessConfig({ nativeHarnessOnly: true });
+        return new Response(null, { status: 403 });
+      },
+    });
+    try {
+      expect(await probeAntigravityUsageQuota("test-access", "test-project")).toMatchObject({ kind: "unavailable", failure: "native_harness_only" });
+      expect(calls).toEqual([summaryUrl]);
+    } finally {
+      bindNativeHarnessConfig(null);
+    }
+  });
+
   test("successful CLI summary needs no retry", async () => {
     const calls = transport([Response.json(summary)]);
     expect((await probeAntigravityUsageQuota("test-access", "test-project")).kind).toBe("available");

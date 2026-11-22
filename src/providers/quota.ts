@@ -69,8 +69,7 @@ import {
   fetchCursorQuota,
   fetchKiroQuota,
   fetchMuseKeyQuota,
-  fetchObservedAntigravityQuota,
-  fetchPassiveProviderQuota,
+  fetchObservedAntigravityQuota, fetchPassiveProviderQuota,
   fetchXaiQuota,
 } from "./quota/vendor-probes-oauth";
 import { fetchCommandCodeQuota, fetchKimiQuota, keyQuotaReaderForProvider, readWithCredentialRefusal } from "./quota/vendor-probes-key";
@@ -147,9 +146,7 @@ async function probeProviderQuota(
   }
   if (provider.authMode === "oauth" && explicitAccountReader(name)) return await fetchExplicitCurrentQuota(name, provider, config);
   if (provider.authMode === "oauth" && configuredAnthropicInstance(config, name)) return await fetchAnthropicQuota(name, config, forceRefresh, resetPoll);
-  if (provider.authMode === "oauth" && name === ANTIGRAVITY_OAUTH_STORE_KEY) {
-    return hasPassiveAccountQuota(name) ? fetchObservedAntigravityQuota(name) : await fetchAntigravityQuota(name, { ...provider });
-  }
+  if (provider.authMode === "oauth" && name === ANTIGRAVITY_OAUTH_STORE_KEY) return hasPassiveAccountQuota(name) ? fetchObservedAntigravityQuota(name) : await fetchAntigravityQuota(name, { ...provider });
   if (provider.authMode === "oauth" && name === "kiro") return await fetchKiroQuota(name);
   // meta-muse: only a device-logged-in account can be probed; others fall back to the last in-band observation.
   if (provider.authMode === "oauth" && hasPassiveAccountQuota(name)) {
@@ -225,9 +222,9 @@ function notifyProviderQuotaSnapshot(
 ): void {
   // Resolved here, synchronously, while the identity is still the one that produced these
   // reports. codex-lb's deadline is the earliest seat deadline, not a whole-pool reset.
-  // Claude CLI rows are display-only: one reset key would span every account that signs in.
+  // Claude CLI and agy-observation rows are display-only: one reset key would span several accounts.
   const observations = reports
-    .filter(report => report.source !== CODEX_LB_USAGE_SOURCE && config.providers[report.provider]?.adapter !== "claude-cli")
+    .filter(report => report.source !== CODEX_LB_USAGE_SOURCE && !report.source.endsWith(":agy-observation") && config.providers[report.provider]?.adapter !== "claude-cli")
     .map(report => ({
     scope: report.provider,
     accountKey: providerObservationAccountKey(report.provider, config, report),

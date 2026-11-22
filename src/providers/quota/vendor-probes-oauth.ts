@@ -475,13 +475,17 @@ export async function fetchPassiveProviderQuota(provider: string): Promise<Provi
 }
 
 /**
- * Provider-level row for the agy-only Antigravity pool: the freshest account observation. agy
- * rotates across the pool, so the dashboard's active account is not necessarily one agy used.
+ * Provider-level row for the agy-only Antigravity pool: the freshest account observation, preferring
+ * one with family windows. agy rotates across the pool, so the dashboard's active account is not
+ * necessarily one agy used. It is display only: reset detection skips its `agy-observation` source.
  */
 export function fetchObservedAntigravityQuota(provider: string): ProviderQuotaReport | null {
+  const family = (quota: ProviderQuota) => quota.customWindows?.some(window => window.modelId === undefined) === true;
   let freshest: ProviderQuota | null = null;
-  for (const row of readPassiveProviderAccountQuotas(provider)) {
-    if (row.quota && (!freshest || row.quota.updatedAt > freshest.updatedAt)) freshest = row.quota;
+  for (const { quota } of readPassiveProviderAccountQuotas(provider)) {
+    if (!quota) continue;
+    const better = !freshest || (family(quota) !== family(freshest) ? family(quota) : quota.updatedAt > freshest.updatedAt);
+    if (better) freshest = quota;
   }
   const built = freshest && report(provider, `${provider}:agy-observation`, freshest);
   return built ? { ...built, observed: true } : null;

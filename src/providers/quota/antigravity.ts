@@ -311,7 +311,11 @@ export async function probeAntigravityUsageQuota(accessToken: string, projectId:
       "User-Agent": userAgent, Authorization: `Bearer ${accessToken}`,
     },
     body: JSON.stringify({ project: projectId }), signal: requestSignal(),
-  }, antigravityOutboundDependencies);
+  }, {
+    ...antigravityOutboundDependencies,
+    // Rechecked at every physical send: the switch can turn on while a probe is in flight.
+    beforeSend: () => !nativeHarnessOnly() && antigravityOutboundDependencies.beforeSend?.() !== false,
+  });
   let summaryFailure: QuotaFailureCode | undefined;
   try {
     // The summary includes the Gemini 4 Argon group only for the CLI client family; under the
@@ -333,6 +337,7 @@ export async function probeAntigravityUsageQuota(accessToken: string, projectId:
     summaryFailure = quotaTransportFailure(error);
   }
   if (signal?.aborted) return unavailableAntigravityQuota(summaryFailure ?? "transport_error");
+  if (nativeHarnessOnly()) return unavailableAntigravityQuota("native_harness_only");
   try {
     const response = await fetchQuota(ANTIGRAVITY_QUOTA_MODELS_URL, antigravityUserAgent());
     if (await providerRedirectError(response, ANTIGRAVITY_QUOTA_MODELS_URL)) {
@@ -347,6 +352,7 @@ export async function probeAntigravityUsageQuota(accessToken: string, projectId:
     }
     return { kind: "available", quota: { customWindows, updatedAt: Date.now() }, source: "google-antigravity:fetchAvailableModels" };
   } catch (error) {
+    if (nativeHarnessOnly()) return unavailableAntigravityQuota("native_harness_only");
     // The public compatibility wrapper still rejects this exact fallback error; it never enters a DTO.
     return {
       kind: "unavailable",
@@ -364,7 +370,8 @@ export function antigravityQuotaFromRelayedAnswer(
   method: "retrieveUserQuotaSummary" | "fetchAvailableModels", body: Record<string, unknown> | null,
 ): ProviderQuota | null {
   if (method === "retrieveUserQuotaSummary") return parseAntigravityQuotaSummary(body);
-  const customWindows = antigravityWindowsFromModels(body);
+  // The models answer's Gem/Cla rows copy one model's counter; only its per-model rows are kept.
+  const customWindows = antigravityWindowsFromModels(body).filter(window => window.modelId !== undefined);
   return customWindows.length ? { customWindows, updatedAt: Date.now() } : null;
 }
 

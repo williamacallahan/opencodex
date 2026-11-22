@@ -30,7 +30,9 @@ import { oauthAccountLogLabel } from "../codex/account-label";
 import { nativeHarnessOnly } from "../lib/native-harness";
 import { ANTIGRAVITY_OAUTH_STORE_KEY } from "../providers/antigravity-quota-identity";
 import { PROVIDER_REGISTRY } from "../providers/registry";
-import { recordPassiveAccountQuota } from "../providers/quota/account-cache";
+import { observedAntigravityAccountQuota, recordPassiveAccountQuota } from "../providers/quota/account-cache";
+import { antigravityLoginIdentity } from "../providers/antigravity-quota-identity";
+import { getAccountCredential } from "../oauth/store";
 import { antigravityQuotaFromRelayedAnswer } from "../providers/quota/antigravity";
 import { captureConfigGeneration } from "../lib/state-store-sweeper";
 import { classifyUsageClient } from "../usage/client";
@@ -44,12 +46,16 @@ const QUOTA_METHODS = new Set(["retrieveUserQuotaSummary", "fetchAvailableModels
 type QuotaMethod = typeof QUOTA_METHODS extends Set<infer M> ? M : never;
 const isQuotaMethod = (method: string): method is QuotaMethod => QUOTA_METHODS.has(method as QuotaMethod);
 /**
- * When each account last had a quota summary read. A per-model reading (agy sends one each
- * session) does not replace a summary younger than this, because only the summary reports the
- * 5-hour and weekly family buckets.
+ * A per-model reading (agy sends one each session) does not replace an account's summary younger
+ * than this, because only the summary reports the 5-hour and weekly family buckets.
  */
 const SUMMARY_PRECEDENCE_MS = 30 * 60_000;
-const summaryReadAt = new Map<string, number>();
+
+/** The sign-in a pooled slot holds now; undefined when the slot is gone or has no credential. */
+function agyLogin(accountId: string): string | undefined {
+  const credential = getAccountCredential(ANTIGRAVITY_OAUTH_STORE_KEY, accountId);
+  return credential ? antigravityLoginIdentity(accountId, credential) : undefined;
+}
 const CLOUD_CODE_METHOD = /^\/v1internal:[A-Za-z]+$/;
 /** Generation calls always carry their account's project; refusing a project-less one keeps them off rotation. */
 const PROJECT_REQUIRED = /^\/v1internal:(?:streamGenerateContent|generateContent|countTokens)$/;
@@ -102,10 +108,10 @@ function splitAgyPath(pathname: string): { key: string; method: string } | undef
 }
 
 /** Decode a copy for reading only; null when the coding is one this lane does not read. */
-function decoded(bytes: Uint8Array, contentEncoding: string | null): Uint8Array | null {
+function decoded(bytes: Uint8Array, contentEncoding: string | null, maxOutputLength = MAX_AGY_REQUEST_BYTES): Uint8Array | null {
   const coding = contentEncoding?.trim().toLowerCase();
-  // Bounded: a small compressed body must not inflate past the lane's own request limit.
-  const bound = { maxOutputLength: MAX_AGY_REQUEST_BYTES };
+  // Bounded: a small compressed body must not inflate past the caller's limit.
+  const bound = { maxOutputLength };
   try {
     if (!coding || coding === "identity") return bytes;
     if (coding === "gzip" || coding === "x-gzip") return gunzipSync(bytes, bound);
@@ -163,7 +169,8 @@ async function readRelayedJson(copy: ReadableStream<Uint8Array>, contentEncoding
       if (total > MAX_OBSERVED_ANSWER_BYTES) return undefined;
       chunks.push(value);
     }
-    const plain = decoded(Buffer.concat(chunks), contentEncoding);
+    // The decoded copy has the same bound, so a small compressed answer cannot expand past it.
+    const plain = decoded(Buffer.concat(chunks), contentEncoding, MAX_OBSERVED_ANSWER_BYTES);
     if (!plain) return undefined;
     const parsed: unknown = JSON.parse(new TextDecoder().decode(plain));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
@@ -179,7 +186,7 @@ async function readRelayedJson(copy: ReadableStream<Uint8Array>, contentEncoding
  * or the account's quota (agy's own quota calls). The client's bytes are never touched.
  */
 async function observeRelayedAnswer(copy: ReadableStream<Uint8Array>, contentEncoding: string | null, accountId: string,
-  method: string, writerGeneration: number): Promise<void> {
+  method: string, writerGeneration: number, login: string | undefined): Promise<void> {
   const body = await readRelayedJson(copy, contentEncoding);
   if (!body) return;
   if (method === "loadCodeAssist") {
@@ -187,13 +194,14 @@ async function observeRelayedAnswer(copy: ReadableStream<Uint8Array>, contentEnc
     if (project) learnAgyAccountProject(accountId, project);
     return;
   }
-  if (!isQuotaMethod(method)) return;
+  if (!isQuotaMethod(method) || !login) return;
   const quota = antigravityQuotaFromRelayedAnswer(method, body);
-  if (!quota) return;
-  const now = Date.now();
-  if (method === "fetchAvailableModels" && now - (summaryReadAt.get(accountId) ?? 0) < SUMMARY_PRECEDENCE_MS) return;
-  if (method === "retrieveUserQuotaSummary") summaryReadAt.set(accountId, now);
-  recordPassiveAccountQuota(ANTIGRAVITY_OAUTH_STORE_KEY, accountId, quota, writerGeneration);
+  // The answer belongs to the sign-in whose token was sent; a slot now holding another login gets nothing.
+  if (!quota || agyLogin(accountId) !== login) return;
+  const kept = observedAntigravityAccountQuota(accountId);
+  if (method === "fetchAvailableModels" && kept?.customWindows?.some(window => window.modelId === undefined)
+    && Date.now() - kept.updatedAt < SUMMARY_PRECEDENCE_MS) return;
+  recordPassiveAccountQuota(ANTIGRAVITY_OAUTH_STORE_KEY, accountId, quota, writerGeneration, login);
 }
 
 /** The client's branch of the answer; it settles the request log and the turn lease exactly once. */
@@ -256,8 +264,9 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
     project, callerKey: callerKey(admission, authorization), mayRotate: parts.method === "/v1internal:loadCodeAssist",
   });
   if (choice.kind !== "account") return choiceRefusal(choice);
-  // Captured with the account choice, so a roster change during the send fences the quota write.
+  // Captured with the account choice: a roster change or another sign-in in the slot fences the quota write.
   const quotaWriterGeneration = captureConfigGeneration();
+  const quotaLogin = agyLogin(choice.accountId);
   let snapshot: Awaited<ReturnType<typeof getValidAccessSnapshotForAccount>>;
   try {
     snapshot = await getValidAccessSnapshotForAccount(ANTIGRAVITY_OAUTH_STORE_KEY, choice.accountId, { requireUsableAccount: true });
@@ -321,7 +330,7 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
   if (upstream.status >= 200 && upstream.status < 300 && (method === "loadCodeAssist" || isQuotaMethod(method))) {
     const [forClient, forObserver] = upstream.body.tee();
     clientBody = forClient;
-    void observeRelayedAnswer(forObserver, upstream.headers.get("content-encoding"), choice.accountId, method, quotaWriterGeneration);
+    void observeRelayedAnswer(forObserver, upstream.headers.get("content-encoding"), choice.accountId, method, quotaWriterGeneration, quotaLogin);
   }
   return new Response(settledBody(clientBody, settle, () => controller.abort(), () => req.signal.aborted), {
     status: upstream.status, statusText: upstream.statusText, headers: messagesEndToEndHeaders(upstream.headers),

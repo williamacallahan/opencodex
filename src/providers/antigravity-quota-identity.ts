@@ -15,6 +15,14 @@ export function isAntigravityArgonIdentity(identity: string): boolean { return A
  */
 export const ANTIGRAVITY_OAUTH_STORE_KEY = "google-antigravity";
 
+/**
+ * The sign-in behind a pooled slot. An access-token refresh keeps it; another login placed in the
+ * same slot changes it, so an observation never moves to a different Google account.
+ */
+export function antigravityLoginIdentity(accountId: string, credential: OAuthCredentials): string {
+  return createHash("sha256").update(JSON.stringify(["agy-login", accountId, credential.accountId ?? null, credential.refresh])).digest("hex");
+}
+
 /** Accounting and inference must refer to the same OAuth store entry and the supported Antigravity destination. */
 export function antigravityQuotaEligible(name: string, provider: OcxProviderConfig): boolean {
   if (name !== ANTIGRAVITY_OAUTH_STORE_KEY || provider.disabled || provider.authMode !== "oauth"

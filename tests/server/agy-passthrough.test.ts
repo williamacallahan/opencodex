@@ -14,6 +14,7 @@ import { clearGenericFailoverHealth } from "../../src/oauth/generic-account-fail
 import { getAccountSet, saveCredential, setAccountPaused } from "../../src/oauth/store";
 import { clearPoolRotationState } from "../../src/oauth/pool-kernel";
 import { resetAgyAccountState } from "../../src/server/agy-passthrough-accounts";
+import { clearAccountQuotaCache } from "../../src/providers/quota";
 import type { OcxConfig } from "../../src/types";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { drainAndRemoveFixtureRoots } from "../helpers/fixture-teardown";
@@ -50,7 +51,7 @@ describe("agy pass-through public HTTP lane", () => {
     release = acquireOwnedSpendHome();
     calls = []; unexpected = 0;
     reply = () => new Response(sse, { headers: { "content-type": "text/event-stream", "x-google-fixture": "kept" } });
-    clearGenericFailoverHealth(); clearPoolRotationState(); resetAgyAccountState();
+    clearGenericFailoverHealth(); clearPoolRotationState(); resetAgyAccountState(); clearAccountQuotaCache();
     for (const slot of ["one", "two", "three"]) {
       await saveCredential("google-antigravity", { access: `synthetic-pool-${slot}`, refresh: `synthetic-refresh-${slot}`,
         expires: Date.now() + 3_600_000, accountId: `synthetic-${slot}`, projectId: `synthetic-project-${slot}` });
@@ -79,7 +80,7 @@ describe("agy pass-through public HTTP lane", () => {
       expect(unexpected).toBe(0);
     } finally {
       globalThis.fetch = savedFetch;
-      clearGenericFailoverHealth(); clearPoolRotationState(); resetAgyAccountState();
+      clearGenericFailoverHealth(); clearPoolRotationState(); resetAgyAccountState(); clearAccountQuotaCache();
       release?.(); release = undefined;
       if (savedHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = savedHome;
       if (savedCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = savedCodexHome;
@@ -183,28 +184,62 @@ describe("agy pass-through public HTTP lane", () => {
     const percents = (quota: unknown) => ((quota as { customWindows?: Array<{ percent: number; modelId?: string }> }).customWindows ?? [])
       .filter(window => window.modelId === undefined).map(window => Math.round(window.percent));
 
+    const modelPercents = (quota: unknown) => ((quota as { customWindows?: Array<{ percent: number; modelId?: string }> }).customWindows ?? [])
+      .filter(window => window.modelId !== undefined).map(window => Math.round(window.percent));
+
     reply = () => Response.json(summary);
     const answer = await post("retrieveUserQuotaSummary", '{"project":"synthetic-project-two"}');
     expect(JSON.parse(answer.text)).toEqual(summary);
     const two = accountFor("synthetic-project-two");
     expect(percents(await observed(two))).toEqual([40]);
 
-    // A per-model reading in the same session does not replace that account's fresher summary.
+    // A per-model reading in the same session does not replace that account's fresher summary, and
+    // on its own it is kept as per-model rows only: one model's counter is not a family window.
     reply = () => Response.json(models(0.1));
     await post("fetchAvailableModels", '{"project":"synthetic-project-two"}');
     reply = () => Response.json(models(0.75));
     await post("fetchAvailableModels", '{"project":"synthetic-project-three"}');
     const three = accountFor("synthetic-project-three");
-    expect(percents(await observed(three))).toEqual([25]);
+    const threeQuota = await observed(three);
+    expect([percents(threeQuota), modelPercents(threeQuota)]).toEqual([[], [25]]);
     expect(percents(await observed(two))).toEqual([40]);
 
-    // The pool's provider row is the freshest observation, from whichever account agy used last.
+    // The pool's provider row prefers the freshest observation that has family windows.
     const row = fetchObservedAntigravityQuota("google-antigravity");
     expect(row?.observed).toBe(true);
-    expect(percents(row?.quota)).toEqual([25]);
+    expect(percents(row?.quota)).toEqual([40]);
     expect(calls.map(call => call.path)).toEqual([
       "/v1internal:retrieveUserQuotaSummary", "/v1internal:fetchAvailableModels", "/v1internal:fetchAvailableModels",
     ]);
+  });
+
+  test("an observation never moves to another sign-in, and a row with no agy sign-in is not an observation", async () => {
+    await launch();
+    const { readPassiveProviderAccountQuotas, recordPassiveAccountQuota } = await import("../../src/providers/quota/account-cache");
+    const { mergeAccountCredential } = await import("../../src/oauth/store");
+    const account = () => getAccountSet("google-antigravity")!.accounts.find(row => row.credential.projectId === "synthetic-project-one")!;
+    const id = account().id;
+    const observedIds = () => readPassiveProviderAccountQuotas("google-antigravity").map(row => row.accountId);
+
+    // A probe-era row with no sign-in attached is not shown.
+    recordPassiveAccountQuota("google-antigravity", id, { customWindows: [{ label: "Gem", percent: 90 }], updatedAt: Date.now() }, Number.MAX_SAFE_INTEGER);
+    expect(observedIds()).toEqual([]);
+
+    // The answer arrives after another login took the slot: it is not written for the new login.
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    reply = () => new Response(new ReadableStream({ async start(controller) {
+      await held;
+      controller.enqueue(new TextEncoder().encode(JSON.stringify({ groups: [{ displayName: "Gemini", buckets: [{ window: "5h", remainingFraction: 0.5 }] }] })));
+      controller.close();
+    } }), { headers: { "content-type": "application/json" } });
+    const pending = post("retrieveUserQuotaSummary", '{"project":"synthetic-project-one"}');
+    for (let attempt = 0; attempt < 50 && calls.length === 0; attempt++) await Bun.sleep(10);
+    await mergeAccountCredential("google-antigravity", id, { ...account().credential, refresh: "synthetic-refresh-other-login", accountId: "synthetic-other-login" });
+    release();
+    expect((await pending).status).toBe(200);
+    await Bun.sleep(50);
+    expect(observedIds()).toEqual([]);
   });
 
   test("a 429 passes through unchanged; only loadCodeAssist moves the caller, trajectory writes stay put", async () => {
