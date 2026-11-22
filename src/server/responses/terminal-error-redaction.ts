@@ -46,7 +46,8 @@ export function maskDiagnosticJson(parsed: unknown, mask: (text: string) => stri
     )) return field;
     if (role === "envelope" && key === "status" && (field === "failed" || field === "incomplete" || field === "completed")) return field;
     if (SENSITIVE_KEY_PATTERN.test(key)) return REDACTED_SECRET;
-    if (typeof field === "string") return mask(redactSecretString(field));
+    // Generated answer text is the user's content: only the exact physical credential is removed from it.
+    if (typeof field === "string") return role === "output" ? mask(field) : mask(redactSecretString(field));
     if (field === null || typeof field !== "object") {
       const scalar = String(field);
       if (mask(scalar) !== scalar) return REDACTED_SECRET;

@@ -254,6 +254,17 @@ export function attachCredentialMask(response: Response, mask: CredentialMask): 
   if (!physicalCredentialMasks.has(response)) physicalCredentialMasks.set(response, mask);
   return response;
 }
+/** Rebuilt wrappers keep the physical identity of the body they relay. */
+export function carryCredentialMask(source: Response, target: Response): Response {
+  const mask = physicalCredentialMasks.get(source);
+  return mask ? attachCredentialMask(target, mask) : target;
+}
+/** A published head whose body may be swapped later masks every physical body it can relay. */
+export function combineCredentialMasks(masks: () => readonly CredentialMask[]): CredentialMask {
+  return Object.assign((text: string) => masks().reduce((masked, mask) => mask(masked), text), {
+    redirectBody: (body: ReadableStream<Uint8Array>) => masks().reduce((relayed, mask) => mask.redirectBody(relayed), body),
+  });
+}
 export function responseCredentialMask(response: Response, fallbackHeaders?: HeadersInit): CredentialMask {
   return physicalCredentialMasks.get(response) ?? createOutboundCredentialMask(fallbackHeaders);
 }

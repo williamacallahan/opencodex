@@ -66,6 +66,7 @@ import {
 } from "../../combos";
 import { formatErrorResponse } from "../../bridge";
 import { SEND_BUDGET_EXHAUSTED_CODE } from "../../lib/errors";
+import { isScopedSpendRefusal, takeScopedSpendDenial } from "./request-spend";
 import {
   expandPreviousResponseInput,
   previousResponseRestoredPrefixLength,
@@ -1653,22 +1654,32 @@ export async function executeComboResponses(
       localAdmissionRefusals = undefined;
     }
     const localBudgetDenial = attempt.sendCount === 0 && isProxyError(failure.response) && failure.upstreamCode === SEND_BUDGET_EXHAUSTED_CODE;
-    if (localBudgetDenial && lastFailure) { attemptRetained = true; return exhaustedFailure(); }
+    // An identity or pool denial is this target's only: skip it uncooled, keep the earlier real failure.
+    const restoreSpendStamp = takeScopedSpendDenial(logCtx);
+    const scopedDenial = attempt.sendCount === 0 && isProxyError(failure.response)
+      && (localBudgetDenial ? restoreSpendStamp !== undefined : isScopedSpendRefusal(failure.response, inboundClientThreadId));
+    if (scopedDenial) restoreSpendStamp?.();
+    if (localBudgetDenial && !scopedDenial && lastFailure) { attemptRetained = true; return exhaustedFailure(); }
     attemptRetained = true;
-    lastFailure = failure.response;
-    lastFailureUpstreamCode = failure.upstreamCode;
+    const keepsEarlierFailure = scopedDenial && lastFailure !== null;
+    if (!(scopedDenial && lastFailure)) {
+      lastFailure = failure.response;
+      lastFailureUpstreamCode = failure.upstreamCode;
+    }
     toolChoiceRefusalsOnly = (toolChoiceRefusalsOnly ?? true) && isMandatoryToolChoiceRefusal(failure.response);
     // A real target failure ends the session pin; the next turn is decided afresh (#7525).
     jevPin?.forget();
     // A strict Reserve refusal is this leg's own typed answer, not the ladder's quota evidence.
-    if (!quotaFailure && legIntent !== "reserve-only" && (lastFailure.status === 429 || lastFailure.status === 402)) {
+    if (!quotaFailure && !scopedDenial && legIntent !== "reserve-only" && (lastFailure.status === 429 || lastFailure.status === 402)) {
       quotaFailure = lastFailure;
       quotaFailedChildLog = childLog;
     }
-    lastFailedChildLog = childLog;
-    // The failed child's resolved destination, so the next hop compares physical targets.
-    lastFailedTarget = { provider: targetRoute.providerName, model: targetRoute.modelId };
-    lastFailedRetryAfter = failure.retryAfter;
+    if (!keepsEarlierFailure) {
+      lastFailedChildLog = childLog;
+      // The failed child's resolved destination, so the next hop compares physical targets.
+      lastFailedTarget = { provider: targetRoute.providerName, model: targetRoute.modelId };
+      lastFailedRetryAfter = failure.retryAfter;
+    }
     const hardRefusal = failure.wsPreludeVerdict && failure.wsPreludeVerdict === "hard-stop";
     if (hardRefusal && restoredRefusal) {
       adoptFailedChildLog(childLog);
@@ -1687,7 +1698,7 @@ export async function executeComboResponses(
     }
     // A non-replayable failure (the answer to a spent ambiguous-reset replacement) may follow a
     // send that already ran the turn, so no later target may receive it, whatever its status says.
-    const failureDecision = localBudgetDenial || boundTargetKey !== undefined || hardRefusal || failure.nonReplayable || spentReplacement
+    const failureDecision = scopedDenial ? "hop" : localBudgetDenial || boundTargetKey !== undefined || hardRefusal || failure.nonReplayable || spentReplacement
       ? "stop"
       : isPolicyCandidateRefusal(failure.response) ? "hop"
       : comboFailureDecision(failure.response.status, failure.classificationText, {
@@ -1802,7 +1813,7 @@ export async function executeComboResponses(
     const pooledRelay = hasUpstreamSeatPool(targetRoute, childLog.providerAdapter);
     const relayCooldown = pooledRelay
       ? relayFailureCooldownMs(failure.response.status, failure.relayRetryAfterHeader, combo.cooldownMs, failureNow) : undefined;
-    const failureCooldownScope = reserveCapacityRefused || isPolicyCandidateRefusal(failure.response) ? "none"
+    const failureCooldownScope = reserveCapacityRefused || scopedDenial || isPolicyCandidateRefusal(failure.response) ? "none"
       : relayCooldown !== undefined && classifiedScope === "provider" ? "target" : classifiedScope;
     const failedTargetKey = targetKey(pick.target);
     let failedTargetCooled = false;

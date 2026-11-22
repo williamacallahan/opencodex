@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { apiKeyAccountLogLabel } from "../../src/codex/account-label";
-import { clearComboTargetCooldowns } from "../../src/combos/failover";
+import { clearComboTargetCooldowns, isComboTargetInCooldown } from "../../src/combos/failover";
 import { clearComboSelectionState } from "../../src/combos/resolve";
 import { configureSharedSpendLedger, sharedSpendLedger, spendPolicyFromConfig } from "../../src/lib/spend-reservation-ledger";
 import { admitWorkflowTurn, listWorkflowBudgetEvents, resetWorkflowBudgetsForTest, workflowBudgetSnapshot } from "../../src/lib/workflow-budget";
@@ -49,7 +49,7 @@ afterEach(async () => {
 });
 
 type FixtureTransport = "Mistral" | "ordinary keyed Chat" | "ordinary keyed Responses";
-function fixture(spend: NonNullable<OcxConfig["spend"]>, rotate: boolean, combo = false, wireProtocol: FixtureTransport = "Mistral") {
+function fixture(spend: NonNullable<OcxConfig["spend"]>, rotate: boolean, combo = false, wireProtocol: FixtureTransport = "Mistral", changeOn503 = false) {
   configureSharedSpendLedger(spendPolicyFromConfig(spend, undefined, combo ? [provider, "earlier"] : [provider]));
   const ledger = sharedSpendLedger();
   const wire: string[] = [];
@@ -68,6 +68,11 @@ function fixture(spend: NonNullable<OcxConfig["spend"]>, rotate: boolean, combo 
       if (!selected) throw new Error("Expected one of the two fixture keys");
       wire.push(selected.id);
       reservations.push([0, 1].map(index => ledger.snapshot("identity", label(index))?.reserved ?? 0));
+      if (changeOn503 && wire.length === 1) {
+        config.providers[provider]!.apiKeyPool = [{ ...keys[0]!, disabled: true }, keys[1]!];
+        config.providers[provider]!.apiKey = keys[1]!.key;
+        return Response.json({ error: { message: "fixture unavailable" } }, { status: 503, headers: { "retry-after": "0" } });
+      }
       return rotate && selected.id === "first"
         ? Response.json({ error: { message: "fixture key is rate limited" } }, { status: 429 })
         : wireProtocol === "ordinary keyed Responses" ? Response.json(responsesSuccess("fixture answer", "m1")) : chatSuccess("fixture answer", "m1");
@@ -126,6 +131,36 @@ for (const transport of ["Mistral", "ordinary keyed Chat", "ordinary keyed Respo
   const balance = f.ledger.snapshot("pool", "earlier");
   expect(balance?.reserved).toBe(0);
   expect(balance?.unresolved).toBeGreaterThan(0);
+});
+
+for (const scope of ["identity", "pool"] as const) test(`an unsent ${scope} denial skips to the funded combo member without cooldown`, async () => {
+  const f = fixture({ [scope]: headroom }, false, true, "ordinary keyed Responses");
+  const scopes = scope === "identity" ? { identityId: label(1) } : { poolId: provider };
+  expect(f.ledger.reserve({ sendId: "prior", scopes, inputTokens: headroom.maxTokens, outputCeilingTokens: 0 }).reserved).toBe(true);
+  f.ledger.markDispatched("prior"); f.ledger.settle("prior", { inputTokens: headroom.maxTokens, outputTokens: 0 });
+  const member = { provider, model: "m1" };
+  const visited: string[] = [];
+  for (const name of ["earlier", "later"]) f.config.providers[name] = { adapter: "openai-chat", baseUrl: `https://${name}.example.test/v1`, authMode: "local", models: ["m1"], liveModels: false,
+    fetch: Object.assign(async () => { visited.push(name); return name === "earlier" ? Response.json({ error: { message: "temporary" } }, { status: 503 }) : chatSuccess("funded", "m1"); }, { preconnect: fetch.preconnect }) };
+  f.config.combos!.selected!.targets = [{ provider: "earlier", model: "m1" }, member, { provider: "later", model: "m1" }];
+  const result = await f.run();
+  expect(result.status, result.text).toBe(200);
+  expect(visited).toEqual(["earlier", "later"]);
+  expect(f.wire).toEqual([]);
+  expect(isComboTargetInCooldown("selected", member)).toBe(false);
+  // The served row carries no trace of the skipped member's local refusal.
+  expect([f.log.localTerminalReason, f.log.terminalSource, f.log.errorCode]).toEqual([undefined, undefined, undefined]);
+  expect(result.chargedSends).toBe(2);
+});
+
+test("a deferred HTTP retry leaves the failed send on its issuing key", async () => {
+  const f = fixture(combined, false, false, "ordinary keyed Chat", true);
+  f.config.providers[provider]!.transientRetryOn5xx = { attempts: 2 };
+  const result = await f.run();
+  expect(result.status, result.text).toBe(200);
+  expect(f.wire).toEqual(["first", "second"]);
+  expect(f.ledger.snapshot("identity", label(0))?.unresolved).toBe(f.reservations[0]![0]);
+  expect(f.ledger.snapshot("identity", label(1))).toMatchObject({ reserved: 0, settled: 3, unresolved: 0 });
 });
 
 test("native Chat books one ledger entry for an ordinary keyed Chat combo send", async () => {

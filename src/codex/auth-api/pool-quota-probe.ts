@@ -1,9 +1,9 @@
 import { parseCodexCredits, rememberCodexCredits } from "../credits";
 import { fetchCodexUsage } from "../quota-query-backoff";
 import type { CodexUsageOwner } from "../quota-query-backoff";
-import { capturePoolQuotaWriter, getValidCodexToken, isCodexAccountGenerationLive, forceRefreshCodexPoolToken, markCodexAccountValidated, markCodexAccountValidationFailed, readCodexAccountRecord, isTerminalCodexPoolRefreshFailure, CodexCredentialGenerationConflictError, CodexCredentialRefreshLockTimeoutError, CodexCredentialRefreshBusyError, CodexCredentialRefreshStaleError, TokenRefreshError } from "../account-store";
+import { capturePoolQuotaWriter, getValidCodexToken, isCodexAccountGenerationLive, forceRefreshCodexPoolToken, isCodexValidationAuthRefused, markCodexAccountValidated, markCodexAccountValidationAttemptFailed, markCodexAccountValidationFailed, readCodexAccountRecord, isTerminalCodexPoolRefreshFailure, CodexCredentialGenerationConflictError, CodexCredentialRefreshLockTimeoutError, CodexCredentialRefreshBusyError, CodexCredentialRefreshStaleError, TokenRefreshError } from "../account-store";
 import type { PoolQuotaWriter } from "../quota-types";
-import { isValidWhamHistoryObservation, getAccountQuota, isCodexQuotaExhausted, isCompleteCodexQuotaRecoverySnapshot, parseUsageQuota, poolWhamPolicyObservation, setAccountQuotaFromParsed } from "../quota";
+import { isValidWhamHistoryObservation, exhaustedCodexQuotaWindows, getAccountQuota, isCodexQuotaExhausted, isCompleteCodexQuotaRecoverySnapshot, parseUsageQuota, poolWhamPolicyObservation, setAccountQuotaFromParsed } from "../quota";
 import type { StoredAccountQuota, WhamUsageResponse } from "../quota";
 import { CODEX_EXHAUSTED_QUOTA_PROBE_INTERVAL_MS, codexQuotaProbeIntervalMs } from "../routing/cooldown-math";
 import type { ManualResetRefreshLineage } from "../routing";
@@ -25,7 +25,7 @@ export const POOL_CACHE_TTL = 5 * 60_000;
 const poolQuotaAttemptAt = new Map<string, number>();
 const MAX_TRACKED_POOL_QUOTA_ATTEMPTS = 512;
 
-export function resetPoolQuotaAttemptsForTests(): void { poolQuotaAttemptAt.clear(); }
+export function resetPoolQuotaAttemptsForTests(): void { poolQuotaAttemptAt.clear(); lastLoggedValidationSkip.clear(); }
 
 function notePoolQuotaAttempt(accountId: string, at: number): void {
   poolQuotaAttemptAt.delete(accountId);
@@ -561,14 +561,55 @@ function pendingValidationSkipReason(
   if (result.quotaProbeSkipped) return "usage_read_skipped";
   if (result.freshCredentialGeneration === undefined) return "no_fresh_usage_read";
   if (result.freshCredentialGeneration !== recordGeneration) return "credential_generation_moved";
-  if (!isCompleteCodexQuotaRecoverySnapshot(result.freshQuota ?? null, result.freshPlan ?? configuredPlan)) {
-    return result.freshQuota ? "usage_exhausted_or_incomplete" : "no_usage_window";
+  const plan = result.freshPlan ?? configuredPlan;
+  if (!isCompleteCodexQuotaRecoverySnapshot(result.freshQuota ?? null, plan)) {
+    if (!result.freshQuota) return "no_usage_window";
+    const exhausted = exhaustedCodexQuotaWindows(result.freshQuota, plan);
+    return exhausted.length > 0 ? `usage_exhausted window=${exhausted.join(",")}` : "usage_incomplete";
   }
   return undefined;
 }
 
-/** One line per dashboard validation outcome; names the account by its id suffix only. */
+/** How long an unattended refresh waits after a failed warm-up before it sends that account another. */
+export const PENDING_VALIDATION_RETRY_BACKOFF_MS = 30 * 60_000;
+
+/**
+ * Whether an unattended refresh must leave this pending account's warm-up unsent. The standing
+ * admin-token consent is exercised about once a minute; without this a warm-up that keeps failing
+ * would spend a model request on every pass. A dashboard click never asks.
+ */
+export function pendingValidationRetryHeld(accountId: string, now: number = Date.now()): boolean {
+  const record = readCodexAccountRecord(accountId);
+  if (!record?.codexValidationPending) return false;
+  // A 401/403 verdict does not age out: only a new sign-in or a dashboard click retries it.
+  if (isCodexValidationAuthRefused(record)) {
+    notePendingValidation(accountId, "skipped reason=reauth_required");
+    return true;
+  }
+  const failedAt = record.lastCodexValidationAttemptFailedAt;
+  // A failure time ahead of the clock (the clock was stepped back) must not extend the hold.
+  if (failedAt === undefined || failedAt > now || now - failedAt >= PENDING_VALIDATION_RETRY_BACKOFF_MS) return false;
+  notePendingValidation(accountId, "skipped reason=retry_backoff");
+  return true;
+}
+
+/** The last `skipped ...` outcome logged per account, so an unattended refresh does not repeat it every pass. */
+const lastLoggedValidationSkip = new Map<string, string>();
+
+/**
+ * One line per validation outcome; names the account by its id suffix only. A skip is logged
+ * when it differs from that account's last logged outcome; `completed` and `failed` always log.
+ */
 function notePendingValidation(accountId: string, outcome: string): void {
+  if (outcome.startsWith("skipped ")) {
+    if (lastLoggedValidationSkip.get(accountId) === outcome) return;
+    lastLoggedValidationSkip.delete(accountId);
+    lastLoggedValidationSkip.set(accountId, outcome);
+    const oldest = lastLoggedValidationSkip.keys().next();
+    if (lastLoggedValidationSkip.size > MAX_TRACKED_POOL_QUOTA_ATTEMPTS && !oldest.done) lastLoggedValidationSkip.delete(oldest.value);
+  } else {
+    lastLoggedValidationSkip.delete(accountId);
+  }
   console.warn(`[codex] pool validation account=\u2026${accountId.slice(-4)} ${outcome}`);
 }
 
@@ -680,7 +721,10 @@ export async function fetchPoolAccountQuota(
         });
         markCodexAccountValidated(accountId, Date.now(), generation);
         clearAccountNeedsReauth(accountId, generation);
-        notePendingValidation(accountId, "completed");
+        // The write is fenced on the credential the warm-up used. A credential replaced mid-test
+        // leaves the account pending, and saying "completed" for it sent operators looking elsewhere.
+        notePendingValidation(accountId, readCodexAccountRecord(accountId)?.codexValidationPending
+          ? "unrecorded reason=credential_changed" : "completed");
       } catch (error) {
         // Keep the durable restriction on any failed/partial inference response, even
         // when WHAM just reported headroom. No raw upstream text enters diagnostics.
@@ -689,6 +733,8 @@ export async function fetchPoolAccountQuota(
         if (reason === "http_status:401" || reason === "http_status:403") {
           markCodexAccountValidationFailed(accountId, reason, { expectedGeneration: generation });
           markAccountNeedsReauth(accountId, captureConfigGeneration(), generation);
+        } else {
+          markCodexAccountValidationAttemptFailed(accountId, Date.now(), generation);
         }
       }
     }

@@ -490,6 +490,8 @@ export async function prepareAdapterExchange(
       const deferredInitial = deferAdmission && !receiptMode ? deferPhysicalSendReporter(initialReporter) : undefined;
       try { upstreamResponse = await fetchWithRetryPolicy(
         recovery => {
+          // A retry thunk starts only after the prior admitted send is settled on its issuing key.
+          deferredInitial?.report(0);
           // Unconfigured generic sends may omit the counting reporter. Capture policy
           // independently so a later recovery still belongs to this request's start.
           sendBudgetState.adapterSendBudget?.startRequest?.(responsesSpendTarget(logCtx, route.providerName));

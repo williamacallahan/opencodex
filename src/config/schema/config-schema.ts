@@ -284,6 +284,8 @@ export const configSchema = z.object({
   // to undefined, which resolves to the historical auto-open behavior.
   oauthOpenBrowser: z.boolean().optional().catch(undefined),
   showCodexCredits: z.boolean().optional().catch(false),
+  // Consent switch: a malformed hand edit grants nothing.
+  codexPendingValidationByAdminRefresh: z.boolean().optional().catch(false),
   openaiProviderTierVersion: z.union([z.literal(1), z.literal(2)]).optional(),
   // Invalid hand edits must not discard an otherwise usable config.
   googleAntigravityStaticCatalogVersion: z.union([z.literal(1), z.literal(2)]).optional().catch(undefined),

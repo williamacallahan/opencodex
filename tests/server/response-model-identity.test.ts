@@ -149,6 +149,18 @@ describe("a passthrough openai-model header is kept only as a known model id", (
     expect(body.error.message).not.toContain(marker);
   });
 
+  test("an incomplete buffered answer keeps its example Authorization header", async () => {
+    releaseSpendHome = acquireOwnedSpendHome();
+    const config = routedConfig("fixture-openai", "openai-responses", "gpt-5.5");
+    const marker = "physical-fixture-marker", example = "Use Authorization: Bearer example-only";
+    config.providers["fixture-openai"]!.headers = { "x-fixture-auth": marker };
+    globalThis.fetch = (async () => Response.json({ ...responseSnapshot(undefined), status: "incomplete", incomplete_details: { reason: "max_output_tokens" },
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: `${example} (${marker})` }] }] })) as typeof fetch;
+    const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "fixture-openai/gpt-5.5", input: "hi", stream: false }) }), config, {}, {});
+    expect((await response.json()).output[0].content[0].text).toBe(`${example} ([REDACTED])`);
+  });
+
   // A provider-owned hint naming a model the user configured for this provider survives as the
   // proxy's copy; an unconfigured or prefixless value is still dropped.
   test.each([

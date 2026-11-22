@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { collectOAuthDoctorChecks } from "../../src/cli/doctor";
 import { loadAuthStore, saveCredential } from "../../src/oauth/store";
@@ -71,4 +71,12 @@ test("a store write clears the condition, and a file that goes bad again is quar
   await loadRepeatedly(3);
   expect(quarantined()).toHaveLength(2);
   expect(unreadableLines()).toEqual([`${UNREADABLE_LINE} reason=empty_file`, `${UNREADABLE_LINE} reason=empty_file`]);
+});
+
+test("an auth.json that cannot be read at all is one doctor failure, not a thrown doctor", async () => {
+  // A bind mount of a missing file leaves a directory where auth.json should be.
+  mkdirSync(authPath());
+  expect((await doctorStoreFailures())[0]).toContain("(read_failed)");
+  expect(loadAuthStore()).toEqual({});
+  expect(unreadableLines()).toEqual([`${UNREADABLE_LINE} reason=read_failed`]);
 });
