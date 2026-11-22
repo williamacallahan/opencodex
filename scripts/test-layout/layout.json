@@ -1598,6 +1598,7 @@
     "responses-spend-ledger-wiring.test.ts": "responses",
     "responses-spend-contract-c.test.ts": "responses",
     "responses-spend-anchor.test.ts": "responses",
+    "responses-mistral-selected-key-spend.test.ts": "responses",
     "responses-spend-capacity-guard.test.ts": "responses",
     "responses-spill-acl-recovery.test.ts": "responses",
     "responses-spill-admission-headroom.test.ts": "responses",

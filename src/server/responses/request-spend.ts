@@ -3,7 +3,7 @@ import type { RequestSendObserver } from "../../lib/request-execution-budget";
 import { sharedSpendLedger, sharedSpendPolicy, type SpendReservationLedger, type SpendScopes, type SpendSeed, type SpendReservationProof, type SpendAdmissionPolicy } from "../../lib/spend-reservation-ledger";
 import { SpendLedgerOwnerError } from "../../lib/spend-ledger-owner";
 import { markLocalRequestLogRefusal, type RequestLogContext } from "../request-log";
-import { recordWorkflowRefusalEvent, workflowDenialSummary, type WorkflowDenial } from "../../lib/workflow-budget";
+import { recordWorkflowRefusalEvent, workflowDenialSummary, workflowSpendCeilingReached, WORKFLOW_LOCAL_REFUSAL_HEADER, type WorkflowDenial } from "../../lib/workflow-budget";
 
 /** The terminal usage a request reported, in the only two fields the ledger books. */
 export interface TerminalSpendUsage {
@@ -34,6 +34,26 @@ export interface RequestSpendTracker extends RequestSendObserver, RequestSpendSe
   requestFinalSettlement(usage: TerminalSpendUsage | undefined): void;
 }
 
+// A denial scoped to one keyed identity or pool leaves other targets fundable; every other
+// refusal (root, undurable ledger, tracking capacity) is request-wide. Each entry keeps the log
+// fields that denial overwrote, so a combo that hops past it leaves no refusal on a served row.
+type SpendRefusalStamp = Partial<Pick<RequestLogContext, "localTerminalReason" | "terminalSource" | "errorCode" | "spendRefusalDetail">>;
+const scopedSpendDenials = new WeakMap<object, SpendRefusalStamp>();
+/**
+ * Claim the identity or pool denial of the attempt that just failed, once. Returns a restore that
+ * puts back the log fields the denial stamped, or undefined when the attempt had no such denial.
+ */
+export function takeScopedSpendDenial(logCtx: SpendRefusalStamp): (() => void) | undefined {
+  const prior = scopedSpendDenials.get(logCtx);
+  if (!prior) return undefined;
+  scopedSpendDenials.delete(logCtx);
+  return () => { Object.assign(logCtx, prior); };
+}
+/** A pre-dispatch spend refusal that no spent root explains is an identity or pool denial. */
+export const isScopedSpendRefusal = (response: Response, rootId: string | undefined): boolean =>
+  response.headers.get(WORKFLOW_LOCAL_REFUSAL_HEADER) === "workflow_spend_exhausted"
+  && (rootId === undefined || workflowSpendCeilingReached(rootId) === undefined);
+
 /**
  * One request's entries in the durable spend ledger (#4707).
  *
@@ -56,7 +76,7 @@ export interface RequestSpendTracker extends RequestSendObserver, RequestSpendSe
 export function createRequestSpendTracker(
   logCtx: Pick<
     RequestLogContext,
-    "provider" | "accountLogLabel" | "usageLogInputTokens" | "spendOutputCeilingTokens" | "spendInputEstimateTokens" | "spendPoolId"
+    "provider" | "accountLogLabel" | "usageLogInputTokens" | "spendOutputCeilingTokens" | "spendInputEstimateTokens" | "spendPoolId" | "spendIdentityPending"
   > & Partial<Pick<RequestLogContext, "localTerminalReason" | "terminalSource" | "errorCode" | "spendRefusalDetail">>,
   rootId: string | undefined,
   injected?: SpendReservationLedger,
@@ -94,7 +114,7 @@ export function createRequestSpendTracker(
     if (initialEnforced !== undefined) return initialEnforced;
     const policy = admissionPolicy ?? ledgerRef?.policy ?? sharedSpendPolicy();
     return (scopes.rootId !== undefined && policy.root.maxTokens !== undefined)
-      || (scopes.identityId !== undefined && policy.identity.maxTokens !== undefined)
+      || ((scopes.identityId !== undefined || logCtx.spendIdentityPending === true) && policy.identity.maxTokens !== undefined)
       || (scopes.poolId !== undefined && policy.pool.maxTokens !== undefined);
   };
   const estimates = () => ({ inputTokens: logCtx.spendInputEstimateTokens ?? logCtx.usageLogInputTokens ?? 0,
@@ -182,6 +202,7 @@ export function createRequestSpendTracker(
   };
   const refusal = (denial: import("../../lib/spend-reservation-ledger").SpendDenial): void => {
         refusals += 1;
+        scopedSpendDenials.delete(logCtx);
         // Preserve the PR's explicit unresolved-history refusal and its distinct operator code.
         if (denial.reason === "pool-history-unresolved") {
           const summary = workflowDenialSummary("workflow-pool-history-unresolved");
@@ -205,6 +226,10 @@ export function createRequestSpendTracker(
             ...(denial.includesUnboundPoolHistory ? { includesUnboundPoolHistory: true } : {}),
           }
           : undefined;
+        if (detail && (detail.scope === "identity" || detail.scope === "pool")) {
+          const { localTerminalReason, terminalSource, errorCode, spendRefusalDetail } = logCtx;
+          scopedSpendDenials.set(logCtx, { localTerminalReason, terminalSource, errorCode, spendRefusalDetail });
+        }
         const summary = workflowDenialSummary(reason, detail);
         markLocalRequestLogRefusal(logCtx, summary.code);
         logCtx.errorCode = summary.code;
@@ -286,6 +311,9 @@ export function createRequestSpendTracker(
           const entry = physical.get(ordinal);
           const owned = starts.find(start => start.ordinal === ordinal);
           if (closed || !entry || !owned || entry.sendId) throw new Error("Invalid spend reporter rebind");
+          // Without an identity ceiling the key that sends decides nothing the pool and root scopes
+          // did not already admit, so the provisional booking stands instead of being re-reserved.
+          if (target.identityId !== undefined && (admissionPolicy ?? ledgerRef?.policy ?? sharedSpendPolicy()).identity.maxTokens === undefined) return true;
           const old = seedState(entry.seed)!;
           // A helper start is provisional until selection reaches the executor. If this is
           // the first start on its seed, abandon/rebind at NORMAL capacity before the wire.

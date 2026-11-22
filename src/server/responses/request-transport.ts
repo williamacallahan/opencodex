@@ -61,7 +61,7 @@ import { resolveContextPrincipal } from "../auth-cors";
 import { tryKiroAlternateAfterTerminalRefresh } from "../../oauth/kiro-terminal-failover";
 import { classifyModelFamilyForQuota } from "../../oauth/account-quota-rank";
 import { expandInferenceOAuthSendBudget } from "../inference/context";
-import { stampOAuthAccountLabel, usesApiKeyAccount } from "../../providers/label";
+import { stampApiKeyAccountLabel, stampOAuthAccountLabel, usesApiKeyAccount } from "../../providers/label";
 import { isXaiResponsesDestination, resolveProviderTransport } from "../../providers/xai-transport";
 import { captureRouteStaticPolicy } from "../../router";
 import { CopilotAutoHttpError, resolveCopilotAuto } from "../../providers/github-copilot-auto";
@@ -160,6 +160,7 @@ export async function prepareResponsesTransport(
   if (!anthropicAdmissionIsCurrent()) {
     return formatErrorResponse(401, "authentication_error", "Anthropic Pool 2 provider target changed; retry the request");
   }
+  logCtx.spendIdentityPending = usesApiKeyAccount(route.provider);
   const requireAnthropicAdmission = (): void => {
     if (!anthropicAdmissionIsCurrent()) throw new OAuthLoginRequiredError(anthropicInstance!);
   };
@@ -881,8 +882,12 @@ export async function prepareResponsesTransport(
           let physicalOwner: AnthropicPhysicalSendOwnership | null = null;
           try {
             requireAnthropicAdmission();
+            // Spend admission books the key this send actually uses. The attempt label is stamped
+            // only at commit below, and a rotated key must not be charged to the previous one.
+            const sendingKey: { accountLogLabel?: string } = { accountLogLabel: logCtx.accountLogLabel };
+            if (binding?.kind === "api-key") stampApiKeyAccountLabel(sendingKey, route.providerName, binding.provider);
             if (!rebindPhysicalSend(options.sendBudget, { poolId: logCtx.spendPoolId ?? route.providerName,
-              identityId: logCtx.accountLogLabel })) throw new SendBudgetExhaustedError();
+              identityId: sendingKey.accountLogLabel })) throw new SendBudgetExhaustedError();
             if (snapshot) {
               // Reserve the incarnation at this synchronous send boundary, never on return.
               physicalOwner = captureAnthropicPhysicalSendOwnership(snapshot);

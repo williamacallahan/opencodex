@@ -351,7 +351,11 @@ export function createPhysicalSendReporter(
   report.execute = run => activePhysicalReporters.run(report, run);
   report.bind = (selected: SpendScopes & { targetKey?: string }) => {
     if (!producer || currentOrdinal === undefined || observer?.enforced !== true) return true;
-    return producer.rebindTarget(selected, currentOrdinal);
+    if (producer.rebindTarget(selected, currentOrdinal)) return true;
+    // A refused rebind dropped the provisional start: that send never left, so it is not reported.
+    started--;
+    currentOrdinal = undefined;
+    return false;
   };
   report.close = () => {
     if (closed) return;

@@ -217,6 +217,8 @@ export interface RequestLogContext extends UpstreamErrorDiagnostics {
   spendInputEstimateTokens?: number;
   /** Canonical provider-pool spend identity; independent of mutable, account-specific log labels. */
   spendPoolId?: string;
+  /** The routed provider charges one of its API keys, which pacing selects only at the physical send. */
+  spendIdentityPending?: boolean;
   /** Internal safe refusal detail for a request whose ceiling includes unidentified old pool spend. */
   spendRefusalDetail?: WorkflowSpendDenialDetail;
   /** Settles this request's durable spend entries from `addFinalRequestLog`. */

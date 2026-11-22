@@ -49,6 +49,7 @@ import {
 } from "../../combos";
 import { formatErrorResponse } from "../../bridge";
 import { SEND_BUDGET_EXHAUSTED_CODE } from "../../lib/errors";
+import { isScopedSpendRefusal, takeScopedSpendDenial } from "./request-spend";
 import { redactSecretString, sanitizeLogMetadataString } from "../../lib/redact";
 import {
   expandPreviousResponseInput,
@@ -58,7 +59,7 @@ import {
 import { hasUnreadableEncryptedAgentTask } from "./encrypted-payload";
 import { routeConcreteModel, comboRouteDecisionTrace } from "../../router";
 import { memoryModelRouteReason } from "./memory-models";
-import { baseProviderLabel, poolAccountProviderLabel } from "../../providers/label";
+import { baseProviderLabel, poolAccountProviderLabel, usesApiKeyAccount } from "../../providers/label";
 import { getAccountSet } from "../../oauth/store";
 import { anthropicRefusalCredentialIsCurrent } from "../../oauth/anthropic-account-refusal";
 import { configuredAnthropicInstance } from "../../providers/anthropic-instance";
@@ -954,6 +955,10 @@ export async function executeComboResponses(
     }
     // The inherited spend tracker observes this parent log, before the child has its own label.
     logCtx.spendPoolId = targetRoute.providerName;
+    // The spend policy freezes at the first target's booking. A key target later in the combo still
+    // charges its own key, so identity ceilings must already apply when an earlier target is unkeyed.
+    logCtx.spendIdentityPending = usesApiKeyAccount(targetRoute.provider) || combo.targets.some(target =>
+      usesApiKeyAccount(routeConcreteModel(config, `${target.provider}/${target.model}`).provider));
     // Combo prepays before its child normalizes the route; the parent tracker must
     // already see this target's effective cap rather than a previous target's cap.
     const spendProvider = resolveWireProtocolOverride(targetRoute.providerName, targetRoute.modelId,
@@ -979,6 +984,18 @@ export async function executeComboResponses(
       targetKey: `${pick.target.provider}/${pick.target.model}`,
       countedExternally: true,
     });
+    if (hopDecision && !hopDecision.allowed) {
+      // An identity or pool spend denial is this target's alone: skip it uncooled while another target remains.
+      const restoreSpendStamp = takeScopedSpendDenial(logCtx);
+      if (restoreSpendStamp) {
+        const skipped = advanceComboAfterFailure(config, pick, { cooldownScope: "none", eligible: targetEligible, now: Date.now() });
+        if (skipped) {
+          restoreSpendStamp();
+          pick = skipped;
+          continue;
+        }
+      }
+    }
     if (hopDecision && !hopDecision.allowed && firstComboTarget) {
       // A refused initial reservation authorizes no child send and has no upstream failure to return.
       return formatErrorResponse(429, SEND_BUDGET_EXHAUSTED_CODE, "request send budget exhausted before combo dispatch");
@@ -1325,18 +1342,26 @@ export async function executeComboResponses(
     } else {
       localAdmissionRefusals = undefined;
     }
+    // An identity or pool denial is this target's only: skip it uncooled, keep the earlier real failure.
+    const restoreSpendStamp = takeScopedSpendDenial(logCtx);
+    const scopedDenial = attempt.sendCount === 0
+      && (restoreSpendStamp !== undefined || isScopedSpendRefusal(failure.response, inboundClientThreadId));
+    if (scopedDenial) restoreSpendStamp?.();
     attemptRetained = true;
-    lastFailure = failure.response;
+    const keepsEarlierFailure = scopedDenial && lastFailure !== null;
+    if (!scopedDenial || !lastFailure) lastFailure = failure.response;
     // A real target failure ends the session pin; the next turn is decided afresh (#7525).
     jevPin?.forget();
-    if (!quotaFailure && (lastFailure.status === 429 || lastFailure.status === 402)) {
+    if (!quotaFailure && !scopedDenial && (lastFailure.status === 429 || lastFailure.status === 402)) {
       quotaFailure = lastFailure;
       quotaFailedChildLog = childLog;
     }
-    lastFailedChildLog = childLog;
-    // The failed child's resolved destination, so the next hop compares physical targets.
-    lastFailedTarget = { provider: targetRoute.providerName, model: targetRoute.modelId };
-    lastFailedRetryAfter = failure.retryAfter;
+    if (!keepsEarlierFailure) {
+      lastFailedChildLog = childLog;
+      // The failed child's resolved destination, so the next hop compares physical targets.
+      lastFailedTarget = { provider: targetRoute.providerName, model: targetRoute.modelId };
+      lastFailedRetryAfter = failure.retryAfter;
+    }
     // A replacement that answers 200 is unmarked, and its zero-output failure only exists once
     // preflight has rebuilt the stream as a fresh Response. A spent grant never hops: a status the
     // client would resend becomes the refusal, and anything else reaches the client as it is.
@@ -1350,7 +1375,7 @@ export async function executeComboResponses(
     }
     // A non-replayable failure (the answer to a spent ambiguous-reset replacement) may follow a
     // send that already ran the turn, so no later target may receive it, whatever its status says.
-    const failureDecision = failure.nonReplayable || spentReplacement
+    const failureDecision = scopedDenial ? "hop" : failure.nonReplayable || spentReplacement
       ? "stop"
       : comboFailureDecision(failure.response.status, failure.classificationText, {
         code: failure.upstreamCode,
@@ -1425,7 +1450,7 @@ export async function executeComboResponses(
     );
     const failureNow = Date.now();
     const attemptedTargets = pick.attempted;
-    const failureCooldownScope = comboFailureCooldownScope(failure.response.status, failure.classificationText, {
+    const failureCooldownScope = scopedDenial ? "none" : comboFailureCooldownScope(failure.response.status, failure.classificationText, {
       code: failure.upstreamCode,
     });
     const failedTargetKey = targetKey(pick.target);
