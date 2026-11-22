@@ -68,6 +68,19 @@ describe("provider account quota persistence", () => {
     expect(readPersistedAccountQuotas().size).toBe(0);
   });
 
+  test("an agy observation outlives a restart for days; untagged Antigravity rows do not", async () => {
+    const day = 24 * 60 * 60_000;
+    const agy = "google-antigravity\u0000acct-agy";
+    const observed = (age: number) => ({ ...quota(30, Date.now() - age), identity: "a".repeat(64) });
+    schedulePersistAccountQuotas(() => [
+      [agy, observed(2 * day)],
+      ["google-antigravity\u0000acct-old", observed(9 * day)],
+      ["google-antigravity\u0000acct-untagged", quota(30, Date.now() - 2 * day)],
+    ]);
+    await settle();
+    expect([...readPersistedAccountQuotas().keys()]).toEqual([agy]);
+  });
+
   test("a corrupt file is ignored instead of breaking startup", () => {
     writeFileSync(join(home, FILE), "{ not json");
     expect(readPersistedAccountQuotas().size).toBe(0);

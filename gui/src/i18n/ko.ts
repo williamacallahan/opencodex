@@ -3189,6 +3189,7 @@ export const ko: Record<TKey, string> = {
   "pws.currentAccountUsage": "현재 계정 사용량",
   "pws.quotaUnsupported": "이 계정은 할당량 조회를 지원하지 않습니다.",
   "pws.quotaUnobserved": "아직 관측된 사용량이 없습니다.",
+  "pws.agyAccountPolicy": "허브는 각 agy 로그인이 사용할 계정을 선택하고, Google이 해당 계정의 속도를 제한하거나(HTTP 429) 계정이 일시 중지되었거나 다시 로그인이 필요하거나 로그인이 6시간 동안 유휴 상태가 될 때까지 그 로그인을 해당 계정에 유지합니다. 그러면 agy는 다음 턴에 다음 사용 가능한 계정으로 이동합니다. 계정의 할당량은 agy가 해당 계정을 사용한 뒤에 표시되며, agy 자체의 할당량 호출에서 읽고(허브 자체는 Google에 아무것도 보내지 않습니다), 경과 시간과 함께 계속 표시됩니다. “활성”은 대시보드의 기본 계정을 표시할 뿐, agy가 사용 중인 계정이 아닙니다.",
   "pws.quotaLastRead": "마지막 조회",
   "pws.quotaCheckCompleted": "할당량 확인 완료",
   "pws.modelBreakdown": "모델별 사용량",

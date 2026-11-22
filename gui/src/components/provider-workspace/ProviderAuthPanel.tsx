@@ -456,6 +456,7 @@ export default function ProviderAuthPanel({
         )}
       </div>
       <div className="pwi-auth-body">
+        {item.nativeHarness === "agy" && <p className="muted">{t("pws.agyAccountPolicy")}</p>}
         {item.name === "xai" && (
           <XaiChatOptInControl
             initialState={item.xaiResponsesOptInState ?? true}

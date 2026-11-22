@@ -3142,6 +3142,7 @@ export const de: Record<TKey, string> = {
   "pws.currentAccountUsage": "Nutzung des aktuellen Kontos",
   "pws.quotaUnsupported": "Für dieses Konto ist keine Kontingentabfrage verfügbar.",
   "pws.quotaUnobserved": "Noch keine Nutzungsdaten beobachtet.",
+  "pws.agyAccountPolicy": "Der Hub wählt das Konto, das jede agy-Anmeldung nutzt, und hält diese Anmeldung darauf, bis Google das Konto drosselt (HTTP 429), es pausiert ist oder eine erneute Anmeldung braucht, oder die Anmeldung 6 Stunden lang inaktiv war; agy wechselt dann bei seinem nächsten Durchlauf zum nächsten verfügbaren Konto. Das Kontingent eines Kontos erscheint, sobald agy es genutzt hat, gelesen aus agys eigenen Kontingentabfragen (der Hub selbst sendet Google nichts), und bleibt mit seinem Alter sichtbar. „Aktiv“ kennzeichnet das Standardkonto des Dashboards, nicht das, das agy gerade nutzt.",
   "pws.quotaLastRead": "Zuletzt gelesen",
   "pws.quotaCheckCompleted": "Kontingentprüfung abgeschlossen",
   "pws.modelBreakdown": "Modellaufschlüsselung",

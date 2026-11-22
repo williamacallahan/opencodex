@@ -3814,6 +3814,7 @@ export const ja: Record<TKey, string> = {
   "pws.currentAccountUsage": "現在のアカウントの使用量",
   "pws.quotaUnsupported": "このアカウントは割り当て量の照会に対応していません。",
   "pws.quotaUnobserved": "使用量はまだ観測されていません。",
+  "pws.agyAccountPolicy": "ハブは agy の各サインインが使用するアカウントを選択し、Google がそのアカウントをレート制限するか（HTTP 429）、アカウントが一時停止中か再サインインが必要になるか、サインインが 6 時間アイドル状態になるまで、そのサインインを同じアカウントに留めます。その後 agy は次のターンで次に利用可能なアカウントへ移動します。アカウントの割り当て量は、agy がそのアカウントを使用した後に表示され、agy 自身の割り当て量呼び出しから読み取られ（ハブ自体は Google に何も送信しません）、経過時間とともに表示され続けます。“アクティブ”はダッシュボードの既定のアカウントを示すもので、agy が使用しているアカウントではありません。",
   "pws.quotaLastRead": "最終読み取り",
   "pws.quotaCheckCompleted": "割り当て量の確認が完了しました",
   "pws.modelBreakdown": "Model breakdown",

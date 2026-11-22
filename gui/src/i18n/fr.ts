@@ -1952,6 +1952,7 @@ export const fr: Record<TKey, string> = {
   "pws.currentAccountUsage": "Utilisation du compte actuel",
   "pws.quotaUnsupported": "La consultation du quota n’est pas prise en charge pour ce compte.",
   "pws.quotaUnobserved": "Aucune utilisation observée pour le moment.",
+  "pws.agyAccountPolicy": "Le hub choisit le compte utilisé par chaque connexion agy et maintient cette connexion dessus jusqu’à ce que Google limite le débit du compte (HTTP 429), que celui-ci soit en pause ou nécessite une nouvelle connexion, ou que la connexion soit inactive depuis 6 heures ; agy passe alors au compte disponible suivant à son prochain tour. Le quota d’un compte apparaît une fois qu’agy l’a utilisé, lu à partir des propres appels de quota d’agy (le hub n’envoie rien à Google de lui-même), et reste affiché avec son âge. « Actif » désigne le compte par défaut du tableau de bord, pas celui qu’agy utilise.",
   "pws.quotaLastRead": "Dernière lecture",
   "pws.quotaCheckCompleted": "Vérification du quota terminée",
   "pws.modelBreakdown": "Répartition par modèle",

@@ -1950,6 +1950,7 @@ export const vi: Record<TKey, string> = {
   "pws.currentAccountUsage": "Mức sử dụng tài khoản hiện tại",
   "pws.quotaUnsupported": "Tra cứu hạn mức không được hỗ trợ cho tài khoản này.",
   "pws.quotaUnobserved": "Chưa có dữ liệu sử dụng nào được ghi nhận.",
+  "pws.agyAccountPolicy": "Hub chọn tài khoản mà mỗi lần đăng nhập agy sử dụng và giữ lần đăng nhập đó trên tài khoản cho đến khi Google giới hạn tốc độ tài khoản (HTTP 429), tài khoản bị tạm dừng hoặc cần đăng nhập lại, hoặc lần đăng nhập đã không hoạt động trong 6 giờ; agy sau đó chuyển sang tài khoản khả dụng tiếp theo ở lượt tiếp theo của nó. Hạn mức của một tài khoản xuất hiện sau khi agy đã dùng nó, được đọc từ các lệnh gọi hạn mức của chính agy (hub không tự gửi gì cho Google), và vẫn được hiển thị kèm theo tuổi của nó. “Đang hoạt động” đánh dấu tài khoản mặc định của bảng điều khiển, không phải tài khoản mà agy đang dùng.",
   "pws.quotaLastRead": "Lần đọc gần nhất",
   "pws.quotaCheckCompleted": "Đã hoàn thành kiểm tra hạn mức",
   "pws.modelBreakdown": "Chi tiết theo model",

@@ -42,7 +42,7 @@ row is never shown as an observation. A models answer does not replace a summary
 than 30 minutes ago. `hasPassiveAccountQuota` treats `google-antigravity` as observed while the switch
 is on: the Accounts tab shows each account's last observation (or "not observed yet"), and the quota
 bar's provider row (`fetchObservedAntigravityQuota`) is the freshest observation with family windows,
-since agy rotates across the pool; reset detection skips that display row. The hub's own probe
+since agy rotates across the pool; reset detection skips that display row. An observation is persisted with its sign-in and kept on disk for 8 days rather than the account cache's 6 hours (`src/providers/account-quota-disk.ts`), because an account agy is not using gets no newer reading; the Accounts tab shows its age, and its note (`pws.agyAccountPolicy`) explains the account policy below. The hub's own probe
 rechecks the switch before every physical send, so turning it on mid-probe stops the retry and the
 fallback. `tests/server/agy-passthrough.test.ts` and
 `tests/providers/provider-antigravity-quota-retry.test.ts` cover it.

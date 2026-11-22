@@ -29,6 +29,12 @@ const FILENAME = "provider-account-quota-cache.json";
  * it should not outrank a fresh probe.
  */
 const DISK_MAX_AGE_MS = 6 * 60 * 60_000;
+/**
+ * An agy observation is the only Antigravity reading under `nativeHarnessOnly`, and an account agy
+ * is not using gets no newer one. It is kept a little past a weekly window, shown with its age,
+ * so a hub restart never blanks an idle account.
+ */
+const AGY_OBSERVATION_MAX_AGE_MS = 8 * 24 * 60 * 60_000;
 const PERSIST_DEBOUNCE_MS = 250;
 /** Match the reset ledger's maximum deferral under sustained quota observations. */
 const MAX_PERSIST_DEFERRAL_MS = 1_000;
@@ -62,7 +68,8 @@ export function readPersistedAccountQuotas(now = Date.now()): Map<string, Provid
     for (const [key, quota] of Object.entries(parsed.rows)) {
       if (!quota || typeof quota !== "object" || typeof quota.updatedAt !== "number"
         || !Number.isFinite(quota.updatedAt)) continue;
-      if (now - quota.updatedAt > DISK_MAX_AGE_MS) continue;
+      const agyObservation = key.startsWith("google-antigravity\0") && typeof (quota as KiroPersistedQuota).identity === "string";
+      if (now - quota.updatedAt > (agyObservation ? AGY_OBSERVATION_MAX_AGE_MS : DISK_MAX_AGE_MS)) continue;
       if (key.startsWith("kiro\0") && (quota.updatedAt > now
         || typeof (quota as KiroPersistedQuota).identity !== "string"
         || !/^[a-f0-9]{64}$/.test((quota as KiroPersistedQuota).identity))) continue;
