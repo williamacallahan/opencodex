@@ -1240,7 +1240,7 @@ export async function upsertCredentialByIdentity(
       set.activeAccountId ??= existing.id;
       return "updated";
     }
-    const id = newAccountId(safe);
+    const id = distinctAccountId(safe, set?.accounts ?? []);
     const account: ProviderAccount = { id, credential: safe, addedAt: Date.now() };
     if (set) {
       set.accounts.push(account);

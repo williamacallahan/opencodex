@@ -290,8 +290,9 @@ export function projectCodexAccountHealth(input: {
 
 /**
  * Incomplete credentials warning. Kiro may intentionally store an empty refresh
- * when authenticated via KIRO_ACCESS_TOKEN or a pasted access-only token, as long
- * as the access token is still unexpired.
+ * when authenticated via KIRO_ACCESS_TOKEN or a pasted access-only token, and an
+ * Anthropic pool holds an imported setup token the same way, as long as the access
+ * token is still unexpired.
  */
 export function detectOAuthWarning(
   provider: string,
@@ -307,7 +308,7 @@ export function detectOAuthWarning(
   if (!cred?.access) return "stale_credentials";
   if (!cred.refresh) {
     if (
-      provider === "kiro"
+      (provider === "kiro" || isAnthropicInstanceId(provider))
       && typeof cred.expires === "number"
       && Number.isFinite(cred.expires)
       && cred.expires > now

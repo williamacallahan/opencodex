@@ -2,6 +2,8 @@ import type { OAuthCredentials } from "../types";
 
 export const ACCOUNT_IMPORT_PROVIDER = "google-antigravity" as const;
 export const ACCOUNT_IMPORT_FORMAT = "cockpit-tools" as const;
+export const CLAUDE_SETUP_TOKEN_IMPORT_PROVIDER = "anthropic" as const;
+export const CLAUDE_SETUP_TOKEN_IMPORT_FORMAT = "claude-setup-token" as const;
 export const ACCOUNT_IMPORT_MAX_BYTES = 256 * 1024;
 // The HTTP request also carries the fixed provider/format envelope. Keep that envelope bounded
 // without making a valid document at the 256 KiB contract boundary fail at the API layer.
@@ -74,9 +76,23 @@ export interface CockpitAccountRecord {
   projectId?: string;
 }
 
-export type ParsedCockpitRecord =
-  | { index: number; record: CockpitAccountRecord }
+/** One `claude setup-token` credential: an inference-only bearer that never renews. */
+export interface ClaudeSetupTokenRecord {
+  email: string;
+  setupToken: string;
+  /** Epoch ms at which Anthropic stops accepting the token; the operator knows its mint time, the hub cannot read it. */
+  expiresAt: number;
+}
+
+export type ParsedAccountImportRecord<AccountRecord> =
+  | { index: number; record: AccountRecord }
   | { index: number; code: "invalid_record" };
+
+export type ParsedCockpitRecord = ParsedAccountImportRecord<CockpitAccountRecord>;
+
+export type AccountImportDocumentParseResult<AccountRecord> =
+  | { ok: true; records: ParsedAccountImportRecord<AccountRecord>[] }
+  | { ok: false; code: "invalid_document" };
 
 export type AccountImportRecordOutcome =
   | { status: "imported"; code: "imported" }
@@ -86,10 +102,10 @@ export type AccountImportRecordOutcome =
     code: "credential_rejected" | "identity_mismatch" | "missing_project" | "persist_failed";
   };
 
-export interface AccountImportAdapter {
-  readonly provider: typeof ACCOUNT_IMPORT_PROVIDER;
-  readonly format: typeof ACCOUNT_IMPORT_FORMAT;
-  importRecord(record: CockpitAccountRecord, signal?: AbortSignal): Promise<AccountImportRecordOutcome>;
+export interface AccountImportAdapter<AccountRecord = CockpitAccountRecord> {
+  readonly provider: string;
+  readonly format: string;
+  importRecord(record: AccountRecord, signal?: AbortSignal): Promise<AccountImportRecordOutcome>;
 }
 
 export interface ValidatedAntigravityCredential extends OAuthCredentials {

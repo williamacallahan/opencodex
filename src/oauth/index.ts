@@ -943,6 +943,8 @@ export async function refreshAnthropicAccountWithLock(
     if (credentialGeneration(stored) !== credentialGeneration(callerCredential) && stored.expires > now() + REFRESH_SKEW_MS) {
       return stored.access;
     }
+    // An imported setup token has no refresh grant: once it expires the account needs a new token, and an empty grant is never posted.
+    if (stored.refresh === "") { await markAccountNeedsReauthIfGeneration(provider, accountId, generation, writerGeneration); throw new OAuthLoginRequiredError(provider); }
 
     let refreshMayHaveReachedProvider = false;
     let attemptIntent: OAuthRefreshIntent | undefined;

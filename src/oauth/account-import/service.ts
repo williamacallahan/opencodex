@@ -5,6 +5,8 @@ import {
   throwIfAccountImportAborted,
 } from "./types";
 import type {
+  AccountImportAdapter,
+  AccountImportDocumentParseResult,
   AccountImportRequest,
   AccountImportResult,
   AccountImportRecordResult,
@@ -32,8 +34,16 @@ export async function importAccounts(
   // credential-bearing document.
   const resolved = deps.resolveAdapter(request.provider, request.format);
   if (!resolved.ok) return { ok: false, status: 400, code: resolved.code };
+  return "parse" in resolved
+    ? importParsedAccounts(request, resolved.parse(request.document), resolved.adapter)
+    : importParsedAccounts(request, parseCockpitAccountDocument(request.document), resolved.adapter);
+}
 
-  const parsed = parseCockpitAccountDocument(request.document);
+async function importParsedAccounts<AccountRecord>(
+  request: AccountImportRequest,
+  parsed: AccountImportDocumentParseResult<AccountRecord>,
+  adapter: AccountImportAdapter<AccountRecord>,
+): Promise<AccountImportServiceResult> {
   if (!parsed.ok) return { ok: false, status: 400, code: parsed.code };
 
   const results: AccountImportRecordResult[] = [];
@@ -44,7 +54,7 @@ export async function importAccounts(
         results.push({ index: item.index, status: "failed", code: item.code });
         continue;
       }
-      const outcome = await resolved.adapter.importRecord(item.record, request.signal);
+      const outcome = await adapter.importRecord(item.record, request.signal);
       results.push({ index: item.index, ...outcome });
       // Record the committed outcome before observing cancellation. The route uses this
       // internal signal to reconcile live stores and caches even when the public response

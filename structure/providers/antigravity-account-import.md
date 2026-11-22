@@ -31,6 +31,36 @@ providers guide.
   one (`merged` in `src/oauth/index.ts`).
 - **Output.** Results carry only fixed codes and counts; no token, email or upstream text.
 
+## Claude setup tokens
+
+`POST /api/oauth/accounts/import` with provider `anthropic` and format `claude-setup-token` loads
+`claude setup-token` credentials into the Anthropic pool
+(`src/oauth/account-import/claude-setup-token-adapter.ts`). It shares the document envelope above
+through `parseAccountImportDocument`; a record allows only `email`, `setup_token` and `expires_at`
+(epoch ms), all required.
+
+- **No upstream call.** A setup token is inference-only: the profile and usage endpoints refuse it,
+  and the hub sends no inference of its own. The operator-supplied email is the identity, and the
+  first genuine Claude Code request is what proves the token.
+- **Slot.** The email selects the pool slot. A slot marked for a new sign-in, or one already
+  holding a setup token, is replaced in place and keeps its account id and plan label. A slot
+  holding a working renewable login is left alone and the record fails `persist_failed`. Two slots
+  with one email fail `identity_mismatch`. No slot means a new account.
+- **Stored shape.** `refresh` is empty, `expires` is the record's `expires_at`, `source` is
+  `manual`. A token inside one minute of its expiry fails `credential_rejected`.
+- **Life in the pool.** `detectOAuthWarning` reports the row healthy while unexpired;
+  `accountQuotaProbeSkip` keeps it off the usage endpoint, so its quota comes from response
+  headers; at expiry `refreshAnthropicAccountWithLock` marks it for a new token and posts no grant.
+  Importing a new token for the same email clears that mark.
+- **Limits.** A token Anthropic rejects before its stated expiry is marked only when the refusal
+  is the revoked-token answer; any other 401 leaves the row selectable until it is paused or
+  replaced. With no account proof, the cross-pool duplicate guard sees only an identical token.
+
+Coverage: `tests/server/account-import-claude-setup-token.test.ts` (a real temporary store; no
+live calls).
+
+## Antigravity coverage
+
 Coverage: `tests/server/account-import.test.ts` and
 `tests/server/account-import-project-fallback.test.ts` (fakes for validation, probe and upsert;
 no live calls).
