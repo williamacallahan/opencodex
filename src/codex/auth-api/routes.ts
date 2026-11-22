@@ -49,8 +49,10 @@ export async function handleCodexAuthAPI(
   }
 
   if (url.pathname === "/api/codex-auth/accounts/refresh" && req.method === "POST") {
-    // Inference spends quota: only a dashboard session carries the consent
-    // required by AGENTS_INSTALL.md. Raw-admin/CLI refreshes remain observational.
+    // Inference spends quota: a dashboard session carries the consent required by
+    // AGENTS_INSTALL.md. Raw-admin/CLI refreshes remain observational unless the operator
+    // gave standing consent with `codexPendingValidationByAdminRefresh`; that unattended path
+    // paces its retries, a dashboard click does not.
     // The hub's quota-refresh sidecar posts here every ~50 s with the admin token; only a dashboard
     // session or an explicit `force` flag re-reads an exhausted seat inside its 15 minute hold.
     const body: unknown = await req.json().catch(() => null);
@@ -58,7 +60,9 @@ export async function handleCodexAuthAPI(
     const forceParam = url.searchParams.get("force");
     const forceHeld = principal === "gui-session" || forceParam === "1" || forceParam === "true" || bodyForce;
     return jsonResponse({ accounts: await listCodexAuthAccounts(config, true, {
-      validatePending: principal === "gui-session",
+      validatePending: principal === "gui-session"
+        || (principal === "admin-token" && getRuntimeConfig(config).codexPendingValidationByAdminRefresh === true),
+      paceValidationRetries: principal !== "gui-session",
       explicitRefresh: true,
       holdExhausted: !forceHeld,
     }) });

@@ -4,7 +4,7 @@ import type { MainAccountExternalUsageWarning } from "../codex/main-account-exte
 import { getCodexAccountHealthSnapshot, type CodexCooldownSource } from "../codex/routing";
 import { anthropicRoutingFor } from "./anthropic-routing";
 import { isAccountNeedsReauth } from "../codex/account-runtime-state";
-import { getCodexAccountCredential, listCodexAccountIds, readCodexAccountRecord } from "../codex/account-store";
+import { getCodexAccountCredential, isCodexValidationAuthRefused, listCodexAccountIds, readCodexAccountRecord } from "../codex/account-store";
 import { MAIN_CODEX_ACCOUNT_ID } from "../codex/main-account";
 import { readRuntimePort } from "../config/process-state";
 import { LOCAL_MANAGEMENT_READ_PATHS } from "../lib/local-management-capability";
@@ -241,10 +241,7 @@ export function projectCodexAccountHealth(input: {
 
   // A successful quota read is not evidence that model authorization recovered.
   // Preserve this guidance until validation succeeds or reauthentication replaces it.
-  const validationAuthFailed = record !== null
-    && record.codexValidationPending === true
-    && record.lastCodexValidationStatus === "failed"
-    && (record.lastCodexValidationError === "http_status:401" || record.lastCodexValidationError === "http_status:403");
+  const validationAuthFailed = record !== null && isCodexValidationAuthRefused(record);
 
   // A persisted terminal verdict outranks the in-memory reauth flag rather than duplicating it:
   // the flag lives in this process and a revoked grant does not. Without it, an account whose

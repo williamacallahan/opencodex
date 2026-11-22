@@ -533,6 +533,14 @@ function dropCodexSafetyBufferingError(value: unknown): string | null {
   return "schema_invalid: dropCodexSafetyBuffering: must be a boolean or omitted";
 }
 
+function codexPendingValidationByAdminRefreshError(value: unknown): string | null {
+  const raw = rawConfigRecord(value);
+  if (!raw || !Object.hasOwn(raw, "codexPendingValidationByAdminRefresh")) return null;
+  const enabled = raw.codexPendingValidationByAdminRefresh;
+  if (enabled === undefined || typeof enabled === "boolean") return null;
+  return "schema_invalid: codexPendingValidationByAdminRefresh: must be a boolean or omitted";
+}
+
 function showCodexCreditsError(value: unknown): string | null {
   const raw = rawConfigRecord(value);
   if (!raw || !Object.hasOwn(raw, "showCodexCredits")) return null;
@@ -824,6 +832,7 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
     ?? dropCodexSafetyBufferingError(value)
     ?? oauthOpenBrowserError(value)
     ?? showCodexCreditsError(value)
+    ?? codexPendingValidationByAdminRefreshError(value)
     ?? creditCodexAccountIdsError(value)
     ?? remainingQuotaAccountIdsError(value)
     ?? runtimeRoleError(value)

@@ -351,12 +351,12 @@ export const CAPABILITIES: readonly Capability[] = [
   },
   {
     command: ["account","refresh"],
-    summary: "Refresh account quotas without model validation; pending Codex accounts require dashboard consent.",
+    summary: "Refresh account quotas; pending Codex accounts validate only with dashboard consent or the codexPendingValidationByAdminRefresh setting.",
     routes: [{"method":"POST","path":"/api/codex-auth/accounts/refresh"},{"method":"GET","path":"/api/codex-auth/active"},{"method":"GET","path":"/api/provider-quotas"}],
     flags: [{"name":"--json","value":"boolean","summary":"Emit the refresh result as JSON."}],
     mutates: true,
     json: "envelope",
-    details: ["CLI/admin-token refreshes only observe usage. After quota recovery, a human must click Refresh quotas in the dashboard to authorize model validation. Do not mint a GUI session to work around this consent boundary."],
+    details: ["By default CLI/admin-token refreshes only observe usage. After quota recovery, a human must click Refresh quotas in the dashboard to authorize model validation. Do not mint a GUI session to work around this consent boundary.","An operator who sets codexPendingValidationByAdminRefresh has given standing consent: this refresh then validates pending accounts, at most once per 30 minutes per account after a failed validation request. Do not turn the setting on for them."],
     usage: "ocx account refresh <provider> [--json]",
   },
   {
