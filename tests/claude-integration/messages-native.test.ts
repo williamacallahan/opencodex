@@ -1083,6 +1083,14 @@ describe("strict Messages public HTTP transport", () => {
       expect(text.endsWith(clean)).toBe(true);
     });
 
+    test("is masked on an identity stream even when the frame never says error", async () => {
+      const echoed = `event: Unauthorized\ndata: {"type":"ping","detail":"${key}"}\n\n`;
+      await launch(() => send(encode(clean + echoed + clean), false), withKey);
+      const text = new TextDecoder().decode(await readAll(await post(encode(streamBody))));
+      expect(text).not.toContain(key);
+      expect(text).toContain('"detail":"[REDACTED]"');
+    });
+
     test("is withheld, with the clean prefix kept, on a gzip stream", async () => {
       const split = Bun.gzipSync(encode(clean + reflected + clean));
       await launch(() => new Response(new ReadableStream<Uint8Array>({ start(controller) {

@@ -70,19 +70,21 @@ function streamingAcceptEncoding(callerValue: string | null): string | undefined
 /** The masked replacement for a block that carries a sent credential, or undefined when it is clean. */
 function maskedBlock(block: Uint8Array, mask: CredentialMask): Uint8Array | undefined {
   const bytes = Buffer.from(block.buffer, block.byteOffset, block.byteLength);
-  if (!bytes.includes("error")) return undefined;
+  // A credential is ASCII, so the Latin-1 view matches it byte for byte without a UTF-8 decode.
+  const view = bytes.toString("latin1");
+  if (mask(view) === view) return undefined;
   const text = bytes.toString("utf8");
   const safe = mask(text);
   return safe === text ? undefined : Buffer.from(safe);
 }
 
 /**
- * A successful strict SSE stream is relayed as-is unless a frame that mentions an error carries a sent
+ * A successful strict SSE stream is relayed as-is unless a frame carries a sent
  * credential. An identity stream masks that frame before it is enqueued. A coded stream cannot be edited
  * in place: its wire bytes are held and released only up to the point whose decoded output has been
  * inspected (gzip and deflate are the only codings strict streaming negotiates), and the stream is
  * aborted when a frame is credential-bearing, the decoder fails, or a cap is hit. Cost on a clean stream:
- * one delimiter scan and one copy into the framer per decoded byte, one substring check per frame.
+ * one delimiter scan and one copy into the framer per decoded byte, one literal credential scan per frame.
  */
 function screenStrictSseBody(body: ReadableStream<Uint8Array>, coding: string, mask: CredentialMask): ReadableStream<Uint8Array> | undefined {
   const decoder = coding === "" || coding === "identity" ? null : streamDecoder(coding);
