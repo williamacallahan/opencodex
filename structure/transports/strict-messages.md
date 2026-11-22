@@ -74,7 +74,7 @@ refusal still records its cooldown for subsequent independent requests. OAuth re
 generation-fenced refusal owner with `canRetry: false`: revoked-token reauthentication, account cooldowns,
 rate admission and affinity settlement affect subsequent requests only. No recovery candidate is selected
 or refreshed by that observation. Optional auto-pause retains its existing policy and incarnation fences. The first response retains
-its status and entity bytes, including malformed SSE tails, unknown fields and errors. Transport
+its status and entity bytes, including malformed SSE tails and unknown fields. Public headers and refusal bodies withhold reflected credentials. Unchanged encoded refusals keep their wire bytes; a refusal that cannot be inspected within the bounded decoder uses a status-only diagnostic. Transport
 failure terminates the body without synthetic frames. Bounded usage observation decodes gzip/deflate
 separately from forwarding; unsupported or malformed coding and inspection overflow leave usage
 unresolved rather than inventing it. Counting goes upstream and settles as non-generation work.

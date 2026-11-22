@@ -12,6 +12,8 @@ import { createRequestExecutionBudget, reportDispatchSends, createPhysicalSendRe
 import { createRequestSpendTracker } from "../../src/server/responses/request-spend";
 import { createResponsesSendBudget } from "../../src/server/responses/request-send-budget";
 import { estimateTokens } from "../../src/lib/token-estimate";
+import { formatErrorResponse } from "../../src/bridge";
+import { markProxyError } from "../../src/lib/client-error-body";
 import { SendBudgetExhaustedError } from "../../src/lib/upstream-retry";
 import { SpendLedgerOwnerError, type SpendLedgerOwnerErrorCode } from "../../src/lib/spend-ledger-owner";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
@@ -319,10 +321,13 @@ describe("the request path books every physical send on the durable ledger", () 
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
       }), body, "spend", config, logCtx, { sendBudget, translatorBudget }, {
         handleResponses: async (_req, _config, childLog, options) => {
-          children += 1;
           const reporter = createPhysicalSendReporter(options!.sendBudget!, () => ({ poolId: childLog.spendPoolId,
             identityId: childLog.accountLogLabel }), options!.comboDispatchPermit);
-          expect(reporter.beforeSend?.()).toBe(true); reporter(1); reporter.close?.();
+          if (!reporter.beforeSend?.()) {
+            reporter.close?.();
+            return markProxyError(formatErrorResponse(429, "request_send_budget_exhausted", "fixture spend limit"));
+          }
+          children++; reporter(1); reporter.close?.();
           childLog.provider += `-account-${children}`;
           return children === 1
             ? Response.json({ error: { message: "fixture outage" } }, { status: 503 })

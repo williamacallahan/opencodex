@@ -5,6 +5,7 @@ import { passthroughBuildErrorResponse } from "./passthrough-build-error";
 import { recoverAutoPausedAccount, rotatePassthroughKeyOn429 } from "./passthrough-key-rotation";
 import { createAutoPauseRefreshErrorMapper } from "./account-auto-pause-recovery";
 import { physicalSendAccounting } from "./deferred-send-reporter";
+import { responsesSpendTarget } from "./request-spend-target";
 import { adoptCodexWsStage, capturePassthroughAffinity } from "./passthrough-observations";
 import { spendLedgerStorageErrorResponse } from "./spend-storage-error";
 import { requestPacingOverloadResponse } from "./pacing-overload";
@@ -109,7 +110,7 @@ import {
 } from "./core-codex-account";
 import { settlePoolResponse } from "./pool-response-alternate";
 import { consumeComboFailure } from "./core-combo-failure";
-import { createOutboundCredentialMask } from "./terminal-error-redaction";
+import { responseCredentialMask } from "../../lib/outbound-credential-registry";
 import { readCodexWsResponseEvidence, codexWsCredentialRejected, codexWsPreludeVerdict, isCodexWsPreOutputRefusal, codexWsSocketDeathStage, isCodexWsUpstreamResponse } from "./codex-ws-wire";
 import { linkAbortSignal } from "./core-lifetime";
 import { checkOutboundBodySize, describeOutboundBodyRefusal } from "./outbound-body-guard";
@@ -218,7 +219,7 @@ export async function preparePassthroughExchange(
     | "genericFailovers"
     | "genericFailoverLimit"
     | "applyFailoverSnapshot"
-    | "noteRoutedAttemptSend" | "deferPhysicalAttribution"
+    | "noteRoutedAttemptSend" | "attemptSendDeferred" | "deferPhysicalAttribution"
     | "selectionIsCurrent"
     | "requestBindings"
   >,
@@ -797,7 +798,7 @@ export async function preparePassthroughExchange(
      * the transport that just failed.
      */
     const nativeSendAccounting = (permit?: Parameters<typeof transientSendReporter>[0]) => physicalSendAccounting(
-      transientSendReporter(permit), options.poolCapacityIntent === "reserve-only" || route.providerName === "github-copilot" && route.provider.authMode !== "forward"
+      transientSendReporter(permit), options.poolCapacityIntent === "reserve-only" || transportState.deferPhysicalAttribution || (options.comboAttempt && transportState.attemptSendDeferred())
         ? { permit, destination: () => errorDestinationLabel(request.url) } : undefined);
     const sendAmbiguousReplacement = (
       signal: AbortSignal = upstream.signal,
@@ -981,9 +982,6 @@ export async function preparePassthroughExchange(
     if (initialBodyRefusal) return initialBodyRefusal;
     // A combo-owned first send is settled by the physical-dispatch receipt unless spend
     // enforcement is on, where the shared reporter already owns the permit lifecycle.
-    // Stable per request: the Combo booking (`reserveDispatch`) already started and froze the spend
-    // policy, so `spendEnforced` cannot change before dispatch even though no reporter starts it here.
-    const receiptMode = !sendBudgetState.adapterSendBudget?.spendEnforced && Boolean(options.comboInitialSend);
     const initialAccounting = nativeSendAccounting();
     // #6969: Pool sends hold empty lifecycle frames so a pre-output refusal reaches the ladder below.
     const preOutputRefusals = new PoolPreOutputRefusals();
@@ -993,6 +991,8 @@ export async function preparePassthroughExchange(
     const preOutputRefusalHold = poolPreOutputRefusalHold(firstPoolContext, route.provider, connectMs, options.comboAttempt, parsed, req.headers, options.poolCapacityIntent);
     const onContinuationDispatch = createNativeContinuationDispatch(sendBudgetState, logCtx);
     try {
+      sendBudgetState.adapterSendBudget?.startRequest?.(responsesSpendTarget(logCtx, route.providerName));
+      const receiptMode = !sendBudgetState.adapterSendBudget?.spendEnforced && Boolean(options.comboInitialSend);
       // Transient-5xx pre-stream retry (devlog/_plan/260716_claudecode_hardening/010):
       // the ChatGPT backend emits transient 502/520s that an immediate retry absorbs.
       // Body is a replayable string; nothing has streamed to the client yet.
@@ -1648,7 +1648,7 @@ export async function preparePassthroughExchange(
     if (options.onConsumedComboFailure && isCodexWsPreOutputRefusal(upstreamResponse)
       && (hardStop || (options.poolCapacityIntent === "reserve-only" && (upstreamResponse.status === 429 || upstreamResponse.status === 402)))) {
       options.onConsumedComboFailure(await consumeComboFailure(upstreamResponse, options.abortSignal, undefined, undefined, false,
-        createOutboundCredentialMask(request.headers)));
+        responseCredentialMask(upstreamResponse, request.headers)));
     }
     upstreamResponse = preOutputRefusals.restore(upstreamResponse);
     if (hardStop) break;

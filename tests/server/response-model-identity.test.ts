@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { registerUpstreamRewriter } from "../../src/plugins/upstream-hooks";
 import { handleResponses } from "../../src/server/responses/core";
 import {
   inspectResponseLogJson, inspectResponseLogSsePayload, type RequestLogContext,
@@ -12,10 +13,12 @@ import { materializeModelPreset } from "../../src/providers/model-presets";
 import { modelIdentityLogFields } from "../../src/usage/log";
 
 const originalFetch = globalThis.fetch;
+let removeRewriter: (() => void) | undefined;
 let releaseSpendHome: (() => void) | undefined;
 
 afterEach(() => {
   // Release the lease before later teardown can replace the preload sandbox home.
+  removeRewriter?.(); removeRewriter = undefined;
   releaseSpendHome?.();
   releaseSpendHome = undefined;
   globalThis.fetch = originalFetch;
@@ -100,6 +103,50 @@ describe("a passthrough openai-model header is kept only as a known model id", (
     expect(response.headers.has("openai-model")).toBe(false);
     expect(response.headers.has("x-codex-safety-buffering-faster-model")).toBe(false);
     expect(JSON.stringify([...response.headers, text, logCtx.servedModel, logCtx.resolvedModel])).not.toContain(PROVIDER_KEY);
+  });
+
+  test.each([307, 401, 200])("physical custom auth marker stays private on the %i relay", async status => {
+    releaseSpendHome = acquireOwnedSpendHome();
+    const marker = "fixture-egress-marker";
+    const config = routedConfig("fixture-openai", "openai-responses", "gpt-5.5");
+    config.providers["fixture-openai"]!.headers = { "x-fixture-slot": "planned-marker" };
+    removeRewriter = registerUpstreamRewriter("fixture", target => { target.headers.set("x-fixture-slot", marker); });
+    const stream = status === 200;
+    let observed: string | null = null;
+    globalThis.fetch = (async (_url, init) => {
+      observed = new Headers(init?.headers).get("x-fixture-slot");
+      return new Response(stream ? `data: ${JSON.stringify({ type: "response.completed", response: responseSnapshot(undefined) })}\n\n` : `fixture ${marker}`, {
+        status, statusText: stream ? "OK" : `fixture ${marker}`, headers: {
+          "content-type": stream ? "text/event-stream" : "text/plain", "x-safe": "keep",
+          [stream ? "x-stream-note" : status === 307 ? "location" : "www-authenticate"]: `fixture/${marker}`,
+        },
+      });
+    }) as typeof fetch;
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "fixture-openai/gpt-5.5", input: "hi", stream }),
+    }), config, { model: "", provider: "" }, {});
+    const body = await response.text();
+    expect(observed).toBe(marker);
+    expect(response.status).toBe(status);
+    expect(response.headers.get("x-safe")).toBe("keep");
+    expect(JSON.stringify([...response.headers, response.statusText, body])).not.toContain(marker);
+  });
+
+  test("a buffered failure on HTTP 200 masks diagnostics without losing its response status", async () => {
+    releaseSpendHome = acquireOwnedSpendHome();
+    const marker = "fixture-buffered-marker";
+    const config = routedConfig("fixture-openai", "openai-responses", "gpt-5.5");
+    config.providers["fixture-openai"]!.headers = { "x-fixture-auth": marker };
+    globalThis.fetch = (async () => Response.json({ ...responseSnapshot(undefined), status: "failed", error: { message: `fixture ${marker}` } })) as typeof fetch;
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "fixture-openai/gpt-5.5", input: "hi", stream: false }),
+    }), config, { model: "", provider: "" }, {});
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.status).toBe("failed");
+    expect(body.error.message).not.toContain(marker);
   });
 
   // A provider-owned hint naming a model the user configured for this provider survives as the

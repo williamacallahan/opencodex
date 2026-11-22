@@ -16,7 +16,8 @@ import {
   type OcxErrorPayload,
 } from "../lib/errors";
 import { redactSecretString } from "../lib/redact";
-import { clientErrorCodeMessage } from "../lib/client-error-body";
+import { clientErrorCodeMessage, OPENAI_ERROR_CODES, OPENAI_ERROR_TYPES } from "../lib/client-error-body";
+import { truncationReasonFor } from "../responses/truncated-stop-reason";
 import { REASONING_LOOP_ERROR_CODE } from "../lib/upstream-retry";
 import { formatRetryAfterAdvice } from "../lib/retry-delay";
 import { usageDisplayTotalTokens } from "../usage/totals";
@@ -146,6 +147,30 @@ export function toolCallArgumentsCouldBeJson(args: string): boolean {
     || first === "t"
     || first === "f"
     || first === "n";
+}
+
+type TerminalDiagnostic = Extract<AdapterEvent, { type: "error" | "incomplete" }>;
+type Mask = (text: string) => string;
+// A continuation can use a different dispatch. A symbol follows the existing terminal spreads
+// that merge usage, without ever being serialized or changing the evidence used for routing.
+const physicalMask = Symbol("physical diagnostic mask");
+export function bindTerminalMask(event: AdapterEvent, mask: Mask): AdapterEvent {
+  if (event.type === "error" || event.type === "incomplete") Object.assign(event, { [physicalMask]: mask });
+  return event;
+}
+export function terminalMask(event: TerminalDiagnostic, fallback?: Mask): Mask | undefined {
+  return (event as TerminalDiagnostic & { [physicalMask]?: Mask })[physicalMask] ?? fallback;
+}
+export function publicAdapterError(error: OcxErrorPayload, mask?: Mask): OcxErrorPayload {
+  if (!mask) return error;
+  return { message: mask(error.message), type: OPENAI_ERROR_TYPES.get(error.type) ?? mask(error.type),
+    code: error.code === null ? null : OPENAI_ERROR_CODES.get(error.code) ?? OPENAI_ERROR_TYPES.get(error.code) ?? mask(error.code) };
+}
+export function publicIncompleteDetails(event: Extract<AdapterEvent, { type: "incomplete" }>, fallback?: Mask) {
+  const mask = terminalMask(event, fallback);
+  return { reason: truncationReasonFor(event.reason) ?? (mask ? mask(event.reason) : event.reason),
+    ...(event.message ? { message: mask ? mask(event.message) : event.message } : {}),
+    ...(event.retryable !== undefined ? { retryable: event.retryable } : {}) };
 }
 
 export function adapterFailureFromEvent(event: Extract<AdapterEvent, { type: "error" }>): { httpStatus: number; error: OcxErrorPayload } {

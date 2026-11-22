@@ -156,6 +156,22 @@ test("real handler -> auth/dispatch -> native exchange -> downstream preserves a
   expect(log.upstreamError).toBeUndefined();
 });
 
+test("native control keeps a custom dial credential out of public frames", async () => {
+  const settings = config();
+  const marker = "synthetic-dial-marker";
+  settings.providers.openai!.headers = { "x-fixture-auth": marker };
+  const { ws, sent, send } = downstream({}, settings);
+  await waitFor(() => sent.some(frame => frame.type === "response.created"));
+  const socket = Socket.all[0]!;
+  expect(new Headers(socket.options.headers).get("x-fixture-auth")).toBe(marker);
+  send({ type: "response.steer", previous_response_id: socket.root, input: "fixture" });
+  socket.emit({ type: "response.steer.failed", steer: { previous_response_id: socket.root }, error: { message: `fixture ${marker}` } });
+  socket.emit({ type: "response.failed", response: { id: socket.root, status: "failed", error: { message: `fixture ${marker}` } } });
+  await waitFor(() => !ws.data.nativeControl);
+  expect(sent.map(frame => frame.type)).toEqual(["response.created", "response.steer.failed", "response.failed"]);
+  expect(JSON.stringify(sent)).not.toContain(marker);
+});
+
 test("normal completion before acceptance still retains the socket and successor", async () => {
   const { ws, socket, send, sent, id } = await begin();
   send({ type: "response.steer", previous_response_id: id, input: "new constraint" });

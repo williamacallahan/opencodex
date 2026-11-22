@@ -1,3 +1,4 @@
+import { publicHeaderValue } from "../../lib/http-response-semantics";
 import { formatErrorResponse } from "../../bridge";
 import { isUnsafeJsonDocument } from "../../codex/quota-rejection";
 import { isCyberPolicyCode, terminalPolicyErrorFromBody } from "../../lib/errors";
@@ -93,7 +94,9 @@ export function formatPassthroughUpstreamError(
   const publicHeaders = () => {
     const headers = new Headers(options?.headers ?? { "Content-Type": "application/json" });
     if (mask) options?.headers?.forEach((value, name) => {
-      if (mask(value) !== value) headers.delete(name);
+      const safe = publicHeaderValue(name, value, mask);
+      if (safe === undefined) headers.delete(name);
+      else if (safe !== value) headers.set(name, safe);
     });
     return headers;
   };

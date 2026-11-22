@@ -33,6 +33,19 @@ function bridged(events: AdapterEvent[]): Response {
 }
 
 describe("combo: terminal upstream refusal", () => {
+  test.each([
+    ["invalid_request_error", "server_is_overloaded", "hop"],
+    ["origin_rejected", "server_is_overloaded", "stop"],
+    ["invalid_request_error", "invalid_request_error", "stop"],
+  ] as const)("HTTP 500 invalid request prose with root %s and nested %s must %s", async (rootCode, nestedCode, decision) => {
+    // Put both codes beyond the display excerpt: prose must not stand in for the structured verdict.
+    const error = { message: `Invalid request: ${"sample field; ".repeat(40)}`, code: nestedCode };
+    const failure = await consumeComboFailure(Response.json({ error, code: rootCode }, { status: 500 }));
+    expect(comboFailureDecision(failure.response.status, failure.classificationText, {
+      code: failure.upstreamCode, rootCode: failure.upstreamRootCode,
+    })).toBe(decision);
+  });
+
   test("a zero-output refusal becomes an HTTP 400 that stops the chain", async () => {
     const logCtx = {} as RequestLogContext;
     const preflight = await preflightComboStreamResponse(bridged([REFUSAL]), logCtx);

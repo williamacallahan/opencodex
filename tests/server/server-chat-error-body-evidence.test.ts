@@ -1,6 +1,7 @@
 import { comboFailureDecision, comboFailureCooldownScope } from "../../src/combos/failover";
 import { expect, test } from "bun:test";
-import { attachComboFailureEvidence } from "../../src/lib/client-error-body";
+import { attachComboFailureEvidence, ownedChatErrorPayload } from "../../src/lib/client-error-body";
+import { attachCredentialMask, createOutboundCredentialMask } from "../../src/lib/outbound-credential-registry";
 import { consumeComboFailure } from "../../src/server/responses/core-combo-failure";
 import { markVerifiedModelNotInPlanResponse } from "../../src/lib/errors";
 import { markResponseNonReplayable, markReplayRefusalResponse } from "../../src/lib/upstream-retry";
@@ -99,6 +100,37 @@ test("deferred legacy inspection preserves numeric reset and diagnostic projecti
     return { row, ctx };
   }
   expect(await project(true)).toEqual(await project(false));
+});
+
+test("dispatch mask survives native Chat combo failure formatting without changing the retry verdict", async () => {
+  const marker = "orchidFixtureMarker";
+  const evidence = { status: 429, type: "rate_limit_error", code: "rate_limit_exceeded", message: `provider busy ${marker}` };
+  const child = Response.json(ownedChatErrorPayload({ ...evidence, evidence }), { status: 429, headers: { "retry-after": "7" } });
+  attachComboFailureEvidence(child, JSON.stringify({ error: evidence }));
+  attachCredentialMask(child, createOutboundCredentialMask({ "x-api-key": marker }));
+  const failure = await consumeComboFailure(child);
+  expect(failure.response.status).toBe(429);
+  expect(failure.response.headers.get("retry-after")).toBe("7");
+  expect(failure.upstreamMessage).toBe(evidence.message);
+  const client = await failure.response.json();
+  expect(client.error.code).toBe("rate_limit_exceeded");
+  expect(JSON.stringify(client)).not.toContain(marker);
+});
+
+test("final combo diagnostics mask before clipping", async () => {
+  const marker = "orchidFixtureMarker";
+  const mask = createOutboundCredentialMask({ "x-api-key": marker });
+  const body = JSON.stringify({ error: { message: "q".repeat(465) + marker } });
+  const clipped = await consumeComboFailure(new Response(body, { status: 503 }), undefined, undefined, undefined, false, mask);
+  const message = (await clipped.response.json()).error.message;
+  expect(message).toContain("qqqq");
+  expect(message).not.toContain("orchid");
+});
+
+test("a quoted refusal in a final gateway page retains the combo's HTTP 503", async () => {
+  const failure = await consumeComboFailure(new Response('<html>Example: {"code":"cyber_policy"}</html>', { status: 503 }));
+  expect(failure.cyberPolicy).toBe(false);
+  expect(failure.response.status).toBe(503);
 });
 
 test("combo rebuilding carries only the original local response identity", async () => {

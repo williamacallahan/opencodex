@@ -13,7 +13,8 @@ import { isNativeControlResponse } from "./native-response-control";
 import { guardBufferedComboRequiredTool } from "./combo-required-tool-contract";
 import { createComboRequiredToolStreamGuard } from "./combo-required-tool-stream";
 import { attachResponseToolOwnership } from "./response-tool-ownership";
-import { createOutboundCredentialMask, createTerminalErrorRedactionBlockRewrite } from "./terminal-error-redaction";
+import { responseCredentialMask } from "../../lib/outbound-credential-registry";
+import { createTerminalErrorRedactionBlockRewrite, maskDiagnosticJson } from "./terminal-error-redaction";
 import type { ResponsesRequestContext, ResponsesAdmissionState } from "./core-options";
 import type { PreparedResponsesRequest } from "./request-prepare";
 import type { ResponsesTransport } from "./request-transport";
@@ -477,6 +478,7 @@ export async function deliverPassthroughResponse(
   const { requestBindings } = transportState;
 
   let upstreamResponse = nativeExchange.upstreamResponse;
+  const maskCredential = responseCredentialMask(upstreamResponse, nativeExchange.request?.headers);
   // Judge the restored native payload before display projection can erase hosted-call evidence.
   const requiredToolFailure = async (text: string): Promise<Response | undefined> => {
     if (!options.comboAttempt || clientRequestedStream === true || isNonReplayableResponse(upstreamResponse)) return;
@@ -505,7 +507,7 @@ export async function deliverPassthroughResponse(
     // Every relayed header set below goes through this filter with the route's known models, so a
     // reported model (row and header) is only ever a model id this route or a catalog already names.
     const passthroughHeaderOptions = {
-      ...codexSafetyBufferingOptions,
+      ...codexSafetyBufferingOptions, maskCredential,
       knownModels: [...routeKnownModels(logCtx), ...providerKnownModels(route.provider)],
       provider: logCtx.provider,
     };
@@ -644,23 +646,19 @@ export async function deliverPassthroughResponse(
     // keep their typed failure envelope. Except for the classified 413 below,
     // non-empty bodies are relayed verbatim
     // (headers included) so pool-retry Activation B/D and client diagnostics stay intact.
-    // Manual-redirect policy (#914): a 3xx is relayed as-is (Location preserved
-    // through sanitizePassthroughHeaders) so a redirect to a dead host can never
-    // masquerade as a pre-connection failure after the credential was seen.
+    // A manual redirect remains a redirect. Masking its public fields does not authorize a resend.
     // The numeric outcome above already classified it neutral — no streak.
     if (isNonReplayableResponse(upstreamResponse) && !isReplayRefusalResponse(upstreamResponse) && !wasPermanentAccountRefusal(upstreamResponse)) {
       return await sanitizeNonReplayableUpstreamError(upstreamResponse, upstream.signal);
     }
     if (upstreamResponse.status >= 300 && upstreamResponse.status < 400) {
-      return new Response(upstreamResponse.body, {
+      return new Response(upstreamResponse.body && maskCredential.redirectBody(upstreamResponse.body), {
         status: upstreamResponse.status,
-        statusText: upstreamResponse.statusText,
-        headers: sanitizePassthroughHeaders(upstreamResponse.headers, passthroughHeaderOptions),
+        statusText: maskCredential(upstreamResponse.statusText), headers,
       });
     }
     if (!upstreamResponse.ok) {
       const sentHeaders = nativeExchange.request?.headers;
-      const maskCredential = sentHeaders ? createOutboundCredentialMask(sentHeaders) : () => "";
       if (options.comboAttempt) {
         const comboCause: Pick<typeof logCtx, "causeHint"> = {};
         const failure = await consumeComboFailure(upstreamResponse, options.abortSignal, undefined, comboCause, false, maskCredential);
@@ -698,7 +696,7 @@ export async function deliverPassthroughResponse(
       // Meta's Muse Code refusal is a plan restriction, not a rejected credential (#8352).
       stampMetaMusePlanRefusal(logCtx, upstreamResponse.status, errorText);
       return carryPolicyCandidateRefusal(upstreamResponse, carryProxyError(upstreamResponse, formatPassthroughUpstreamError(upstreamResponse.status, sentHeaders ? errorText : "", {
-        statusText: upstreamResponse.statusText,
+        statusText: maskCredential(upstreamResponse.statusText),
         headers,
         // Provenance, not inference: `errorText` is empty when the bounded read finds nothing
         // display-safe, and an empty body is exactly what the retryable-429 default fires on.
@@ -714,7 +712,8 @@ export async function deliverPassthroughResponse(
       // contracts and would truncate it. Keep the bounded upstream as the sole reader.
       options.nativeControl.relayActive = true;
       commitReasoningReplayServingRoute(nativeExchange.request.headers);
-      const body = trackStreamLifetime(upstreamResponse.body, upstream, undefined, options.turnAdmissionLease);
+      const safeStream = relaySseWithBlockRewrite(upstreamResponse.body, createTerminalErrorRedactionBlockRewrite({}, maskCredential), translatorBudget);
+      const body = trackStreamLifetime(safeStream, upstream, undefined, options.turnAdmissionLease);
       return new Response(body, { status: upstreamResponse.status, headers });
     }
 
@@ -893,7 +892,6 @@ export async function deliverPassthroughResponse(
           return [block];
         }, { dispose: () => plaintextInspector.dispose() })
         : undefined;
-      const maskCredential = createOutboundCredentialMask(nativeExchange.request.headers);
       const requiredStreamEvidence = { replayUnsafe: !!webSearchBridgePlan };
       const normalizeRequiredToolItem = (item: unknown) => {
         item = restoreImageGenCalls(item, imageGenCallAliases).value;
@@ -1218,7 +1216,7 @@ export async function deliverPassthroughResponse(
         jsonHeaders.set("content-type", "application/json");
         return markPreinspectedJsonResponse(new Response(clientJson, {
           status: upstreamResponse.status,
-          statusText: upstreamResponse.statusText,
+          statusText: maskCredential(upstreamResponse.statusText),
           headers: jsonHeaders,
         }));
       }
@@ -1516,6 +1514,9 @@ export async function deliverPassthroughResponse(
             && observed.status === "completed" && Array.isArray(observed.output)
             && nativeExchange.request.outboundModelId === NATIVE_RESERVE_MODEL) terminalRecorder?.("completed");
           rememberPassthroughResponseChecked(observed);
+          if (observed.status === "failed" || observed.status === "incomplete" || observed.error) {
+            clientJson = maskDiagnosticJson(clientJson === text ? observed : JSON.parse(clientJson), maskCredential);
+          }
         }
       } catch { /* non-JSON despite content-type; recording is best-effort */ }
       if (isLocalCodexImageClient(req.headers, options.admission?.kind, options.inboundWire)) {
@@ -1575,7 +1576,7 @@ export async function deliverPassthroughResponse(
           sseHeaders.set("cache-control", "no-store");
           return new Response(stream, {
             status: upstreamResponse.status,
-            statusText: upstreamResponse.statusText,
+            statusText: maskCredential(upstreamResponse.statusText),
             headers: sseHeaders,
           });
         }
@@ -1599,7 +1600,7 @@ export async function deliverPassthroughResponse(
         : clientJson;
       return new Response(outboundJson, {
         status: upstreamResponse.status,
-        statusText: upstreamResponse.statusText,
+        statusText: maskCredential(upstreamResponse.statusText),
         headers,
       });
     }

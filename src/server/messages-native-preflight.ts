@@ -1,6 +1,7 @@
 import { comboFailureDecision } from "../combos";
 import { isProviderModerationRefusal } from "../combos/failover";
-import { attachComboFailureEvidence } from "../lib/client-error-body";
+import { attachCredentialMask, responseCredentialMask } from "../lib/outbound-credential-registry";
+import { ANTHROPIC_ERROR_CODES, ANTHROPIC_ERROR_TYPES, attachComboFailureEvidence } from "../lib/client-error-body";
 import { explicitErrorEventStatus } from "./responses/combo-stream-preflight";
 import { cyberPolicyTerminalError, httpStatusFromTerminalError } from "../lib/errors";
 import { redactSecretString } from "../lib/redact";
@@ -161,13 +162,17 @@ export async function preflightNativeMessagesResponse(
       release();
       const headers = new Headers(response.headers);
       headers.set("content-type", "application/json"); headers.delete("content-length"); headers.delete("content-encoding");
-      const failed = Response.json({ error: {
+      const mask = responseCredentialMask(response);
+      const error = {
         ...(typeof failure.type === "string" ? { type: failure.type } : {}),
-        ...(typeof failure.code === "string" ? { code: failure.code } : {}),
-        message,
-      } }, { status: failureStatus, headers });
+        ...(typeof failure.code === "string" ? { code: failure.code } : {}), message,
+      };
+      const failed = attachCredentialMask(Response.json({ error: {
+        ...error, ...(error.type ? { type: ANTHROPIC_ERROR_TYPES.get(error.type) ?? mask(error.type) } : {}),
+        ...(error.code ? { code: ANTHROPIC_ERROR_CODES.get(error.code) ?? mask(error.code) } : {}), message: mask(message),
+      } }, { status: failureStatus, headers }), mask);
       // The rebuilt envelope drops the evidence (root code, innererror) the verdict was judged on.
-      return { kind: "failed", response: failureEvidence === undefined ? failed : attachComboFailureEvidence(failed, failureEvidence) };
+      return { kind: "failed", response: attachComboFailureEvidence(failed, failureEvidence ?? JSON.stringify({ error })) };
     }
     let index = 0;
     const body = new ReadableStream<Uint8Array>({

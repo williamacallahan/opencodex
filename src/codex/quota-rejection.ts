@@ -1,3 +1,4 @@
+import { isRevokedChatgptCredentialCode } from "./chatgpt-refresh-failure";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 
 const RESET_ELIGIBLE_CODE_VALUES = [
@@ -97,7 +98,8 @@ async function denialFromResponse(
     const body = await readBoundedResponseBody(response.clone(), { signal, fatalUtf8: true });
     if (!body.displaySafe || body.truncated || !body.text.trim()) return undefined;
     if (isUnsafeJsonDocument(body.text)) return undefined;
-    return codexAccessDenial(JSON.parse(body.text));
+    const verdict = codexAuthRejection(403, JSON.parse(body.text));
+    return verdict === "credential" ? undefined : verdict;
   } catch {
     // Same fail-closed rule as the exhaustion classifier: an unreadable body must not
     // downgrade a credential failure into a workspace one.
@@ -113,16 +115,22 @@ function ownStringField(container: Record<string, unknown>, field: string): stri
 }
 
 /** A specific grant denial is evidence about access even when its wrapper has a generic auth code. */
-export function codexAccessDenial(payload: unknown): CodexPreStreamRejection["denial"] {
+export function codexAuthRejection(status: number, payload: unknown): CodexPreStreamRejection["denial"] | "credential" {
+  if (status !== 401 && status !== 403) return undefined;
+  let denial: CodexPreStreamRejection["denial"];
+  let genericAuth = false;
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
   for (const field of [undefined, "error", "detail"] as const) {
     const diagnostic: unknown = field === undefined ? payload : Object.getOwnPropertyDescriptor(payload, field)?.value;
     if (diagnostic === null || typeof diagnostic !== "object" || Array.isArray(diagnostic)) continue;
     const code = ownStringField(diagnostic as Record<string, unknown>, "code");
-    if (code !== undefined && WORKSPACE_DENIAL_CODES.has(code)) return "workspace";
-    if (code !== undefined && ENTITLEMENT_DENIAL_CODES.has(code)) return "entitlement";
+    if (isRevokedChatgptCredentialCode(code)) return "credential";
+    genericAuth ||= code === "invalid_authentication" || code === "invalid_api_key";
+    if (status !== 403 || !code) continue;
+    if (WORKSPACE_DENIAL_CODES.has(code)) denial ??= "workspace";
+    if (ENTITLEMENT_DENIAL_CODES.has(code)) denial ??= "entitlement";
   }
-  return undefined;
+  return denial ?? (genericAuth ? "credential" : undefined);
 }
 
 const RESET_ELIGIBLE_CODES: ReadonlySet<string> = new Set(RESET_ELIGIBLE_CODE_VALUES);

@@ -55,7 +55,7 @@ import {
   type TranslatorBudget,
   type TranslatorBufferKind,
 } from "../lib/translator-budget";
-import { adapterFailureFromEvent, emptyChunks, joinChunks, ownedBudgetAbandonedMs, responsesUsage, toolCallArgumentsCouldBeJson, toolCallArgumentsUsable, uuid, webSearchAction, webSearchCellItemId } from "./internal";
+import { publicAdapterError, publicIncompleteDetails, terminalMask, adapterFailureFromEvent, emptyChunks, joinChunks, ownedBudgetAbandonedMs, responsesUsage, toolCallArgumentsCouldBeJson, toolCallArgumentsUsable, uuid, webSearchAction, webSearchCellItemId } from "./internal";
 import type { OutputItem, StringChunks } from "./internal";
 import { terminalRefusalFailure } from "./terminal-refusal";
 import { createMaxOutputCompletion, type MaxOutputCompletionOptions } from "./max-output-completion";
@@ -80,6 +80,7 @@ export function bridgeToResponsesSSE(
   onCancel?: () => void,
   heartbeatMs = 2_000,
   options?: MaxOutputCompletionOptions & {
+    maskCredential?: (text: string) => string;
     responseId?: string;
     proxyErrorContext?: object;
     /** Trusted structural grouping only; never provider state or execution authority. */
@@ -1480,11 +1481,12 @@ export function bridgeToResponsesSSE(
               }
               const refusal = options?.terminalRefusalAsFailed ? terminalRefusalFailure(event) : undefined;
               if (refusal) {
+                const error = publicAdapterError(refusal.error, terminalMask(event, options?.maskCredential));
                 emit("response.failed", {
                   response: {
                     ...responseSnapshot("failed", finishedItems, event.endTurn),
                     usage: responsesUsage(event.usage),
-                    ...refusal,
+                    ...refusal, error, last_error: error,
                   },
                 });
                 reportTerminal("failed");
@@ -1495,11 +1497,7 @@ export function bridgeToResponsesSSE(
                 response: {
                   ...responseSnapshot("incomplete", finishedItems, event.endTurn),
                   usage: responsesUsage(event.usage),
-                  incomplete_details: {
-                    reason: truncationReasonFor(event.reason) ?? event.reason,
-                    ...(event.message ? { message: event.message } : {}),
-                    ...(event.retryable !== undefined ? { retryable: event.retryable } : {}),
-                  },
+                  incomplete_details: publicIncompleteDetails(event, options?.maskCredential),
                 },
               });
               reportTerminal("incomplete");
@@ -1520,6 +1518,7 @@ export function bridgeToResponsesSSE(
               releasePendingWebSources();
               flushHiddenReasoningEnvelope();
               const failure = adapterFailureFromEvent(event);
+              const error = publicAdapterError(failure.error, terminalMask(event, options?.maskCredential));
               if (event.usage) options?.onUsage?.(event.usage);
               await awaitThoughtSignatureDurability();
               emit("response.failed", {
@@ -1528,8 +1527,8 @@ export function bridgeToResponsesSSE(
                   // Partial consumption from a mid-stream upstream failure: surfaced so the request
                   // log can record real tokens instead of usageStatus "unreported" with 0.
                   ...(event.usage ? { usage: responsesUsage(event.usage) } : {}),
-                  error: failure.error,
-                  last_error: failure.error,
+                  error,
+                  last_error: error,
                   ...(isTerminalRefusalCode(failure.error.code)
                     ? { retryable: false }
                     : event.retryable !== undefined ? { retryable: event.retryable } : {}),
@@ -1565,11 +1564,11 @@ export function bridgeToResponsesSSE(
             releasePendingWebSources();
             flushHiddenReasoningEnvelope();
           })) return;
-          const failure = responseError(
+          const failure = publicAdapterError(responseError(
             500,
             "proxy_error",
             redactSecretString(err instanceof Error ? err.message : String(err)),
-          );
+          ), options?.maskCredential);
           emit("response.failed", {
             response: {
               ...responseSnapshot("failed", finishedItems),

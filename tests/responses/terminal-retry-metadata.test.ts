@@ -12,6 +12,16 @@ function payload(block: string): unknown {
 }
 
 describe("terminal retry metadata", () => {
+  test("media type and retry controls survive short credential collisions", () => {
+    const headers = new Headers({ "content-type": "application/json", "x-should-retry": "false", "retry-after": "3", "x-note": "false" });
+    const maskCredential = createOutboundCredentialMask({ authorization: "Bearer json", "x-api-key": "false", "x-goog-api-key": "3" });
+    const response = formatPassthroughUpstreamError(503, "busy", { headers, maskCredential });
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(response.headers.get("x-should-retry")).toBe("false");
+    expect(response.headers.get("retry-after")).toBe("3");
+    expect(response.headers.get("x-note")).toBeNull();
+  });
+
   test("a key matching a protocol field name does not rewrite a clean HTTP error", async () => {
     const body = '{\n  "error": { "type": "invalid_request_error", "message": "bad input" }\n}\n';
     const headers = new Headers({ "content-length": String(Buffer.byteLength(body)) });

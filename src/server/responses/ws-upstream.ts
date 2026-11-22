@@ -26,7 +26,7 @@ import { CodexWsSession } from "./codex-ws-session";
 import { codexWsPool, codexWsReuseIdentity } from "./codex-ws-pool";
 import { codexWsCreateFrameExceedsLimit, type CodexWsPreOutputRefusalHold } from "./codex-ws-wire";
 import { isLoopbackUrl, rewriteWebSocketDial } from "../../plugins/upstream-hooks";
-import { outboundCredentials } from "../../lib/outbound-credential-registry";
+import { attachCredentialMask, outboundCredentials, type CredentialMask } from "../../lib/outbound-credential-registry";
 export { CODEX_WS_LIVENESS_PING_INTERVAL_MS, CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS, MAX_CODEX_WS_FRAME_BYTES, MAX_CODEX_WS_QUEUE_BYTES,
   MAX_CODEX_WS_CREATE_FRAME_BYTES, CODEX_WS_CREATE_FRAME_LIMIT_BYTES, codexWsCreateFrameExceedsLimit,
   isCodexWsQuotaObservedResponse, isCodexWsUpstreamResponse, isCodexWsPreludeProjection } from "./codex-ws-wire";
@@ -167,6 +167,7 @@ export async function codexWsUpstreamFetch(
   /** Opt-in pre-output refusal hold (#6969); see codexWsExchange. */
   preOutputRefusalHold?: CodexWsPreOutputRefusalHold,
   onContinuationDispatch?: (frame: { body: Record<string, unknown>; text: string }) => void,
+  configuredHeaders?: Record<string, string>,
 ): Promise<Response> {
   const prepared = prepareCodexWsRequest(url, init);
   if (!prepared) return sseFallback(url, prepareCodexHttpInit(url, init));
@@ -219,6 +220,7 @@ export async function codexWsUpstreamFetch(
   }
   let session: CodexWsSession;
   let dialHeaders: Headers;
+  let mask: CredentialMask;
   try {
     // Steering keeps a private physical connection across successor responses; it
     // must never enter the idle-socket pool or move to a different credential.
@@ -231,8 +233,9 @@ export async function codexWsUpstreamFetch(
     init[TURN_STATE_OWNER]?.assertHeaders(dialHeaders);
     // The final dial headers, after plugin rewrites, are what the WebSocket upstream receives; the
     // per-turn headers planning drops from the upgrade still reach it inside the frame metadata.
-    outboundCredentials().remember(headers);
-    outboundCredentials().remember(dial.headers);
+    const sentHeaders = new Headers(dialHeaders);
+    for (const name of CODEX_WS_FRAME_HEADERS) if (headers[name]) sentHeaders.set(name, headers[name]!);
+    mask = outboundCredentials().remember(sentHeaders, configuredHeaders);
     const identity = control ? null : codexWsReuseIdentity(url, dial.headers, frameText, dial.proxy, dial.url);
     const reuseAcrossTurns = identity !== null && codexWsReuseAcrossTurnsEnabled();
     const pooled = identity
@@ -253,7 +256,7 @@ export async function codexWsUpstreamFetch(
     return sseFallback(url, init);
   }
   const owner = init[TURN_STATE_OWNER];
-  return codexWsExchange({
+  const response = await codexWsExchange({
     session, url, init, prepared, sseFallback, onQuota, beforeDispatch: owner ? headers => {
       owner.assertHeaders(dialHeaders);
       beforeDispatch?.(headers);
@@ -265,4 +268,5 @@ export async function codexWsUpstreamFetch(
     metadataContext: { turnStateBinding: init[TURN_STATE_BINDING_INIT]?.(dialHeaders),
       knownModels: prepared.model ? [prepared.model] : [], provider: "openai-codex" },
   });
+  return attachCredentialMask(response, mask);
 }

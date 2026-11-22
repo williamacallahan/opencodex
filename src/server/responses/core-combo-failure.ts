@@ -3,6 +3,7 @@ import { inspectedReserveRefusal } from "./reserve-refusal-body";
 import { recordUpstreamProviderErrorDetail, recordUpstreamValidationDetail, type FailureDetail } from "../request-log-failure-detail";
 import { carryProxyErrorPresentation } from "../../lib/client-error-body";
 import { carryPolicyCandidateRefusal } from "./policy-request-scope";
+import { responseCredentialMask } from "../../lib/outbound-credential-registry";
 import { comboFailureEvidence, carryProxyError } from "../../lib/client-error-body";
 import { carryWorkflowRefusal } from "../workflow-refusal";
 import {
@@ -65,10 +66,13 @@ export async function consumeComboFailure(
 ): Promise<ConsumedComboFailure> {
   // Read before the body: the marker lives on this Response object, and the failure below is
   // rebuilt as a new one that would otherwise lose it.
+  maskCredential ??= responseCredentialMask(response);
   const nonReplayable = isNonReplayableResponse(response);
   const replayRefusal = isReplayRefusalResponse(response);
   const fallback = `Provider error ${response.status}`;
   let classificationText = fallback;
+  let displayText = fallback;
+  let displayMessage: string | undefined;
   let codexModelRefusal: CodexAccountModelRefusal | undefined;
   let malformedResponseFormat: boolean | undefined;
   let openRouterOpaque400: boolean | undefined;
@@ -125,10 +129,17 @@ export async function consumeComboFailure(
       // Status-independent: the nested record is what normalization selects, so a root verdict
       // beside it has to be captured here or the conflict rule never sees it.
       upstreamRootCode ??= upstreamEnvelopeRootCode(body.text);
-      const normalized = normalizeUpstreamErrorText(body.text, fallback);
+      // An invalid UTF-8 suffix cannot erase an otherwise complete refusal envelope. Do not
+      // search fragments for a verdict: the remaining document still has to parse on its own.
+      const diagnostic = body.utf8Valid === false ? body.text.replace(/\uFFFD+$/u, "") : body.text;
+      const normalized = normalizeUpstreamErrorText(diagnostic, fallback);
       cyberFailure = normalized.cyberPolicy;
       if (utf8Trusted || cyberFailure) {
         classificationText = normalized.safeText;
+        // Keep routing evidence intact; mask the whole diagnostic before taking the public excerpt.
+        const projected = normalizeUpstreamErrorText(diagnostic, fallback, maskCredential);
+        displayText = projected.safeText;
+        displayMessage = projected.message;
         upstreamCode = codexAccountModelRefusalHardStopCode(response.status, body.text)
           ?? upstreamCodeForComboFailure(response, normalized.code);
         // Only the adapter's own normalized refusal may claim the plan-refusal hop; another
@@ -185,7 +196,7 @@ export async function consumeComboFailure(
     : formatErrorResponse(
     fatalPolicy ? 400 : response.status,
     cyberFailure ? (upstreamType ?? CYBER_POLICY_ERROR_CODE) : fatalPolicy ? "invalid_request_error" : "upstream_error",
-    fatalPolicy ? upstreamMessage ?? message : message,
+    fatalPolicy ? displayMessage ?? displayText : displayText === fallback ? fallback : `${fallback}: ${displayText}`,
     {
       classified: fatalPolicy,
       cyberPolicy: cyberFailure,
@@ -211,7 +222,7 @@ export async function consumeComboFailure(
     cyberPolicy: cyberFailure,
     ...(nonReplayable ? { nonReplayable: true } : {}),
     ...(verifiedPlanRefusal ? { verifiedPlanRefusal: true } : {}),
-    classificationText,
+    classificationText, publicDiagnostic: displayMessage ?? displayText,
     maskCredential,
     ...(isWrappedReserveQuota(response) ? { wrappedReserveQuota: true } : {}),
     ...(codexModelRefusal !== undefined ? { codexModelRefusal } : {}),

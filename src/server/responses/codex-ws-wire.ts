@@ -1,3 +1,4 @@
+import { attachCredentialMask, physicalCredentialMasks } from "../../lib/outbound-credential-registry";
 import { normalizeResponsesIncompleteReason } from "../../responses/incomplete-reason";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
 import {
@@ -386,7 +387,9 @@ export function restoreCodexWsPreOutputRefusal(response: Response): Response {
   const restore = record?.restore;
   if (!record || !restore) return response;
   record.restore = null;
-  return carryCodexWsPreludeVerdict(response, restore());
+  const restored = carryCodexWsPreludeVerdict(response, restore());
+  const mask = physicalCredentialMasks.get(response);
+  return mask ? attachCredentialMask(restored, mask) : restored;
 }
 
 const codexWsStageByResponse = new WeakMap<Response, CodexWsStageRecord>();

@@ -6,6 +6,7 @@ import { configureSharedSpendLedger, sharedSpendLedger, spendPolicyFromConfig } 
 import { admitWorkflowTurn, listWorkflowBudgetEvents, resetWorkflowBudgetsForTest, workflowBudgetSnapshot } from "../../src/lib/workflow-budget";
 import { clearKeyCooldowns, forgetApiKeyRotationCursor } from "../../src/providers/key-failover";
 import { MistralBudgetPacer, resolveMistralTransport } from "../../src/providers/mistral-transport";
+import { protocolTraceForRequest } from "../../src/protocols/trace";
 import { resetProviderRequestPacingForTest } from "../../src/providers/request-pacing";
 import { clearResponseStateForTests, flushResponseState } from "../../src/responses/state";
 import { handleChatCompletions } from "../../src/server/chat-completions";
@@ -13,7 +14,7 @@ import { createInferenceSendBudget } from "../../src/server/inference/context";
 import type { RequestLogContext } from "../../src/server/request-log";
 import { handleResponses } from "../../src/server/responses";
 import type { OcxConfig } from "../../src/types";
-import { chatSuccess } from "../helpers/combo-failover-upstream";
+import { chatSuccess, responsesSuccess } from "../helpers/combo-failover-upstream";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { createTempHome, type TempHome } from "../helpers/temp-home";
 
@@ -47,18 +48,21 @@ afterEach(async () => {
   }
 });
 
-function fixture(spend: NonNullable<OcxConfig["spend"]>, rotate: boolean, combo = false) {
-  configureSharedSpendLedger(spendPolicyFromConfig(spend, undefined, [provider]));
+type FixtureTransport = "Mistral" | "ordinary keyed Chat" | "ordinary keyed Responses";
+function fixture(spend: NonNullable<OcxConfig["spend"]>, rotate: boolean, combo = false, wireProtocol: FixtureTransport = "Mistral") {
+  configureSharedSpendLedger(spendPolicyFromConfig(spend, undefined, combo ? [provider, "earlier"] : [provider]));
   const ledger = sharedSpendLedger();
   const wire: string[] = [];
   const reservations: number[][] = [];
   const transport = resolveMistralTransport({
-    adapter: "openai-chat", baseUrl: "https://api.mistral.ai/v1", authMode: "key",
+    adapter: wireProtocol === "ordinary keyed Responses" ? "openai-responses" : "openai-chat",
+    baseUrl: wireProtocol === "Mistral" ? "https://api.mistral.ai/v1" : "https://chat.example.test/v1", authMode: "key",
     apiKey: keys[0]!.key, apiKeyPool: combo ? [keys[1]!, keys[0]!] : keys, models: ["m1"], liveModels: false,
     requestPacing: { enabled: true, keySelection: "round-robin" }, retryOn429: { enabled: false },
     fetch: Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       const destination = input instanceof Request ? input.url : String(input);
-      if (new URL(destination).pathname !== "/v1/chat/completions") throw new Error("Expected translated Chat inference");
+      const path = wireProtocol === "ordinary keyed Responses" ? "/v1/responses" : "/v1/chat/completions";
+      if (new URL(destination).pathname !== path) throw new Error(`Expected fixture inference at ${path}`);
       const bearer = new Headers(init?.headers).get("authorization");
       const selected = keys.find(entry => bearer === `Bearer ${entry.key}`);
       if (!selected) throw new Error("Expected one of the two fixture keys");
@@ -66,7 +70,7 @@ function fixture(spend: NonNullable<OcxConfig["spend"]>, rotate: boolean, combo 
       reservations.push([0, 1].map(index => ledger.snapshot("identity", label(index))?.reserved ?? 0));
       return rotate && selected.id === "first"
         ? Response.json({ error: { message: "fixture key is rate limited" } }, { status: 429 })
-        : chatSuccess("fixture answer", "m1");
+        : wireProtocol === "ordinary keyed Responses" ? Response.json(responsesSuccess("fixture answer", "m1")) : chatSuccess("fixture answer", "m1");
     }, { preconnect: fetch.preconnect }),
   }, new MistralBudgetPacer());
   const config: OcxConfig = { port: 0, defaultProvider: provider, providers: { [provider]: transport }, spend };
@@ -94,8 +98,8 @@ function fixture(spend: NonNullable<OcxConfig["spend"]>, rotate: boolean, combo 
   return { config, ledger, wire, reservations, log, run };
 }
 
-for (const admitted of [false, true]) test(`an earlier unattributed combo booking preserves the Mistral identity ceiling and both balances (admitted=${admitted})`, async () => {
-  const f = fixture({ identity: admitted ? headroom : { maxTokens: 15 } }, false, true);
+for (const transport of ["Mistral", "ordinary keyed Chat", "ordinary keyed Responses"] as const) for (const admitted of [false, true]) test(`an earlier unattributed combo booking preserves the ${transport} identity ceiling and both balances (admitted=${admitted})`, async () => {
+  const f = fixture({ identity: admitted ? headroom : { maxTokens: 15 } }, false, true, transport);
   let earlierSends = 0;
   f.config.providers.earlier = { adapter: "openai-chat", baseUrl: "https://fixture.example/v1", authMode: "local", models: ["m1"], liveModels: false,
     fetch: Object.assign(async () => {
@@ -107,11 +111,47 @@ for (const admitted of [false, true]) test(`an earlier unattributed combo bookin
   expect(earlierSends).toBe(1);
   expect(f.wire).toEqual(admitted ? ["second"] : []);
   expect(response.chargedSends).toBe(admitted ? 2 : 1);
+  if (transport !== "Mistral") {
+    expect(workflowBudgetSnapshot(root)?.sends).toBe(admitted ? 2 : 1);
+    expect(f.log.attempts?.reduce((sum, attempt) => sum + attempt.sendCount, 0)).toBe(admitted ? 2 : 1);
+    const finalPool = f.ledger.snapshot("pool", provider);
+    expect([finalPool?.reserved ?? 0, finalPool?.unresolved ?? 0, finalPool?.settled ?? 0]).toEqual([0, 0, admitted ? 3 : 0]);
+    if (admitted) {
+      expect(response.status, response.text).toBe(200);
+      expect(f.reservations[0]?.[1]).toBeGreaterThanOrEqual(16);
+    }
+  }
   if (admitted) expect(f.ledger.snapshot("identity", label(1))).toMatchObject({ reserved: 0, unresolved: 0, settled: 3 });
   else expect(listWorkflowBudgetEvents(1)[0]).toMatchObject({ reason: "workflow-spend-exhausted", spendScope: "identity" });
   const balance = f.ledger.snapshot("pool", "earlier");
   expect(balance?.reserved).toBe(0);
   expect(balance?.unresolved).toBeGreaterThan(0);
+});
+
+test("native Chat books one ledger entry for an ordinary keyed Chat combo send", async () => {
+  const f = fixture({ identity: headroom }, false, true, "ordinary keyed Chat");
+  f.config.protocols = { rollout: { nativeChatCombos: true } };
+  const admission = admitWorkflowTurn(root, "interactive");
+  if (!admission?.admitted) throw new Error("Fixture root refused");
+  admission.lease.release();
+  const request = new Request("http://localhost/v1/chat/completions", { method: "POST",
+    headers: { "content-type": "application/json", "x-codex-parent-thread-id": root },
+    body: JSON.stringify({ model: "combo/selected", messages: [{ role: "user", content: "fixture" }], max_tokens: 16 }) });
+  const network = spyOn(globalThis, "fetch").mockImplementation(async () => { throw new Error("Unexpected network fetch"); });
+  try {
+    const response = await handleChatCompletions(request, f.config, f.log);
+    const text = await response.text();
+    expect(response.status, text).toBe(200);
+    expect(protocolTraceForRequest(f.log, f.log.attempts)?.requestPath).toEqual(["chat", "chat"]);
+    expect(f.wire).toEqual(["second"]);
+    f.log.spendTracker?.settle(f.log.usage);
+    const journal = await Bun.file(home.path("spend-ledger.jsonl")).text();
+    const dispatched = journal.trim().split("\n").map(line => JSON.parse(line)).filter(row => row.kind === "dispatch");
+    expect(dispatched).toHaveLength(1);
+    expect(workflowBudgetSnapshot(root)?.sends).toBe(1);
+    for (const [scope, id] of [["identity", label(1)], ["pool", provider], ["root", root]] as const)
+      expect(f.ledger.snapshot(scope, id)).toMatchObject({ reserved: 0, unresolved: 0, settled: 3 });
+  } finally { network.mockRestore(); }
 });
 
 test("cancelling a native Chat combo during Mistral pacing records no spend or attempt", async () => {

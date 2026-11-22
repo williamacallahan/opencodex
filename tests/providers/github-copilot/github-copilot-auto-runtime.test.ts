@@ -10,6 +10,7 @@ import { handleClaudeMessages } from "../../../src/server/claude-messages";
 import { saveConfig } from "../../../src/config";
 import { clearGenericFailoverHealth } from "../../../src/oauth/generic-account-failover";
 import { clearCopilotAutoModelsForTests } from "../../../src/providers/github-copilot-auto";
+import { apiKeyAccountLogLabel } from "../../../src/codex/account-label";
 import { fetchProviderModels } from "../../../src/codex/catalog/provider-models";
 import { filterCatalogVisibleModels } from "../../../src/codex/catalog/model-visibility";
 import { reconcileSuccessfulModelDiscoveries } from "../../../src/providers/new-model-policy";
@@ -249,8 +250,8 @@ describe("Copilot Auto through the Responses pipeline", () => {
     expect(f.sent.filter(call => ["/chat/completions", "/responses"].includes(call.path))).toHaveLength(0);
     expect(fallbackBodies).toHaveLength(1); expect(fallbackBodies[0].tool_choice).toEqual(choice);
     expect(fallbackBodies[0].tools).toEqual(tools); expect(log.provider).toBe(mode === "combo" ? "combo" : "fallback");
-    // The generic key route keeps its existing pre-key-commit identity, never Copilot's candidate.
-    if (mode === "policy") expect(spendTargets.at(-1)).toEqual({ poolId: "fallback", identityId: undefined });
+    // The final booking is the fallback's own key, not the refused Copilot candidate.
+    if (mode === "policy") expect(spendTargets.at(-1)).toEqual({ poolId: "fallback", identityId: apiKeyAccountLogLabel("fallback", { reference: "fixture" }) });
     if (mode === "combo") {
       expect(isComboTargetInCooldown("mandatoryAuto", { provider: "github-copilot", model: "auto" })).toBe(false);
       clearComboSelectionState(); // Reset selection history, retaining any real target cooldown.

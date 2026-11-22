@@ -3,6 +3,7 @@ import { preflightNativeMessagesResponse } from "../../src/server/messages-nativ
 import { tapAnthropicSseForLog } from "../../src/server/messages-shared";
 import type { RequestLogContext } from "../../src/server/request-log";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../../src/server/sse-frame-buffer";
+import { attachCredentialMask, createOutboundCredentialMask } from "../../src/lib/outbound-credential-registry";
 import { createTestTranslatorBudget } from "../helpers/translator-budget";
 
 const refusal = JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "fixture-private-echo" } });
@@ -114,6 +115,20 @@ for (const [name, block, failed] of [
     else await result.response.body?.cancel();
   });
 }
+
+test("dispatch mask keeps a native Messages preflight refusal actionable without echoing its marker", async () => {
+  const marker = "orchidFixtureMarker";
+  const error = { type: "overloaded_error", message: `busy ${marker}`, code: `detail_${marker}` };
+  const source = oneChunk(prelude + `event: error\ndata: ${JSON.stringify({ type: "error", error })}\n\n`);
+  attachCredentialMask(source, createOutboundCredentialMask({ "x-api-key": marker }));
+  const result = await preflightNativeMessagesResponse(source, { model: "fixture", provider: "anth" }, createTestTranslatorBudget());
+  expect(result.kind).toBe("failed");
+  expect(result.response.status).toBe(502);
+  const client = await result.response.json();
+  expect(client.error.type).toBe("overloaded_error");
+  expect(client.error.message).toBeTruthy();
+  expect(JSON.stringify(client)).not.toContain(marker);
+});
 
 test("native combo preflight judges a moderation refusal on the whole event, like the HTTP reader", async () => {
   const run = async (event: Record<string, unknown>) => {

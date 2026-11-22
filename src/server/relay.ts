@@ -1,3 +1,4 @@
+import { publicHeaderValue } from "../lib/http-response-semantics";
 import { carryProxyError } from "../lib/client-error-body";
 import type { ResponsesTerminalStatus } from "../bridge";
 import {
@@ -1802,6 +1803,7 @@ export function codexSafetyBufferingFilterOptions(
 
 /** Model ids a passthrough route knows, for the relayed model headers. */
 export interface PassthroughHeaderOptions extends CodexSafetyBufferingFilterOptions {
+  maskCredential?: (text: string) => string;
   knownModels?: readonly string[];
   provider?: string;
 }
@@ -1822,7 +1824,8 @@ export function sanitizePassthroughHeaders(upstream: Headers, options?: Passthro
       if (known) out.set(key, known);
       return;
     }
-    out.set(key, value);
+    const safe = publicHeaderValue(lower, value, options?.maskCredential);
+    if (safe !== undefined) out.set(key, safe);
   });
   return out;
 }

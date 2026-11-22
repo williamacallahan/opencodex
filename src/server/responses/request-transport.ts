@@ -88,7 +88,7 @@ import {
 } from "../../providers/api-key-selection";
 import { isProviderApiKeyPaused, ProviderApiKeyPausedError } from "../../providers/api-key-pause";
 import { resolveAdapter, resolveWireProtocolOverride } from "../adapter-resolve";
-import { ownsDispatchReceipt, settlePhysicalDispatch } from "../../lib/provider-admission-wait";
+import { settlePhysicalDispatch } from "../../lib/provider-admission-wait";
 import { codexWsExecutorBinding, fetchWithHeaderTimeout, physicalSendCommitInit, physicalSendGuardInit, physicalSendObserverInit, providerFetch, sendWithConnectionPolicy } from "./fetch-helpers";
 import { resolveConnectTimeoutMs } from "../../stall-timeout";
 import { isLocalUpstream } from "../../lib/local-upstream";
@@ -988,8 +988,8 @@ export async function prepareResponsesTransport(
             // Copilot's local negotiation may refuse before this point, and spend admission
             // may still refuse at the HTTP executor. Its note follows that final admission.
             const deferredCopilotNote = route.providerName === "github-copilot" && route.provider.authMode !== "forward";
-            const deferredMistralNote = ownsDispatchReceipt(route.provider);
-            if (!deferredCopilotNote && !deferredMistralNote) commitKeyAttemptSend();
+            const deferredKeyNote = usesApiKeyAccount(route.provider) && !deferredCopilotNote;
+            if (ws?.provider === route.provider && deferredKeyNote) ws.onSent = commitKeyAttemptSend;
             // The WS executor dials its own socket: HTTP connection policy and body coding do not apply.
             // WS eligibility (egress, pacing, URL) was checked for the provider it was built for; a
             // provider reselected above was not, so it takes the HTTP fallback under its own route.
@@ -997,7 +997,7 @@ export async function prepareResponsesTransport(
               distributedKeyPhysicalFetch(anthropicBillingPhysicalFetch(fetchImpl, route.providerName, route.provider), route.providerName, route.provider, target),
               input,
               { ...physicalInit, redirect: "manual",
-                ...(deferredMistralNote ? physicalSendCommitInit(() => { settlePhysicalDispatch(physicalInit); commitKeyAttemptSend(); }) : {}),
+                ...(deferredKeyNote ? physicalSendCommitInit(() => { settlePhysicalDispatch(physicalInit); commitKeyAttemptSend(); }) : {}),
                 ...physicalSendObserverInit(observeAutoPause, destination instanceof Request ? destination.url : String(destination), deferredCopilotNote ? commitKeyAttemptSend : undefined),
                 ...(hasVertexRequestAuthority(wireRequest) ? physicalSendGuardInit((finalTarget, finalHeaders) => {
                     if (!selectionIsCurrent(requestBindings.get(wireRequest)) || !vertexRequestAuthorityIsCurrent(wireRequest, finalTarget, finalHeaders)) throw new Error("Vertex credential authority changed before dispatch");
@@ -1339,7 +1339,7 @@ export async function prepareResponsesTransport(
       ? resolveCopilotApiBaseUrl(servingOAuthSnapshot?.apiBaseUrl)
       : undefined,
   );
-  if (ownsDispatchReceipt(route.provider)) bindResponsesSpendTarget(logCtx, () => {
+  if (!deferPhysicalAttribution && usesApiKeyAccount(route.provider)) bindResponsesSpendTarget(logCtx, () => {
     const selected: { accountLogLabel?: string } = {};
     stampApiKeyAccountLabel(selected, route.providerName, route.provider);
     return { poolId: logCtx.spendPoolId ?? route.providerName, identityId: selected.accountLogLabel ?? "" };

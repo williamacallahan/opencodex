@@ -1,5 +1,6 @@
 import { recordUpstreamProviderErrorDetail } from "./request-log-failure-detail";
 import { normalizeNativeChatContent } from "../adapters/openai-chat/native-content";
+import { attachCredentialMask, responseCredentialMask, type CredentialMask } from "../lib/outbound-credential-registry";
 import { attachComboFailureEvidence, ownedChatErrorPayload, type ClientErrorContract } from "../lib/client-error-body";
 import type { FailureVerdictSink } from "../chat/failure-verdict";
 import { normalizeChatChoiceErrors } from "./chat-native-sse";
@@ -318,14 +319,16 @@ export async function runNativeChatAttempt(
     return chatCompletionsErrorResponse(status, safeMessage, type, code);
   };
 
+  let dispatchMask: CredentialMask | undefined;
   const failUpstream = (status: number, message: string, type?: string, code?: string | null, contract?: ClientErrorContract): Response => {
     const legacy = chatCompletionsErrorBody(status, redactSecretString(message), type, code);
     finishLog(status, redactSecretString(message));
     const error = legacy.error as { type: string; code: string | null };
     const finalStatus = error.code === CYBER_POLICY_ERROR_CODE ? 400 : status;
-    return attachComboFailureEvidence(new Response(JSON.stringify(ownedChatErrorPayload({ status: finalStatus, type: error.type, code: error.code, contract,
+    const failed = attachComboFailureEvidence(new Response(JSON.stringify(ownedChatErrorPayload({ status: finalStatus, type: error.type, code: error.code, contract,
       evidence: { status, type, code: code ?? undefined, message } })),
       { status: finalStatus, headers: { "Content-Type": "application/json", ...(code === REASONING_LOOP_ERROR_CODE ? REPLAY_REFUSAL_CLIENT_HEADERS : {}) } }), JSON.stringify(legacy));
+    return dispatchMask ? attachCredentialMask(failed, dispatchMask) : failed;
   };
 
   normalizePinnedChatEffort(execution);
@@ -729,6 +732,7 @@ export async function runNativeChatAttempt(
   }
   releaseRetainedRequest();
 
+  dispatchMask = responseCredentialMask(response, activeRequest.headers);
   if (!response.ok) {
     let bodyText = "";
     try {
@@ -816,6 +820,7 @@ export async function runNativeChatAttempt(
         ...(replayRefusal || upstreamCode === REASONING_LOOP_ERROR_CODE ? REPLAY_REFUSAL_CLIENT_HEADERS : {}),
       },
     });
+    attachCredentialMask(rewritten, dispatchMask);
     attachComboFailureEvidence(rewritten, JSON.stringify(chatCompletionsErrorBody(status, classified.message, classified.type, classified.code)));
     return replayRefusal ? retainReplayRefusal(rewritten) : rewritten;
   }
@@ -831,7 +836,9 @@ export async function runNativeChatAttempt(
       // single replacement, so the send must not be able to spend more than it granted.
       async () => {
         try {
-          return await send(activeRequest, "connection-reset", true);
+          const replacement = await send(activeRequest, "connection-reset", true);
+          dispatchMask = responseCredentialMask(replacement, activeRequest.headers);
+          return replacement;
         } finally {
           // Reselection can charge the rebuilt request after the initial send settled.
           releaseRetainedRequest();

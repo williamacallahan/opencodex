@@ -3,21 +3,10 @@ import { truncationReasonFor } from "../../responses/truncated-stop-reason";
 import { REDACTED_SECRET, SENSITIVE_KEY_PATTERN, redactSecretString } from "../../lib/redact";
 import { replaceSseDataPayload, sseDataPayload, type SseBlockRewrite } from "../sse-payload-rewrite";
 
-/** Mask the selected outbound credential even when upstream echoes only its raw value. */
-export function createOutboundCredentialMask(outboundHeaders: Record<string, string>): (text: string) => string {
-  const knownSecrets = Object.entries(outboundHeaders)
-    .filter(([name]) => SENSITIVE_KEY_PATTERN.test(name))
-    .flatMap(([name, value]) => {
-      const credential = /^(?:authorization|proxy-authorization)$/i.test(name)
-        ? value.replace(/^\S+\s+/, "")
-        : value;
-      return credential ? [credential] : [];
-    })
-    .sort((a, b) => b.length - a.length);
-  return (text) => knownSecrets.reduce((safe, secret) => safe.replaceAll(secret, REDACTED_SECRET), text);
-}
+import { createOutboundCredentialMask } from "../../lib/outbound-credential-registry";
+export { createOutboundCredentialMask };
 
-const terminalType = (type: unknown) => type === "error" || type === "response.failed" || type === "response.incomplete";
+const terminalType = (type: unknown) => type === "error" || type === "response.failed" || type === "response.incomplete" || type === "response.steer.failed" || type === "response.inject.failed";
 
 /** Serialize the inspected values, never raw bytes discarded by JSON parsing. */
 export function maskDiagnosticJson(parsed: unknown, mask: (text: string) => string): string {
@@ -69,7 +58,7 @@ export function maskDiagnosticJson(parsed: unknown, mask: (text: string) => stri
 /** Mask upstream diagnostics before either SSE delivery or buffered JSON reconstruction. */
 export function createTerminalErrorRedactionBlockRewrite(
   outboundHeaders: Record<string, string>,
-  maskCredential = createOutboundCredentialMask(outboundHeaders),
+  maskCredential: (text: string) => string = createOutboundCredentialMask(outboundHeaders),
 ): SseBlockRewrite {
   const maskFields = (block: string) => block.replace(/^([^:\r\n]*):([^\r\n]*)/gm, (line, name, text) =>
     name === "event" || name === "data" || name === "retry" ? line : `${name}:${maskCredential(text)}`);

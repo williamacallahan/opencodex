@@ -4,10 +4,9 @@ import { comboLogLabel, comboTargetLogLabel } from "../../combos/resolve";
 import { clientFacingModelLabel, clientFacingModelText } from "../../lib/error-destination";
 import { projectLocalModelRefusalLog } from "../request-log-failure-detail";
 import { withPhysicalSendAdmission } from "../../lib/provider-admission-wait";
-import { carryProxyErrorContext, hasProxyErrorMessage, markProxyError } from "../../lib/client-error-body";
+import { carryProxyErrorContext, hasProxyErrorMessage, isProxyError, markProxyError } from "../../lib/client-error-body";
 import { classifyUpstreamCondition } from "../../lib/upstream-condition";
 import { effectiveAzureOutputBudget } from "../../adapters/azure";
-import { isCanonicalMistralChat } from "../../providers/mistral-transport";
 import { responsesSpendTarget } from "./request-spend-target";
 import { buildResponsesTransport } from "../../adapters/openai-responses/transport";
 import { isMetaAiResponsesDestination } from "../../responses/muse-tool-name-alias";
@@ -1238,7 +1237,7 @@ export async function executeComboResponses(
     };
     const hopDecision = comboSendScope?.reserveDispatch({
       sendClass: firstComboTarget ? "initial" : "combo-failover",
-      ...(isCanonicalMistralChat(spendProvider) ? { selectedSpendScopes: () => responsesSpendTarget(childLog, targetRoute.providerName) } : {}),
+      selectedSpendScopes: () => responsesSpendTarget(childLog, targetRoute.providerName),
       targetKey: `${pick.target.provider}/${pick.target.model}`,
       countedExternally: true,
     });
@@ -1653,6 +1652,8 @@ export async function executeComboResponses(
     } else {
       localAdmissionRefusals = undefined;
     }
+    const localBudgetDenial = attempt.sendCount === 0 && isProxyError(failure.response) && failure.upstreamCode === SEND_BUDGET_EXHAUSTED_CODE;
+    if (localBudgetDenial && lastFailure) { attemptRetained = true; return exhaustedFailure(); }
     attemptRetained = true;
     lastFailure = failure.response;
     lastFailureUpstreamCode = failure.upstreamCode;
@@ -1686,7 +1687,7 @@ export async function executeComboResponses(
     }
     // A non-replayable failure (the answer to a spent ambiguous-reset replacement) may follow a
     // send that already ran the turn, so no later target may receive it, whatever its status says.
-    const failureDecision = boundTargetKey !== undefined || hardRefusal || failure.nonReplayable || spentReplacement
+    const failureDecision = localBudgetDenial || boundTargetKey !== undefined || hardRefusal || failure.nonReplayable || spentReplacement
       ? "stop"
       : isPolicyCandidateRefusal(failure.response) ? "hop"
       : comboFailureDecision(failure.response.status, failure.classificationText, {
@@ -1770,7 +1771,7 @@ export async function executeComboResponses(
     // Hard stops above still return their own verdict, and every attempt keeps its own usage.
     if (!contextFailure && failure.response.status === 400 && isDefiniteContextOverflow(400, failure.classificationText)) {
       contextFailure = { childLog, response: formatErrorResponse(400, "invalid_request_error",
-        failure.upstreamMessage ?? failure.classificationText, { code: "context_length_exceeded", classified: true, maskCredential: failure.maskCredential }) };
+        failure.publicDiagnostic ?? "Provider context length exceeded", { code: "context_length_exceeded", classified: true, maskCredential: failure.maskCredential }) };
     }
     if (failure.upstreamCode === "zero_output_token_limit") {
       zeroOutputLimitFailure = {

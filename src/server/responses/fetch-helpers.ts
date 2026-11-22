@@ -11,6 +11,7 @@ import {
 import type { OcxProviderConfig } from "../../types";
 import type { WsData } from "../ws-bridge";
 import {
+  registerProviderResponseProvenance,
   requestPacingMaxConcurrentRequests,
   sendTrackingRequestSlot,
   trackProviderRequestSlotBody,
@@ -31,11 +32,12 @@ import {
   type ProviderEgressBinding,
 } from "../../lib/provider-egress";
 import { redactSecretString } from "../../lib/redact";
-import { outboundCredentials } from "../../lib/outbound-credential-registry";
+import { attachCredentialMask, outboundCredentials, physicalCredentialMasks } from "../../lib/outbound-credential-registry";
 import { compressUpstreamRequestBody, isCanonicalCodexResponsesUrl } from "./request-compression";
 import { requiredComboSendOwner, redeemOutboundTurnState, TURN_STATE_BINDING_INIT, TURN_STATE_OWNER, type TurnStateConstrained, turnStateBinding } from "../turn-state-handles";
 
 export { withUpstreamHttpVersion };
+registerProviderResponseProvenance(physicalCredentialMasks);
 
 const egressWebsocketDowngradeWarned = new Set<string>();
 /** A provider name is configuration-controlled, so the notice set is bounded like any cache. */
@@ -270,11 +272,11 @@ export function sendWithConnectionPolicy(
   if (!deferDispatchReceipt && !ownsDispatchReceipt(egress?.provider)) settlePhysicalDispatch(init);
   (init as Record<symbol, ((destination: string, headers: Headers) => void) | undefined> | undefined)?.[PHYSICAL_SEND_OBSERVER]?.(target, headers);
   // Remember only credentials that passed the final dispatch invariant.
-  outboundCredentials().remember(headers);
-  return physicalFetch(input, physicalInit);
+  const mask = outboundCredentials().remember(headers, egress?.provider.headers);
+  return physicalFetch(input, physicalInit).then(response => attachCredentialMask(response, mask));
 }
 
-interface CodexWsExecutor { provider: OcxProviderConfig; http: typeof globalThis.fetch }
+interface CodexWsExecutor { provider: OcxProviderConfig; http: typeof globalThis.fetch; onSent?: () => void }
 const codexWsExecutors = new WeakMap<object, CodexWsExecutor>();
 const codexWsExecutor = (send: (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => Promise<Response>, binding: CodexWsExecutor) => {
   codexWsExecutors.set(send, binding);
@@ -449,15 +451,17 @@ export function providerFetch(
         check?.();
         if (notified) return;
         options.onPhysicalDispatch?.(body);
+        binding.onSent?.();
         notified = true;
       };
       const fallback = ((url: Parameters<typeof globalThis.fetch>[0], fallbackInit?: RequestInit) =>
         httpFetch(url, { ...fallbackInit, [WS_FALLBACK_RECEIPT]: notifyOnce } as RequestInit, reacquirePacing, null)) as typeof globalThis.fetch;
+      const binding: CodexWsExecutor = { provider, http: markEgressTransparentExecutor(fallback) };
       const wsSend = codexWsExecutor((url: Parameters<typeof globalThis.fetch>[0], wsInit?: RequestInit) => codexWsUpstreamFetch(String(url),
         { ...(wsInit ?? init), [TURN_STATE_BINDING_INIT]: dialHeaders => turnStateBinding(providerName, dialHeaders) },
         fallback, runtime, options.onCodexWsQuota, options.beforeDispatch, options.nativeControl,
-        async () => { (await waitForPacing(init.signal ?? undefined))?.release(); }, notifyOnce, options.preOutputRefusalHold, options.onContinuationDispatch),
-        { provider, http: markEgressTransparentExecutor(fallback) });
+        async () => { (await waitForPacing(init.signal ?? undefined))?.release(); }, notifyOnce, options.preOutputRefusalHold, options.onContinuationDispatch, provider.headers),
+        binding);
       // A WS frame is a physical send like any other, so it runs the same override: that is where a
       // key-auth send is committed to its attempt row and the send budget is rebound to the
       // credential that left. Without it a key-auth WS turn logged `sendCount: 0`.

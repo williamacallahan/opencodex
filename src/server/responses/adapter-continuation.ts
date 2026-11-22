@@ -38,6 +38,8 @@ import {
 } from "../../lib/upstream-retry";
 import { unwrapUpstreamRetryEvidenceError } from "../../codex/auth-context";
 import { AdmissionModelDeniedError, MODEL_NOT_ALLOWED_FOR_KEY } from "../admission-model-scope";
+import { bindTerminalMask } from "../../bridge/internal";
+import { responseCredentialMask } from "../../lib/outbound-credential-registry";
 import { redactSecretString } from "../../lib/redact";
 import { resolveWireProtocolOverride } from "../adapter-resolve";
 import { bindRouteReasoningReplayScope } from "./core-replay";
@@ -706,15 +708,16 @@ export function createAdapterContinuations(
     }
 
     if (!response.ok) {
+      const maskCredential = responseCredentialMask(response, transportState.sameTargetRequest?.headers);
       if (route.providerName === "kiro") response = carryProxyError(response, await normalizeFinalKiroHttpError(response, upstream.signal));
       const errorText = await readDisplaySafeErrorText(response, upstream.signal, "unknown error");
-      const normalized = normalizeUpstreamErrorText(errorText, "unknown error");
+      const normalized = normalizeUpstreamErrorText(errorText, "unknown error", maskCredential);
       const message = normalized.cyberPolicy
         ? normalized.message ?? (isCyberPolicyCode(normalized.code) ? CYBER_POLICY_FALLBACK_MESSAGE : normalized.safeText)
         : `Provider continuation error ${response.status}: ${normalized.safeText}`;
       if (isProxyError(response)) rememberProxyErrorMessage(logCtx, message, { status: normalized.cyberPolicy ? 400 : response.status,
         type: normalized.cyberPolicy ? normalized.type ?? CYBER_POLICY_ERROR_CODE : undefined, code: normalized.cyberPolicy ? CYBER_POLICY_ERROR_CODE : undefined, presentation: proxyErrorPresentation(response) });
-      yield {
+      yield bindTerminalMask({
         type: "error",
         status: normalized.cyberPolicy ? 400 : response.status,
         message,
@@ -725,7 +728,7 @@ export function createAdapterContinuations(
             retryable: false,
           }
           : isNonReplayableUpstreamCode(normalized.code) ? { code: normalized.code, retryable: false } : {}),
-      };
+      }, maskCredential);
       return;
     }
 
@@ -736,14 +739,15 @@ export function createAdapterContinuations(
       // the error that the already-live Responses bridge turns into a terminal.
       const parse = async function* (current: Response): AsyncGenerator<AdapterEvent> {
         const bodyInactivityMs = resolveStallTimeoutMs(config.stallTimeoutSec, { localUpstream: isLocalUpstream(transportState.sameTargetRequest?.url ?? route.provider.baseUrl) });
+        const maskCredential = responseCredentialMask(current, transportState.sameTargetRequest?.headers);
         if (!current.ok) {
-          yield await adapterExchange.thinkingSignatureRecovery.projectHttpFailure(current, upstream.signal);
+          yield bindTerminalMask(await adapterExchange.thinkingSignatureRecovery.projectHttpFailure(current, upstream.signal), maskCredential);
         } else if (nextParsed.stream) {
-          yield* readResponseStreamWithInactivity(current, upstream.signal, bodyInactivityMs,
-            guarded => transportState.activeAdapter.parseStream(guarded, translatorBudget, logCtx.activeTierMetadata));
+          for await (const event of readResponseStreamWithInactivity(current, upstream.signal, bodyInactivityMs,
+            guarded => transportState.activeAdapter.parseStream(guarded, translatorBudget, logCtx.activeTierMetadata))) yield bindTerminalMask(event, maskCredential);
         } else if (transportState.activeAdapter.parseResponse) {
-          yield* await readResponseBodyWithInactivity(current, upstream.signal, bodyInactivityMs,
-            guarded => transportState.activeAdapter.parseResponse!(guarded, translatorBudget, logCtx.activeTierMetadata));
+          for (const event of await readResponseBodyWithInactivity(current, upstream.signal, bodyInactivityMs,
+            guarded => transportState.activeAdapter.parseResponse!(guarded, translatorBudget, logCtx.activeTierMetadata))) yield bindTerminalMask(event, maskCredential);
         } else {
           try { void current.body?.cancel().catch(() => {}); } catch { /* closed */ }
           yield { type: "error", message: "Provider continuation does not support response parsing" };

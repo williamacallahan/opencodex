@@ -1,5 +1,4 @@
-import { isRevokedChatgptCredentialCode } from "../../codex/chatgpt-refresh-failure";
-import { codexAccessDenial } from "../../codex/quota-rejection";
+import { codexAuthRejection } from "../../codex/quota-rejection";
 import type { CodexWsAuthRejection } from "./codex-ws-wire";
 import { NativeSteeringError } from "./native-steering";
 import { envelopeRecordCode } from "../../combos/failover";
@@ -116,14 +115,6 @@ function refusalErrorBody(source: unknown): Record<string, string> {
 function refusalUsage(frame: Record<string, unknown>): unknown {
   const usage = (record(frame.response) ? frame.response.usage : undefined) ?? frame.usage;
   return safeSnapshotUsage(usage) ? usage : undefined;
-}
-
-function frameAuthRejection(status: number, frame: Record<string, unknown>): CodexWsAuthRejection | undefined {
-  if (status !== 401 && status !== 403) return undefined;
-  const denial = status === 403 ? codexAccessDenial(frame) : undefined;
-  if (denial) return denial;
-  const rejects = (code: unknown) => code === "invalid_authentication" || code === "invalid_api_key" || isRevokedChatgptCredentialCode(code);
-  return rejects(frame.code) || (record(frame.error) && rejects(frame.error.code)) ? "credential" : undefined;
 }
 
 function markFrameRefusal(response: Response, frame: Record<string, unknown>, authRejection: CodexWsAuthRejection | undefined,
@@ -712,7 +703,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
             terminalQuota = { status: rejection.status, headers: rejection.headers, confirmedCapacity: refusalEligible && correlated
               && terminalOwnerCapacityStatus(normalized.payload, rejection.status) === rejection.status };
           }
-          if (rejection && refusalEligible) authRejection = frameAuthRejection(rejection.status, normalized.payload);
+          if (rejection && refusalEligible) authRejection = codexAuthRejection(rejection.status, normalized.payload);
           if (rejection && projectCreateRefusal) {
             const projection = new Response(JSON.stringify({
               error: rejection.error ?? { type: "upstream_error", message: "Upstream rejected the request" },

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { bridgeToResponsesSSE } from "../../src/bridge";
+import { bridgeToResponsesSSE, buildResponseJSON } from "../../src/bridge";
+import { responseCredentialMask } from "../../src/lib/outbound-credential-registry";
+import { createTestTranslatorBudget } from "../helpers/translator-budget";
 import { isTerminalRefusalCode } from "../../src/lib/errors";
 import type { AdapterEvent, OcxUsage } from "../../src/types";
 
@@ -42,6 +44,36 @@ async function terminal(events: AdapterEvent[], options?: BridgeOptions): Promis
   expect(terminals).toHaveLength(1);
   return terminals[0]!;
 }
+
+describe("dispatch mask on translated adapter terminals", () => {
+  const marker = "orchidFixtureMarker";
+  const maskCredential = responseCredentialMask(new Response(), { "x-api-key": marker });
+  const message = "Provider diagnostic: " + marker;
+  for (const stream of [false, true]) {
+    for (const kind of ["error", "incomplete"] as const) {
+      test(`${kind} keeps the public verdict and usage, stream=${stream}`, async () => {
+        const terminalEvent: AdapterEvent = kind === "error"
+          ? { type: "error", status: 502, errorType: `kind_${marker}`, code: `detail_${marker}`, message, retryable: false, usage: USAGE }
+          : { type: "incomplete", reason: `stop_${marker}`, message, retryable: false, usage: USAGE };
+        const events: AdapterEvent[] = [{ type: "text_delta", text: "partial answer" }, terminalEvent];
+        const options = { translatorBudget: createTestTranslatorBudget(), maskCredential };
+        const client = stream ? (await terminal(events, options)).data.response : buildResponseJSON(events, "routed/model", options);
+        const status = kind === "error" ? "failed" : "incomplete";
+        expect(client).toMatchObject({ status, usage: { input_tokens: 120, output_tokens: 7 } });
+        expect(JSON.stringify(client.output)).toContain("partial answer");
+        if (kind === "error") {
+          expect(client.error).toEqual(client.last_error);
+          expect(client.error.message).toContain("Provider diagnostic:");
+          expect(client.retryable).toBe(false);
+        } else {
+          expect(client.incomplete_details.message).toContain("Provider diagnostic:");
+          expect(client.incomplete_details.retryable).toBe(false);
+        }
+        expect(JSON.stringify(client)).not.toContain(marker);
+      });
+    }
+  }
+});
 
 describe("Responses bridge: terminal upstream refusal", () => {
   test("a non-retryable content filter becomes response.failed with a terminal-refusal code", async () => {

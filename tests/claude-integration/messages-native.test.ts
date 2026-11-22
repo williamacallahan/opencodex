@@ -875,6 +875,21 @@ describe("strict Messages public HTTP transport", () => {
     });
   }
 
+  test.each([false, true])("strict Messages withholds a reflected marker in a 403 (gzip=%s)", async compressed => {
+    const marker = "orchidFixtureMarker";
+    const plain = encode(JSON.stringify({ error: { message: `fixture ${marker}` } }));
+    await launch(() => new Response(compressed ? Bun.gzipSync(plain) : plain, { status: 403, headers: {
+      "content-type": "application/json", "x-upstream-note": marker, ...(compressed ? { "content-encoding": "gzip" } : {}),
+    } }), config => { config.providers.anth!.apiKey = marker; });
+    const response = await post();
+    expect(response.status).toBe(403);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const decoded = response.headers.get("content-encoding") === "gzip" ? Bun.gunzipSync(bytes) : bytes;
+    expect(new TextDecoder().decode(decoded)).not.toContain(marker);
+    expect(response.headers.get("x-upstream-note")).toBeNull();
+    expect(calls).toHaveLength(1);
+  });
+
   for (const status of [400, 401, 403, 429, 529, 307]) test(`strict preserves ${status} bytes without retry or redirect`, async () => {
     const bytes = encode(status === 529 ? "not JSON\u0000upstream error" : '{ "type":"error", "future":-0, "error":{"type":"future_error","message":"fixture refusal"} }');
     await launch(() => new Response(bytes, { status, headers: {

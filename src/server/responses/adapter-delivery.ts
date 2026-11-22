@@ -1,4 +1,6 @@
 import { proxyErrorPresentation, isProxyError, rememberProxyErrorMessage } from "../../lib/client-error-body";
+import { bindTerminalMask } from "../../bridge/internal";
+import { responseCredentialMask } from "../../lib/outbound-credential-registry";
 import type { ResponsesRequestContext } from "./core-options";
 import type { PreparedResponsesRequest } from "./request-prepare";
 import type { ResponsesTransport } from "./request-transport";
@@ -83,6 +85,7 @@ export async function deliverAdapterResponse(
     notifyResponseComplete,
   } = responseEffects;
   const { routedCompaction } = sidecarState;
+  const maskCredential = responseCredentialMask(upstreamResponse);
   const bodyInactivityMs = resolveStallTimeoutMs(config.stallTimeoutSec, { localUpstream });
   const upstreamRequestsStream = () => parsed.stream || ("passthrough" in transportState.activeAdapter
     && transportState.activeAdapter.passthrough && requiresStreamingResponses(route.provider));
@@ -90,6 +93,7 @@ export async function deliverAdapterResponse(
     thinkingSignatureRecovery.wrap(events, async function* () {
       const result = await refetchThinkingSignature();
       let response = "failed" in result ? result.failed : result;
+      const replacementMask = responseCredentialMask(response);
       // A replacement can be an HTTP/auth/budget refusal; never feed its JSON body to an SSE parser.
       if (!response.ok) {
         // A local refusal closes the upstream signal before returning its generated JSON.
@@ -98,11 +102,11 @@ export async function deliverAdapterResponse(
         const nonReplayable = isNonReplayableResponse(response);
         if (nonReplayable) response = await sanitizeNonReplayableUpstreamError(response, errorSignal);
         const body = await readDisplaySafeErrorText(response, errorSignal, "Upstream recovery failed");
-        const error = normalizeUpstreamErrorText(body, "Upstream recovery failed");
+        const error = normalizeUpstreamErrorText(body, "Upstream recovery failed", replacementMask);
         if (isProxyError(response)) rememberProxyErrorMessage(logCtx, error.message ?? error.safeText, { status: response.status, type: error.type ?? "upstream_error", code: error.code, presentation: proxyErrorPresentation(response) });
-        yield { type: "error", status: response.status, message: error.message ?? error.safeText,
+        yield bindTerminalMask({ type: "error", status: response.status, message: error.message ?? error.safeText,
           errorType: error.type ?? "upstream_error", ...(error.code ? { code: error.code } : {}),
-          ...(nonReplayable ? { retryable: false } : {}) };
+          ...(nonReplayable ? { retryable: false } : {}) }, replacementMask);
         return;
       }
       try {
@@ -116,7 +120,7 @@ export async function deliverAdapterResponse(
             })();
         for await (const event of retryEvents) {
           options.onCompactionRecoveryAdapterEvent?.(event);
-          yield event;
+          yield bindTerminalMask(event, replacementMask);
         }
       } catch (error) {
         if (!(error instanceof ResponseBodyInactivityError)) throw error;
@@ -258,7 +262,7 @@ export async function deliverAdapterResponse(
       guardedEventStream, parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
       () => { cancelResponseCompletion(); upstream.abort(); }, 2_000,
       {
-        translatorBudget, proxyErrorContext: logCtx,
+        translatorBudget, proxyErrorContext: logCtx, maskCredential,
         replayCacheScope: parsed._reasoningReplayScope,
         ...(outputItemIds ? { outputItemIds } : {}),
         ...(options.forceEmptyResponseId ? { responseId: "" } : {}),
@@ -374,7 +378,7 @@ export async function deliverAdapterResponse(
     let providerState: OcxProviderContinuationState | undefined;
     events = guardEmptyToolCatalogEvents(events, clientToolCatalog, translatorBudget);
     const json = buildResponseJSON(events, parsed._responseModelId ?? parsed.modelId, {
-      translatorBudget,
+      translatorBudget, maskCredential,
       replayCacheScope: parsed._reasoningReplayScope,
       hideThinkingSummary: parsed.options.hideThinkingSummary,
       chatRawReasoningVisible: options.chatRawReasoningVisible,

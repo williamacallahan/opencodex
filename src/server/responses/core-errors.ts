@@ -5,7 +5,7 @@ import { inspectedReserveRefusal } from "./reserve-refusal-body";
 import { cancelResponseBodyBestEffort } from "../../lib/upstream-retry";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { redactSecretString } from "../../lib/redact";
-import { isCyberPolicyCode, isCyberPolicyMessage, terminalPolicyError } from "../../lib/errors";
+import { isCyberPolicyCode, standalonePolicyRefusal, terminalPolicyError } from "../../lib/errors";
 import { isTranslatorBudgetExceededError } from "../../lib/translator-budget";
 import { formatErrorResponse, formatUsageLimitReachedResponse } from "../../bridge";
 import {
@@ -53,8 +53,10 @@ export interface NormalizedUpstreamErrorText {
  * Policy identity comes from the dedicated code (or the legacy message fallback); a credible
  * upstream type is only carried through so callers do not erase provider diagnostics.
  */
-export function normalizeUpstreamErrorText(text: string, fallback: string): NormalizedUpstreamErrorText {
-  const safeText = redactSecretString(text).slice(0, 500).trim() || fallback;
+export function normalizeUpstreamErrorText(text: string, fallback: string, mask?: (text: string) => string): NormalizedUpstreamErrorText {
+  const excerpt = (raw: string) => redactSecretString(raw).slice(0, 500);
+  const safeText = excerpt(mask ? mask(text) : text).trim() || fallback;
+  const messageExcerpt = (raw: string) => excerpt(mask ? mask(raw) : raw);
   let message: string | undefined;
   let type: string | undefined;
   let code: string | undefined;
@@ -62,7 +64,7 @@ export function normalizeUpstreamErrorText(text: string, fallback: string): Norm
     const parsed = JSON.parse(text) as Record<string, unknown>;
     const policy = terminalPolicyError(parsed);
     if (policy) return { safeText, code: policy.code, type: policy.type,
-      message: redactSecretString(policy.message).slice(0, 500), cyberPolicy: isCyberPolicyCode(policy.code) };
+      message: messageExcerpt(policy.message), cyberPolicy: isCyberPolicyCode(policy.code) };
     const response = parsed?.response && typeof parsed.response === "object" && !Array.isArray(parsed.response)
       ? parsed.response as Record<string, unknown>
       : undefined;
@@ -74,14 +76,14 @@ export function normalizeUpstreamErrorText(text: string, fallback: string): Norm
     });
     if (!source) return { safeText, cyberPolicy: false };
     if (typeof source.message === "string" && source.message.trim()) {
-      message = redactSecretString(source.message.trim()).slice(0, 500);
+      message = messageExcerpt(source.message.trim());
     }
     if (typeof source.type === "string" && source.type.trim()) type = source.type.trim();
     if (typeof source.code === "string" && source.code.trim()) {
       code = source.code.trim();
     }
   } catch {
-    return { safeText, cyberPolicy: isCyberPolicyMessage(safeText) };
+    return { safeText, cyberPolicy: standalonePolicyRefusal(text) !== undefined };
   }
   return { safeText, message, type, code, cyberPolicy: false };
 }

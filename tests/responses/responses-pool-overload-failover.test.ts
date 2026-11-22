@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { clearAccountNeedsReauth } from "../../src/codex/auth-api";
+import { clearAccountNeedsReauth, isAccountNeedsReauth } from "../../src/codex/auth-api";
+import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import { clearAccountQuota, setAccountQuotaFromParsed } from "../../src/codex/quota";
 import { clearCodexUpstreamHealth, clearThreadAccountMap, getCodexUpstreamHealth } from "../../src/codex/routing";
@@ -30,7 +31,7 @@ const HOME_KEYS = ["HOME", "OPENCODEX_HOME", "CODEX_HOME"] as const;
 const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"] as const;
 
 type Listener = (event: unknown) => void;
-type Step = { denialCode: string } | "reserve-quota" | "refuse" | "ok" | "output-then-refuse" | "refuse-then-abort" | "transport-error" | "silent"
+type Step = { denialCode: string; rootCode?: string; beforeRefusal?: () => void } | "reserve-quota" | "refuse" | "ok" | "output-then-refuse" | "refuse-then-abort" | "transport-error" | "silent"
   | "heartbeat-then-refuse" | "heartbeat-output-then-refuse" | "unsafe-heartbeat-then-refuse"
   | "heartbeat-bare-then-refuse" | "heartbeat-then-abort";
 
@@ -64,7 +65,8 @@ class FakeWebSocket {
     if (step === "reserve-quota") this.frame({ type: "codex.rate_limits", rate_limits: { primary: { used_percent: 25, window_minutes: 10080 } } });
     this.frame({ type: "response.created", response: { id, status: "in_progress", output: [] } });
     if (typeof step === "object") {
-      this.frame({ type: "error", status: 403, code: "invalid_authentication",
+      step.beforeRefusal?.();
+      this.frame({ type: "error", status: 403, code: step.rootCode ?? "invalid_authentication",
         error: { code: step.denialCode, message: "Fixture grant denied" } });
       return;
     }
@@ -248,6 +250,58 @@ describe("pooled native Codex recovers a pre-output upstream refusal (#6969)", (
     expect(refused.logCtx.terminalHttpStatus).toBe(403);
     expect((await send(config)).body).toContain("event: response.completed");
   });
+
+  test.each(["Request refused.", "You have hit your usage limit."])("HTTP retry probe: a typed refusal stops Pool alternate even with diagnostic %s", async message => {
+    const accounts: (string | null)[] = [];
+    const config = poolConfig();
+    config.providers.openai!.upstreamWebsocket = false;
+    globalThis.fetch = (async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (!url.endsWith("/responses")) return Response.json({ rate_limit: { primary_window: { used_percent: 10 } } });
+      accounts.push(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)).get("chatgpt-account-id"));
+      return accounts.length === 1
+        ? Response.json({ error: { code: "cyber_policy", message } }, { status: 503, headers: { "retry-after": "0" } })
+        : Response.json({ id: "resp_unexpected", object: "response", status: "completed", output: [] });
+    }) as typeof fetch;
+    const { response, body } = await send(config);
+    expect(accounts).toEqual(["acc-work"]);
+    expect(response.status).toBe(400);
+    expect(response.headers.get("retry-after")).toBeNull();
+    expect(JSON.parse(body)).toMatchObject({ error: { code: "cyber_policy", message } });
+  });
+
+  for (const transport of ["HTTP", "WebSocket"] as const) {
+    test.each([
+      ["token_invalidated", "codex_workspace_access_denied", false, true],
+      ["codex_entitlement_missing", "refresh_token_reused", false, true],
+      ["token_invalidated", "codex_workspace_access_denied", true, false],
+      ["invalid_authentication", "codex_workspace_access_denied", false, false],
+    ] as const)(`${transport} 403 credential precedence: %s with %s (replaced=%s, reauth=%s)`, async (rootCode, nestedCode, replaced, reauth) => {
+      const config = poolConfig([WORK]);
+      const beforeRefusal = () => {
+        if (replaced) saveCodexAccountCredential(WORK, { accessToken: "fixture-new-access", refreshToken: "fixture-new-grant",
+          expiresAt: Date.now() + 3_600_000, chatgptAccountId: `acc-${WORK}` });
+      };
+      const httpBearers: Array<string | null> = [];
+      if (transport === "WebSocket") FakeWebSocket.plan = [{ rootCode, denialCode: nestedCode, beforeRefusal }];
+      else {
+        config.providers.openai!.upstreamWebsocket = false;
+        globalThis.fetch = (async (input, init) => {
+          const url = new URL(input instanceof Request ? input.url : String(input));
+          if (!url.pathname.endsWith("/responses")) throw new Error(`Unexpected fixture request: ${url.pathname}`);
+          httpBearers.push(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)).get("authorization"));
+          beforeRefusal();
+          return Response.json({ code: rootCode, error: { code: nestedCode, message: "Fixture grant denied" } }, { status: 403 });
+        }) as typeof fetch;
+      }
+      const { response, body, logCtx } = await send(config);
+      expect(transport === "WebSocket" ? logCtx.terminalHttpStatus : response.status).toBe(403);
+      if (transport === "WebSocket") expect(body).toContain("event: response.failed");
+      expect(transport === "WebSocket" ? sockets() : httpBearers).toEqual(["Bearer work-access"]);
+      expect(isAccountNeedsReauth(WORK)).toBe(reauth);
+      if (replaced) expect(failures(WORK)).toBe(0);
+    });
+  }
 
   test("a correlated zero-output Reserve refusal spends one alternate WebSocket send", async () => {
     setAccountQuotaFromParsed(WORK, { weeklyPercent: 100, weeklyResetAt: Date.now() + 3_600_000 });

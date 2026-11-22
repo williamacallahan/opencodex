@@ -29,6 +29,7 @@ export interface AdapterFailureMessageInput {
   errorText: string;
   route: AdapterFailureProviderFacts;
   upstreamRetryAfter: string | null;
+  maskCredential?: (text: string) => string;
   /** The Antigravity request-local denial sentence, already bound to its recovery state. */
   denialMessage: (fallback: string) => string;
   logCtx: { causeHint?: RequestFailureCause };
@@ -40,7 +41,7 @@ export interface AdapterFailureMessage {
 }
 
 export function formatAdapterUpstreamFailure(input: AdapterFailureMessageInput): AdapterFailureMessage {
-  const normalized = normalizeUpstreamErrorText(input.errorText, "unknown error");
+  const normalized = normalizeUpstreamErrorText(input.errorText, "unknown error", input.maskCredential);
   // Meta's Muse Code refusal is a plan restriction, not a rejected credential (#8352). The body
   // proved it here, so stamp the cause and answer with this proxy's own sentence.
   const musePlanRefusal = stampMetaMusePlanRefusal(input.logCtx, input.status, input.errorText);

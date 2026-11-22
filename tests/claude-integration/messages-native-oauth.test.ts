@@ -1190,7 +1190,8 @@ describe("strict Messages OAuth public HTTP transport", () => {
     });
     const response = await post();
     expect(response.status).toBe(403);
-    expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array(bytes));
+    expect(response.headers.get("content-encoding")).toBeNull();
+    expect(await response.text()).toBe("Upstream diagnostic withheld");
     expect(captured).toHaveLength(1);
     expect(getAccountSet("anthropic")!.accounts.find(account => account.id === id)?.paused).not.toBe(true);
     expect(getAnthropicAccountHealthSnapshot(id!)).toBeNull();

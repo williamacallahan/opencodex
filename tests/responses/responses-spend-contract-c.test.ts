@@ -284,7 +284,7 @@ test("restart keeps configured canonical history self-bound without persisted me
   expect(disk.lines.some(line => JSON.parse(line).poolContinuity !== undefined)).toBe(false);
 });
 
-test("combo A to B preserves exact current permit exclusion", async () => {
+test("combo A to B prepays only a slot and never excludes a competing booking", async () => {
   const config: OcxConfig = { port: 0, defaultProvider: "A", providers: {
     A: { adapter: "openai-chat", apiKey: "fixture-a", baseUrl: "https://a.example.test/v1" },
     B: { adapter: "openai-chat", apiKey: "fixture-b", baseUrl: "https://b.example.test/v1" },
@@ -307,12 +307,13 @@ test("combo A to B preserves exact current permit exclusion", async () => {
         const provider = ctx.spendPoolId!;
         visited.push(provider);
         const proof = claimDispatchSpendProof(options!.sendBudget!, options!.comboDispatchPermit);
-        expect(proof).toBeDefined();
+        expect(proof).toBeUndefined();
         expect(workflowSpendCeilingReached(undefined, ledger, provider, proof)).toBeUndefined();
-        expect(ledger.snapshot("pool", provider)?.reserved).toBe(10);
+        expect(ledger.snapshot("pool", provider)?.reserved ?? 0).toBe(0);
         if (provider === "B") expect(workflowSpendCeilingReached(undefined, ledger, "A", proof)?.scope).toBe("pool");
         const report = createPhysicalSendReporter(options!.sendBudget!, () => ({ poolId: provider }), options!.comboDispatchPermit);
         expect(report.beforeSend?.()).toBe(true);
+        expect(ledger.snapshot("pool", provider)?.reserved).toBe(10);
         report(1); report.close?.();
         return provider === "A" ? Response.json({ error: { message: "fixture outage" } }, { status: 503 })
           : Response.json({ id: "fixture", output: [] });

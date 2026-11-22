@@ -4,6 +4,10 @@ import type { AnthropicMessagesPassthroughRequest } from "../adapters/anthropic/
 import { socks5ProxyFromEnv } from "../lib/proxy-env";
 import type { OcxProviderConfig } from "../types";
 import { physicalSendIntegrityInit } from "./responses/fetch-helpers";
+import { publicHeaderValue } from "../lib/http-response-semantics";
+import type { CredentialMask } from "../lib/outbound-credential-registry";
+import { BOUNDED_BODY_MAX_BYTES, BOUNDED_BODY_TIMEOUT_MS, readBoundedResponseBytes } from "../lib/bounded-body";
+import { decodeRequestBody } from "./request-decompress";
 import { nativeHarnessOnly } from "../lib/native-harness";
 
 const HOP_HEADERS = ["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"];
@@ -21,6 +25,39 @@ export function messagesEndToEndHeaders(source: Headers, stripIngress = false): 
       || name.startsWith("x-envoy-") || name.startsWith("tailscale-user-") || name === "tailscale-headers-info") headers.delete(name);
   }
   return headers;
+}
+
+/** Retain the original entity and coding unless a public error contains a sent credential. */
+export async function publicStrictMessagesResponse(response: Response, mask: CredentialMask, signal: AbortSignal): Promise<Response> {
+  const headers = messagesEndToEndHeaders(response.headers);
+  for (const [name, value] of response.headers) {
+    if (!headers.has(name)) continue;
+    const safe = publicHeaderValue(name, value, mask);
+    if (safe === undefined) headers.delete(name);
+    else if (safe !== value) headers.set(name, safe);
+  }
+  let body: BodyInit | null = response.body;
+  if (!response.ok && response.body) {
+    const coding = response.headers.get("content-encoding");
+    if (!coding || coding === "identity") body = mask.redirectBody(response.body);
+    else {
+      try {
+        const read = await readBoundedResponseBytes(response, { maxBytes: BOUNDED_BODY_MAX_BYTES,
+          signal: AbortSignal.any([signal, AbortSignal.timeout(BOUNDED_BODY_TIMEOUT_MS)]) });
+        if (read.oversized) throw new RangeError("Encoded refusal exceeds inspection limit");
+        const decoded = decodeRequestBody(read.bytes, coding, BOUNDED_BODY_MAX_BYTES);
+        const text = new TextDecoder().decode(decoded);
+        const safe = mask(text);
+        body = safe === text ? read.bytes : safe;
+        if (safe !== text) headers.delete("content-encoding");
+      } catch {
+        signal.throwIfAborted();
+        headers.delete("content-encoding"); headers.set("content-type", "text/plain");
+        body = "Upstream diagnostic withheld";
+      }
+    }
+  }
+  return new Response(body, { status: response.status, headers });
 }
 
 export class MessagesIntegrityError extends Error {

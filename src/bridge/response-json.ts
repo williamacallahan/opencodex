@@ -44,7 +44,7 @@ import {
   type TranslatorBudget,
   type TranslatorBufferKind,
 } from "../lib/translator-budget";
-import { adapterFailureFromEvent, emptyChunks, joinChunks, responsesUsage, toolCallArgumentsUsable, uuid, webSearchAction, webSearchCellItemId } from "./internal";
+import { publicAdapterError, publicIncompleteDetails, terminalMask, adapterFailureFromEvent, emptyChunks, joinChunks, responsesUsage, toolCallArgumentsUsable, uuid, webSearchAction, webSearchCellItemId } from "./internal";
 import type { OutputItem, StringChunks } from "./internal";
 import { bridgeToResponsesSSE } from "./sse";
 import { createMaxOutputCompletion, type MaxOutputCompletionOptions } from "./max-output-completion";
@@ -88,6 +88,7 @@ function buildResponseJSONWithBudget(
   events: AdapterEvent[],
   modelId: string,
   options?: MaxOutputCompletionOptions & {
+    maskCredential?: (text: string) => string;
     hideThinkingSummary?: boolean;
     /** Internal Chat delivery override for raw reasoning only; summaries keep their policy. */
     chatRawReasoningVisible?: boolean;
@@ -666,6 +667,7 @@ function buildResponseJSONWithBudget(
   }
 
   const failure = errorEvent ? adapterFailureFromEvent(errorEvent) : undefined;
+  const publicError = errorEvent && failure ? publicAdapterError(failure.error, terminalMask(errorEvent, options?.maskCredential)) : undefined;
   const gracefulComplete = maxOutputCompletion.completed && !errorEvent;
   const status = errorEvent
     ? "failed"
@@ -685,16 +687,12 @@ function buildResponseJSONWithBudget(
     status,
     model: modelId, output,
     ...(endTurn !== undefined ? { end_turn: endTurn } : {}),
-    ...(failure ? { error: failure.error, last_error: failure.error } : {}),
+    ...(publicError ? { error: publicError, last_error: publicError } : {}),
     ...(failure && isCyberPolicyCode(failure.error.code)
       ? { retryable: false }
       : errorEvent?.retryable !== undefined ? { retryable: errorEvent.retryable } : {}),
     ...(!gracefulComplete && incompleteEvent ? {
-      incomplete_details: {
-        reason: truncationReasonFor(incompleteEvent.reason) ?? incompleteEvent.reason,
-        ...(incompleteEvent.message ? { message: incompleteEvent.message } : {}),
-        ...(incompleteEvent.retryable !== undefined ? { retryable: incompleteEvent.retryable } : {}),
-      },
+      incomplete_details: publicIncompleteDetails(incompleteEvent, options?.maskCredential),
     } : !gracefulComplete && stopReason === "max_tokens" ? {
       incomplete_details: { reason: "max_output_tokens" },
     } : stopReason === "content_filter" ? {

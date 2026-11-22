@@ -1529,7 +1529,8 @@ export function comboFailureDecision(
   if (isTerminalRefusalCode(rootCode) || isTerminalRefusalCode(nestedCode)) return "stop";
   if (options?.cyberPolicy ?? (!hasStructuredErrorVerdict({ code: rootCode })
     && !hasStructuredErrorVerdict({ code: nestedCode }) && isCyberPolicyMessage(message))) return "stop";
-  if (rootCode !== "" && rootCode !== nestedCode) {
+  const nestedOverload = !hasStructuredErrorVerdict({ code: rootCode }) && recognizedUpstreamError({ code: nestedCode })?.httpStatus === 503;
+  if (rootCode !== "" && rootCode !== nestedCode && !nestedOverload) {
     const rootDecision = decideComboFailure(status, message, { ...options, code: rootRawCode });
     if (rootDecision === "stop" || nestedCode === "") return rootDecision;
   }

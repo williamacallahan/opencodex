@@ -8,7 +8,6 @@ import { codexAdapterBuildRefusal } from "./passthrough-build-error";
 import { createAutoPauseRefreshErrorMapper, recoverAutoPausedAccount } from "./account-auto-pause-recovery";
 import { wasAccountAutoPaused, wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
 import { bindAnthropicRejectionResponse } from "../../adapters/anthropic-rejection-memo";
-import { ownsDispatchReceipt } from "../../lib/provider-admission-wait";
 import { deferPhysicalSendReporter } from "./deferred-send-reporter";
 import { usesApiKeyAccount } from "../../providers/label";
 import { spendLedgerStorageErrorResponse } from "./spend-storage-error";
@@ -41,7 +40,7 @@ import { anthropicPoolCooldownResponse, clientCancelledResponse, readDisplaySafe
 import { isTranslatorBudgetExceededError } from "../../lib/translator-budget";
 import { redactSecretString } from "../../lib/redact";
 import { rewriteUpstreamPolicyRefusal } from "./policy-refusal";
-import { createOutboundCredentialMask } from "./terminal-error-redaction";
+import { attachCredentialMask, responseCredentialMask } from "../../lib/outbound-credential-registry";
 import { carryPolicyCandidateRefusal } from "./policy-request-scope";
 import { withProviderRequestSlot } from "../../providers/request-pacing";
 import { providerFetch, fetchWithHeaderTimeout, safeHostLabel } from "./fetch-helpers";
@@ -402,13 +401,14 @@ export async function prepareAdapterExchange(
     const headers = new Headers(original.headers);
     headers.delete("content-length");
     headers.delete("content-encoding");
-    upstreamResponse = carryProxyError(original, new Response(text, { status: original.status, statusText: original.statusText, headers }));
+    upstreamResponse = attachCredentialMask(carryProxyError(original, new Response(text, { status: original.status, statusText: original.statusText, headers })),
+      responseCredentialMask(original, (transportState.sameTargetRequest ?? builtInitialRequest).headers));
     return upstreamResponse;
   };
   const autoPauseEnabled = config.providers[route.providerName]?.accountAutoPause?.enabled === true;
   const billingPoolRequest = isAnthropicBillingKeyPool(route.provider);
   const deferTransportSpend = () => billingPoolRequest || (route.providerName === "github-copilot" && route.provider.authMode !== "forward")
-    || ((adapterSendBudget?.spendEnforced || sendBudgetState.workflowRootId) && ownsDispatchReceipt(route.provider));
+    || ((adapterSendBudget?.spendEnforced || sendBudgetState.workflowRootId) && usesApiKeyAccount(route.provider));
   let billingRecoveryActive = false;
   const genericRefetchCountsSends = () => !!sendBudgetState.workflowRootId || options.comboAttempt === true || sendBudgetState.adapterSendBudget?.spendEnforced === true
     || transientRetryPolicyFor(route.provider) !== null || resetReplayPolicyFor(route.provider) !== null
@@ -470,9 +470,8 @@ export async function prepareAdapterExchange(
       // A combo-owned or compaction-prepaid send is settled by the physical-dispatch receipt
       // when spend enforcement is off. Enforced spend and direct requests keep the shared
       // physical-send reporter, which already owns the permit lifecycle there.
-      // A Mistral combo holds a send slot without booking tokens. Choose the accounting path
-      // with the selected key, not the parent combo's still-unattributed spend preview.
-      if (ownsDispatchReceipt(route.provider)) adapterSendBudget?.startRequest?.(responsesSpendTarget(logCtx, route.providerName));
+      // The parent holds a send slot, not the child's selected identity.
+      adapterSendBudget?.startRequest?.(responsesSpendTarget(logCtx, route.providerName));
       const receiptMode = !sendBudgetState.adapterSendBudget?.spendEnforced
         && Boolean(options.comboInitialSend || compactPrepaid);
       // Combo and emergency compaction admission already book this target's first send.
@@ -1864,9 +1863,9 @@ export async function prepareAdapterExchange(
       break;
     }
     if (!upstreamResponse.ok) {
+      const maskCredential = responseCredentialMask(upstreamResponse, (transportState.sameTargetRequest ?? builtInitialRequest).headers);
       if (route.providerName === "kiro")
-        upstreamResponse = await normalizeFinalKiroHttpError(upstreamResponse, upstream.signal);
-      const maskCredential = createOutboundCredentialMask((transportState.sameTargetRequest ?? builtInitialRequest).headers);
+        upstreamResponse = attachCredentialMask(await normalizeFinalKiroHttpError(upstreamResponse, upstream.signal), maskCredential);
       if (options.comboAttempt) {
         // No pre-read guard: `consumeComboFailure` -> `readBoundedResponseBody` reads
         // `response.body` itself with the abort signal threaded through, and the combo
@@ -1933,7 +1932,7 @@ export async function prepareAdapterExchange(
       // material before it reaches the client-facing error surface.
       const upstreamRetryAfter = upstreamResponse.headers.get("retry-after");
       const { normalized, message } = formatAdapterUpstreamFailure({
-        status: upstreamResponse.status,
+        status: upstreamResponse.status, maskCredential,
         errorText,
         route,
         upstreamRetryAfter,
@@ -1967,6 +1966,7 @@ export async function prepareAdapterExchange(
   }
 
   bindAnthropicRejectionResponse(transportState.sameTargetRequest, upstreamResponse);
+  attachCredentialMask(upstreamResponse, responseCredentialMask(upstreamResponse, (transportState.sameTargetRequest ?? builtInitialRequest).headers));
   cancelBodyOnAbort(upstreamResponse.body, upstream.signal);
 
   return {

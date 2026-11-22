@@ -311,6 +311,7 @@ export function hasWorkflowSendObserver(budget: TransientSendBudget): boolean {
 }
 const dispatchSpendProofs = new WeakMap<SingleUseDispatchPermit, {
   owner: SharedSendLedger;
+  targetKey?: string;
   claim(): SpendReservationProof | undefined;
   report(seeded?: boolean): boolean;
 }>();
@@ -379,6 +380,8 @@ export function createPhysicalSendReporter(
   let started = 0;
   let reported = 0;
   let currentOrdinal: number | undefined;
+  const receipt = permit && dispatchSpendProofs.get(permit);
+  const slotKey = receipt?.owner === counter ? receipt?.targetKey : undefined;
   const report: PhysicalSendReporter = (sends) => {
     if (closed) return;
     if (!producer) {
@@ -395,7 +398,6 @@ export function createPhysicalSendReporter(
     try { producer.report(count); }
     finally {
       reported += count;
-      const receipt = permit && dispatchSpendProofs.get(permit);
       const prepaid = count > 0 && receipt && receipt.owner === counter && receipt.report(true) ? 1 : 0;
       if (counter) counter.spent += count - prepaid;
       telemetry?.(count);
@@ -412,9 +414,8 @@ export function createPhysicalSendReporter(
       return true;
     }
     producer ??= observer?.beginReporter?.();
-    const receipt = permit && dispatchSpendProofs.get(permit);
     const proof = receipt?.owner === counter ? receipt?.claim() : undefined;
-    const seed = observer?.ensureSeed?.(selected, proof);
+    const seed = observer?.ensureSeed?.(selected.targetKey || !slotKey ? selected : { ...selected, targetKey: slotKey }, proof);
     if (!seed) return false;
     const ordinal = options.explicitContinuation
       ? (budget as RequestExecutionBudget).claimContinuationPhysicalSend?.()
@@ -428,7 +429,7 @@ export function createPhysicalSendReporter(
   report.execute = run => activePhysicalReporters.run(report, run);
   report.bind = (selected: SpendScopes & { targetKey?: string }) => {
     if (!producer || currentOrdinal === undefined) return true;
-    return producer.rebindTarget(selected, currentOrdinal);
+    return producer.rebindTarget(selected.targetKey || !slotKey ? selected : { ...selected, targetKey: slotKey }, currentOrdinal);
   };
   report.close = () => {
     if (closed) return;
@@ -606,7 +607,10 @@ function createRequestExecutionBudgetWithLedger(
           ...(auxiliary ? { estimate: intent.spendEstimate, auxiliary: true } : {}),
           deferDispatch: true, onReserved: proof => { spendProof = proof; } });
       };
-      if (!intent.selectedSpendScopes && !bookSpend()) return { allowed: false, reason: "spend-exhausted" };
+      // A charge-only observer has no identity-dependent admission: keep its provisional charge and exact refund.
+      const selectSpendScopes = observer?.enforcedFor ? intent.selectedSpendScopes : undefined;
+      if (selectSpendScopes) observer!.startRequest?.(); // Freeze the limits, not the parent's provisional identity.
+      else if (!bookSpend()) return { allowed: false, reason: "spend-exhausted" };
 
       // THE RESERVATION IS THE CHARGE. Deciding here and charging in `use()` left a window in
       // which two legs read the same remainder, both received a permit, and both dispatched:
@@ -626,7 +630,7 @@ function createRequestExecutionBudgetWithLedger(
       let executing = false;
       let physicalOrdinal: number | undefined;
       const startPhysical = (): boolean => {
-        const selected = intent.selectedSpendScopes?.();
+        const selected = selectSpendScopes?.();
         if (selected && !bookSpend(selected)) return false;
         if (!budget.spendEnforced) return auxiliary ? budget.claimWorkflowSend!(true) : budget.claimWorkflowSend!();
         const seed = observer?.ensureSeed?.({ ...spendTarget, ...selected }, spendProof);
@@ -692,11 +696,11 @@ function createRequestExecutionBudgetWithLedger(
         },
       };
       let preflightClaimed = false;
-      dispatchSpendProofs.set(permit, { owner: counter, report: seeded => {
+      dispatchSpendProofs.set(permit, { owner: counter, targetKey: selectSpendScopes ? spendTargetKey : undefined, report: seeded => {
         if (!counter.pendingExternalSends.has(receipt)) return false;
         // Native Chat reports the external receipt instead of assuming the permit. Its
         // enforced reporter already has a seed; the observe-only path still owes one booking.
-        if (intent.selectedSpendScopes && !seeded && !spendProof) bookSpend(intent.selectedSpendScopes());
+        if (selectSpendScopes && !seeded && !spendProof) bookSpend(selectSpendScopes());
         if (spendProof) observer?.dispatch?.(spendProof);
         counter.pendingExternalSends.delete(receipt);
         // Reset-only helpers report just BEFORE calling the dispatch thunk. Its one use()

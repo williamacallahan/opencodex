@@ -90,6 +90,44 @@ describe("fetchWithTransientRetry", () => {
     expect((res as Response & { __wasCancelled: () => boolean }).__wasCancelled()).toBe(false);
   });
 
+  test.each([
+    [502, "text/html", '<html><title>Bad Gateway</title><pre>Example: {"code":"cyber_policy"}</pre></html>'],
+    [503, "application/json", '{"request":{"code":"cyber_policy"},"error":'],
+    [503, "text/plain", 'Queue full while recording "This request was flagged for possible cybersecurity risk."'],
+  ] as const)("HTTP retry probe: %i %s quoting a refusal remains retryable", async (status, contentType, body) => {
+    let sends = 0;
+    const response = await fetchWithTransientRetry(async () => ++sends === 1
+      ? new Response(body, { status, headers: { "content-type": contentType } })
+      : new Response("retry served"), { attempts: 2 });
+    expect([response.status, await response.text(), sends]).toEqual([200, "retry served", 2]);
+  });
+
+  test("HTTP retry probe: a standalone provider refusal remains terminal without a JSON envelope", async () => {
+    const message = "This request was flagged for possible cybersecurity risk.";
+    let sends = 0;
+    const response = await fetchWithTransientRetry(async () => ++sends === 1
+      ? new Response(message, { status: 503, headers: { "content-type": "text/plain" } })
+      : new Response("unexpected retry"), { attempts: 2 });
+    expect([response.status, await response.text(), sends]).toEqual([503, message, 1]);
+  });
+
+  test("HTTP retry probe: a policy-looking JSON prefix cannot hold the retry open", async () => {
+    let finish!: () => void;
+    const body = new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"error":{"code":"cyber_policy"}'));
+      finish = () => controller.error(new Error("fixture stream ended"));
+    } });
+    const deadline = new AbortController();
+    const timer = setTimeout(() => { deadline.abort(); finish(); }, 2_000);
+    let sends = 0;
+    try {
+      const response = await fetchWithTransientRetry(async () => ++sends === 1
+        ? new Response(body, { status: 503, headers: { "content-type": "application/json" } })
+        : new Response("retry served"), { attempts: 2, abortSignal: deadline.signal });
+      expect([response.status, sends, deadline.signal.aborted]).toEqual([200, 2, false]);
+    } finally { clearTimeout(timer); finish(); }
+  });
+
   test("an unmarked 504 keeps the transient retry", async () => {
     let sends = 0;
     const res = await fetchWithTransientRetry(async () => {

@@ -254,7 +254,14 @@ export function terminalPolicyError(payload: unknown): { message: string; code: 
 /** A complete HTTP error document. In JSON, only the protocol's diagnostic carriers count. */
 export function terminalPolicyErrorFromBody(body: string): ReturnType<typeof terminalPolicyError> {
   try { return terminalPolicyError(JSON.parse(body)); }
-  catch { return isCyberPolicyMessage(body) ? { code: CYBER_POLICY_ERROR_CODE, message: body } : undefined; }
+  catch { return standalonePolicyRefusal(body); }
+}
+
+/** No JSON envelope: accept only a refusal the provider states itself. */
+export function standalonePolicyRefusal(body: string): ReturnType<typeof terminalPolicyError> {
+  const message = body.trim();
+  const standalone = /^(?:(?:this (?:request|content)|your request) (?:was|has been) flagged for (?:possible cybersecurity risk|potential high-risk cyber(?:security)? activity)|OpenAI flagged this request for potential high-risk cybersecurity activity)(?:[.!](?:\s|$)|$)/i;
+  return message === CYBER_POLICY_FALLBACK_MESSAGE || standalone.test(message) ? { code: CYBER_POLICY_ERROR_CODE, message } : undefined;
 }
 
 export function cyberPolicyTerminalError(payload: unknown): { message: string; type?: string } | undefined {

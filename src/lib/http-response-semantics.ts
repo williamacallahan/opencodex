@@ -6,6 +6,21 @@
  * consistent Content-Type match before choosing their body decoder.
  */
 
+import { formatClientRetryAfter } from "./client-retry-after";
+
+/** Free-form values that repeat a credential are omitted. For protocol collisions emit only
+ * the independently recognized constant (or parsed retry delay), never unchecked parameters. */
+export function publicHeaderValue(name: string, value: string, mask?: (text: string) => string): string | undefined {
+  if (!mask || mask(value) === value) return value;
+  if (name === "content-type") {
+    const media = value.split(";", 1)[0]?.trim().toLowerCase();
+    return ["application/json", "text/event-stream", "text/plain", "text/html", "application/problem+json", "application/octet-stream"].find(type => type === media);
+  }
+  if (name === "x-should-retry") return value === "false" ? "false" : value === "true" ? "true" : undefined;
+  if (name === "retry-after") return formatClientRetryAfter(value);
+  return undefined;
+}
+
 /** Match the exact type/subtype, ignoring case and parameters (RFC 9110 section 8.3.1). */
 export function hasResponseMediaType(headers: Headers, mediaType: string): boolean {
   return headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() === mediaType.toLowerCase();

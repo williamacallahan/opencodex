@@ -218,6 +218,14 @@ describe("native compact moves a surviving transient 5xx to one alternate accoun
     expect(failures(OTHER)).toBe(0);
   });
 
+  test("HTTP retry probe: native compact keeps a typed refusal on its issuing account", async () => {
+    upstream(() => Response.json({ error: { code: "cyber_policy", message: "Request refused." } }, { status: 503 }), compacted);
+    const { response, body } = await compact();
+    expect(sends).toEqual(["Bearer work-access"]);
+    expect(response.ok).toBe(false);
+    expect(JSON.parse(body)).toMatchObject({ error: { code: "cyber_policy" } });
+  });
+
   test("B served from the remaining base allowance when A's ladder ended early", async () => {
     upstream(overloadedOnce, compacted);
     const { response } = await compact();

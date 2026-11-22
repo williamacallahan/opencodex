@@ -5,6 +5,7 @@ import { isRec, type Rec } from "../claude/inbound-records";
 import { observeNativePromptCacheSend, confirmNativePromptCachePrefill, observeNativePromptCacheFinish, observeNativePromptCacheResponse, nativePromptCacheObservation } from "./prompt-cache-observer";
 import { upstreamErrorIsLocal } from "./request-log-failure-detail";
 import { boundedMessagesDisplayCount, ownedDisabledModelResponse, ownedAnthropicErrorPayload, ownedAnthropicErrorResponse, messagesOverflowPresentation, messagesRelayedOverflowPresentation } from "../lib/messages-error-body";
+import { attachCredentialMask, responseCredentialMask, type CredentialMask } from "../lib/outbound-credential-registry";
 import { attachComboFailureEvidence, isProxyError, markProxyError } from "../lib/client-error-body";
 import { captureAccountAutoPauseAttempt, wasAccountAutoPaused } from "../oauth/account-auto-pause";
 import { createPhysicalSendReporter, reportDispatchSends, type RequestExecutionBudget, type SingleUseDispatchPermit } from "../lib/request-execution-budget";
@@ -44,7 +45,7 @@ import {
   anthropicMessagesNativeWireBody,
   buildAnthropicMessagesPassthroughRequest,
 } from "../adapters/anthropic/passthrough";
-import { MessagesIntegrityError, NativeMessagesIntegrity, messagesEndToEndHeaders, type NativeMessagesRequest } from "./messages-native-integrity";
+import { MessagesIntegrityError, NativeMessagesIntegrity, publicStrictMessagesResponse, type NativeMessagesRequest } from "./messages-native-integrity";
 import { decodeRequestBody, readBoundedJsonRequestBody, resolveInboundBodyLimitBytes, DecompressedBodyTooLargeError } from "./request-decompress";
 import { effortFromOutputConfig, nativeAnthropicProjection, resolveInboundModel } from "../claude/inbound";
 import { anthropicErrorBody, anthropicErrorResponse, claudeOverflowSsePayload, claudePromptTooLongMessage, collectAnthropicMessage, isContextOverflowText, isThroughputLimitText } from "../claude/outbound";
@@ -479,6 +480,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
   // A combo child whose preflight accepted has committed: a later failure must not replay,
   // even when no content frame (and so no first output) was seen.
   let committed = false;
+  let dispatchMask: CredentialMask | undefined;
   const fail = (status: number, message: string, type?: string, code?: string, originalMessage = message): Response => {
     const safeMessage = redactSecretString(message);
     finishLog(status, safeMessage);
@@ -486,7 +488,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
     const response = ownedAnthropicErrorResponse({ status, type, code, evidence: { status, message: originalMessage },
       localError: markProxyError({ message: safeMessage }), overflow: messagesRelayedOverflowPresentation("", legacy) }, legacy);
     if (committed) markResponseNonReplayable(response);
-    return response;
+    return dispatchMask ? attachCredentialMask(response, dispatchMask) : response;
   };
   const failEvidence = (status: number, message: string, type: string, contract?: "transport_failed", overflow?: boolean, rawError?: Rec, legacyBody?: Rec): Response => {
     finishLog(status, message);
@@ -494,7 +496,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
     const response = ownedAnthropicErrorResponse({ status, type, evidence: { status, message, type: typeof rawError?.type === "string" ? rawError.type : undefined, code: typeof rawError?.code === "string" ? rawError.code : undefined }, contract,
       overflow: overflow ?? messagesRelayedOverflowPresentation("", legacy) }, legacy);
     if (committed) markResponseNonReplayable(response);
-    return response;
+    return dispatchMask ? attachCredentialMask(response, dispatchMask) : response;
   };
   const preparationFailure = (error: unknown): Response => {
     const message = error instanceof Error ? error.message : String(error);
@@ -1070,9 +1072,11 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
   }
   releaseRetainedRequest();
 
+  dispatchMask = responseCredentialMask(response, activeRequest.headers);
   if (options.integrity) {
     settleDistributedFailure();
-    const headers = messagesEndToEndHeaders(response.headers);
+    response = await publicStrictMessagesResponse(response, dispatchMask, upstream.signal);
+    const headers = response.headers;
     const sse = headers.get("content-type")?.includes("text/event-stream") === true;
     const guard = resolvePassthroughBodyGuard(config, upstream.signal);
     transferTurnToStream();
@@ -1112,7 +1116,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
       upstream.abort();
       return fail(499, "Client cancelled request", "api_error");
     }
-    return retainUpstreamMessagesRequestId(nativeMessagesErrorResponse(response, bodyText, finishLog, route.providerName, activeProvider), response.headers);
+    return retainUpstreamMessagesRequestId(attachCredentialMask(nativeMessagesErrorResponse(response, bodyText, finishLog, route.providerName, activeProvider), dispatchMask), response.headers);
   }
 
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
@@ -1165,7 +1169,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
       }), response.headers);
       if (options.sendBudget) {
         try {
-          const preflight = await preflightNativeMessagesResponse(delivered, logCtx, translatorBudget, replay);
+          const preflight = await preflightNativeMessagesResponse(attachCredentialMask(delivered, dispatchMask), logCtx, translatorBudget, replay);
           if (preflight.kind === "failed") { bindUsage(logCtx.usage); return preflight.response; }
           delivered = new Response(watchFirstOutput(preflight.response.body!), { status: preflight.response.status, headers: preflight.response.headers });
         } catch (error) {
@@ -1187,7 +1191,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
     const collectorVerdictSink: MessagesFailureVerdictSink = {};
     try {
       if (options.sendBudget) {
-        const preflight = await preflightNativeMessagesResponse(new Response(tapped, { headers: response.headers }), logCtx, translatorBudget, replay);
+        const preflight = await preflightNativeMessagesResponse(attachCredentialMask(new Response(tapped, { headers: response.headers }), dispatchMask), logCtx, translatorBudget, replay);
         if (preflight.kind === "failed") {
           cleanupAbort(); upstream.abort(); bindUsage(logCtx.usage);
           finishLog(preflight.response.status, logCtx.upstreamError);
