@@ -721,7 +721,10 @@ export async function fetchPoolAccountQuota(
         });
         markCodexAccountValidated(accountId, Date.now(), generation);
         clearAccountNeedsReauth(accountId, generation);
-        notePendingValidation(accountId, "completed");
+        // The write is fenced on the credential the warm-up used. A credential replaced mid-test
+        // leaves the account pending, and saying "completed" for it sent operators looking elsewhere.
+        notePendingValidation(accountId, readCodexAccountRecord(accountId)?.codexValidationPending
+          ? "unrecorded reason=credential_changed" : "completed");
       } catch (error) {
         // Keep the durable restriction on any failed/partial inference response, even
         // when WHAM just reported headroom. No raw upstream text enters diagnostics.

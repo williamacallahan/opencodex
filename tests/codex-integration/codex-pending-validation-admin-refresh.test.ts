@@ -121,6 +121,25 @@ describe("standing admin-token consent for pending Codex account validation", ()
     expect(isCodexAccountUsable(config, ACCOUNT_ID)).toBe(true);
   });
 
+  test("a warm-up that succeeds for a credential replaced mid-test is not logged as completed", async () => {
+    const config = pendingPool(true);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      fakeUpstream(weeklyUsage(42), () => {
+        saveCodexAccountCredential(ACCOUNT_ID, { accessToken: "replaced-access", refreshToken: "replaced-refresh",
+          expiresAt: Date.now() + 24 * 3600_000, chatgptAccountId: "acct-pending" }, { validationPending: true });
+        return completedWarmup();
+      });
+      await refresh(config, "admin-token");
+      const validationLines = warn.mock.calls.map(call => String(call[0])).filter(line => line.includes("pool validation account="));
+      expect(readCodexAccountRecord(ACCOUNT_ID)?.codexValidationPending).toBe(true);
+      expect(validationLines.some(line => line.endsWith(" completed"))).toBe(false);
+      expect(validationLines.some(line => line.endsWith("unrecorded reason=credential_changed"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   test("the setting grants nothing to a principal other than the admin token", async () => {
     const config = pendingPool(true);
     const sent = fakeUpstream(weeklyUsage(12), completedWarmup);
