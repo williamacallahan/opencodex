@@ -7,7 +7,10 @@ import { clearComboTargetCooldowns } from "../../../src/combos/failover";
 import { clearAnthropicAccountPoolState, forgetAnthropicFailoverQuorum } from "../../../src/oauth/anthropic-routing";
 import { clearAnthropicRatePauses } from "../../../src/oauth/anthropic-rate-limit-policy";
 import { clearGenericFailoverHealth } from "../../../src/oauth/generic-account-failover";
-import { getAccountSet, saveCredential, setActiveAccount } from "../../../src/oauth/store";
+import { getAccountSet, saveAccountCredential, saveCredential, setActiveAccount } from "../../../src/oauth/store";
+import { bindAnthropicRefusalCredential, rotateAnthropicAccountOnResponse } from "../../../src/oauth/anthropic-account-refusal";
+import { credentialGeneration, getAccountCredential } from "../../../src/oauth/store";
+import { anthropicRatePauseUntil } from "../../../src/oauth/anthropic-rate-limit-policy";
 import { clearAccountQuotaCache, resetProviderQuotaReconcileStateForTests } from "../../../src/providers/quota";
 import { clearResponseStateForTests, flushResponseState } from "../../../src/responses/state";
 import { handleResponses } from "../../../src/server/responses";
@@ -130,6 +133,30 @@ afterEach(async () => {
   if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = originalHome;
   if (home) removeTreeWithRetry(home);
+});
+
+test("a late success from the previous login cannot reset the replacement login's strikes", async () => {
+  const [a] = await seed(2);
+  let finish!: (response: Response) => void;
+  let started!: () => void;
+  const sent = new Promise<void>(resolve => { started = resolve; });
+  const cfg = configFor(() => answered());
+  cfg.providers.anthropic!.fetch = (async () => { started(); return new Promise<Response>(resolve => { finish = resolve; }); }) as typeof fetch;
+  const pending = post(cfg);
+  await sent;
+  await saveAccountCredential("anthropic", a!, { ...credential(0), access: "new-login-access", refresh: "new-login-refresh" });
+  const cred = getAccountCredential("anthropic", a!)!;
+  const refuse = async () => {
+    const response = transient429("0.001");
+    bindAnthropicRefusalCredential(response, { provider: "anthropic", accountId: a!, accessToken: cred.access, generation: credentialGeneration(cred) });
+    await rotateAnthropicAccountOnResponse(response, { config: cfg, accountId: a!, canRetry: false });
+  };
+  await refuse();
+  finish(answered());
+  await pending;
+  now += 15_001; setSystemTime(now);
+  await refuse();
+  expect((anthropicRatePauseUntil(a!) ?? 0) - now).toBeGreaterThanOrEqual(30_000);
 });
 
 test("200 OK on /v1/responses resets Anthropic 429 escalation back to base 15s admission pause", async () => {

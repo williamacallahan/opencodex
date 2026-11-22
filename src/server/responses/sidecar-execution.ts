@@ -2,7 +2,6 @@ import { carryProxyError } from "../../lib/client-error-body";
 import { clientFacingModelText } from "../../lib/error-destination";
 import { createAnthropicThinkingRecovery } from "./anthropic-thinking-recovery";
 import { rotateAnthropicAccountOnResponseForInstance } from "../../oauth/anthropic-account-refusal";
-import { anthropicRatePolicyFor } from "../../oauth/anthropic-rate-limit-policy";
 import type { ResponsesRequestContext } from "./core-options";
 import type { PreparedResponsesRequest } from "./request-prepare";
 import type { ResponsesTransport } from "./request-transport";
@@ -626,9 +625,6 @@ export async function executeResponsesSidecars(
       escapeMemoryCitationTags: inboundWire !== "chat" && inboundWire !== "anthropic",
       onCompletedResponse: (response, providerState) => {
         if (!options.abortSignal?.aborted) thinkingRecovery.rememberSuccess(response);
-        if (response.status === "completed" && anthropicInstance && transportState.anthropicPoolAccountId) {
-          anthropicRatePolicyFor(anthropicInstance).noteAnthropicRateSuccess(transportState.anthropicPoolAccountId);
-        }
         const served = transportState.replayOAuthCredentialSnapshot;
         if (route.providerName === "kiro" && response.status === "completed" && served
           && noteKiroServedSuccess(served.accountId, served.generation)) persistKiroAccountState();
@@ -771,9 +767,6 @@ export async function executeResponsesSidecars(
       retryOn429Policy: route.providerName === "kiro" && isGenericOAuthFailoverEnabled(config, "kiro")
         ? null : rateLimitRetryPolicyFor(route.provider),
       onCompletedResponse: response => {
-        if (response.status === "completed" && anthropicInstance && transportState.anthropicPoolAccountId) {
-          anthropicRatePolicyFor(anthropicInstance).noteAnthropicRateSuccess(transportState.anthropicPoolAccountId);
-        }
         const served = transportState.replayOAuthCredentialSnapshot;
         if (route.providerName === "kiro" && response.status === "completed" && served
           && noteKiroServedSuccess(served.accountId, served.generation)) persistKiroAccountState();

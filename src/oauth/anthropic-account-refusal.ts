@@ -32,6 +32,9 @@ export function bindAnthropicRefusalCredential(response: Response, snapshot: OAu
 /** Retain the pre-send owner even when stale; binding a returned response cannot renew its authority. */
 export function bindAnthropicRefusalCredentialForSend(response: Response, owner: AnthropicPhysicalSendOwnership, providerAccountUuid?: string): void {
   responseCredentials.set(response, Object.freeze({ ...owner, providerAccountUuid, checkProviderUuid: arguments.length >= 3 }));
+  if (response.ok && anthropicRefusalCredentialIsCurrent(response, owner.provider, owner.accountId)) {
+    anthropicRatePolicyFor(owner.provider).noteAnthropicRateSuccess(owner.accountId);
+  }
 }
 
 /** Preserve the original send proof across internal error normalization, without renewing it. */
@@ -119,10 +122,7 @@ export async function rotateAnthropicAccountOnResponseForInstance(
   const sent = responseCredentials.get(response);
   if (!sent || sent.provider !== instance || sent.accountId !== options.accountId) return null;
   const ratePolicy = anthropicRatePolicyFor(instance);
-  if (response.ok) {
-    ratePolicy.noteAnthropicRateSuccess(sent.accountId);
-    return null;
-  }
+  if (response.ok) return null;
   const routing = anthropicRoutingFor(instance);
   const { pauseAnthropicRateAdmission, anthropicRatePauseUntil, recordAnthropicRateRefusal } = ratePolicy;
   const { recordAnthropicAccountRefusal, rotateAnthropicAccountOnRefusal,
@@ -192,12 +192,12 @@ export async function rotateAnthropicAccountOnResponseForInstance(
       if (!options.canRetry || options.allow429Recovery === false) {
         if (!options.canRetry && options.allow429Recovery !== false) {
           const strike = recordAnthropicRateRefusal(sent.accountId, now, {
-            minPauseMs: Math.max(parsedDelay ?? 0, 15_000),
+            minPauseMs: Math.max(parsedDelay ?? 0, alternate ? 15_000 : 0),
             clearDetourGrace: alternate !== null,
           });
           if (alternate) routing.clearAnthropicSessionAffinityForAccount(sent.accountId);
-          const pauseSeconds = strike?.pauseUntil ? Math.max(1, Math.ceil((strike.pauseUntil - now) / 1000)) : 15;
-          console.warn(
+          const pauseSeconds = strike?.pauseUntil ? Math.max(1, Math.ceil((strike.pauseUntil - now) / 1000)) : 0;
+          if (pauseSeconds) console.warn(
             `[${instance}-pool] ${decision ? `route:#${decision.position} ` : ""}429 (${kind}) on ${formatAnthropicAccountOrdinal(sent.accountId)};`
             + ` pausing ${pauseSeconds}s${alternate ? ` (next: ${formatAnthropicAccountOrdinal(alternate)})` : ""}`,
           );
@@ -211,6 +211,7 @@ export async function rotateAnthropicAccountOnResponseForInstance(
           minPauseMs: kind === "transient-rate" ? (parsedDelay ?? ANTHROPIC_SHORT_RETRY_MS) : 0,
         })
         : undefined;
+      if (!countStrike && parsedDelay !== undefined) pauseAnthropicRateAdmission(sent.accountId, now + parsedDelay);
       const repeated = (strike?.strikes ?? 1) >= 2;
       if (repeated && alternate) routing.clearAnthropicSessionAffinityForAccount(sent.accountId);
       if (!options.requestKey) return null;
