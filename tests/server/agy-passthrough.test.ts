@@ -157,9 +157,12 @@ describe("agy pass-through public HTTP lane", () => {
     expect(served).toBe(owner);
     await post("loadCodeAssist", '{"metadata":{}}', { authorization: "Bearer another-caller" });
     expect(served).not.toBe(owner);
+    // Google answered both callers with the same project, so both accounts now own it; a new caller
+    // naming it may go to either owner, never to an account that does not own it.
+    const owners = [owner, served];
     reply = captured => { served = captured.headers.get("authorization")!; return Response.json({}); };
     await post("fetchUserInfo", '{"project":"learned-project"}', { authorization: "Bearer a-third-caller" });
-    expect(served).toBe(owner);
+    expect(owners).toContain(served);
     const stored = () => getAccountSet("google-antigravity")!.accounts.find(row => `Bearer ${row.credential.access}` === owner)?.credential.projectId;
     for (let attempt = 0; attempt < 50 && stored() !== "learned-project"; attempt++) await Bun.sleep(10);
     expect(stored()).toBe("learned-project");
@@ -295,6 +298,28 @@ describe("agy pass-through public HTTP lane", () => {
     await post("streamGenerateContent?alt=sse", '{"project":"shared-project"}', { authorization: "Bearer refreshed-a" });
     await post("streamGenerateContent?alt=sse", '{"project":"shared-project"}', { authorization: "Bearer refreshed-a" });
     expect(new Set(served).size).toBe(1);
+  });
+
+  test("at a turn boundary a caller moves to a clearly less-used account, and stays put when usage is close", async () => {
+    await launch();
+    const { recordPassiveAccountQuota } = await import("../../src/providers/quota/account-cache");
+    const { antigravityLoginIdentity } = await import("../../src/providers/antigravity-quota-identity");
+    const rows = getAccountSet("google-antigravity")!.accounts;
+    const usage = (percent: (index: number) => number) => rows.forEach((row, index) => recordPassiveAccountQuota("google-antigravity", row.id,
+      { customWindows: [{ label: "Gem (Weekly)", percent: percent(index) }], updatedAt: Date.now() }, Number.MAX_SAFE_INTEGER,
+      antigravityLoginIdentity(row.id, row.credential)));
+    let served = "";
+    reply = captured => { served = captured.headers.get("authorization")!; return Response.json({}); };
+    const turn = async () => { await post("loadCodeAssist", "{}", { authorization: "Bearer one-signin" }); return served; };
+    // A new caller starts on the least-used account.
+    usage(index => [60, 5, 40][index]!);
+    expect(await turn()).toBe(`Bearer ${rows[1]!.credential.access}`);
+    // Its account fills up; at the next turn it moves to the clearly emptier one.
+    usage(index => [60, 70, 40][index]!);
+    expect(await turn()).toBe(`Bearer ${rows[2]!.credential.access}`);
+    // Within the margin it stays, so two close accounts do not trade it every turn.
+    usage(index => [36, 70, 40][index]!);
+    expect(await turn()).toBe(`Bearer ${rows[2]!.credential.access}`);
   });
 
   test("a 429 passes through unchanged; only loadCodeAssist moves the caller, trajectory writes stay put", async () => {

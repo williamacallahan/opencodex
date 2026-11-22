@@ -22,9 +22,16 @@ import { randomInt } from "node:crypto";
 import { credentialGeneration, listAccounts, mergeAccountCredential } from "../oauth/store";
 import { eligibleFailoverAccounts, genericFailoverRetryAfterSeconds } from "../oauth/generic-account-failover";
 import { ANTIGRAVITY_OAUTH_STORE_KEY } from "../providers/antigravity-quota-identity";
+import { getCachedProviderAccountQuota } from "../providers/quota/account-cache";
 
 const CALLER_AFFINITY_LIMIT = 1024;
 const CALLER_AFFINITY_TTL_MS = 6 * 60 * 60_000;
+/**
+ * At a turn boundary a caller moves to another account only when that one is at least this many
+ * percentage points less used, so two nearly equal accounts do not trade the caller every turn.
+ * ponytail: fixed margin; becomes a setting if an operator needs to tune it.
+ */
+const BALANCE_MARGIN_PERCENT = 10;
 
 const learnedProjects = new Map<string, string>();
 const callerAccounts = new Map<string, { accountId: string; at: number }>();
@@ -55,6 +62,26 @@ function rememberCaller(callerKey: string, accountId: string, now: number): void
   }
 }
 
+/**
+ * An account's most-used current Gem or Cla window, from agy's own quota readings of the last six
+ * hours (the routing horizon of `getCachedProviderAccountQuota`). An account with no recent reading
+ * counts as unused, so it is chosen, and agy's next quota call reads it.
+ */
+function bindingUsage(accountId: string, now: number): number {
+  const windows = getCachedProviderAccountQuota(ANTIGRAVITY_OAUTH_STORE_KEY, accountId)?.customWindows ?? [];
+  return windows.reduce((most, window) => window.modelId === undefined && (window.resetAt === undefined || window.resetAt > now)
+    ? Math.max(most, window.percent) : most, 0);
+}
+
+/** The least-used of `candidates`; equally used accounts take turns. */
+function leastUsed(candidates: readonly string[], now: number): string | undefined {
+  if (candidates.length === 0) return undefined;
+  const start = rotationCursor % candidates.length;
+  rotationCursor = (rotationCursor + 1) % Number.MAX_SAFE_INTEGER;
+  const turn = [...candidates.slice(start), ...candidates.slice(0, start)];
+  return turn.reduce((best, id) => bindingUsage(id, now) < bindingUsage(best, now) ? id : best);
+}
+
 export function chooseAgyAccount(request: AgyAccountRequest, now = Date.now()): AgyAccountChoice {
   const roster = listAccounts(ANTIGRAVITY_OAUTH_STORE_KEY);
   if (roster.length === 0) return { kind: "pool-empty" };
@@ -64,11 +91,8 @@ export function chooseAgyAccount(request: AgyAccountRequest, now = Date.now()): 
     if (owners.length === 0) return { kind: "project-unowned" };
     const callerAccount = callerAccounts.get(request.callerKey)?.accountId;
     const nextOwner = () => {
-      const rotatable = eligibleFailoverAccounts(ANTIGRAVITY_OAUTH_STORE_KEY, now).filter(id => owners.some(row => row.id === id));
-      if (rotatable.length === 0) return owners.find(row => usable(row.id));
-      const id = rotatable[rotationCursor % rotatable.length];
-      rotationCursor = (rotationCursor + 1) % Number.MAX_SAFE_INTEGER;
-      return owners.find(row => row.id === id);
+      const id = leastUsed(eligibleFailoverAccounts(ANTIGRAVITY_OAUTH_STORE_KEY, now).filter(id => owners.some(row => row.id === id)), now);
+      return owners.find(row => row.id === id) ?? owners.find(row => usable(row.id));
     };
     const owner = owners.find(row => row.id === callerAccount && usable(row.id)) ?? nextOwner();
     if (!owner) return { kind: "project-account-unavailable" };
@@ -79,14 +103,18 @@ export function chooseAgyAccount(request: AgyAccountRequest, now = Date.now()): 
   const previous = callerAccounts.get(request.callerKey);
   if (previous && now - previous.at < CALLER_AFFINITY_TTL_MS
     && (request.mayRotate ? eligible.includes(previous.accountId) : usable(previous.accountId))) {
-    rememberCaller(request.callerKey, previous.accountId, now);
-    return { kind: "account", accountId: previous.accountId };
+    // A turn boundary (`loadCodeAssist`) is where agy learns its project, so the caller may move to
+    // a clearly less-used account there; every other call stays on the caller's account.
+    const better = request.mayRotate ? leastUsed(eligible.filter(id => id !== previous.accountId), now) : undefined;
+    const accountId = better !== undefined
+      && bindingUsage(previous.accountId, now) - bindingUsage(better, now) >= BALANCE_MARGIN_PERCENT ? better : previous.accountId;
+    rememberCaller(request.callerKey, accountId, now);
+    return { kind: "account", accountId };
   }
-  if (eligible.length === 0) {
+  const accountId = leastUsed(eligible, now);
+  if (accountId === undefined) {
     return { kind: "pool-exhausted", retryAfterSeconds: genericFailoverRetryAfterSeconds(ANTIGRAVITY_OAUTH_STORE_KEY, now) };
   }
-  const accountId = eligible[rotationCursor % eligible.length]!;
-  rotationCursor = (rotationCursor + 1) % Number.MAX_SAFE_INTEGER;
   rememberCaller(request.callerKey, accountId, now);
   return { kind: "account", accountId };
 }

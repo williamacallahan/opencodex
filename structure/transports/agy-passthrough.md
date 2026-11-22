@@ -56,6 +56,7 @@ fallback. `tests/server/agy-passthrough.test.ts` and
   that account. Google can hand several accounts the same project (two pooled sign-ins shared one on
   2026-11-22), so among owners the caller's own account wins; a caller with no account yet (a restart, or agy refreshing its own token about hourly) takes the next owner in rotation that is not cooling down, then the first usable owner. An
   unowned project is a local 400; a project whose owners are all paused or reauth-marked is a local 503.
+- Accounts are balanced by usage: `bindingUsage` is an account's most-used current Gem or Cla window from agy's readings of the last 6 hours (an unread account counts as 0). A new caller starts on the least-used eligible account (ties take turns), and at `loadCodeAssist` a caller moves when another eligible account is at least `BALANCE_MARGIN_PERCENT` (10) points less used.
 - A project-less call (`loadCodeAssist`, `writeTrajectoryAcls`) stays on the account this caller last
   used, keyed by a SHA-256 of the caller's own bearer, unless that account is cooling down; otherwise it
   takes the next eligible account in rotation. agy calls `loadCodeAssist` at least once per turn, so a
