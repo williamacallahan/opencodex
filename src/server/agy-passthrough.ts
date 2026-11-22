@@ -91,7 +91,7 @@ function choiceRefusal(choice: Exclude<AgyAccountChoice, { kind: "account" }>): 
     case "project-unowned":
       return refuse(400, "this request names a Cloud Code project no pooled account owns; restart agy so it asks the hub for its project");
     case "project-account-unavailable":
-      return refuse(503, "the pooled account that owns this project is paused or needs sign-in; restart agy to move to another account");
+      return refuse(503, "every pooled account that owns this project is paused or needs sign-in; restart agy to move to another account");
   }
 }
 

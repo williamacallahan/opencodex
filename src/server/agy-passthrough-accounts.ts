@@ -5,7 +5,9 @@
  * Every Cloud Code call except `loadCodeAssist` and `writeTrajectoryAcls` names a `project`, so a
  * project-bearing call goes to an account that owns it. Google can hand several accounts the same
  * project (two pooled Antigravity sign-ins measured on 2026-11-22 shared one), so among owners the
- * caller's own account wins; otherwise the first usable owner does. A project-less
+ * caller's own account wins. A caller with no account yet (a restart, or agy refreshing its own
+ * token about hourly) takes the next owner in rotation that is not cooling down, so new callers
+ * spread across owners instead of all landing on the first one. A project-less
  * call keeps the account this caller last used. Only `loadCodeAssist` (agy's per-turn "which project
  * am I?" call) may move a caller off a cooling account; that answer hands agy the new account's
  * project, so every later body matches the token the hub sends with it. A `writeTrajectoryAcls`
@@ -61,7 +63,14 @@ export function chooseAgyAccount(request: AgyAccountRequest, now = Date.now()): 
     const owners = roster.filter(row => (learnedProjects.get(row.id) ?? row.credential?.projectId) === request.project);
     if (owners.length === 0) return { kind: "project-unowned" };
     const callerAccount = callerAccounts.get(request.callerKey)?.accountId;
-    const owner = owners.find(row => row.id === callerAccount && usable(row.id)) ?? owners.find(row => usable(row.id));
+    const nextOwner = () => {
+      const rotatable = eligibleFailoverAccounts(ANTIGRAVITY_OAUTH_STORE_KEY, now).filter(id => owners.some(row => row.id === id));
+      if (rotatable.length === 0) return owners.find(row => usable(row.id));
+      const id = rotatable[rotationCursor % rotatable.length];
+      rotationCursor = (rotationCursor + 1) % Number.MAX_SAFE_INTEGER;
+      return owners.find(row => row.id === id);
+    };
+    const owner = owners.find(row => row.id === callerAccount && usable(row.id)) ?? nextOwner();
     if (!owner) return { kind: "project-account-unavailable" };
     rememberCaller(request.callerKey, owner.id, now);
     return { kind: "account", accountId: owner.id };

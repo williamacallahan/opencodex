@@ -277,6 +277,26 @@ describe("agy pass-through public HTTP lane", () => {
     expect(getCachedProviderAccountQuota("google-antigravity", old!.id)).toBeNull();
   });
 
+  test("new callers whose first call names a shared project spread across its owners", async () => {
+    await launch();
+    const { mergeAccountCredential } = await import("../../src/oauth/store");
+    for (const row of getAccountSet("google-antigravity")!.accounts) {
+      await mergeAccountCredential("google-antigravity", row.id, { ...row.credential, projectId: "shared-project" });
+    }
+    const served: string[] = [];
+    reply = captured => { served.push(captured.headers.get("authorization")!); return new Response(sse, { headers: { "content-type": "text/event-stream" } }); };
+    // A restart or agy refreshing its own token makes a caller new; it must not pile onto one owner.
+    for (const caller of ["refreshed-a", "refreshed-b", "refreshed-c"]) {
+      expect((await post("streamGenerateContent?alt=sse", '{"project":"shared-project"}', { authorization: `Bearer ${caller}` })).status).toBe(200);
+    }
+    expect(new Set(served).size).toBe(3);
+    // Each caller then stays on the account it was given.
+    served.length = 0;
+    await post("streamGenerateContent?alt=sse", '{"project":"shared-project"}', { authorization: "Bearer refreshed-a" });
+    await post("streamGenerateContent?alt=sse", '{"project":"shared-project"}', { authorization: "Bearer refreshed-a" });
+    expect(new Set(served).size).toBe(1);
+  });
+
   test("a 429 passes through unchanged; only loadCodeAssist moves the caller, trajectory writes stay put", async () => {
     await launch();
     let served = "";
