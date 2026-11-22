@@ -219,10 +219,24 @@ export function providerTier(name: string, p: WorkspaceProvider): ProviderTier {
   return "paid";
 }
 
+/** Subscription accounts listed first, in this order, in the provider rail and the quota bar. */
+const PINNED_PROVIDERS: readonly string[] = ["anthropic", "google-antigravity", "openai"];
+
+/** Position among the pinned providers; every other provider ranks after them, in its own order. */
+export function pinnedProviderRank(provider: string): number {
+  const rank = PINNED_PROVIDERS.indexOf(provider);
+  return rank === -1 ? PINNED_PROVIDERS.length : rank;
+}
+
 /** Rail / list sort modes for the providers workspace. */
 export type ProviderSortMode = "az" | "za" | "free-paid" | "paid-free" | "accounts-first";
 
+/** Pinned providers lead in every mode; the mode orders the rest (the sort is stable). */
 export function sortWorkspaceItems(items: WorkspaceItem[], mode: ProviderSortMode): WorkspaceItem[] {
+  return sortByMode(items, mode).sort((a, b) => pinnedProviderRank(a.name) - pinnedProviderRank(b.name));
+}
+
+function sortByMode(items: WorkspaceItem[], mode: ProviderSortMode): WorkspaceItem[] {
   const copy = [...items];
   const byName = (a: WorkspaceItem, b: WorkspaceItem) =>
     a.name.localeCompare(b.name, undefined, { sensitivity: "base" });

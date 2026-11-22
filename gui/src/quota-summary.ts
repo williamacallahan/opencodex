@@ -9,6 +9,7 @@ import type { AccountQuota } from "./codex-quota-utils";
 import type { TKey } from "./i18n/en";
 import { quotaWindows, resetTimestamp } from "./pages/tray-data";
 import { accountQuotaFromReport, type ProviderQuotaReportView } from "./provider-workspace/report";
+import { pinnedProviderRank } from "./provider-workspace/catalog";
 
 export const QUOTA_SUMMARY_WARN_PERCENT = 70;
 export const QUOTA_SUMMARY_CRITICAL_PERCENT = 90;
@@ -171,7 +172,7 @@ function pickHeadline(windows: QuotaSummaryWindow[], now: number): QuotaSummaryW
 /**
  * Build one summary row per provider that reported at least one measured window.
  * `reports` is the map produced by `freshQuotaReportsFromResponse`, so stale probes are
- * already dropped and response order is preserved.
+ * already dropped; pinned providers lead, then response order is preserved.
  */
 export function buildQuotaSummary(
   reports: Record<string, ProviderQuotaReportView>,
@@ -195,5 +196,5 @@ export function buildQuotaSummary(
       severity: headline.severity,
     });
   }
-  return rows;
+  return rows.sort((a, b) => pinnedProviderRank(a.provider) - pinnedProviderRank(b.provider));
 }
