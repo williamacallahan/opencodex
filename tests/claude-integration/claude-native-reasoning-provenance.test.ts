@@ -108,8 +108,8 @@ describe("Claude native reasoning provenance", () => {
       + `event: response.completed\ndata: ${JSON.stringify({ response: { status: "completed", usage: { input_tokens: 2, output_tokens: 1 } } })}\n\n`,
       { headers: { "content-type": "text/event-stream" } },
     ));
-    // Brackets are outside the public model-label alphabet; the display contract stays unchanged.
-    expect(first.body).toHaveProperty("model", format === "json" ? "the requested model" : display);
+    // The client sees the selector it sent, [1m] marker included (96c7e96405); only the signed envelope normalizes it.
+    expect(first.body).toHaveProperty("model", display);
     const signed = signature(first.body);
     expect(decodeReasoningEnvelope(signed)?.nat?.model).toBe(MODEL);
     expect(JSON.stringify((await send(config(), request(signed))).wires[0])).toContain(BLOB);
