@@ -246,8 +246,9 @@ waits for the bounded reads and then computes an equal-weight estimate from curr
 readings. Setup tokens contribute only from observed response headers. Missing, stale, paused,
 or reauthenticating seats are flagged as incomplete; if none can contribute, the report gives
 coverage without a percentage. A single account or disabled pool uses only the active reading.
-Report currency follows the configured instance and the account roster. Reset detection sees
-only the active seat's own reading, never the pool estimate
+Report ownership follows the configured instance and account roster. A newer reading for the
+same roster updates the estimate at publication without another upstream request. Reset detection
+sees only the active seat's own reading, never the pool estimate
 (`tests/providers/provider-anthropic-pool-capacity.test.ts`).
 
 A probe that yields no quota names one closed `quotaFailure` code from

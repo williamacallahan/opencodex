@@ -116,6 +116,21 @@ test("a new observation of the same quota does not remove the pool report during
   }
 });
 
+test("a changed account reading during report collection updates the pool instead of dropping it", async () => {
+  const [, sibling] = ids as [string, string];
+  setCachedProviderAccountQuotaForTests("anthropic", sibling, { fiveHourPercent: 20, updatedAt: Date.now() });
+  setProviderQuotaBeforePublishForTests(() => {
+    setCachedProviderAccountQuotaForTests("anthropic", sibling, { fiveHourPercent: 70, updatedAt: Date.now() });
+  });
+  try {
+    const row = (await fetchProviderQuotaReports(config(true))).reports.find(report => report.provider === "anthropic");
+    expect(row?.quota.fiveHourPercent).toBeCloseTo(50);
+    expect(row?.aggregation?.includedAccounts).toBe(3);
+  } finally {
+    setProviderQuotaBeforePublishForTests(null);
+  }
+});
+
 test("a recently checked seat is refreshed when its five-hour window rolls over", async () => {
   const [, b, c] = ids as [string, string, string];
   const now = Date.now();
