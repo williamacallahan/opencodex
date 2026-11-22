@@ -597,6 +597,7 @@ export async function prepareResponsesRequest(
     }
     toolBridgeMaps = buildToolBridgeMaps(parsed, translatorBudget);
     if (options.comboReplaySnapshot?.projectForeignReasoning) parsed._lunaProjectForeignReasoning = options.comboReplaySnapshot.projectForeignReasoning;
+    parsed._lunaStatelessReasoningReplay = options.comboReplaySnapshot?.statelessReasoningReplay;
     parsed._issuedReasoningProofs = options.comboReplaySnapshot?.issuedReasoningProofs;
     parsed._recordedResponsesStore = options.comboReplaySnapshot?.recordedResponsesStore;
     if (previousResponseInputExpanded) parsed._previousResponseInputExpanded = true;
@@ -1223,7 +1224,7 @@ export async function prepareResponsesRequest(
         try {
           const reparsed = parseRequest(body);
           const kept: Array<keyof OcxParsedRequest> = [
-            "_previousResponseInputExpanded", "_lunaProjectForeignReasoning", "_recordedResponsesStore", "_issuedReasoningProofs",
+            "_previousResponseInputExpanded", "_lunaProjectForeignReasoning", "_lunaStatelessReasoningReplay", "_recordedResponsesStore", "_issuedReasoningProofs",
             "_providerContinuation",
             "_providerContinuationCandidate",
             "_providerContinuationOwner",

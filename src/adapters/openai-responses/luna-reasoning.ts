@@ -51,7 +51,8 @@ export function projectLunaReasoning(parsed: OcxParsedRequest, stripsReasoning: 
     // summarized item from another issuer indispensable. Check the item, not the pin.
     boundary ??= parsed._lunaProjectForeignReasoning === "portable" ? body.input.length : closedReasoningPrefix(body.input);
     if (i >= boundary || !hasReasoningSummary(item)) {
-      if (issuer === "unknown" && bound && parsed._recordedResponsesStore) {
+      if (bound && parsed._recordedResponsesStore && (issuer === "unknown"
+        || issuer === "foreign" && parsed._lunaStatelessReasoningReplay)) {
         (input ??= body.input.slice())[i] = dropped;
         continue;
       }

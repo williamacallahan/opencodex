@@ -872,12 +872,17 @@ combo re-decides each user turn by design and keeps only a tool loop on its targ
 session pin is described above.
 
 In a failover combo the pin never outlives your policy: a remembered target that the current
-fallback policy no longer allows from the primary is not kept. In `combo/gpt-6-luna`-style combos a
-turn pinned to the relay, or one that carries account-bound state such as encrypted reasoning, keeps
-its target. A portable turn pinned to the hub's own ChatGPT pool still runs the Reserve order: native
-Reserve, then the relay, then included Luna. On that pool each Luna turn asks a seat whose included
-usage is spent for Reserve first, because Reserve is Luna-only capacity while included usage is
-shared with other models.
+fallback policy no longer allows from the primary is not kept. In `combo/gpt-6-luna`-style combos,
+portable turns try native Reserve, then the relay, then included Luna. Reserve is tried first because
+it serves only Luna; included usage is shared with other models.
+
+A tool loop normally returns to the store that served its last turn. If that owner is cooling down,
+is excluded by quota, or confirms it is out of capacity, the combo can continue on strict native
+Reserve or the planned relay without sending either store the other's encrypted reasoning. It keeps
+the tool calls and their matching results. If the client replays the full history with `store: false`,
+the replacement store keeps its own reasoning and skips older foreign reasoning that has no usable
+summary for that turn. A turn-state handle, an unresolved response ID, or an item reference still
+requires its owner. If neither destination is allowed, the client gets the original refusal.
 
 Tracking uses the client's thread or session id; a translated Claude Code turn, which sends
 neither, uses its own transcript identity, so each Claude Code conversation and subagent keeps its
