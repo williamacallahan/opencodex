@@ -35,7 +35,8 @@ export function errorDestinationText(label: ErrorDestinationLabel): string {
 declare const clientModelBrand: unique symbol;
 export type ClientFacingModelLabel = { readonly [clientModelBrand]: true };
 const clientModels = new WeakMap<object, string>();
-const clientModelId = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*){0,3}$/;
+// Claude Code's fixed 1M-context marker is part of the selector it sent and gets echoed back.
+const clientModelId = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*){0,3}(?:\[1m\])?$/i;
 export function clientFacingModelLabel(requestedModel: unknown, placeholder: "requested" | "unnamed" = "requested"): ClientFacingModelLabel {
   const label = Object.freeze({}) as ClientFacingModelLabel;
   clientModels.set(label, typeof requestedModel === "string" && requestedModel.length <= 128

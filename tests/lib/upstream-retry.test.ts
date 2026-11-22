@@ -973,6 +973,8 @@ for (const statuses of [[], [503]]) test(`retry evidence owns its diagnostic sta
 });
 
 for (const [value, expected] of [["provider/model-v1", "provider/model-v1"], ["combo/fast", "combo/fast"],
+  ["ocx-claude-combo--gpt-6-luna[1m]", "ocx-claude-combo--gpt-6-luna[1m]"], ["claude-opus-5-5[1M]", "claude-opus-5-5[1M]"],
+  ["model[evil]", "the requested model"], ["model-[1m]-x", "the requested model"],
   [`https://${destinationSentinel}@provider.example/${destinationSentinel}?key=${destinationSentinel}`, "the requested model"],
   ["a".repeat(129), "the requested model"], ["model\nmetadata", "the requested model"], ["", "the requested model"],
   [{ toString: () => destinationSentinel }, "the requested model"]] as const) {
