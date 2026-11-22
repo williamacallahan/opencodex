@@ -127,7 +127,10 @@ export class BoundedSseFrameBuffer {
   private disposed = false;
   private pendingLineFeed = false;
 
-  constructor(maxFrameBytes = MAX_CLIENT_SSE_FRAME_BYTES) {
+  private readonly terminalFramingException: boolean;
+
+  constructor(maxFrameBytes = MAX_CLIENT_SSE_FRAME_BYTES, options: { terminalFramingException?: boolean } = {}) {
+    this.terminalFramingException = options.terminalFramingException ?? true;
     if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes <= 0) {
       throw new RangeError("maxFrameBytes must be a positive safe integer");
     }
@@ -250,7 +253,7 @@ export class BoundedSseFrameBuffer {
     } catch (err) {
       const framingError = err instanceof SseFrameTooLargeError
         || err instanceof SseFrameCountLimitError;
-      if (framingError && frames.some(frame => isResponsesTerminalFrame(frame.block))) {
+      if (framingError && this.terminalFramingException && frames.some(frame => isResponsesTerminalFrame(frame.block))) {
         // A terminal frame is the Responses protocol boundary. Ignore malformed
         // or oversized bytes that occur later in the same upstream chunk rather
         // than retroactively replacing the committed terminal with a 502.

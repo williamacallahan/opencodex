@@ -62,6 +62,13 @@ The request header filter also excludes ingress topology/identity: `Forwarded`, 
 are not application headers; other caller application headers and response end-to-end fields remain intact.
 Fetch owns header casing/order, framing, and connection freshness; gateway CORS/security response
 headers remain gateway policy. These exceptions do not permit request-body changes.
+One end-to-end header is narrowed: for a streaming request `Accept-Encoding` is rewritten to the
+caller-acceptable subset of `gzip` (including `x-gzip`), `deflate` and `identity`, honoring exclusions
+and quality values, and the request is refused before dispatch when none is acceptable. Success
+streams are screened for a sent credential before delivery, and only those codings can be inspected
+incrementally, so an event-stream response in any other coding (`br`, `zstd`) is rejected at its headers
+with a 502. Identity frames are masked in place; a credential-bearing frame in a coded stream aborts it,
+and an upstream cut discards the unfinished frame and any held coded bytes.
 The final physical-send boundary asserts bytes, method, approved URL, headers, credential currentness,
 manual redirects and disabled decompression after plugin hooks. A mutation or throwing hook refuses
 the send before spend commitment. Nested policy layers defer that commitment to the innermost

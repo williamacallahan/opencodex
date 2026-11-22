@@ -45,7 +45,7 @@ import {
   anthropicMessagesNativeWireBody,
   buildAnthropicMessagesPassthroughRequest,
 } from "../adapters/anthropic/passthrough";
-import { MessagesIntegrityError, NativeMessagesIntegrity, publicStrictMessagesResponse, type NativeMessagesRequest } from "./messages-native-integrity";
+import { isEventStream, MessagesIntegrityError, NativeMessagesIntegrity, publicStrictMessagesResponse, type NativeMessagesRequest } from "./messages-native-integrity";
 import { decodeRequestBody, readBoundedJsonRequestBody, resolveInboundBodyLimitBytes, DecompressedBodyTooLargeError } from "./request-decompress";
 import { effortFromOutputConfig, nativeAnthropicProjection, resolveInboundModel } from "../claude/inbound";
 import { anthropicErrorBody, anthropicErrorResponse, claudeOverflowSsePayload, claudePromptTooLongMessage, collectAnthropicMessage, isContextOverflowText, isThroughputLimitText } from "../claude/outbound";
@@ -1077,7 +1077,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
     settleDistributedFailure();
     response = await publicStrictMessagesResponse(response, dispatchMask, upstream.signal);
     const headers = response.headers;
-    const sse = headers.get("content-type")?.includes("text/event-stream") === true;
+    const sse = isEventStream(headers);
     const guard = resolvePassthroughBodyGuard(config, upstream.signal);
     transferTurnToStream();
     const relayed = response.body && tapAnthropicSseForLog(response.body, logCtx, (status, meta) => {

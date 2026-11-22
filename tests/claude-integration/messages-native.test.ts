@@ -9,7 +9,9 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { constants, createGzip, gunzipSync } from "node:zlib";
 import { saveConfig } from "../../src/config";
+import { publicStrictMessagesResponse } from "../../src/server/messages-native-integrity";
 import { clearKeyCooldowns, forgetApiKeyRotationCursor } from "../../src/providers/key-failover";
 import { estimateClaudeRequestTokens, handleClaudeCountTokens, handleClaudeMessages } from "../../src/server/claude-messages";
 import { getRequestLogEntries } from "../../src/server/request-log";
@@ -1056,9 +1058,160 @@ describe("strict Messages public HTTP transport", () => {
     expect(calls).toHaveLength(1);
   });
 
-  test("strict SSE socket reset after output never replays or appends a replacement event", async () => {
-    const prefix = ': reset after this opaque prefix\nevent: future\ndata: {"partial":';
-    const reset = startTruncatedSseUpstream(prefix);
+  describe("a 200 stream's credential-bearing error frame", () => {
+    const key = "orchidFixtureSecretKey";
+    const clean = 'event: message_start\ndata: {"type":"message_start"}\n\n';
+    const reflected = `event: error\ndata: {"type":"error","error":{"message":"bad ${key}"}}\n\n`;
+    const streamBody = raw.replace('"stream":false', '"stream":true');
+    const withKey = (config: OcxConfig) => { config.providers.anth!.apiKey = key; };
+    const send = (bytes: Uint8Array, gzip: boolean) => new Response(bytes, { headers: {
+      "content-type": "text/event-stream", ...(gzip ? { "content-encoding": "gzip" } : {}) } });
+    const readAll = async (response: Response) => {
+      const received: Uint8Array[] = [];
+      const reader = response.body!.getReader();
+      try { for (;;) { const chunk = await reader.read(); if (chunk.done) break; received.push(chunk.value); } }
+      catch { /* a withheld coded stream is aborted */ }
+      return new Uint8Array(Buffer.concat(received));
+    };
+
+    test("is masked before delivery on an identity stream", async () => {
+      await launch(() => send(encode(clean + reflected + clean), false), withKey);
+      const text = new TextDecoder().decode(await readAll(await post(encode(streamBody))));
+      expect(text).not.toContain(key);
+      expect(text).toContain("bad [REDACTED]");
+      expect(text.startsWith(clean)).toBe(true);
+      expect(text.endsWith(clean)).toBe(true);
+    });
+
+    test("is withheld, with the clean prefix kept, on a gzip stream", async () => {
+      const split = Bun.gzipSync(encode(clean + reflected + clean));
+      await launch(() => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        for (const byte of split) controller.enqueue(Uint8Array.of(byte));
+        controller.close();
+      } }), { headers: { "content-type": "text/event-stream", "content-encoding": "gzip" } }), withKey);
+      const received = await readAll(await post(encode(streamBody)));
+      const visible = gunzipSync(received, { finishFlush: constants.Z_SYNC_FLUSH }).toString();
+      expect(Buffer.from(received).toString("latin1")).not.toContain(key);
+      expect(visible).not.toContain(key);
+      expect(visible).not.toContain("error");
+      expect(received.length).toBeLessThan(split.length);
+    });
+
+    test("a gzip stream delivers its clean decoded event before the credential-bearing one arrives", async () => {
+      const gzip = createGzip();
+      const wire: Uint8Array[] = [];
+      gzip.on("data", (part: Buffer) => wire.push(new Uint8Array(part)));
+      const flush = async (text: string) => { gzip.write(text); await new Promise<void>(resolve => gzip.flush(() => resolve())); };
+      await flush(clean);
+      const cleanParts = wire.splice(0);
+      await flush(reflected);
+      const reflectedParts = wire.splice(0);
+      const gate = Promise.withResolvers<void>();
+      await launch(() => new Response(new ReadableStream<Uint8Array>({
+        async start(controller) {
+          for (const part of cleanParts) controller.enqueue(part);
+          await gate.promise;
+          for (const part of reflectedParts) controller.enqueue(part);
+          controller.close();
+        },
+      }), { headers: { "content-type": "text/event-stream", "content-encoding": "gzip" } }), withKey);
+      const response = await post(encode(streamBody));
+      const reader = response.body!.getReader();
+      const received: Uint8Array[] = [];
+      const decodedSoFar = () => gunzipSync(Buffer.concat(received), { finishFlush: constants.Z_SYNC_FLUSH }).toString();
+      while (!decodedSoFar().includes("message_start")) {
+        const chunk = await reader.read();
+        expect(chunk.done).toBe(false);
+        received.push(chunk.value!);
+      }
+      gate.resolve();
+      try { for (;;) { const chunk = await reader.read(); if (chunk.done) break; received.push(chunk.value); } } catch { /* withheld */ }
+      expect(decodedSoFar()).not.toContain(key);
+      expect(Buffer.concat(received).toString("latin1")).not.toContain(key);
+    });
+
+    test.each([false, true])("a clean stream with the key configured is byte-identical (gzip=%s)", async gzip => {
+      const cleanError = 'event: error\ndata: {"type":"error","error":{"message":"overloaded"}}\n\n';
+      const bytes = gzip ? Bun.gzipSync(encode(clean + cleanError + clean)) : encode(clean + cleanError + clean);
+      await launch(() => send(bytes, gzip), withKey);
+      expect(await readAll(await post(encode(streamBody)))).toEqual(bytes);
+    });
+
+    const direct = (body: ReadableStream<Uint8Array>, gzip: boolean) => publicStrictMessagesResponse(
+      new Response(body, { headers: { "content-type": "text/event-stream", ...(gzip ? { "content-encoding": "gzip" } : {}) } }),
+      Object.assign((text: string) => text.replaceAll(key, "[REDACTED]"), { redirectBody: (stream: ReadableStream<Uint8Array>) => stream }),
+      new AbortController().signal);
+
+    test("gzip frames flushed with one byte of the next frame are delivered before EOF", async () => {
+      const frames = Array.from({ length: 5 }, (_, index) => `event: ping\ndata: {"n":${index}}\n\n`);
+      const gzip = createGzip();
+      const wire: Uint8Array[] = [];
+      gzip.on("data", (part: Buffer) => wire.push(new Uint8Array(part)));
+      const flushed = async (text: string) => { gzip.write(text); await new Promise<void>(resolve => gzip.flush(() => resolve())); };
+      // Each flush ends one byte into the following frame.
+      const text = frames.join("");
+      let at = 0;
+      for (const frame of frames) { const end = at + frame.length + 1; await flushed(text.slice(at, Math.min(end, text.length))); at = Math.min(end, text.length); }
+      gzip.end();
+      await new Promise<void>(resolve => gzip.once("end", () => resolve()));
+      const flushedCount = wire.length;
+      const upstreamOpen = Promise.withResolvers<void>();
+      const response = await direct(new ReadableStream<Uint8Array>({
+        async start(controller) {
+          for (const part of wire.slice(0, 3)) controller.enqueue(part);
+          await upstreamOpen.promise;
+          for (const part of wire.slice(3)) controller.enqueue(part);
+          controller.close();
+        },
+      }), true);
+      const reader = response.body!.getReader();
+      const first = await reader.read(); // would never resolve before EOF if held bytes waited for an empty tail
+      expect(first.done).toBe(false);
+      const decodedFirst = [first.value!];
+      while (!gunzipSync(Buffer.concat(decodedFirst), { finishFlush: constants.Z_SYNC_FLUSH }).toString().includes('data: {"n":0}')) {
+        const more = await reader.read();
+        expect(more.done).toBe(false);
+        decodedFirst.push(more.value!);
+      }
+      expect(flushedCount).toBeGreaterThan(3);
+      upstreamOpen.resolve();
+      const received = [...decodedFirst];
+      for (;;) { const chunk = await reader.read(); if (chunk.done) break; received.push(chunk.value); }
+      expect(Buffer.concat(received)).toEqual(Buffer.concat(wire));
+    }, 5_000);
+
+    describe("streaming content-coding negotiation", () => {
+      const sseReply = () => new Response(encode(clean), { headers: { "content-type": "text/event-stream" } });
+
+      test("advertises only the accepted gzip, deflate and identity codings", async () => {
+        await launch(sseReply, withKey);
+        const response = await post(encode(streamBody), "/v1/messages", { "accept-encoding": "br, zstd, gzip;q=0.5" });
+        expect(response.status).toBe(200);
+        await response.arrayBuffer();
+        expect(calls).toHaveLength(1);
+        expect(calls[0]!.headers.get("accept-encoding")).toBe("gzip, identity");
+      });
+
+      test("refuses before dispatch when the caller accepts none of them", async () => {
+        await launch(sseReply, withKey);
+        const response = await post(encode(streamBody), "/v1/messages", { "accept-encoding": "br, identity;q=0" });
+        expect(response.status).toBeGreaterThanOrEqual(400);
+        await response.arrayBuffer();
+        expect(calls).toHaveLength(0);
+      });
+
+      test("rejects a brotli event stream at its headers", async () => {
+        await launch(() => new Response(encode(clean), { headers: { "content-type": "text/event-stream", "content-encoding": "br" } }), withKey);
+        const response = await post(encode(streamBody));
+        expect(response.status).toBe(502);
+        expect(await response.text()).toBe("Upstream stream withheld");
+      });
+    });
+  });
+
+  test("strict SSE socket reset after output delivers its complete frames, drops the unfinished one, and appends no replacement event", async () => {
+    const prefix = ': reset after this opaque prefix\n\n';
+    const reset = startTruncatedSseUpstream(`${prefix}event: future\ndata: {"partial":`);
     allowed.add(`http://127.0.0.1:${reset.port}`);
     const abort = new AbortController();
     try {
