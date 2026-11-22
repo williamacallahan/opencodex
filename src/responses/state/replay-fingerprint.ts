@@ -2,6 +2,32 @@
 const REPLAY_FINGERPRINT_MAX_BYTES = 8 * 1024;
 /** Depth ceiling so a pathologically nested item cannot blow the canonicalizer. */
 const REPLAY_FINGERPRINT_MAX_DEPTH = 64;
+const MESSAGE_KEYS = new Set(["type", "role", "content"]);
+const TEXT_PART_TYPES = new Set(["input_text", "output_text", "text"]);
+
+/**
+ * One shape for a text-only message: `{role, content: <text>}`.
+ *
+ * A string `input` is stored as `{role: "user", content: <string>}` (state.ts `inputItems`), and a
+ * client that resends that turn may send the typed form `{type: "message", role: "user", content:
+ * [{type: "input_text", text}]}`. Both name the same turn; without this the carried prefix reads 0
+ * and replay prepends the turn a second time. Only a message with no keys beyond type/role/content
+ * and exactly one text part is folded, so an id, a second part, or any annotation still compares
+ * byte for byte.
+ */
+function canonicalTextMessage(item: unknown): unknown {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+  const record = item as Record<string, unknown>;
+  if (typeof record.role !== "string" || (record.type !== undefined && record.type !== "message")) return item;
+  if (!Object.keys(record).every(key => MESSAGE_KEYS.has(key))) return item;
+  const content = record.content;
+  if (typeof content === "string") return { role: record.role, content };
+  if (!Array.isArray(content) || content.length !== 1) return item;
+  const part = content[0] as Record<string, unknown> | null;
+  if (!part || typeof part !== "object" || Array.isArray(part)) return item;
+  if (Object.keys(part).length !== 2 || !TEXT_PART_TYPES.has(part.type as string) || typeof part.text !== "string") return item;
+  return { role: record.role, content: part.text };
+}
 
 /**
  * Canonical, order-stable fingerprint for one input item, or null when the item cannot be
@@ -44,7 +70,7 @@ function replayItemFingerprint(item: unknown): string | null {
     }
     return push("}");
   };
-  return walk(item, 0) ? out.join("") : null;
+  return walk(canonicalTextMessage(item), 0) ? out.join("") : null;
 }
 
 /** Non-empty provider-issued `id`/`call_id` on an item, else null. */
