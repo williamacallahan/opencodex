@@ -3,13 +3,16 @@ import { createHash } from "node:crypto";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { apiKeyPoolEntryId } from "./api-keys";
 import { resolveProviderApiKey } from "./key-store";
-import { CODEX_LB_USAGE_SOURCE, type ProviderQuota } from "./quota-types";
+import { CODEX_LB_USAGE_SOURCE, type ProviderQuota, type QuotaFailureCode } from "./quota-types";
 import { ACCOUNT_QUOTA_TTL_MS } from "./quota-wire";
 
 const MAX_ENTRIES = 256;
 const LAST_GOOD_MS = 30 * 60_000;
-/** `unread` marks a synthesized row: no read happened, so `ts` is not a read time. */
-type Entry = { ts: number; quota: ProviderQuota | null; source?: string; unavailable?: true; unread?: true };
+/**
+ * `unread` marks a synthesized row: no read happened, so `ts` is not a read time. `terminal` marks a
+ * read the provider refused outright (a rejected key), which is not a transient outage.
+ */
+type Entry = { ts: number; quota: ProviderQuota | null; source?: string; unavailable?: true; unread?: true; terminal?: true };
 export type KeyQuotaProbeOutcome =
   | { kind: "quota"; quota: ProviderQuota; source?: string }
   | { kind: "empty" | "terminal" | "unavailable" };
@@ -19,6 +22,8 @@ export interface ProviderApiKeyQuota {
   unavailable?: true;
   /** When this key's quota was last read, success or failure; absent when no read happened. */
   readAt?: number;
+  /** Why the last read failed, when the provider refused it rather than failing transiently. */
+  quotaFailure?: QuotaFailureCode;
   /** Server-only, non-enumerable; call immediately before the safe DTO join. */
   isCurrent: () => boolean;
 }
@@ -144,6 +149,7 @@ async function readEntry(
             quota: result.kind !== "terminal" && lastGood && Date.now() - lastGood.updatedAt < LAST_GOOD_MS ? lastGood : null,
             source: previous?.source,
             unavailable: true,
+            ...(result.kind === "terminal" ? { terminal: true as const } : {}),
           };
     if (isCurrent()) remember(key, entry);
     return entry;
@@ -198,6 +204,7 @@ export async function readProviderApiKeyQuotas(
       quota: current ? entry.quota : null,
       ...(!current || entry.unavailable ? { unavailable: true as const } : {}),
       ...(current && !entry.unread ? { readAt: entry.ts } : {}),
+      ...(current && entry.terminal ? { quotaFailure: "access_denied" as const } : {}),
     };
     return Object.defineProperty(result, "isCurrent", { value: isCurrent }) as ProviderApiKeyQuota;
   });

@@ -310,3 +310,23 @@ test("#8397 a read that reports no balance says not_reported, and a paused key w
   expect(Object.hasOwn(held, "quotaReadAt")).toBe(false);
   expect(seen).not.toContain("Bearer fixture-held");
 });
+
+test("a key the provider rejects is reported as access denied, not as a temporary outage", async () => {
+  const budget = (await import("../fixtures/mistral-budget.json")).default;
+  const subscription = (await import("../fixtures/mistral-subscription.json")).default;
+  const config: OcxConfig = { port: 0, defaultProvider: "mistral", providers: { mistral: {
+    adapter: "openai-chat", authMode: "key", baseUrl: "https://api.mistral.ai/v1", apiKey: "fixture-valid",
+    apiKeyPool: [{ id: "valid", key: "fixture-valid" }, { id: "rejected", key: "fixture-rejected" }],
+  } } };
+  globalThis.fetch = (async (input, init) => {
+    if (new Headers(init?.headers).get("authorization") === "Bearer fixture-rejected") {
+      return Response.json({ detail: "Invalid API Key" }, { status: 401 });
+    }
+    return Response.json(String(input).endsWith("/subscription") ? subscription : budget);
+  }) as typeof fetch;
+  const body = await (await read("/api/providers/keys?name=mistral&quota=1&refresh=1", config)).json();
+  const [valid, rejected] = body.keys;
+  expect(valid).toMatchObject({ id: "valid", quotaUnavailable: false });
+  expect(valid.quotaFailure).toBeUndefined();
+  expect(rejected).toMatchObject({ id: "rejected", quota: null, quotaUnavailable: true, quotaFailure: "access_denied" });
+});

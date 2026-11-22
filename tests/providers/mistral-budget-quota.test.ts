@@ -317,6 +317,8 @@ describe("Mistral error classification", () => {
       const row = (await fetchProviderApiKeyQuotas(config, "mistral", true))[0];
       expect(row?.unavailable).toBe(true);
       expect(row?.quota).toBeNull();
+      // A rejected key is named as such, never shown as a temporary outage.
+      expect(row?.quotaFailure).toBe("access_denied");
     }
   });
 
@@ -409,6 +411,7 @@ describe("Mistral billing transport (#8295 review)", () => {
     const row = (await fetchProviderApiKeyQuotas(config, "mistral", true))[0];
     expect(row?.unavailable).toBe(true);
     expect(row?.quota?.customWindows).toHaveLength(2);
+    expect(row?.quotaFailure).toBeUndefined();
   });
 });
 

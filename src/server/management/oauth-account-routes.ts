@@ -1184,7 +1184,8 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
         const credits = shownCodexCredits(config, codexCredits);
         // Internal identity/epoch checks never enter the JSON DTO.
         return { ...key, quota: row.quota && (credits ? { ...otherQuota, codexCredits: credits } : otherQuota),
-          quotaUnavailable: row.unavailable === true, ...readAt, ...(reason ? { quotaUnknownReason: reason } : {}) };
+          quotaUnavailable: row.unavailable === true, ...(row.unavailable && row.quotaFailure ? { quotaFailure: row.quotaFailure } : {}),
+          ...readAt, ...(reason ? { quotaUnknownReason: reason } : {}) };
       }),
     });
   }
