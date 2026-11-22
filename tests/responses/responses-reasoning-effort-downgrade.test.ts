@@ -328,6 +328,9 @@ describe("rejected reasoning rungs", () => {
     expect(outbound).toHaveLength(2);
     expect(effortOf(outbound[0])).toBe("max");
     expect(effortOf(outbound[1])).toBe("high");
+    expect(logCtx.requestedEffort).toBe("max");
+    expect(logCtx.activeAttempt?.reasoningWireField).toBe("reasoning.effort");
+    expect(logCtx.activeAttempt?.reasoningWireValue).toBe("high");
     expect(logCtx.activeAttempt?.recoveryKinds).toEqual(["reasoning-effort-downgrade"]);
   });
 
@@ -519,6 +522,9 @@ describe("rejected reasoning rungs", () => {
         { host: "opencode.ai", effort: "medium" },
         { host: "fallback.example", effort: "max" },
       ]);
+      if (adapter === "openai-responses") {
+        expect(logCtx.attempts?.find(attempt => attempt.provider === "first")?.reasoningWireValue).toBe("medium");
+      }
     });
   }
 
