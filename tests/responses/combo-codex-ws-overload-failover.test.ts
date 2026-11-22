@@ -10,6 +10,7 @@ import { clearAccountQuota, setAccountQuotaFromParsed } from "../../src/codex/qu
 import { clearCodexUpstreamHealth, clearThreadAccountMap, getCodexQuotaHealthSnapshot } from "../../src/codex/routing";
 import { clearComboSelectionState, clearComboTargetCooldowns, coolComboTarget, isComboTargetInCooldown } from "../../src/combos";
 import { handleResponses } from "../../src/server/responses";
+import { clearComboRecallForTests } from "../../src/server/responses/combo-session-recall";
 import { codexWsPool } from "../../src/server/responses/codex-ws-pool";
 import { createRequestExecutionBudget } from "../../src/lib/request-execution-budget";
 import { clearPoolRecoveryState } from "../../src/routing/probe-lease";
@@ -159,6 +160,7 @@ function clearState(): void {
   clearPoolRecoveryState();
   clearComboSelectionState();
   clearComboTargetCooldowns();
+  clearComboRecallForTests();
 }
 
 beforeEach(() => {
