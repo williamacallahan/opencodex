@@ -794,7 +794,7 @@ export function recordAttemptRequestedEffort(logCtx: RequestLogContext): void {
 /** Copy the adapter's exact outbound reasoning parameter into the durable request log. */
 export function recordAdapterReasoning(
   logCtx: RequestLogContext,
-  request: AdapterRequest,
+  request: Pick<AdapterRequest, "reasoningLog">,
 ): void {
   delete logCtx.effectiveEffort;
   delete logCtx.reasoningWireField;

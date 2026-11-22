@@ -2,7 +2,8 @@ import { formatErrorResponse } from "../../bridge";
 import { markProxyError } from "../../lib/client-error-body";
 import type { PhysicalSendReporter } from "../../lib/request-execution-budget";
 import { SendBudgetExhaustedError } from "../../lib/upstream-retry";
-import type { RequestLogContext } from "../request-log";
+import { responsesReasoningLog } from "../../adapters/openai-responses/reasoning";
+import { recordAdapterReasoning, type RequestLogContext } from "../request-log";
 import { workflowSendCeilingRefusalResponse, workflowRefusalResponse } from "../workflow-refusal";
 import { NativeContinuationRefusalError } from "./native-continuation-refusal";
 import type { RequestSpendTracker } from "./request-spend";
@@ -13,7 +14,10 @@ export function createNativeContinuationDispatch(
   budget: Pick<ResponsesSendBudget, "continuationSendReporter" | "workflowRootId">,
   logCtx: RequestLogContext,
 ): (frame: { body: Record<string, unknown>; text: string }) => void {
-  return frame => claimNativeContinuationSend(budget.continuationSendReporter(frame), logCtx, budget.workflowRootId);
+  return frame => {
+    claimNativeContinuationSend(budget.continuationSendReporter(frame), logCtx, budget.workflowRootId);
+    recordAdapterReasoning(logCtx, { reasoningLog: responsesReasoningLog(frame.body) });
+  };
 }
 
 /** Claim one successor's physical start; never borrow an initial or recovery receipt. */

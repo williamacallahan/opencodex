@@ -32,6 +32,7 @@ add another physical send. Discarded usage is recorded once per attempt; a secon
 fails as `empty_completion_retry_failed`, while HTTP failures and budget refusals retain their response.
 `src/server/responses/passthrough-dispatch.ts` caps that recovery's allowance at one send and disables ambiguous reset resends on it.
 Effort-refusal handling is independent: a Responses send without `reasoning.effort` cannot teach the proxy that the caller's effort was rejected or trigger a lower-effort resend.
+Responses effort diagnostics use the existing request log. The adapter reads only a recognized `reasoning.effort` label from the outbound body, and the dispatch path records it after the send is admitted. A retry that never dispatches cannot replace the recorded effort. No prompt or reasoning summary enters this field.
 Text, refusal, tool/action or unknown events release the original bytes without replay; so does a
 lifecycle or terminal snapshot whose aggregate `output_text` is neither absent, `null` nor `""`. Inspection
 holds at most 1 MiB, 1,024 events/chunks or 30 seconds, then hands the held prefix and pending read

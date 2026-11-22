@@ -1,8 +1,15 @@
 import { namespacedToolName, type AdapterEvent, type OcxParsedRequest, type OcxProviderConfig, type OcxUsage, type TierDecision } from "../../types";
 import { catalogModelSupportsReasoningSummaries } from "../../codex/catalog";
 import { decodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../../responses/reasoning-envelope";
-import { configuredReasoningEfforts, isReasoningEffortOmitted, mapReasoningEffort, modelRecordValue, reasoningEffortMapFor } from "../../reasoning-effort";
+import { configuredReasoningEfforts, isDeclaredReasoningEffort, isReasoningEffortOmitted, mapReasoningEffort, modelRecordValue, reasoningEffortMapFor } from "../../reasoning-effort";
+import type { AdapterRequest } from "../base";
 import { isPlainObject } from "./internal";
+
+export function responsesReasoningLog(body: unknown): AdapterRequest["reasoningLog"] {
+  const effort = isPlainObject(body) && isPlainObject(body.reasoning) ? body.reasoning.effort : undefined;
+  return typeof effort === "string" && isDeclaredReasoningEffort(effort)
+    ? { effectiveEffort: effort, wireField: "reasoning.effort", wireValue: effort } : undefined;
+}
 
 /** Drop only replayed Responses reasoning items; all other continuation input stays untouched. */
 export function dropResponsesReasoningInputItems(body: unknown): unknown {

@@ -79,6 +79,7 @@ import {
   noteProviderAttemptSend,
   recordAdapterReasoning,
   recordAdapterTier,
+  recordAttemptRequestedEffort,
   sealRequestAttemptIdentity,
   recordAttemptCredentialSource,
   noteAttemptRecoveryWithheld,
@@ -684,7 +685,7 @@ export async function preparePassthroughExchange(
         }
       }
     };
-    recordAdapterReasoning(logCtx, request);
+    recordAttemptRequestedEffort(logCtx);
     recordAdapterTier(logCtx, request);
     const actualHostKey = upstreamHostHealthKey(
       route.providerName,
@@ -762,7 +763,10 @@ export async function preparePassthroughExchange(
       recovery => transportState.noteRoutedAttemptSend(passthroughEstimate, recovery),
       recovery => noteProviderAttemptSend(logCtx, route.providerName, route.provider, passthroughEstimate, recovery,
         { wireModel: request.outboundModelId }),
-      replayGuard.sendHandler,
+      next => replayGuard.sendHandler(() => {
+        next?.();
+        recordAdapterReasoning(logCtx, request);
+      }),
     );
     /**
      * The operator's replacement grant for THIS logical request.
@@ -1107,7 +1111,6 @@ export async function preparePassthroughExchange(
           });
         }
         refreshRequestToolAliases(request);
-        recordAdapterReasoning(logCtx, request);
         recordAdapterTier(logCtx, request);
       } catch (err) {
         if (err instanceof CodexInstallationIdUnavailableError) return { failed: transportFailureResponse(err) };
@@ -1264,7 +1267,6 @@ export async function preparePassthroughExchange(
           translatorBudget,
         });
         refreshRequestToolAliases(request);
-        recordAdapterReasoning(logCtx, request);
         recordAdapterTier(logCtx, request);
         refreshUndeclaredToolGuard(request);
         // The 401 replay rebuilds the body before sending, so it needs the same ceiling as
@@ -1409,7 +1411,6 @@ export async function preparePassthroughExchange(
           translatorBudget,
         });
         refreshRequestToolAliases(request);
-        recordAdapterReasoning(logCtx, request);
         recordAdapterTier(logCtx, request);
       } catch (err) {
         if (err instanceof CodexInstallationIdUnavailableError) return transportFailureResponse(err);

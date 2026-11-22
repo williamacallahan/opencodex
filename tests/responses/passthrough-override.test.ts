@@ -13,13 +13,16 @@ test("Responses effort maps work without a ladder and omit only the mapped effor
   const model = "custom-test-reasoner";
   const build = (settings: Partial<OcxProviderConfig>, effort = "xhigh") => {
     const adapter = createResponsesPassthroughAdapter({ adapter: "openai-responses", baseUrl: "https://relay.example/v1", ...settings });
-    return JSON.parse(String(adapter.buildRequest({ modelId: model, stream: false, context: { messages: [] }, options: {},
-      _rawBody: { model, input: "hi", reasoning: { effort, summary: "auto" } } }, { headers: new Headers() }).body)).reasoning;
+    const request = adapter.buildRequest({ modelId: model, stream: false, context: { messages: [] }, options: {},
+      _rawBody: { model, input: "hi", reasoning: { effort, summary: "auto" } } }, { headers: new Headers() });
+    return { reasoning: JSON.parse(String(request.body)).reasoning, log: request.reasoningLog };
   };
-  expect(build({ reasoningEffortMap: { xhigh: "high" } })).toEqual({ effort: "high", summary: "auto" });
-  expect(build({ modelReasoningEffortMap: { [model]: { xhigh: "__omit__" } } })).toEqual({ summary: "auto" });
-  expect(build({ reasoningEfforts: ["high"], reasoningEffortMap: { high: "__omit__" } })).toEqual({ summary: "auto" });
-  expect(build({ reasoningEffortMap: { xhigh: "high" } }, "provider-specific")).toEqual({ effort: "provider-specific", summary: "auto" });
+  expect(build({ reasoningEffortMap: { xhigh: "high" } })).toEqual({
+    reasoning: { effort: "high", summary: "auto" }, log: { effectiveEffort: "high", wireField: "reasoning.effort", wireValue: "high" },
+  });
+  expect(build({ modelReasoningEffortMap: { [model]: { xhigh: "__omit__" } } })).toEqual({ reasoning: { summary: "auto" }, log: undefined });
+  expect(build({ reasoningEfforts: ["high"], reasoningEffortMap: { high: "__omit__" } })).toEqual({ reasoning: { summary: "auto" }, log: undefined });
+  expect(build({ reasoningEffortMap: { xhigh: "high" } }, "provider-specific")).toEqual({ reasoning: { effort: "provider-specific", summary: "auto" }, log: undefined });
 });
 
 describe("Responses sampling defaults", () => {

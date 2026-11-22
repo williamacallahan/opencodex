@@ -1027,7 +1027,6 @@ async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal
     await firstResponse.body?.cancel().catch(() => undefined);
     return { kind: "transport", error, authCtx: retryAuthCtx };
   }
-  recordAdapterReasoning(logCtx, request);
   recordAdapterTier(logCtx, request);
 
   const retrySameConfirmedAccount = outcomeStatus === 400
@@ -1148,6 +1147,7 @@ async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal
                     args.onPhysicalSend?.(request, body);
                     noteProviderAttemptSend(logCtx, route.providerName, route.provider, passthroughEstimate, transient ? "transient-5xx" : moveRecovery,
                       { adapter: retryAdapter.name, wireModel: request.outboundModelId });
+                    recordAdapterReasoning(logCtx, request);
                   },
                   preOutputRefusalHold: args.preOutputRefusalHold,
                   accountAutoPause: (name, provider, headers) => captureAccountAutoPauseAttempt(name, provider, { config, codex: retryAuthCtx }, headers),
