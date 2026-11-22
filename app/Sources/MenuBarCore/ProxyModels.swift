@@ -270,7 +270,9 @@ public extension QuotaReport {
         }
 
         let measured = windows.filter(\.hasPercent)
-        let preferred = measured.max { lhs, rhs in
+        let now = Date()
+        let current = measured.filter { $0.resetAt.map { $0 > now } ?? true }
+        let preferred = (current.isEmpty ? measured : current).max { lhs, rhs in
             let left = lhs.percent ?? 0
             let right = rhs.percent ?? 0
             if left != right { return left < right }

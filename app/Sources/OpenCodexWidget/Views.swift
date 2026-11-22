@@ -163,14 +163,18 @@ struct OpenCodexWidgetView: View {
     }
 
     private func hasQuota(_ snapshot: WidgetSnapshot) -> Bool {
-        snapshot.quotas.contains { $0.percent != nil }
+        snapshot.quotas.contains { $0.percent != nil && $0.isModelFamily != true }
     }
 
     private func quotaView(_ snapshot: WidgetSnapshot) -> some View {
         Group {
             // Each provider is as constrained as its fullest window; show the provider with the most headroom.
-            let binding = Dictionary(grouping: snapshot.quotas.filter { $0.percent != nil }, by: \.providerLabel)
-                .values.compactMap { windows in windows.max { ($0.percent ?? 0) < ($1.percent ?? 0) } }
+            let now = Date().timeIntervalSince1970
+            let binding = Dictionary(grouping: snapshot.quotas.filter { $0.percent != nil && $0.isModelFamily != true }, by: { $0.provider ?? $0.providerLabel })
+                .values.compactMap { windows in
+                    let current = windows.filter { $0.resetAt.map { $0 > now } ?? true }
+                    return (current.isEmpty ? windows : current).max { ($0.percent ?? 0) < ($1.percent ?? 0) }
+                }
             if let quota = binding.min(by: { ($0.percent ?? 100, $0.providerLabel) < ($1.percent ?? 100, $1.providerLabel) }) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(quota.providerLabel).font(.caption).lineLimit(1)

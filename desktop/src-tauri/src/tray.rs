@@ -390,7 +390,11 @@ pub(crate) fn render_title(settings: &Value, usage: &Value, quotas: &Value) -> O
         .unwrap_or("tokens");
     let visible_summary = crate::companion_usage::filtered_summary(usage, settings);
     let summary = visible_summary.as_ref().unwrap_or(&Value::Null);
-    let quota = quota_percent(quotas, settings);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let quota = quota_percent(quotas, settings, now);
     let template = settings
         .get("menuBarTemplate")
         .and_then(Value::as_str)
@@ -466,7 +470,7 @@ pub(crate) fn render_title(settings: &Value, usage: &Value, quotas: &Value) -> O
     }
 }
 
-fn quota_percent(value: &Value, settings: &Value) -> Option<f64> {
+fn quota_percent(value: &Value, settings: &Value, now: f64) -> Option<f64> {
     let reports = value.get("reports")?.as_array()?;
     let mut providers = Vec::new();
     for report in reports {
@@ -480,9 +484,16 @@ fn quota_percent(value: &Value, settings: &Value) -> Option<f64> {
             continue;
         };
         let mut values = Vec::new();
-        for key in ["weeklyPercent", "monthlyPercent", "fiveHourPercent"] {
+        for (key, reset) in [
+            ("weeklyPercent", "weeklyResetAt"),
+            ("monthlyPercent", "monthlyResetAt"),
+            ("fiveHourPercent", "fiveHourResetAt"),
+        ] {
             if let Some(value) = quota.get(key).and_then(Value::as_f64) {
-                values.push(value);
+                values.push((
+                    value,
+                    crate::widget::reset_at(quota.get(reset)).filter(|time| *time > 0.0),
+                ));
             }
         }
         if let Some(windows) = quota.get("customWindows").and_then(Value::as_array) {
@@ -493,10 +504,29 @@ fn quota_percent(value: &Value, settings: &Value) -> Option<f64> {
                         window.get("modelId").is_none_or(Value::is_null)
                             && window.get("scope").and_then(Value::as_str) != Some("model")
                     })
-                    .filter_map(|window| window.get("percent").and_then(Value::as_f64)),
+                    .filter_map(|window| {
+                        window
+                            .get("percent")
+                            .and_then(Value::as_f64)
+                            .map(|percent| {
+                                (
+                                    percent,
+                                    crate::widget::reset_at(window.get("resetAt"))
+                                        .filter(|time| *time > 0.0),
+                                )
+                            })
+                    }),
             );
         }
-        if let Some(binding) = values.into_iter().reduce(f64::max) {
+        let has_current = values
+            .iter()
+            .any(|(_, reset)| reset.is_none_or(|time| time > now));
+        if let Some(binding) = values
+            .into_iter()
+            .filter(|(_, reset)| !has_current || reset.is_none_or(|time| time > now))
+            .map(|(value, _)| value)
+            .reduce(f64::max)
+        {
             providers.push(binding);
         }
     }
@@ -544,7 +574,7 @@ fn tray_anchor(app: &AppHandle) -> tauri::PhysicalPosition<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_title, tray_icon_bytes};
+    use super::{quota_percent, render_title, tray_icon_bytes};
     use serde_json::json;
 
     #[test]
@@ -600,6 +630,15 @@ mod tests {
         let settings = json!({"settings":{"menuBarMetric":"quota","hiddenProviders":["hidden"]}});
         let quotas = json!({"reports":[{"provider":"hidden","quota":{"weeklyPercent":1}}, {"provider":"visible","quota":{"weeklyPercent":75}}]});
         assert_eq!(render_title(&settings, &usage, &quotas), Some("75%".into()));
+    }
+
+    #[test]
+    fn quota_summary_prefers_current_windows_and_falls_back_to_elapsed() {
+        let settings = json!({});
+        let mixed = json!({"reports":[{"provider":"a","quota":{"weeklyPercent":0,"monthlyPercent":100,"monthlyResetAt":1000}}]});
+        let elapsed = json!({"reports":[{"provider":"a","quota":{"monthlyPercent":100,"monthlyResetAt":1000}}]});
+        assert_eq!(quota_percent(&mixed, &settings, 2000.0), Some(0.0));
+        assert_eq!(quota_percent(&elapsed, &settings, 2000.0), Some(100.0));
     }
 
     #[test]
