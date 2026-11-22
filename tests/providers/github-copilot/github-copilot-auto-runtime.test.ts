@@ -226,7 +226,7 @@ describe("Copilot Auto through the Responses pipeline", () => {
     f.config.providers.fallback = { adapter: "openai-responses", authMode: "key", apiKey: "fixture",
       baseUrl: "https://fallback.example.test/v1", fetch: async (_url, init) => {
         fallbackBodies.push(JSON.parse(String(init?.body)));
-        return Response.json({ id: "resp_fallback", object: "response", status: "completed", model: "fallback-model", output });
+        return Response.json({ id: "resp_fallback", object: "response", status: "completed", model: "fallback-model", output, usage: { input_tokens: 2, output_tokens: 3, total_tokens: 5 } });
       } };
     f.config.combos = { mandatoryAuto: { strategy: "failover", targets: [
       { provider: "github-copilot", model: "auto" }, { provider: "fallback", model: "fallback-model" },
@@ -235,10 +235,11 @@ describe("Copilot Auto through the Responses pipeline", () => {
       { provider: "github-copilot", model: "auto" }, { provider: "fallback", model: "fallback-model" },
     ] } };
     const log: RequestLogContext = {};
-    const spendTargets: Array<{ poolId?: string; identityId?: string }> = [];
-    const budget = mode === "policy" ? createRequestExecutionBudget(undefined, undefined, {
-      startRequest: target => { spendTargets.push({ ...target }); }, charge: () => true, refund: () => {},
-    }) : undefined;
+    const journal = spendTestJournal();
+    const ledger = createSpendReservationLedger({ journal, salt: testSpendSalt, policy: spendTestPolicy({ identity: { maxTokens: 100_000 }, pool: { maxTokens: 100_000 } }) });
+    const tracker = createRequestSpendTracker(log, undefined, ledger);
+    // The tracker is the budget's observer, so the fallback's own dispatch books and settles in this ledger.
+    const budget = mode === "policy" ? createRequestExecutionBudget(undefined, undefined, tracker) : undefined;
     const response = await handleResponses(request("hello", false, {
       model: `${mode}/mandatoryAuto`, tool_choice: choice, tools,
     }), f.config, log, { sendBudget: budget });
@@ -251,7 +252,11 @@ describe("Copilot Auto through the Responses pipeline", () => {
     expect(fallbackBodies).toHaveLength(1); expect(fallbackBodies[0].tool_choice).toEqual(choice);
     expect(fallbackBodies[0].tools).toEqual(tools); expect(log.provider).toBe(mode === "combo" ? "combo" : "fallback");
     // The final booking is the fallback's own key, not the refused Copilot candidate.
-    if (mode === "policy") expect(spendTargets.at(-1)).toEqual({ poolId: "fallback", identityId: apiKeyAccountLogLabel("fallback", { reference: "fixture" }) });
+    if (mode === "policy") {
+      tracker.settle(log.usage);
+      expect(journal.lines.map(line => JSON.parse(line)).filter(row => row.kind === "dispatch")).toHaveLength(1);
+      expect(ledger.snapshot("identity", apiKeyAccountLogLabel("fallback", { reference: "fixture" })!)).toMatchObject({ settled: 5, unresolved: 0, reserved: 0 });
+    }
     if (mode === "combo") {
       expect(isComboTargetInCooldown("mandatoryAuto", { provider: "github-copilot", model: "auto" })).toBe(false);
       clearComboSelectionState(); // Reset selection history, retaining any real target cooldown.

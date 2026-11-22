@@ -8,6 +8,7 @@ import {
 } from "../../src/server/responses/reset-replay";
 import { authorizeResendForRecovery } from "../../src/lib/request-resend-gate";
 import type { AdapterRequest } from "../../src/adapters/base";
+import { attachCredentialMask, createOutboundCredentialMask, responseCredentialMask } from "../../src/lib/outbound-credential-registry";
 import { deferProtocolSafeResetRecovery, selectProtocolSafeResetResponse, type ResetSelectionOwner } from "../../src/server/responses/combo-stream-preflight";
 
 const prelude = 'event: response.created\ndata: {"type":"response.created","response":{"id":"first","output":[]}}\n\n';
@@ -98,9 +99,10 @@ describe("early reset selection", () => {
     const replacement = { cancelled: false };
     const commits: ResetSelectionOwner[] = [];
     let acceptedAfterCommit: boolean | undefined;
-    const selected = selectProtocolSafeResetResponse(gatedOriginal(gate.promise, original), responseLog,
+    const originalResponse = attachCredentialMask(gatedOriginal(gate.promise, original), createOutboundCredentialMask({ "x-api-key": "fixture-original" }));
+    const selected = selectProtocolSafeResetResponse(originalResponse, responseLog,
       async (_error, _stage, _signal, accepts) => {
-        const candidate = trackedReplacement(replacement);
+        const candidate = attachCredentialMask(trackedReplacement(replacement), createOutboundCredentialMask({ "x-api-key": "fixture-replacement" }));
         acceptedAfterCommit = accepts(candidate);
         return candidate;
       }, { heartbeatIntervalMs: 15_000, onCommit: (_response, owner) => commits.push(owner) });
@@ -114,8 +116,10 @@ describe("early reset selection", () => {
     const reader = published.body!.getReader();
     // The client already waited one heartbeat interval for this head.
     expect(decoder.decode((await reader.read()).value)).toBe(": keepalive\n\n");
+    const mask = responseCredentialMask(published);
     gate.resolve();
     const rest = await readAll(reader);
+    expect(mask("fixture-replacement")).toBe("[REDACTED]");
     // A read error after the head is committed keeps the reset lane's permissive replacement:
     // the transport died, so the fresh attempt stands in for it whatever its headers say.
     expect(acceptedAfterCommit).toBe(true);
