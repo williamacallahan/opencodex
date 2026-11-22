@@ -323,6 +323,42 @@ for (const kind of ["oauth", "api-key"] as const) {
     expect(requests.filter(request => request.url.includes("quota=1"))).toHaveLength(1);
   });
 
+  test(`${kind} quota survives a push refresh that supersedes the first roster before it lands`, async () => {
+    // Page load: the accounts event stream's first refresh starts a second roster read before the
+    // first lands, and the quota read (started by the first) answers before the second roster.
+    const firstRoster = deferred<Response>();
+    const secondRoster = deferred<Response>();
+    const quota = deferred<Response>();
+    const quotaStarted = deferred<void>();
+    let rosterReads = 0;
+    const rows = ["a", "b"].map(id => ({ id, masked: id, active: id === "a", quotaMode: "probe" as const }));
+    respond = async url => {
+      if (url.includes("quota=1")) { quotaStarted.resolve(); return quota.promise; }
+      return ++rosterReads === 1 ? firstRoster.promise : secondRoster.promise;
+    };
+    const roster = () => Response.json({ activeAccountId: "a", activeId: "a", accounts: rows, keys: rows });
+    let full!: Promise<boolean>;
+    let pushed!: Promise<boolean>;
+    await act(async () => {
+      full = kind === "oauth" ? pools.fetchAccountSets(["fixture"], true) : pools.fetchKeyPools(["fixture"], true);
+      pushed = pools.refreshAccountRosters({ provider: "fixture", kind });
+      firstRoster.resolve(roster());
+      await quotaStarted.promise;
+    });
+    const enriched = rows.map(row => ({ ...row, quota: reading }));
+    await act(async () => {
+      quota.resolve(Response.json({ activeAccountId: "a", activeId: "a", accounts: enriched, keys: enriched }));
+      await full;
+    });
+    await act(async () => {
+      secondRoster.resolve(roster());
+      expect(await pushed).toBe(true);
+    });
+    const current = kind === "oauth" ? pools.accountSets.fixture.accounts : pools.keyPools.fixture;
+    expect(current.map(row => row.id)).toEqual(["a", "b"]);
+    expect(current[0]).toMatchObject({ quota: reading, quotaPending: false, quotaUnavailable: false });
+  });
+
   test(`${kind} rejected manual PUT retires reads begun during the write and reconciles without changing quota health`, async () => {
     const rows = ["a", "b"].map(id => ({ id, masked: id, active: id === "a", quotaMode: "probe" as const,
       quota: reading, quotaUnavailable: true, quotaPending: false }));

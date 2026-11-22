@@ -306,8 +306,9 @@ export function useProviderAccountPools(deps: {
             if (!Array.isArray(quotaData.accounts)) throw new Error("Invalid account quota roster");
             if (!currentQuota()) return false;
             const enriched = selectionRows(quotaData.accounts, quotaData.activeAccountId);
-            setAccountSets(current => !currentQuota() ? current : !currentRoster() ? {
-              ...current, [provider]: { ...current[provider], accounts: mergeLateQuotaRows(current[provider]?.accounts ?? [], enriched) },
+            // As for keys: with no roster landed yet, this enriched read is the roster.
+            setAccountSets(current => !currentQuota() ? current : !currentRoster() && current[provider] !== undefined ? {
+              ...current, [provider]: { ...current[provider], accounts: mergeLateQuotaRows(current[provider].accounts, enriched) },
             } : {
               ...current,
               [provider]: {
@@ -383,9 +384,12 @@ export function useProviderAccountPools(deps: {
             if (!Array.isArray(data.keys)) throw new Error("Invalid key quota roster");
             if (!currentQuota()) return false;
             const enriched = selectionRows(data.keys, data.activeId);
-            setKeyPools(current => currentQuota() ? { ...current, [name]: currentRoster()
+            // A newer roster read can supersede this one before any roster lands (the accounts
+            // event stream's first refresh does on page load). With no rows to merge into, this
+            // enriched read is the only roster: keep it, so the newer read inherits its quota.
+            setKeyPools(current => currentQuota() ? { ...current, [name]: currentRoster() || current[name] === undefined
               ? mergeQuotaRows(enriched, current[name] ?? [], true)
-              : mergeLateQuotaRows(current[name] ?? [], enriched) } : current);
+              : mergeLateQuotaRows(current[name], enriched) } : current);
             const refreshable = enriched.filter(row => row.disabled !== true && supportsQuotaRead(row));
             return !refreshable.some(row => row.quotaUnavailable === true);
           } catch {
