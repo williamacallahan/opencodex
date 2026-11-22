@@ -18,12 +18,16 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
     }
 
     public struct Quota: Codable, Equatable, Sendable {
+        public let provider: String?
+        public let isModelFamily: Bool?
         public let providerLabel: String
         public let windowLabel: String
         public let percent: Double?
         public let resetAt: Double?
 
-        public init(providerLabel: String, windowLabel: String, percent: Double?, resetAt: Double?) {
+        public init(providerLabel: String, windowLabel: String, percent: Double?, resetAt: Double?, provider: String? = nil, isModelFamily: Bool? = nil) {
+            self.provider = provider
+            self.isModelFamily = isModelFamily
             self.providerLabel = providerLabel
             self.windowLabel = windowLabel
             self.percent = percent
@@ -101,7 +105,7 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
             Today(requests: $0.requests, totalTokens: $0.totalTokens, estimatedCostUsd: $0.estimatedCostUsd)
         }
         let quotas = snapshot.quotaRows.map {
-            Quota(providerLabel: $0.providerLabel, windowLabel: $0.windowLabel, percent: $0.percent, resetAt: $0.resetAt?.timeIntervalSince1970)
+            Quota(providerLabel: $0.providerLabel, windowLabel: $0.windowLabel, percent: $0.percent, resetAt: $0.resetAt?.timeIntervalSince1970, provider: $0.provider, isModelFamily: $0.modelId != nil)
         }
         let chart = snapshot.timeline?.projected(snapshot.settings).mapChart(style: snapshot.settings.chartStyle.rawValue)
         return WidgetSnapshot(

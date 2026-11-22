@@ -27,6 +27,12 @@ enum MenuBarTitleSuite {
             let scoped = try! JSONDecoder().decode([QuotaReport].self, from: Data(#"[{"provider":"a","quota":{"weeklyPercent":20,"customWindows":[{"label":"Opus","scope":"model","percent":100}]}}]"#.utf8))
             t.equal(MenuBarTitle.render(settings: CompanionSettings(menuBarMetric: .quota), today: report, quotas: scoped.map { $0.normalized() }), "20%")
         }
+        t.test("menu title: quota prefers current windows and falls back to elapsed") {
+            let reports = try! JSONDecoder().decode([QuotaReport].self, from: Data(#"[{"provider":"a","quota":{"weeklyPercent":0,"monthlyPercent":100,"monthlyResetAt":1}},{"provider":"b","quota":{"monthlyPercent":100,"monthlyResetAt":1}}]"#.utf8))
+            let settings = CompanionSettings(menuBarMetric: .quota)
+            t.equal(MenuBarTitle.render(settings: settings, today: report, quotas: [reports[0].normalized()]), "0%")
+            t.equal(MenuBarTitle.render(settings: settings, today: report, quotas: [reports[1].normalized()]), "100%")
+        }
         t.test("menu title: template replaces placeholders") {
             let settings = CompanionSettings(menuBarTemplate: "{requests}/{totalTokens}/{costUsd}")
             t.equal(MenuBarTitle.render(settings: settings, today: report, quotas: []), "12/3K/$1.25")

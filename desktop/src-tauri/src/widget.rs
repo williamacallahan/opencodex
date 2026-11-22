@@ -1,5 +1,15 @@
+pub(crate) fn reset_at(value: Option<&serde_json::Value>) -> Option<f64> {
+    let value = value.and_then(serde_json::Value::as_f64)?;
+    Some(if value >= 1_000_000_000_000.0 {
+        value / 1000.0
+    } else {
+        value
+    })
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
+    use super::reset_at;
     use crate::companion_query::{timeline_query, timeline_rows};
     use crate::{
         proxy::{ProxyClient, ProxyError},
@@ -25,7 +35,10 @@ mod macos {
     #[derive(Debug, Serialize, serde::Deserialize, Clone, PartialEq)]
     #[serde(rename_all = "camelCase")]
     struct Quota {
+        provider: Option<String>,
         provider_label: String,
+        #[serde(default)]
+        is_model_family: bool,
         window_label: String,
         percent: Option<f64>,
         reset_at: Option<f64>,
@@ -128,15 +141,6 @@ mod macos {
         value.and_then(crate::companion_usage::integer)
     }
 
-    fn reset_at(value: Option<&Value>) -> Option<f64> {
-        let value = number(value)?;
-        Some(if value >= 1_000_000_000_000.0 {
-            value / 1000.0
-        } else {
-            value
-        })
-    }
-
     fn quotas(value: &Value, settings: &Value) -> Vec<Quota> {
         let Some(reports) = value.get("reports").and_then(Value::as_array) else {
             return Vec::new();
@@ -149,6 +153,10 @@ mod macos {
             ) {
                 continue;
             }
+            let provider = report
+                .get("provider")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             let provider_label = report
                 .get("label")
                 .or_else(|| report.get("provider"))
@@ -158,7 +166,10 @@ mod macos {
             let Some(quota) = report.get("quota") else {
                 continue;
             };
-            let mut push = |percent: Option<&Value>, window_label: &str, reset: Option<&Value>| {
+            let mut push = |percent: Option<&Value>,
+                            window_label: &str,
+                            reset: Option<&Value>,
+                            is_model_family: bool| {
                 // JSON null (or any non-number) is an absent window, not a row of dashes: a
                 // weekly-only plan reports `fiveHourPercent: null` and must show weekly only.
                 let percent = number(percent).filter(|value| value.is_finite() && *value >= 0.0);
@@ -168,7 +179,9 @@ mod macos {
                     reset_at(reset).filter(|value| *value > 0.0 && *value < 253_402_300_800.0);
                 if percent.is_some() || reset.is_some() {
                     rows.push(Quota {
+                        provider: provider.clone(),
                         provider_label: provider_label.clone(),
+                        is_model_family,
                         window_label: window_label.to_owned(),
                         percent,
                         reset_at: reset,
@@ -179,28 +192,34 @@ mod macos {
                 quota.get("fiveHourPercent"),
                 "5h",
                 quota.get("fiveHourResetAt"),
+                false,
             );
             push(
                 quota.get("weeklyPercent"),
                 "week",
                 quota.get("weeklyResetAt"),
+                false,
             );
             push(
                 quota.get("monthlyPercent"),
                 "month",
                 quota.get("monthlyResetAt"),
+                false,
             );
             if let Some(windows) = quota.get("customWindows").and_then(Value::as_array) {
-                // Model-family windows (Anthropic Opus) are not provider-wide capacity.
-                for window in windows.iter().filter(|window| {
-                    window.get("modelId").is_none_or(Value::is_null)
-                        && window.get("scope").and_then(Value::as_str) != Some("model")
-                }) {
+                for window in windows {
                     let label = window
                         .get("label")
                         .and_then(Value::as_str)
                         .unwrap_or("window");
-                    push(window.get("percent"), label, window.get("resetAt"));
+                    let is_model_family = window.get("modelId").is_some_and(|id| !id.is_null())
+                        || window.get("scope").and_then(Value::as_str) == Some("model");
+                    push(
+                        window.get("percent"),
+                        label,
+                        window.get("resetAt"),
+                        is_model_family,
+                    );
                 }
             }
         }
@@ -474,7 +493,9 @@ mod macos {
                     estimated_cost_usd: Some(0.12),
                 }),
                 quotas: vec![Quota {
+                    provider: Some("openai".into()),
                     provider_label: "OpenAI".into(),
+                    is_model_family: false,
                     window_label: "week".into(),
                     percent: Some(10.0),
                     reset_at: Some(1.0),
@@ -494,7 +515,7 @@ mod macos {
             };
             assert_eq!(
                 serde_json::to_string(&snapshot).unwrap(),
-                r#"{"schemaVersion":1,"state":"running","stateTitle":"Running","detail":"ok","endpointDisplay":"127.0.0.1:10100","menuTitle":"2K","today":{"requests":2,"totalTokens":1234,"estimatedCostUsd":0.12},"quotas":[{"providerLabel":"OpenAI","windowLabel":"week","percent":10.0,"resetAt":1.0}],"chart":{"start":1.0,"bucketSeconds":3600,"style":"line","series":[{"id":"openai/gpt","points":[1.0,2.0]}]},"lastUpdated":2.0,"generatedAt":3.0}"#
+                r#"{"schemaVersion":1,"state":"running","stateTitle":"Running","detail":"ok","endpointDisplay":"127.0.0.1:10100","menuTitle":"2K","today":{"requests":2,"totalTokens":1234,"estimatedCostUsd":0.12},"quotas":[{"provider":"openai","providerLabel":"OpenAI","isModelFamily":false,"windowLabel":"week","percent":10.0,"resetAt":1.0}],"chart":{"start":1.0,"bucketSeconds":3600,"style":"line","series":[{"id":"openai/gpt","points":[1.0,2.0]}]},"lastUpdated":2.0,"generatedAt":3.0}"#
             );
         }
 
@@ -656,7 +677,7 @@ mod macos {
         }
 
         #[test]
-        fn quota_rows_skip_model_family_windows() {
+        fn quota_rows_keep_and_flag_model_family_windows() {
             let reports = json!({ "reports": [
                 { "provider": "anthropic", "label": "Anthropic", "quota": { "weeklyPercent": 20.0,
                     "customWindows": [
@@ -665,8 +686,25 @@ mod macos {
                         { "label": "Extra", "percent": 40.0 } ] } }
             ] });
             let rows = quotas(&reports, &json!({ "settings": {} }));
-            let windows: Vec<_> = rows.iter().map(|row| row.window_label.as_str()).collect();
-            assert_eq!(windows, ["week", "Extra"]);
+            let windows: Vec<_> = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.window_label.as_str(),
+                        row.is_model_family,
+                        row.provider.as_deref(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                windows,
+                [
+                    ("week", false, Some("anthropic")),
+                    ("Opus", true, Some("anthropic")),
+                    ("Sonnet", true, Some("anthropic")),
+                    ("Extra", false, Some("anthropic"))
+                ]
+            );
         }
 
         #[test]
