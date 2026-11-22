@@ -193,7 +193,7 @@ export function upstreamErrorTailFrame(
 
 function upstreamErrorFailedPayload(message: string, refusalCode?: string, maskCredential?: (text: string) => string, errorType?: string, errorCode?: string): string {
   const diagnostic = redactSecretString(message);
-  const recognized = recognizedUpstreamError({ type: errorType, code: errorCode });
+  const recognized = recognizedUpstreamError({ type: errorType, code: errorCode, message });
   const error = {
     type: refusalCode === undefined ? (recognized?.type ?? "upstream_error") : "invalid_request_error",
     code: refusalCode === undefined ? (recognized?.code ?? "upstream_server_error")

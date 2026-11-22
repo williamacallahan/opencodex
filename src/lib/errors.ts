@@ -788,10 +788,22 @@ const CLIENT_ERROR_STATUS: Record<string, 400 | 401 | 403 | 404> = {
   not_found_error: 404,
 };
 
+/** Throughput limits must not be reported as requests that need compaction. */
+export function isThroughputLimitText(message: string): boolean {
+  return /\bper (?:second|minute|hour|day)\b|\brate limit|\bquota\b|\btpm\b/i.test(message);
+}
+
 /** Narrow structured classes carried through a synthesized bare-error terminal. */
-export function recognizedUpstreamError(error: { type?: unknown; code?: unknown }):
+export function recognizedUpstreamError(error: { type?: unknown; code?: unknown; message?: unknown }):
   { type: string; code: string; httpStatus: 400 | 401 | 403 | 404 | 429 | 503 } | undefined {
   const code = typeof error.code === "string" ? error.code : undefined;
+  if (code === "context_length_exceeded" && typeof error.message === "string" && !isThroughputLimitText(error.message)
+    && error.type !== "server_error" && error.type !== "upstream_error") {
+    return { type: "invalid_request_error", code, httpStatus: 400 };
+  }
+  if (code === "model_not_found" && error.type !== "server_error" && error.type !== "upstream_error") {
+    return { type: "not_found_error", code, httpStatus: 404 };
+  }
   const clientClass = code ?? (typeof error.type === "string" ? error.type : undefined);
   if (clientClass !== undefined && Object.hasOwn(CLIENT_ERROR_STATUS, clientClass)) {
     return { type: clientClass, code: clientClass, httpStatus: CLIENT_ERROR_STATUS[clientClass] };
@@ -823,6 +835,7 @@ export function httpStatusFromTerminalError(error: {
     return 400;
   }
   const message = error.message ?? "";
+  if (error.code === "context_length_exceeded" && isThroughputLimitText(message)) return 429;
   const recognized = recognizedUpstreamError(error);
   // Client-closed messages often arrive as invalid_request_error after classifyError, so a
   // recognized 400 yields to the client-closed check below; every other class keeps its order.
