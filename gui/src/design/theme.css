@@ -91,9 +91,9 @@
 
   --ocx-success: light-dark(#0e9f6e, #34d399);
   --ocx-success-soft: light-dark(rgb(14 159 110 / 0.1), rgb(52 211 153 / 0.14));
-  --ocx-warning: light-dark(#c2410c, #fbbf24);
+  --ocx-warning: light-dark(#9a4a08, #fbbf24);
   --ocx-warning-soft: light-dark(rgb(194 65 12 / 0.1), rgb(251 191 36 / 0.14));
-  --ocx-danger: light-dark(#dc2626, #f87171);
+  --ocx-danger: light-dark(#b91c1c, #f87171);
   --ocx-danger-soft: light-dark(rgb(220 38 38 / 0.1), rgb(248 113 113 / 0.14));
 
   /* React Bits App UI blocks read these; keep them on the same palette */
