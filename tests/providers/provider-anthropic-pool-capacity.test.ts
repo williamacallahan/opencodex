@@ -86,6 +86,33 @@ test("an enabled Anthropic account pool reports the pool-wide capacity estimate 
   expect(result?.aggregation?.fiveHour?.nextRecoveryPercent).toBeCloseTo(100 / 3, 5);
 });
 
+test("a cold pool waits for its inactive accounts instead of publishing an active-only estimate", async () => {
+  const utilization = new Map(getAccountSet("anthropic")!.accounts.map((row, index) => [
+    `Bearer ${row.credential.access}`, [90, 0, 30][index],
+  ]));
+  globalThis.fetch = (async (_input, init) => Response.json({
+    five_hour: { utilization: utilization.get(new Headers(init?.headers).get("Authorization") ?? "") },
+  })) as typeof fetch;
+
+  const result = (await fetchProviderQuotaReports(config(true))).reports.find(row => row.provider === "anthropic");
+
+  expect(result?.quota.fiveHourPercent).toBe(40);
+  expect(result?.aggregation).toMatchObject({ includedAccounts: 3, excludedAccounts: 0, incomplete: false });
+});
+
+test("a recently checked seat is refreshed when its five-hour window rolls over", async () => {
+  const [, b, c] = ids as [string, string, string];
+  const now = Date.now();
+  setCachedProviderAccountQuotaForTests("anthropic", b, {
+    fiveHourPercent: 80, fiveHourResetAt: now - 1, weeklyPercent: 20, updatedAt: now - 100,
+  });
+  setCachedProviderAccountQuotaForTests("anthropic", c, { fiveHourPercent: 40, weeklyPercent: 20, updatedAt: now });
+
+  const row = (await fetchProviderQuotaReports(config(true))).reports.find(report => report.provider === "anthropic");
+  expect(row?.quota.fiveHourPercent).toBeCloseTo(40);
+  expect(row?.aggregation?.fiveHour).toMatchObject({ includedAccounts: 3, incomplete: false });
+});
+
 test("a paused pool account is excluded from the estimate and reported as incomplete coverage", async () => {
   const [, b, c] = ids as [string, string, string];
   const now = Date.now();
@@ -115,21 +142,34 @@ test("pausing an inactive pool account retires the cached pooled report", async 
   const now = Date.now();
   setCachedProviderAccountQuotaForTests("anthropic", b, { fiveHourPercent: 100, weeklyPercent: 100, updatedAt: now });
   setCachedProviderAccountQuotaForTests("anthropic", c, { fiveHourPercent: 10, weeklyPercent: 0, updatedAt: now });
-  let probes = 0;
-  const probe = globalThis.fetch;
-  globalThis.fetch = (async (input, init) => { probes++; return probe(input, init); }) as typeof fetch;
   const cfg = config(true);
-  clearProviderQuotaCache();
 
   const first = (await fetchProviderQuotaReports(cfg)).reports.find(item => item.provider === "anthropic");
   expect(first?.aggregation).toMatchObject({ includedAccounts: 3, pausedAccounts: 0 });
-  const afterFirst = probes;
-  // Pausing a seat that is not active leaves the active account and the cache key unchanged.
+  // The active account stays the same, but the paused seat must no longer contribute.
   await setAccountPaused("anthropic", b, true);
 
   const second = (await fetchProviderQuotaReports(cfg)).reports.find(item => item.provider === "anthropic");
-  expect(probes).toBeGreaterThan(afterFirst);
+  expect(second?.quota.fiveHourPercent).toBe(25);
   expect(second?.aggregation).toMatchObject({ includedAccounts: 2, pausedAccounts: 1, incomplete: true });
+});
+
+test("a pool without an active reading still reports measured siblings and never substitutes one for the active account", async () => {
+  const [active, sibling] = getAccountSet("anthropic")!.accounts;
+  globalThis.fetch = Object.assign(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const bearer = new Headers(init?.headers).get("authorization");
+    return bearer === `Bearer ${sibling!.credential.access}`
+      ? Response.json({ five_hour: { utilization: 55 } }) : new Response(null, { status: 503 });
+  }, { preconnect: originalFetch.preconnect });
+  const cfg = config(true);
+  const first = (await fetchProviderQuotaReports(cfg)).reports.find(row => row.provider === "anthropic");
+  expect(first?.quota.fiveHourPercent).toBeCloseTo(55);
+  expect(first?.aggregation).toMatchObject({ includedAccounts: 1, excludedAccounts: 2, incomplete: true, currentAccount: { quota: null } });
+
+  setCachedProviderAccountQuotaForTests("anthropic", active!.id, { fiveHourPercent: 5, updatedAt: Date.now() });
+  const next = (await fetchProviderQuotaReports(cfg)).reports.find(row => row.provider === "anthropic");
+  expect(next?.quota.fiveHourPercent).toBeCloseTo(30);
+  expect(next?.aggregation?.currentAccount?.quota?.fiveHourPercent).toBe(5);
 });
 
 test("an enabled pool holding one account reports that account's own reading", async () => {

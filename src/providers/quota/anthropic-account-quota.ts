@@ -52,8 +52,14 @@ export async function fetchAnthropicAccountQuota(
   // A setup token (no refresh grant) is inference-only and the usage endpoint refuses it. Its only
   // readings are the ones response headers recorded, so every reader gets those and nothing is sent.
   const headerOnly = initialRow.credential.refresh === "";
-  if (cached && (headerOnly || !force && Date.now() - cached.ts < ACCOUNT_QUOTA_TTL_MS)) {
-    return { ...cached, quota: normalizeAnthropicQuota(cached.quota, Date.now()) };
+  if (cached) {
+    const now = Date.now();
+    const quota = normalizeAnthropicQuota(cached.quota, now);
+    // A window can roll over before the probe TTL. Read its replacement rather than letting
+    // a just-expired window drop out of the pool while its cached probe still looks fresh.
+    if (headerOnly || !force && quota === cached.quota && now - cached.ts < ACCOUNT_QUOTA_TTL_MS) {
+      return { ...cached, quota };
+    }
   }
   if (headerOnly) return unavailable();
   let token: string;

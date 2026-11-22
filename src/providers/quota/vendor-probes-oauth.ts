@@ -1,11 +1,9 @@
-import { markAnthropicFamilyEnumeration } from "./anthropic-family-headers";
 import { effectiveCodexAuthAccountId, fetchMainAccountInfoSnapshot, listCodexAuthAccountsSnapshot } from "../../codex/auth-api";
 import { MAIN_CODEX_ACCOUNT_ID } from "../../codex/main-account";
-import { getValidAccessToken } from "../../oauth";
 import { loadConfig } from "../../config";
-import { configuredAnthropicInstance, type AnthropicInstanceId } from "../anthropic-instance";
+import { configuredAnthropicInstance } from "../anthropic-instance";
 import { isAnthropicPoolEnabledFor } from "../../oauth/anthropic-pool-config";
-import { captureOAuthAccountSelection, credentialGeneration, getAccountCredential, getAccountSet } from "../../oauth/store";
+import { credentialGeneration, getAccountCredential, getAccountSet } from "../../oauth/store";
 import { hydrateKiroAccountState, persistKiroAccountState } from "../kiro-account-state-disk";
 import { kiroProbeCurrent, kiroProbeIdentity } from "./kiro-account-probe";
 import { fetchMuseKeyQuotaSnapshot } from "../muse-key-quota";
@@ -46,7 +44,9 @@ import {
 } from "./account-cache";
 import type { OcxConfig, OcxProviderConfig } from "../../types";
 import type { ProviderQuota, ProviderQuotaWindow } from "../quota-types";
-import { AnthropicQuotaProbeOwnershipError, anthropicCooldownRecoveryFor } from "./anthropic-cooldown-recovery";
+import { mapQuotaRoster } from "../quota-key-accounts";
+import { fetchAnthropicAccountQuota } from "./anthropic-account-quota";
+import type { AnthropicInstanceId } from "../anthropic-instance-id";
 
 const XAI_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing";
 const XAI_CREDITS_URL = `${XAI_BILLING_URL}?format=credits`;
@@ -284,126 +284,100 @@ export async function fetchAnthropicUsageProbeForInstance(
   return probe;
 }
 
-/** Pool switch plus each seat's routability, in store order; a change retires a cached pooled report. */
-function anthropicPoolState(config: OcxConfig, instance: AnthropicInstanceId): string {
-  const accounts = getAccountSet(instance)?.accounts ?? [];
-  return JSON.stringify([isAnthropicPoolEnabledFor(config, instance),
-    accounts.map(row => [row.id, row.paused === true, row.needsReauth === true])]);
-}
-
-/**
- * Pooled Anthropic report: the same display-only configured-weight estimate the Codex pool row
- * carries, so the Providers overview shows pool-wide 5-hour/weekly bars, the next recovery and the
- * effective account instead of the active seat alone.
- *
- * Only when the account pool is enabled and holds more than one account: with the pool off,
- * requests are served by the active account, so its own reading is the provider's quota. Each
- * account reads its last-good per-account row (the active one was just refreshed above); Anthropic
- * reports no seat tier, so every routable account weighs 1. Paused, reauth and stale accounts are
- * excluded and surface as incomplete coverage, exactly as for Codex.
- */
-function anthropicPoolReport(
-  provider: string,
-  instance: AnthropicInstanceId,
-  config: OcxConfig,
-  activeAccountId: string,
-  activeQuota: ProviderQuota,
-): ProviderQuotaReport | null {
-  if (!isAnthropicPoolEnabledFor(config, instance)) return null;
-  const accounts = getAccountSet(instance)?.accounts ?? [];
-  if (accounts.length < 2) return null;
-  const capacity = aggregateCodexPoolCapacity(accounts.map(row => ({
-    isMain: false,
-    active: row.id === activeAccountId,
-    weight: 1,
-    paused: row.paused === true,
-    needsReauth: row.needsReauth === true,
-    quota: (row.id === activeAccountId ? activeQuota : getCachedProviderAccountQuota(instance, row.id)) as CodexCapacityQuota | null,
-  })));
-  if (!capacity.aggregation || !capacity.quota) return null;
-  return report(
-    provider,
-    "anthropic:oauth-usage",
-    capacity.quota as ProviderQuota,
-    publicCapacityAggregation(capacity.aggregation, "aggregate"),
-  );
-}
-
 /** `config` is the caller's live object; currency re-reads it instead of reloading the file. */
-export async function fetchAnthropicQuota(provider: string, config: OcxConfig = loadConfig()): Promise<ProviderQuotaReport | null> {
+export async function fetchAnthropicQuota(
+  provider: string, config: OcxConfig = loadConfig(), force = false, resetPoll = false,
+): Promise<ProviderQuotaReport | null> {
   const instance = configuredAnthropicInstance(config, provider);
   const target = config.providers[provider];
   if (!instance || target?.disabled || target && target.authMode !== "oauth") return null;
   const targetIdentity = JSON.stringify(target);
   const targetCurrent = () => configuredAnthropicInstance(config, provider) === instance
     && JSON.stringify(config.providers[provider]) === targetIdentity;
-  const recovery = anthropicCooldownRecoveryFor(instance);
-  // Capture the account we intend to probe before awaiting — a mid-flight active
-  // switch must not seed the wrong account's cache with this response.
-  const selection = captureOAuthAccountSelection(instance);
-  const probedAccountId = selection?.accountId;
-  const initialRow = getAccountSet(instance)?.accounts.find(row => row.id === probedAccountId);
-  // The active seat holds a setup token, which the usage endpoint refuses: report from the reading
-  // response headers recorded for it, and send nothing.
-  if (probedAccountId && initialRow?.credential.refresh === "") {
-    const headerQuota = getCachedProviderAccountQuota(instance, probedAccountId) as ProviderQuota | null;
-    if (!headerQuota) return null;
-    const pooledHeaderReport = anthropicPoolReport(provider, instance, config, probedAccountId, headerQuota);
-    if (pooledHeaderReport) observedQuotaFor.set(pooledHeaderReport, headerQuota);
-    return pooledHeaderReport ?? report(provider, "anthropic:oauth-usage", headerQuota);
-  }
   const epoch = captureProviderAccountQuotaEpoch(instance);
-  const incarnation = probedAccountId ? recovery.reserveAnthropicAccountIncarnation(probedAccountId) : undefined;
-  const probedAccountKey = probedAccountId ? accountCacheKey(instance, probedAccountId) : null;
-  const writerGeneration = captureConfigGeneration();
-  let accessToken: string;
+  const poolEnabled = isAnthropicPoolEnabledFor(config, instance);
+  const initial = getAccountSet(instance);
+  if (!initial?.accounts.length) return null;
+  const scopeCurrent = () => targetCurrent() && epoch === captureProviderAccountQuotaEpoch(instance)
+    && poolEnabled === isAnthropicPoolEnabledFor(config, instance);
+  const accountsToRead = initial.accounts.filter(row => !row.paused && !row.needsReauth
+    && (poolEnabled || row.id === initial.activeAccountId))
+    .toSorted((a, b) => Number(b.id === initial.activeAccountId) - Number(a.id === initial.activeAccountId));
+  const eligibleAtStart = new Map(accountsToRead.map(row => [row.id, row]));
+  // The dashboard and account endpoints share each seat's cached reading and in-flight probe.
+  // Bound the whole wait: a large pool must not block every other provider's report.
+  let deadlineReached = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let activeProbeSucceeded = false;
   try {
-    accessToken = await getValidAccessToken(instance);
-  } catch {
-    return null;
+    await Promise.race([
+      mapQuotaRoster(accountsToRead, async row => {
+        if (deadlineReached || !scopeCurrent()) return;
+        const reading = await fetchAnthropicAccountQuota(instance, row.id, force && (!resetPoll || row.id === initial.activeAccountId), config);
+        if (row.id === initial.activeAccountId) {
+          activeProbeSucceeded = !reading.unavailable && reading.isCurrent?.() !== false && !!reading.quota;
+        }
+      }),
+      new Promise<void>(resolve => {
+        timer = setTimeout(() => { deadlineReached = true; resolve(); }, 2 * REQUEST_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
-  if (!probedAccountId || !probedAccountKey) return null;
-  const currentRow = getAccountSet(instance)?.accounts.find(row => row.id === probedAccountId);
-  if (!initialRow || !currentRow || initialRow.loginId !== currentRow.loginId || initialRow.addedAt !== currentRow.addedAt
-    || epoch !== captureProviderAccountQuotaEpoch(instance) || recovery.anthropicAccountIncarnation(probedAccountId) !== incarnation) return null;
-  let quota: ProviderQuota | null;
-  let anthropicCurrent: (() => boolean) | undefined; let anthropicPublish: (() => void) | undefined;
-  try {
-    const result = await recovery.probeAnthropicQuotaWithRecovery(probedAccountId, accessToken,
-      fresh => {
-        if (!targetCurrent()) throw new AnthropicQuotaProbeOwnershipError("quota target changed");
-        recovery.assertAnthropicQuotaSendAllowed(probedAccountId, accessToken);
-        return fetchAnthropicUsageQuotaForInstance(instance, accessToken, fresh);
-      },
-      () => targetCurrent() && mayCommitAccountQuotaKey(probedAccountKey, writerGeneration));
-    if (result && !result.isCurrent()) return null;
-    quota = result?.quota ?? null;
-    anthropicCurrent = result?.isCurrent; anthropicPublish = result?.publishDecisionQuota;
-  } catch (error) {
-    if (error instanceof AnthropicQuotaProbeOwnershipError) return null;
-    throw error;
+  if (!scopeCurrent()) return null;
+  const roster = getAccountSet(instance);
+  if (!roster?.accounts.length) return null;
+  const pooled = poolEnabled && roster.accounts.length > 1;
+  const belongsToBatch = (row: (typeof roster.accounts)[number]) => {
+    const started = eligibleAtStart.get(row.id);
+    return started?.loginId === row.loginId && started?.addedAt === row.addedAt
+      && started?.pauseRevision === row.pauseRevision;
+  };
+  if (roster.accounts.some(row => !row.paused && !row.needsReauth
+    && (pooled || row.id === roster.activeAccountId) && !belongsToBatch(row))) return null;
+
+  const now = Date.now();
+  const rows = roster.accounts.map(row => ({
+    isMain: false,
+    active: row.id === roster.activeAccountId,
+    weight: 1,
+    paused: row.paused === true,
+    needsReauth: row.needsReauth === true,
+    quota: getCachedProviderAccountQuota(instance, row.id),
+  }));
+  const activeQuota = rows.find(row => row.active && !row.paused && !row.needsReauth)?.quota ?? null;
+  const source = "anthropic:oauth-usage";
+  const capacity = pooled ? aggregateCodexPoolCapacity(rows, now) : null;
+  const quotaReport = capacity?.aggregation ? {
+    provider,
+    label: providerLabel(provider),
+    source,
+    quota: capacity.quota ?? { updatedAt: now },
+    updatedAt: capacity.quota?.updatedAt ?? now,
+    aggregation: publicCapacityAggregation(capacity.aggregation, capacity.quota ? "aggregate" : "coverage-only"),
+  } : activeQuota && now - activeQuota.updatedAt < CODEX_CAPACITY_MAX_QUOTA_AGE_MS
+    ? report(provider, source, activeQuota) : null;
+  if (!quotaReport) return null;
+  // The pool estimate must never become the reset detector's reading of its active account.
+  if (pooled || !activeProbeSucceeded) {
+    observedQuotaFor.set(quotaReport, activeProbeSucceeded && roster.activeAccountId === initial.activeAccountId
+      ? activeQuota ?? { updatedAt: now } : { updatedAt: now });
   }
-  if (!quota) return null;
-  // Share the active-account probe with the per-account cache so Providers-page
-  // loads do not double-hit Anthropic's rate-limited usage endpoint.
-  if (probedAccountId && probedAccountKey) {
-    const stillOwnsToken = getAccountCredential(instance, probedAccountId)?.access === accessToken;
-    if (stillOwnsToken && anthropicCurrent?.() && mayCommitAccountQuotaKey(probedAccountKey, writerGeneration)) {
-      accountQuotaCache.set(probedAccountKey, { ts: Date.now(), quota, isCurrent: anthropicCurrent,
-        anthropicCredentialGeneration: credentialGeneration(currentRow.credential) }); anthropicPublish?.();
-    }
-  }
-  const pooledReport = anthropicPoolReport(provider, instance, config, probedAccountId, quota);
-  const quotaReport = pooledReport ?? report(provider, "anthropic:oauth-usage", quota);
-  // The estimate carries no reset times, so reset detection keeps observing the active seat's reading.
-  if (pooledReport) observedQuotaFor.set(pooledReport, quota);
-  // Current only while the pool switch and membership are unchanged: pausing, resuming or reauthorizing
-  // an inactive seat changes the aggregate, and turning the pool on or adding a seat changes the report.
-  const poolState = anthropicPoolState(config, instance);
-  if (quotaReport && anthropicCurrent) {
-    accountReportCurrent.set(quotaReport, () => anthropicCurrent() && anthropicPoolState(config, instance) === poolState
-      && getAccountSet(instance)?.activeAccountId === probedAccountId);
-  }
+  const rosterIdentity = (set: NonNullable<typeof roster>) => JSON.stringify([set.activeAccountId,
+    set.accounts.map(row => [row.id, row.paused === true, row.needsReauth === true, row.pauseRevision, credentialGeneration(row.credential)])]);
+  const identity = rosterIdentity(roster);
+  const evidence = roster.accounts.flatMap((row, index) =>
+    !row.paused && !row.needsReauth && (pooled || row.id === roster.activeAccountId)
+      ? [{ id: row.id, quota: rows[index]?.quota ?? null }] : []);
+  accountReportCurrent.set(quotaReport, () => {
+    const current = getAccountSet(instance);
+    return !!current && scopeCurrent() && rosterIdentity(current) === identity
+      && evidence.every(({ id, quota }) => {
+        const latest = getCachedProviderAccountQuota(instance, id);
+        return latest === quota || JSON.stringify(latest) === JSON.stringify(quota);
+      });
+  });
   return quotaReport;
 }
 

@@ -121,11 +121,11 @@ async function maybeFetchProviderQuota(
   provider: OcxProviderConfig,
   config: OcxConfig,
   forceRefresh: boolean,
-  prefetchedCodexSnapshot?: CodexAuthAccountsSnapshotPromise,
+  prefetchedCodexSnapshot?: CodexAuthAccountsSnapshotPromise, resetPoll = false,
 ): Promise<ProviderQuotaProbeResult> {
   if (provider.disabled === true) return null;
   try {
-    const result = await probeProviderQuota(name, provider, config, forceRefresh, prefetchedCodexSnapshot);
+    const result = await probeProviderQuota(name, provider, config, forceRefresh, prefetchedCodexSnapshot, resetPoll);
     if (result !== null) clearQuotaProbeWarnings(name);
     return result;
   } catch (error) {
@@ -139,14 +139,14 @@ async function probeProviderQuota(
   provider: OcxProviderConfig,
   config: OcxConfig,
   forceRefresh: boolean,
-  prefetchedCodexSnapshot?: CodexAuthAccountsSnapshotPromise,
+  prefetchedCodexSnapshot?: CodexAuthAccountsSnapshotPromise, resetPoll = false,
 ): Promise<ProviderQuotaProbeResult> {
   if (provider.adapter === "claude-cli") return await fetchClaudeCliObservedQuota(name, forceRefresh);
   if (isBuiltInChatGptForwardProvider(name, provider)) {
     return await fetchChatGptForwardQuota(config, name, provider, forceRefresh, prefetchedCodexSnapshot);
   }
   if (provider.authMode === "oauth" && explicitAccountReader(name)) return await fetchExplicitCurrentQuota(name, provider, config);
-  if (provider.authMode === "oauth" && configuredAnthropicInstance(config, name)) return await fetchAnthropicQuota(name, config);
+  if (provider.authMode === "oauth" && configuredAnthropicInstance(config, name)) return await fetchAnthropicQuota(name, config, forceRefresh, resetPoll);
   if (provider.authMode === "oauth" && name === ANTIGRAVITY_OAUTH_STORE_KEY) return await fetchAntigravityQuota(name, { ...provider });
   if (provider.authMode === "oauth" && name === "kiro") return await fetchKiroQuota(name);
   // meta-muse: only a device-logged-in account can be probed; others fall back to the last in-band observation.
@@ -251,7 +251,7 @@ export function flushProviderQuotaObservationsForTests(): Promise<void> {
 }
 
 /** Collect provider quota reports, using the cache unless refresh is forced, and publish the secret-free decision evidence from the collected reports. */
-export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh = false): Promise<ProviderQuotaResponse> {
+export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh = false, { resetPoll = false } = {}): Promise<ProviderQuotaResponse> {
   // A passive read (a Remote Link Child's, #6959) shows the held reports and starts nothing.
   if (isPassiveRead()) { const held = heldProviderQuotaReports(config); return { ...held, reports: refreshHeldClaudeCliReports(config, held.reports) }; }
   // A Pool report's cache signature and provider fetch must share one account snapshot.
@@ -290,7 +290,7 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
     const previous = previousCache && previousCache.key === key ? previousCache.response.reports : [];
     const probeResults = await Promise.all(
       Object.entries(config.providers).map(([name, provider]) => (
-        maybeFetchProviderQuota(name, provider, config, forceRefresh, prefetchedCodexSnapshot)
+        maybeFetchProviderQuota(name, provider, config, forceRefresh, prefetchedCodexSnapshot, resetPoll)
       )),
     );
     await providerQuotaBeforePublishForTests?.();

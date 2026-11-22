@@ -33,6 +33,7 @@ import { canCreateJevAutoFrom } from "../jev-decision-service";
 import { useProviderSettingsDeepLink } from "./providers-deep-link";
 import { subscribeKiroDeviceFinal } from "../kiro-device-login-finalizer";
 import type { BrowserLaunch } from "../oauth-browser-launch";
+import { anthropicInstanceRowShapeMatches } from "../../../src/providers/anthropic-instance-id";
 
 /** The page's real refresh tickets: only the captured report epoch and account read can settle them. */
 // oxlint-disable-next-line react/only-export-components -- keep the page-owned coordinator and its direct race tests in the authorized owner.
@@ -429,6 +430,17 @@ export default function Providers({ apiBase, targetKey, targetLabel }: { apiBase
     return refreshAccountRosters(target);
   }, [refreshAccountRosters, oauthCardProviders, keyCardProviders]);
   const recoverSelectionStream = useAccountSelectionEvents(apiBase, config !== null, refreshSelection);
+  const selectedProvider = workspaceSelected ? config?.providers[workspaceSelected] : undefined;
+  const selectedAccount = workspaceSelected ? accountSets[workspaceSelected]?.accounts.find(row => row.active) : undefined;
+  const unmeasuredAccount = selectedAccount?.quotaMode === "probe" && selectedAccount.quota === undefined
+    && !selectedAccount.quotaPending && !selectedAccount.quotaUnavailable && !selectedAccount.paused
+    && !selectedAccount.needsReauth ? selectedAccount.id : undefined;
+  useEffect(() => {
+    if (workspaceSelected && selectedProvider?.authMode === "oauth" && unmeasuredAccount
+      && anthropicInstanceRowShapeMatches(workspaceSelected, selectedProvider)) {
+      void fetchAccountSets([workspaceSelected]);
+    }
+  }, [fetchAccountSets, selectedProvider, unmeasuredAccount, workspaceSelected]);
   const rosterKey = JSON.stringify([draftTargetKey, apiBase, oauthCardProviders.toSorted(), keyCardProviders.toSorted()]);
   const rosterRecoveryKeyRef = useRef<string | null>(null);
   useKeyedClientResource(`provider-rosters:${rosterKey}`, [rosterKey], async signal => {

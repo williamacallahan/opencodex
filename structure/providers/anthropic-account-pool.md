@@ -240,7 +240,15 @@ the new generation, so a refreshed account keeps its usage and threshold standin
 and a different-identity replacement publish no rotation, so their old readings stay historical.
 `captureProviderAccountQuotaEpoch(instance)` and the cache keys in
 `src/providers/quota/account-cache.ts` are per instance, so clearing Pool 2 quota never
-invalidates the primary pool. With the pool on and two or more accounts, `fetchAnthropicQuota` (`src/providers/quota/vendor-probes-oauth.ts`) reports a display-only estimate via `aggregateCodexPoolCapacity`: seats weigh 1, inactive seats use their last-good row (no extra probes), paused, reauth or stale seats count as incomplete coverage. Every Anthropic report is current only while the pool switch and each seat's id, paused and reauth state are unchanged; pool off or one account keeps the active report. Quota reset detection observes the active seat's own reading (`observedQuotaFor`), never the estimate, which has no reset times (`tests/providers/provider-anthropic-pool-capacity.test.ts`).
+invalidates the primary pool. `fetchAnthropicQuota` (`src/providers/quota/vendor-probes-oauth.ts`)
+uses the same account reader as the Accounts tab. An enabled pool with two or more accounts
+waits for the bounded reads and then computes an equal-weight estimate from current account
+readings. Setup tokens contribute only from observed response headers. Missing, stale, paused,
+or reauthenticating seats are flagged as incomplete; if none can contribute, the report gives
+coverage without a percentage. A single account or disabled pool uses only the active reading.
+Report currency follows the configured instance and the account roster. Reset detection sees
+only the active seat's own reading, never the pool estimate
+(`tests/providers/provider-anthropic-pool-capacity.test.ts`).
 
 A probe that yields no quota names one closed `quotaFailure` code from
 `src/providers/quota/failure-codes.ts`: `account_unavailable` when no usable credential could

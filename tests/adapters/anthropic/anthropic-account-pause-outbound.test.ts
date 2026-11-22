@@ -2,7 +2,6 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as oauth from "../../../src/oauth";
 import { captureProviderGather } from "../../../src/codex/catalog/gather-capture";
 import { fetchProviderModelsWithAuth } from "../../../src/codex/catalog/provider-models";
 import { ProviderOutboundSendCancelledError, providerOutboundGet } from "../../../src/lib/provider-outbound";
@@ -60,7 +59,7 @@ test("per-account quota does not send when pause commits while token resolution 
 test("provider quota does not send when pause commits while token resolution waits", async () => {
   const started = Promise.withResolvers<void>();
   const token = Promise.withResolvers<string>();
-  const read = spyOn(oauth, "getValidAccessToken").mockImplementation(async () => {
+  const read = spyOn(accountCache, "getTokenForAccountQuotaProbe").mockImplementation(async () => {
     started.resolve();
     return token.promise;
   });

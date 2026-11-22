@@ -80,7 +80,7 @@ async function tick(): Promise<void> {
     if (entryGeneration !== generation) return;
     // Forced: an unforced call would be served from the 5-minute cache and produce no new
     // observation at all.
-    await fetchProviderQuotaReports(loadConfig(), true);
+    await fetchProviderQuotaReports(loadConfig(), true, { resetPoll: true });
   } catch {
     // A failed probe is not an error worth surfacing: the next tick tries again.
   } finally {
