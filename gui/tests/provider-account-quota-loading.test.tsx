@@ -359,6 +359,43 @@ for (const kind of ["oauth", "api-key"] as const) {
     expect(current[0]).toMatchObject({ quota: reading, quotaPending: false, quotaUnavailable: false });
   });
 
+  test(`${kind} an early quota read lends quota by ID but never restores a removed row or its selection`, async () => {
+    const firstRoster = deferred<Response>();
+    const secondRoster = deferred<Response>();
+    const quota = deferred<Response>();
+    const quotaStarted = deferred<void>();
+    let rosterReads = 0;
+    const before = ["a", "b"].map(id => ({ id, masked: id, active: id === "a", quotaMode: "probe" as const }));
+    const after = [{ id: "b", masked: "b", active: true, quotaMode: "probe" as const }];
+    respond = async url => {
+      if (url.includes("quota=1")) { quotaStarted.resolve(); return quota.promise; }
+      return ++rosterReads === 1 ? firstRoster.promise : secondRoster.promise;
+    };
+    let full!: Promise<boolean>;
+    let pushed!: Promise<boolean>;
+    await act(async () => {
+      full = kind === "oauth" ? pools.fetchAccountSets(["fixture"], true) : pools.fetchKeyPools(["fixture"], true);
+      pushed = pools.refreshAccountRosters({ provider: "fixture", kind });
+      firstRoster.resolve(Response.json({ activeAccountId: "a", activeId: "a", accounts: before, keys: before }));
+      await quotaStarted.promise;
+    });
+    const enriched = before.map(row => ({ ...row, quota: reading }));
+    await act(async () => {
+      quota.resolve(Response.json({ activeAccountId: "a", activeId: "a", accounts: enriched, keys: enriched }));
+      await full;
+    });
+    // Account "a" was removed meanwhile; no roster has landed yet, so nothing may show it.
+    expect(kind === "oauth" ? pools.accountSets.fixture : pools.keyPools.fixture).toBeUndefined();
+    await act(async () => {
+      secondRoster.resolve(Response.json({ activeAccountId: "b", activeId: "b", accounts: after, keys: after }));
+      expect(await pushed).toBe(true);
+    });
+    const current = kind === "oauth" ? pools.accountSets.fixture.accounts : pools.keyPools.fixture;
+    expect(current.map(row => [row.id, row.active])).toEqual([["b", true]]);
+    expect(current[0]).toMatchObject({ quota: reading, quotaPending: false });
+    if (kind === "oauth") expect(pools.accountSets.fixture.activeAccountId).toBe("b");
+  });
+
   test(`${kind} rejected manual PUT retires reads begun during the write and reconciles without changing quota health`, async () => {
     const rows = ["a", "b"].map(id => ({ id, masked: id, active: id === "a", quotaMode: "probe" as const,
       quota: reading, quotaUnavailable: true, quotaPending: false }));
