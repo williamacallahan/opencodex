@@ -184,7 +184,7 @@ import { resolveProviderTransport } from "../../providers/xai-transport";
 import type { WsData } from "../ws-bridge";
 import { codexAccountSelectionForTurn, registerTurn, trackStreamLifetime, unregisterTurn } from "../lifecycle";
 import type { AdmissionLease } from "../../lib/admission";
-import { redactSecretString } from "../../lib/redact";
+import { REDACTED_SECRET, redactSecretString } from "../../lib/redact";
 import { readBoundedResponseBytes } from "../../lib/bounded-body";
 import { resolveConnectTimeoutMs, resolveStallTimeoutMs } from "../../stall-timeout";
 import { isLocalUpstream } from "../../lib/local-upstream";
@@ -617,7 +617,7 @@ function compactResponseHeaders(upstream: Response, mask: (text: string) => stri
     // Retry advice is rebuilt from a validated value, never relayed as upstream text.
     if (name === "retry-after") {
       const advice = validateClientRetryAfterHeader(value, Date.now());
-      if (advice !== undefined) headers.set(name, advice);
+      if (advice !== undefined && mask(advice) === advice) headers.set(name, advice);
     } else headers.set(name, mask(value));
   }
   return headers;
@@ -631,6 +631,8 @@ function maskCompactBody(bytes: Uint8Array, mask: (text: string) => string): str
       if (typeof value === "string") return mask(value);
       if (Array.isArray(value)) return value.map(walk);
       if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [mask(key), walk(item)]));
+      // A number that is exactly the credential is an echo; a short credential inside a longer number is not.
+      if (typeof value === "number" && mask(String(value)) === REDACTED_SECRET) return REDACTED_SECRET;
       return value;
     };
     return JSON.stringify(walk(JSON.parse(text)));

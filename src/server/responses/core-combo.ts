@@ -990,8 +990,30 @@ export async function executeComboResponses(
       // An identity or pool spend denial is this target's alone: skip it uncooled while another target remains.
       const restoreSpendStamp = takeScopedSpendDenial(logCtx);
       if (restoreSpendStamp) {
-        const skipped = advanceComboAfterFailure(config, pick, { cooldownScope: "none", eligible: targetEligible, now: Date.now() });
+        const skipNow = Date.now();
+        const skipped: ComboPick | null = advanceComboAfterFailure(config, pick, { cooldownScope: "none" as const, eligible: targetEligible, now: skipNow })
+          ?? await pickWithWait({
+            exclude: pick.attempted,
+            eligible: targetEligible,
+            cooldownReprobeTargets: pick.cooldownReprobeTargets ? Object.entries(pick.cooldownReprobeTargets) : undefined,
+            now: skipNow,
+          });
         if (skipped) {
+          // The skip moves the request to another destination, so the fallback policy decides it
+          // exactly as it decides a hop after a failed send.
+          const nextRoute = routeConcreteModel(config, `${skipped.target.provider}/${skipped.target.model}`);
+          const hop = guardFallbackHop(config, {
+            site: "combo",
+            route: `combo/${comboId}`,
+            aliases: [requestedModel],
+            from: { provider: targetRoute.providerName, model: targetRoute.modelId },
+            to: { provider: nextRoute.providerName, model: nextRoute.modelId },
+            trigger: fallbackTriggerForStatus(429),
+            admission: options.admission,
+          });
+          if (!hop.ok) return hop.response;
+          const declaredCommit = pendingHopCommit;
+          pendingHopCommit = declaredCommit ? () => { declaredCommit(); hop.commit(); } : hop.commit;
           restoreSpendStamp();
           pick = skipped;
           continue;
@@ -1387,6 +1409,8 @@ export async function executeComboResponses(
         // model through another wire via `modelAdapters`, and an unresolved leg grants no hop.
         failedAdapter: childLog.providerAdapter,
       });
+    // A denial of a retry after a real send stamped the parent log too; a hop past it leaves no trace.
+    if (!scopedDenial && failureDecision === "hop") restoreSpendStamp?.();
     const wantsStream = (rawBody as { stream?: unknown } | null)?.stream === true;
     // Local byte admission has its own diagnostic; do not relabel it as an upstream refusal.
     const classifyOverflow = failure.response.status === 413 && !lateAttributionRefusal

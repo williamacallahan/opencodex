@@ -5,6 +5,9 @@ import { replaceSseDataPayload, sseDataPayload, type SseBlockRewrite } from "../
 import { createOutboundCredentialMask } from "../../lib/outbound-credential-registry";
 export { createOutboundCredentialMask };
 
+/** An event name this proxy relays as protocol; any other upstream-chosen name is untrusted text. */
+const PROTOCOL_EVENT_NAME = /^[ \t]*(?:error|response\.[a-z_.]+)[ \t]*$/;
+
 const terminalType = (type: unknown) => type === "error" || type === "response.failed" || type === "response.incomplete" || type === "response.steer.failed" || type === "response.inject.failed";
 
 /** Serialize the inspected values, never raw bytes discarded by JSON parsing. */
@@ -57,7 +60,7 @@ export function createTerminalErrorRedactionBlockRewrite(
   maskCredential: (text: string) => string = createOutboundCredentialMask(outboundHeaders),
 ): SseBlockRewrite {
   const maskFields = (block: string) => block.replace(/^([^:\r\n]*):([^\r\n]*)/gm, (line, name, text) =>
-    name === "event" || name === "data" || name === "retry" ? line : `${name}:${maskCredential(text)}`);
+    name === "data" || name === "retry" || (name === "event" && PROTOCOL_EVENT_NAME.test(text)) ? line : `${name}:${maskCredential(text)}`);
   return (block) => {
     const payload = sseDataPayload(block);
     if (payload === null) return [maskFields(block)];

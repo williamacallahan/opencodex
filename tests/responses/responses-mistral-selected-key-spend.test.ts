@@ -151,6 +151,32 @@ for (const scope of ["identity", "pool"] as const) test(`an unsent ${scope} deni
   expect(result.chargedSends).toBe(2);
 });
 
+test("a pool-denied first member does not skip to another provider when provider fallback is off", async () => {
+  const f = fixture({ pool: headroom }, false, true, "ordinary keyed Responses");
+  expect(f.ledger.reserve({ sendId: "prior", scopes: { poolId: provider }, inputTokens: headroom.maxTokens, outputCeilingTokens: 0 }).reserved).toBe(true);
+  f.ledger.markDispatched("prior"); f.ledger.settle("prior", { inputTokens: headroom.maxTokens, outputTokens: 0 });
+  let laterSends = 0;
+  f.config.providers.later = { adapter: "openai-chat", baseUrl: "https://later.example.test/v1", authMode: "local", models: ["m1"], liveModels: false,
+    fetch: Object.assign(async () => { laterSends++; return chatSuccess("funded", "m1"); }, { preconnect: fetch.preconnect }) };
+  f.config.combos!.selected!.targets = [{ provider, model: "m1" }, { provider: "later", model: "m1" }];
+  f.config.fallback = { provider: false };
+  const result = await f.run();
+  expect(result.status).not.toBe(200);
+  expect(laterSends).toBe(0);
+});
+
+test("a pool-denied first member skips to a funded last-resort member", async () => {
+  const f = fixture({ pool: headroom }, false, true, "ordinary keyed Responses");
+  expect(f.ledger.reserve({ sendId: "prior", scopes: { poolId: provider }, inputTokens: headroom.maxTokens, outputCeilingTokens: 0 }).reserved).toBe(true);
+  f.ledger.markDispatched("prior"); f.ledger.settle("prior", { inputTokens: headroom.maxTokens, outputTokens: 0 });
+  f.config.providers.later = { adapter: "openai-chat", baseUrl: "https://later.example.test/v1", authMode: "local", models: ["m1"], liveModels: false,
+    fetch: Object.assign(async () => chatSuccess("funded", "m1"), { preconnect: fetch.preconnect }) };
+  f.config.combos!.selected!.targets = [{ provider, model: "m1" }, { provider: "later", model: "m1", lastResort: true }];
+  f.config.combos!.selected!.cooldownWaitPolicy = "before-last-resort";
+  const result = await f.run();
+  expect(result.status, result.text).toBe(200);
+});
+
 test("a deferred HTTP retry leaves the failed send on its issuing key", async () => {
   const f = fixture(combined, false, false, "ordinary keyed Chat", true);
   f.config.providers[provider]!.transientRetryOn5xx = { attempts: 2 };

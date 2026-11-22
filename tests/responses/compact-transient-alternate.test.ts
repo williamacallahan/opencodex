@@ -180,6 +180,18 @@ describe("native compact moves a surviving transient 5xx to one alternate accoun
     expect(response.headers.get("retry-after")).toBe("12");
   });
 
+  test("compact masks a numeric credential echo and drops a retry-after that is the credential", async () => {
+    const { responseCredentialMask, createOutboundCredentialMask, attachCredentialMask } = await import("../../src/lib/outbound-credential-registry");
+    const { bufferCompactResponse } = await import("../../src/server/responses/compact");
+    const raw = attachCredentialMask(Response.json({ error: { code: 424242, retry_after: 10 } }, { status: 429, headers: { "retry-after": "424242" } }), createOutboundCredentialMask({ authorization: "Bearer 424242" }));
+    expect(responseCredentialMask(raw)("424242")).toBe("[REDACTED]");
+    const out = await bufferCompactResponse(raw, new AbortController().signal);
+    const json = await out.json() as { error: { code: unknown; retry_after: unknown } };
+    expect(json.error.code).toBe("[REDACTED]");
+    expect(json.error.retry_after).toBe(10);
+    expect(out.headers.get("retry-after")).toBeNull();
+  });
+
   test("an initial typed 503 refusal is not resent by the retry ladder", async () => {
     upstream(() => Response.json({ error: { code: "cyber_policy", message: "fixture refusal" } }, { status: 503, headers: { "retry-after": "0" } }), compacted);
     const { body } = await compact();

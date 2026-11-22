@@ -222,6 +222,13 @@ describe("credential masking keeps protocol syntax and finds every echo", () => 
     expect(rewrite(block)[0]).toMatch(/^event: response\.failed\ndata: /);
   });
 
+  test("an upstream-chosen SSE event name carrying the credential is masked", () => {
+    const rewrite = createTerminalErrorRedactionBlockRewrite({ authorization: "Bearer fixture-secret-value" });
+    const out = rewrite('event: fixture-secret-value\ndata: {"type":"response.failed","response":{"status":"failed","error":{"message":"x"}}}')[0]!;
+    expect(out).not.toContain("fixture-secret-value");
+    expect(rewrite('event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"message":"x"}}}')[0]).toMatch(/^event: response\.failed\n/);
+  });
+
   test("a typed-refusal verdict that timed out is final, not re-peeked", async () => {
     const slow = new Response(new ReadableStream<Uint8Array>({ start() {} }), { status: 503 });
     expect(await inspectPolicyRefusal(slow)).toBeUndefined();
