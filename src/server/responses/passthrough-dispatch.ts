@@ -1759,8 +1759,9 @@ export async function preparePassthroughExchange(
     // model's ladder, not this account's entitlement. Learn each refusal so later turns clamp
     // before dispatch. Direct requests repair once; combo candidates may retry the next lower
     // published rung until it works, the ladder ends, or the send budget is spent.
-    const downgrade = await refusedReasoningEffortDowngrade(upstreamResponse, upstream.signal, reasoningEffortDowngradeGuard,
-      options.comboAttempt, { provider: route.provider, modelId: parsed.modelId, requested: parsed.options.reasoning });
+    const downgrade = request.responsesEffortOmitted ? undefined
+      : await refusedReasoningEffortDowngrade(upstreamResponse, upstream.signal, reasoningEffortDowngradeGuard,
+        options.comboAttempt, { provider: route.provider, modelId: parsed.modelId, requested: parsed.options.reasoning });
     if (downgrade && !configuredTransientSendBudgetExhausted()) {
       reasoningEffortDowngradeGuard.attempted = true;
       parsed.options.reasoning = downgrade.effort;
