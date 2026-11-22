@@ -1,6 +1,5 @@
-import { modelInList, type OcxProviderConfig } from "../types";
-import { isCanonicalOpenAiForwardProvider, isOpenAiOperatedResponsesDestination } from "../providers/openai-tiers-destination";
-import { isCodexLbResponsesEndpoint } from "../providers/quota/codex-lb-url";
+import { MODEL_ADAPTER_OVERRIDE_ALLOWED, modelInList, type OcxProviderConfig } from "../types";
+import { isCanonicalOpenAiForwardProvider, isOpenAiOperatedResponsesDestination, responsesTransportUrl } from "../providers/openai-tiers-destination";
 
 type Sampling = { temperature?: number | null; topP?: number | null };
 
@@ -8,8 +7,16 @@ export function rejectsSamplingDefaults(provider: OcxProviderConfig, modelId: st
   if (isCanonicalOpenAiForwardProvider(provider)) return true;
   // OpenAI's GPT-6.2 migration guide explicitly excludes both sampling fields.
   // A relay can also route other models to external sources; don't assume they reject sampling.
-  return (modelId === "gpt-6.2-sol" || modelId === "gpt-6.2-astra")
-    && (isOpenAiOperatedResponsesDestination(provider) || isCodexLbResponsesEndpoint(provider, provider.adapter));
+  if (modelId !== "gpt-6.2-sol" && modelId !== "gpt-6.2-astra") return false;
+  const override = provider.modelAdapters?.[modelId];
+  const adapter = override && MODEL_ADAPTER_OVERRIDE_ALLOWED.has(override) ? override : provider.adapter;
+  if (adapter !== "openai-responses") return false;
+  const responsesProvider = adapter === provider.adapter ? provider : { ...provider, adapter };
+  if (isOpenAiOperatedResponsesDestination(responsesProvider)) return true;
+  const destination = URL.parse(responsesTransportUrl(responsesProvider));
+  return (provider.authMode ?? "key") === "key" && destination?.protocol === "https:"
+    && !destination.username && !destination.password && !destination.search && !destination.hash
+    && (destination.pathname === "/backend-api/codex/responses" || destination.pathname === "/backend-api/codex/v1/responses");
 }
 
 export function applyChatSamplingDefaults(

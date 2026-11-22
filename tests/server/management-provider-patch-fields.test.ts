@@ -81,6 +81,23 @@ describe("provider PATCH field mask", () => {
     }, { adapter: "openai-responses", baseUrl });
   });
 
+  test("rejects new defaults at the resolved relay URL without blocking existing provider edits", async () => {
+    const modelSamplingDefaults = { "gpt-6.2-sol": { temperature: 0.2 } };
+    await withRelay(async patch => {
+      const update = await patch({ contextWindow: 100_000 });
+      expect(update.status, await update.text()).toBe(200);
+      expect((await patch({ modelSamplingDefaults: { "gpt-6.2-sol": { temperature: 0.4 } } })).status).toBe(400);
+      expect((await patch({ modelSamplingDefaults: null })).status).toBe(200);
+      expect((await patch({ modelSamplingDefaults })).status).toBe(400);
+    }, { adapter: "openai-responses", baseUrl: "https://relay.example", responsesPath: "/backend-api/codex/v1/responses", modelSamplingDefaults });
+  });
+
+  test("keeps defaults for a model with a Chat wire override on a Responses relay", async () => {
+    await withRelay(async patch => {
+      expect((await patch({ modelSamplingDefaults: { "gpt-6.2-sol": { temperature: 0.2 } } })).status).toBe(200);
+    }, { adapter: "openai-responses", baseUrl: "https://relay.example/backend-api/codex", chatCompletionsPath: "/chat/completions", modelAdapters: { "gpt-6.2-sol": "openai-chat" } });
+  });
+
   test("sets, displays, validates, and clears the provider proxy", async () => {
     const name = "OCX_TEST_PROVIDER_PATCH_PROXY";
     const previous = process.env[name];

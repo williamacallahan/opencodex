@@ -823,7 +823,7 @@ function nativeContextOverlayError(raw: Record<string, unknown>): string | null 
 export function providerManagementConfigError(
   name: unknown,
   provider: unknown,
-  options?: { allowOperatorOverlays?: boolean },
+  options?: { allowOperatorOverlays?: boolean; previousProvider?: OcxProviderConfig },
 ): string | null {
   if (typeof name !== "string" || !provider || typeof provider !== "object" || Array.isArray(provider)) {
     return "provider must be a plain object";
@@ -925,8 +925,11 @@ export function providerManagementConfigError(
     return `provider ${name} must not include codexAccountMode`;
   }
   const typed = provider as unknown as OcxProviderConfig;
-  if (typed.modelSamplingDefaults && Object.entries(typed.modelSamplingDefaults).some(([model, sampling]) =>
-    (sampling?.temperature !== undefined || sampling?.topP !== undefined) && rejectsSamplingDefaults(typed, model))) {
+  for (const [model, sampling] of Object.entries(typed.modelSamplingDefaults ?? {})) {
+    if (!sampling || (sampling.temperature === undefined && sampling.topP === undefined) || !rejectsSamplingDefaults(typed, model)) continue;
+    const previous = options?.previousProvider;
+    const old = previous?.modelSamplingDefaults?.[model];
+    if (previous && old && old.temperature === sampling.temperature && old.topP === sampling.topP && rejectsSamplingDefaults(previous, model)) continue;
     return "modelSamplingDefaults cannot set temperature or topP for a model that does not support sampling on this destination";
   }
   const markerError = anthropicOAuthInstanceConfigError({ providers: { [name]: provider } });

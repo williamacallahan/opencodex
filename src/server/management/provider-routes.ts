@@ -265,7 +265,7 @@ function providerEditorCandidate(
     // The editor merges onto the persisted row, so stored operator overlays (selectedModels,
     // disabled, …) ride along in the candidate. They are owned by their own write boundaries;
     // the seed check must only pin the canonical transport/auth keys.
-    const providerError = providerManagementConfigError(name, transportCandidate, { allowOperatorOverlays: true })
+    const providerError = providerManagementConfigError(name, transportCandidate, { allowOperatorOverlays: true, previousProvider: persisted.providers[name] })
       ?? providerEmptyToolOutputConfigError(name, transportCandidate)
       ?? providerCatalogCapabilityConfigError(name, transportCandidate);
     if (providerError) return { ok: false, status: 400, error: providerError, code: "invalid_provider" };
@@ -979,7 +979,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       providerTransportValidationCandidate(provider as unknown as Record<string, unknown>),
       // Reload validates a row straight off disk, which legitimately carries stored
       // operator overlays; only the canonical transport/auth keys need to match the seed.
-      { allowOperatorOverlays: true },
+      { allowOperatorOverlays: true, previousProvider: provider },
     )
       ?? providerEmptyToolOutputConfigError(name, provider);
     if (providerError) return jsonResponse({ error: "provider reload target invalid" }, 409);
@@ -1163,7 +1163,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (markerCollision) return jsonResponse({ error: markerCollision }, 409);
     const pinError = applyProviderPinFields(transportCandidate as unknown as OcxProviderConfig, body.provider, existing);
     if (pinError) return jsonResponse({ error: pinError }, 400);
-    const providerError = providerManagementConfigError(name, transportCandidate)
+    const providerError = providerManagementConfigError(name, transportCandidate, { previousProvider: existing })
       ?? providerEmptyToolOutputConfigError(name, transportCandidate)
       ?? providerCompatFieldConfigError(body.provider as Record<string, unknown>);
     if (providerError) return jsonResponse({ error: providerError }, 400);
@@ -1517,7 +1517,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
             // PATCH merges the mask onto the persisted row, which legitimately carries
             // stored operator overlays (selectedModels, disabled, …); only the canonical
             // transport/auth keys need to match the seed.
-            { allowOperatorOverlays: true },
+            { allowOperatorOverlays: true, previousProvider: config.providers[name] },
           )
           ?? providerEmptyToolOutputConfigError(name, next);
       if (providerError) return jsonResponse({ error: providerError }, 400);
@@ -1569,7 +1569,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
           : providerManagementConfigError(
               name,
               providerTransportValidationCandidate(replay.next as unknown as Record<string, unknown>),
-              { allowOperatorOverlays: true },
+              { allowOperatorOverlays: true, previousProvider: config.providers[name] },
             )
             ?? providerEmptyToolOutputConfigError(name, replay.next);
         if (syncError) {
