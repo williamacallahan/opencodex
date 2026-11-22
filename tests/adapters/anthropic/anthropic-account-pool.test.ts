@@ -687,6 +687,27 @@ describe("anthropic account pool quota window scoring", () => {
     )).toBe(bId);
   });
 
+  for (const window of ["five-hour", "max-utilization"] as const) {
+    test(`${window}: a setup-token account that has never served takes the next session from a measured seat`, async () => {
+      const { aId, bId } = await seedTwoAccounts();
+      await saveCredential("anthropic", {
+        access: "setup-token-c", refresh: "", expires: Date.now() + 3_600_000, email: "c@example.test", source: "manual",
+      });
+      const { getAccountSet } = await import("../../../src/oauth/store");
+      const cId = getAccountSet("anthropic")!.accounts.find(acc => acc.credential.email === "c@example.test")!.id;
+      await setActiveAccount("anthropic", aId);
+      const updatedAt = Date.now();
+      setCachedProviderAccountQuotaForTests("anthropic", aId, { fiveHourPercent: 97, weeklyPercent: 97, updatedAt });
+      setCachedProviderAccountQuotaForTests("anthropic", bId, { fiveHourPercent: 90, weeklyPercent: 90, updatedAt });
+      const config = cfg(true, 80, { quotaWindow: window });
+      expect(resolveAnthropicAccountForSession(`unused-token-${window}`, config).accountId).toBe(cId);
+
+      // Its first response measures it; from then on it ranks by that reading like any seat.
+      setCachedProviderAccountQuotaForTests("anthropic", cId, { fiveHourPercent: 95, weeklyPercent: 95, updatedAt });
+      expect(resolveAnthropicAccountForSession(`measured-token-${window}`, config).accountId).toBe(bId);
+    });
+  }
+
   test("five-hour default does not adopt known-before-unknown ranking", async () => {
     // The known-first rule belongs to the opt-in windows. Under the legacy five-hour default
     // a measured 100% account must NOT outrank an unmeasured one just for having a reading —

@@ -811,15 +811,22 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
     const eligible = hasKnownUnderThreshold
       ? availableOrFallback.filter(id => isActiveUnderFillFirstThreshold(config, id, model)) : availableOrFallback;
     if (eligible.length === 0) return null;
-    const scored: ScoredAccount[] = eligible.map(accountId => ({
-      accountId,
-      hasKnownUsage: hasKnownUsage(config, accountId, model),
-      score: usageScore(config, accountId, model, true),
-      fiveHourTieBreak: window === "five-hour" ? 0 : fiveHourScore(accountId),
-      // Every window EXCEPT the legacy five-hour default is an explicit opt-in, so
-      // known-before-unknown applies to all of them and to none of the default path.
-      knownFirst: window !== "five-hour",
-    }));
+    const scored: ScoredAccount[] = eligible.map(accountId => {
+      const known = hasKnownUsage(config, accountId, model);
+      // No probe can measure a setup token (empty refresh grant); only a served request can.
+      // Ranked as unknown, it would wait behind every measured seat and never be measured, so one
+      // seat would hold every session. Until its first response it ranks as an unused seat.
+      const unusedSetupToken = !known && getAccountCredential(PROVIDER, accountId)?.refresh === "";
+      return {
+        accountId,
+        hasKnownUsage: known || unusedSetupToken,
+        score: unusedSetupToken ? 0 : usageScore(config, accountId, model, true),
+        fiveHourTieBreak: window === "five-hour" || unusedSetupToken ? 0 : fiveHourScore(accountId),
+        // Every window EXCEPT the legacy five-hour default is an explicit opt-in, so
+        // known-before-unknown applies to all of them and to none of the default path.
+        knownFirst: window !== "five-hour",
+      };
+    });
     let best = scored[0]!;
     for (let i = 1; i < scored.length; i++) {
       const candidate = scored[i]!;
