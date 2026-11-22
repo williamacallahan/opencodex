@@ -672,15 +672,22 @@ describe("Anthropic known-reset expiry", () => {
     setCachedProviderAccountQuotaForTests("anthropic", id!, quota);
     setCachedProviderAccountQuotaForTests("zai", "untouched", quota);
     const candidate = { provider: "anthropic", model: "claude-opus-4-6", accountRef: id! };
+    let probes = 0;
+    const guard = globalThis.fetch;
+    globalThis.fetch = ((...args: Parameters<typeof fetch>) => { probes++; return guard(...args); }) as typeof fetch;
     now += 59_999;
     expect(getCachedProviderAccountQuota("anthropic", id!)).toEqual(quota);
     expect(quotaEvidenceForCandidate(candidate)).toMatchObject({ known: true, exhausted: true, headroom: 0 });
     now++;
     expect(getCachedProviderAccountQuota("anthropic", id!)).toBeNull();
     expect(quotaEvidenceForCandidate(candidate)).toEqual({ known: false });
+    expect(probes).toBe(0);
+    // An explicit account read after a reset re-reads the usage endpoint (7f3e01d9b7) rather than
+    // serving the expired window; the guard transport refuses it, so the seat reads unknown.
     const [row] = await fetchProviderAccountQuotas("anthropic");
+    expect(probes).toBeGreaterThan(0);
     expect(row?.quota).toBeNull();
-    expect(row?.unavailable).toBeUndefined();
+    expect(row?.unavailable).toBe(true);
     expect(getCachedProviderAccountQuota("zai", "untouched")).toBe(quota);
   });
 
