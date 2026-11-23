@@ -10,7 +10,9 @@
 // are replaced by the bounded encoding already used by canonical JSONL reads.
 // Version 3 adds the routing-health indexes; the rebuild runs on the worker, so
 // no existing index is ever indexed in place on the event loop.
-export const HISTORY_SCHEMA_VERSION = 3;
+// Version 4 widens single-column filter indexes to composite (col, timestamp DESC, request_id DESC)
+// so filtered /api/request-history pages seek via index instead of temp-B-tree sorting on the event loop.
+export const HISTORY_SCHEMA_VERSION = 4;
 export const HISTORY_DB_FILENAME = "routing-history.sqlite";
 
 export const HISTORY_META_KEYS = {
@@ -62,13 +64,13 @@ CREATE TABLE IF NOT EXISTS requests (
 );
 
 CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(timestamp DESC, request_id DESC);
-CREATE INDEX IF NOT EXISTS idx_requests_provider ON requests(provider);
-CREATE INDEX IF NOT EXISTS idx_requests_model ON requests(model);
-CREATE INDEX IF NOT EXISTS idx_requests_requested_model ON requests(requested_model);
-CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
-CREATE INDEX IF NOT EXISTS idx_requests_conversation ON requests(conversation_id);
-CREATE INDEX IF NOT EXISTS idx_requests_api_key ON requests(api_key_id);
-CREATE INDEX IF NOT EXISTS idx_requests_profile ON requests(profile_id);
+CREATE INDEX IF NOT EXISTS idx_requests_provider ON requests(provider, timestamp DESC, request_id DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_model ON requests(model, timestamp DESC, request_id DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_requested_model ON requests(requested_model, timestamp DESC, request_id DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status, timestamp DESC, request_id DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_conversation ON requests(conversation_id, timestamp DESC, request_id DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_api_key ON requests(api_key_id, timestamp DESC, request_id DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_profile ON requests(profile_id, timestamp DESC, request_id DESC);
 -- Routing-time health evidence (routing/health.ts): newest rows for one candidate, and the
 -- rare multi-attempt rows. Without them each lookup scanned the whole 14-day window.
 CREATE INDEX IF NOT EXISTS idx_requests_provider_model_ts ON requests(provider, model, timestamp);

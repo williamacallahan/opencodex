@@ -704,8 +704,8 @@ function queryRows(
   if (filters.from !== undefined) add("timestamp >= ?", filters.from);
   if (filters.to !== undefined) add("timestamp <= ?", filters.to);
   if (cursor) {
-    where.push("(timestamp < ? OR (timestamp = ? AND request_id < ?))");
-    values.push(cursor.t, cursor.t, cursor.i);
+    where.push("(timestamp, request_id) < (?, ?)");
+    values.push(cursor.t, cursor.i);
   }
   const whereSql = where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "";
   const rows = handle.query(

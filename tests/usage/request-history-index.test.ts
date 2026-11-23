@@ -24,8 +24,10 @@ import {
 } from "../../src/usage/log";
 import {
   closeRequestHistoryIndex,
+  openRequestHistoryIndex,
   openRequestHistoryIndexSync,
   queryRequestHistory,
+  requestHistoryDb,
   ROUTING_TAIL_INGEST_MAX_BYTES,
   rebuildRequestHistoryIndex,
   requestHistoryRowById,
@@ -576,5 +578,63 @@ describe("request-history index (RI-02)", () => {
     const ids = [...first.rows, ...second.rows].map(row => row.requestId);
     expect(ids).toEqual(["req-5", "req-4", "req-3", "req-2", "req-1", "req-0"]);
     expect(second.hasMore).toBe(false);
+  });
+
+  test("filtered keyset queries seek via composite indexes without temp B-tree sorting and tie-break identical timestamps", async () => {
+    for (const row of [
+      entry("tie-b", 5000, "p1", "m1", { status: 200 }),
+      entry("tie-a", 5000, "p1", "m1", { status: 200 }),
+      entry("tie-c", 5000, "p1", "m1", { status: 200 }),
+      entry("older", 4000, "p1", "m1", { status: 429 }),
+      entry("other", 5000, "p2", "m2", { status: 200 }),
+    ]) appendUsageEntry(row);
+
+    const p1 = await queryRequestHistory({ provider: "p1" }, undefined, 2);
+    expect(p1.rows.map(row => row.requestId)).toEqual(["tie-c", "tie-b"]);
+    expect(p1.hasMore).toBe(true);
+    const p2 = await queryRequestHistory({ provider: "p1" }, p1.nextCursor, 2);
+    expect(p2.rows.map(row => row.requestId)).toEqual(["tie-a", "older"]);
+    expect(p2.hasMore).toBe(false);
+
+    await openRequestHistoryIndex();
+    const db = requestHistoryDb();
+    const plans: Array<{ name: string; sql: string; args: Array<string | number>; expectedIndex: string }> = [
+      {
+        name: "provider",
+        sql: "EXPLAIN QUERY PLAN SELECT row_json, timestamp, request_id FROM requests WHERE provider = ? ORDER BY timestamp DESC, request_id DESC LIMIT 101",
+        args: ["p1"],
+        expectedIndex: "idx_requests_provider",
+      },
+      {
+        name: "provider+cursor",
+        sql: "EXPLAIN QUERY PLAN SELECT row_json, timestamp, request_id FROM requests WHERE provider = ? AND (timestamp, request_id) < (?, ?) ORDER BY timestamp DESC, request_id DESC LIMIT 101",
+        args: ["p1", 5000, "tie-b"],
+        expectedIndex: "idx_requests_provider",
+      },
+      {
+        name: "model+cursor",
+        sql: "EXPLAIN QUERY PLAN SELECT row_json, timestamp, request_id FROM requests WHERE model = ? AND (timestamp, request_id) < (?, ?) ORDER BY timestamp DESC, request_id DESC LIMIT 101",
+        args: ["m1", 5000, "tie-b"],
+        expectedIndex: "idx_requests_model",
+      },
+      {
+        name: "status+cursor",
+        sql: "EXPLAIN QUERY PLAN SELECT row_json, timestamp, request_id FROM requests WHERE status = ? AND (timestamp, request_id) < (?, ?) ORDER BY timestamp DESC, request_id DESC LIMIT 101",
+        args: [200, 5000, "tie-b"],
+        expectedIndex: "idx_requests_status",
+      },
+      {
+        name: "unfiltered+cursor",
+        sql: "EXPLAIN QUERY PLAN SELECT row_json, timestamp, request_id FROM requests WHERE (timestamp, request_id) < (?, ?) ORDER BY timestamp DESC, request_id DESC LIMIT 101",
+        args: [5000, "tie-b"],
+        expectedIndex: "idx_requests_ts",
+      },
+    ];
+    for (const check of plans) {
+      const steps = db.query(check.sql).all(...check.args) as Array<{ detail: string }>;
+      const joined = steps.map(step => step.detail).join(" | ");
+      expect(joined, check.name).toContain(check.expectedIndex);
+      expect(joined, check.name).not.toContain("TEMP B-TREE");
+    }
   });
 });
