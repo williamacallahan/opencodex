@@ -320,10 +320,7 @@ export function useAnthropicResetGrants({ apiBase, targetKey, provider = "anthro
       || (pending && (pending.operationId !== request.operationId || pending.grantId !== request.grantId))) {
       return { kind: "unknown", code: "in_flight" };
     }
-    if ((grantReadDeadlines.get(key) ?? 0) > Date.now()) {
-      setEntry(accountId, { status: "error", reason: "rate_limited" });
-      return { kind: "refused", code: "rate_limited" };
-    }
+    if ((grantReadDeadlines.get(key) ?? 0) > Date.now()) return { kind: "refused", code: "rate_limited" };
     // Publish before fetch: closing or pausing during the request cannot lose its identity.
     updateHold(key, request.operationId, { ...request, inFlight: true });
     const spendEpoch = epoch.current;
