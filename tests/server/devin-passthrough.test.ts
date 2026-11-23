@@ -2,11 +2,16 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 import { saveConfig } from "../../src/config";
 import { clearGenericFailoverHealth } from "../../src/oauth/generic-account-failover";
-import { saveCredential } from "../../src/oauth/store";
+import { listAccounts, saveCredential, setAccountPaused } from "../../src/oauth/store";
 import { clearPoolRotationState } from "../../src/oauth/pool-kernel";
-import { resetDevinAccountState, rewriteDevinProtoCredentials } from "../../src/server/devin-passthrough";
+import {
+  resetDevinAccountState,
+  resolveDevinPassthroughBaseUrl,
+  rewriteDevinProtoCredentials,
+} from "../../src/server/devin-passthrough";
 import { encodeMessage, encodeString, encodeVarintField, frameConnectStream, iterFields, parseConnectFrames } from "../../src/adapters/devin/cloud-direct/wire";
 import type { OcxConfig } from "../../src/types";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
@@ -29,6 +34,14 @@ function buildSampleProto(apiKey: string, userJwt?: string): Buffer {
     encodeString(2, "prompt-body-intact"),
     encodeVarintField(7, 42),
   ]);
+}
+
+function buildConnectEosFrame(payload: Record<string, unknown>): Buffer {
+  const raw = Buffer.from(JSON.stringify(payload), "utf8");
+  const hdr = Buffer.alloc(5);
+  hdr[0] = 0x02;
+  hdr.writeUInt32BE(raw.length, 1);
+  return Buffer.concat([hdr, raw]);
 }
 
 function extractMetadataStrings(proto: Buffer): Map<number, string> {
@@ -136,26 +149,52 @@ describe("devin pass-through public HTTP lane", () => {
     }
   });
 
-  test("rewrites Metadata.api_key and strips Metadata.user_jwt while preserving other fields", () => {
-    const raw = buildSampleProto("sk-ws-placeholder", "stale.jwt.value");
-    const rewritten = rewriteDevinProtoCredentials(raw, "devin-session-token$real.jwt.sig");
-    const meta = extractMetadataStrings(rewritten);
+  test("rewrites Metadata.api_key and strips Metadata.user_jwt across merged field-1 chunks and rejects malformed varints", () => {
+    const merged = Buffer.concat([
+      buildSampleProto("synthetic-placeholder-key"),
+      encodeMessage(1, encodeString(21, "second-chunk-stale.jwt.value")),
+    ]);
+    const rewritten = rewriteDevinProtoCredentials(merged, "devin-session-token$real.jwt.sig");
+    expect(rewritten).not.toBeNull();
+    const meta = extractMetadataStrings(rewritten!);
     expect(meta.get(1)).toBe("devin-cli");
     expect(meta.get(3)).toBe("devin-session-token$real.jwt.sig");
     expect(meta.has(21)).toBe(false);
-    const top = [...iterFields(rewritten)];
+    const top = [...iterFields(rewritten!)];
     expect(top.find(f => f.num === 2)?.value.toString()).toBe("prompt-body-intact");
     expect(top.find(f => f.num === 7)?.value).toBe(42n);
+
+    // Overlong varint (>10 bytes) must fail closed (null), not DoS.
+    const overlongVarint = Buffer.alloc(64, 0x80);
+    expect(rewriteDevinProtoCredentials(overlongVarint, "devin-session-token$real.jwt.sig")).toBeNull();
   });
 
-  test("forwards unary application/proto with swapped Basic auth and Metadata.api_key", async () => {
-    const body = buildSampleProto("sk-ws-opencodex-placeholder");
+  test("enforces Cognition host allowlist and preserves EU/FedStart tenant path prefixes", () => {
+    const defaultCfg = { providers: { devin: { adapter: "devin", authMode: "oauth", baseUrl: "https://server.codeium.com" } } } as OcxConfig;
+    expect(resolveDevinPassthroughBaseUrl(defaultCfg, "https://eu.windsurf.com/_route/api_server")).toBe(
+      "https://eu.windsurf.com/_route/api_server",
+    );
+    expect(resolveDevinPassthroughBaseUrl(defaultCfg, "https://evil.example.com/steal")).toBe(
+      "https://server.codeium.com",
+    );
+    expect(resolveDevinPassthroughBaseUrl(defaultCfg, "http://127.0.0.1:9999")).toBe(
+      "https://server.codeium.com",
+    );
+  });
+
+  test("forwards unary application/proto (including gzip) and strips sensitive headers", async () => {
+    const body = gzipSync(buildSampleProto("synthetic-placeholder-key"));
     const res = await fetch(`http://127.0.0.1:${proxy!.port}/devin/${hubKey}/exa.seat_management_pb.SeatManagementService/GetUserStatus`, {
       method: "POST",
       headers: {
         "content-type": "application/proto",
+        "content-encoding": "gzip",
         "connect-protocol-version": "1",
-        authorization: "Basic sk-ws-opencodex-placeholder-sk-ws-opencodex-placeholder",
+        authorization: "Basic synthetic-placeholder-key-synthetic-placeholder-key",
+        cookie: "session=secret",
+        "x-api-key": "leaked",
+        referer: `https://opencodex.haiku.host/devin/${hubKey}/secret`,
+        "x-opencodex-api-key": hubKey,
       },
       body,
     });
@@ -165,15 +204,26 @@ describe("devin pass-through public HTTP lane", () => {
     expect(calls[0]!.headers.get("authorization")).toBe(
       "Basic devin-session-token$pool-one.jwt.sig-devin-session-token$pool-one.jwt.sig",
     );
-    expect(extractMetadataStrings(calls[0]!.bytes).get(3)).toBe("devin-session-token$pool-one.jwt.sig");
+    expect(calls[0]!.headers.get("cookie")).toBeNull();
+    expect(calls[0]!.headers.get("x-api-key")).toBeNull();
+    expect(calls[0]!.headers.get("referer")).toBeNull();
+    expect(calls[0]!.headers.get("x-opencodex-api-key")).toBeNull();
   });
 
-  test("rewrites gzipped application/connect+proto streaming frames and fails over after 429", async () => {
-    const framed = frameConnectStream(buildSampleProto("sk-ws-opencodex-placeholder"), true);
+  test("fails over on HTTP 429 and on HTTP 200 Connect EOS resource_exhausted trailer", async () => {
+    const framed = frameConnectStream(buildSampleProto("synthetic-placeholder-key"), true);
     let attempt = 0;
     reply = () => {
       attempt++;
-      if (attempt === 1) return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+      if (attempt === 1) {
+        return new Response(
+          Buffer.concat([
+            frameConnectStream(Buffer.from([0x0a, 0x02, 0x6f, 0x6b]), false),
+            buildConnectEosFrame({ error: { code: "resource_exhausted", message: "quota reached" } }),
+          ]),
+          { status: 200, headers: { "content-type": "application/connect+proto" } },
+        );
+      }
       return new Response(frameConnectStream(Buffer.from([0x0a, 0x02, 0x6f, 0x6b]), false), {
         status: 200,
         headers: { "content-type": "application/connect+proto" },
@@ -184,26 +234,27 @@ describe("devin pass-through public HTTP lane", () => {
     const headers = {
       "content-type": "application/connect+proto",
       "connect-protocol-version": "1",
-      authorization: "Basic sk-ws-opencodex-placeholder-sk-ws-opencodex-placeholder",
+      authorization: "Basic synthetic-placeholder-key-synthetic-placeholder-key",
     };
 
     const first = await fetch(url, { method: "POST", headers, body: framed });
-    expect(first.status).toBe(429);
+    expect(first.status).toBe(200);
+    await first.arrayBuffer();
+    await Bun.sleep(20);
+
     const second = await fetch(url, { method: "POST", headers, body: framed });
     expect(second.status).toBe(200);
+    await second.arrayBuffer();
 
     expect(calls).toHaveLength(2);
     const firstMeta = extractMetadataStrings(parseConnectFrames(calls[0]!.bytes)[0]!.payload);
     const secondMeta = extractMetadataStrings(parseConnectFrames(calls[1]!.bytes)[0]!.payload);
     expect(firstMeta.get(3)).toBe("devin-session-token$pool-one.jwt.sig");
     expect(secondMeta.get(3)).toBe("devin-session-token$pool-two.jwt.sig");
-    expect(calls[1]!.headers.get("authorization")).toBe(
-      "Basic devin-session-token$pool-two.jwt.sig-devin-session-token$pool-two.jwt.sig",
-    );
   });
 
-  test("preserves unauthenticated analytics RPCs without injecting Authorization and balances distinct callers", async () => {
-    const analyticsBody = Buffer.concat([encodeMessage(1, encodeString(1, "evt")), encodeString(2, "payload")]);
+  test("never rewrites unauthenticated analytics payloads even with field-1/field-3 and balances distinct callers", async () => {
+    const analyticsBody = Buffer.concat([encodeMessage(1, encodeString(3, "event-id-must-not-be-overwritten")), encodeString(2, "payload")]);
     const analyticsRes = await fetch(
       `http://127.0.0.1:${proxy!.port}/devin/${hubKey}/exa.product_analytics_pb.ProductAnalyticsService/BatchRecordAnalyticsEvents`,
       { method: "POST", headers: { "content-type": "application/proto" }, body: analyticsBody },
@@ -213,7 +264,7 @@ describe("devin pass-through public HTTP lane", () => {
     expect(calls[0]!.bytes.equals(analyticsBody)).toBe(true);
 
     const url = `http://127.0.0.1:${proxy!.port}/devin/${hubKey}/exa.seat_management_pb.SeatManagementService/GetUserStatus`;
-    const body = buildSampleProto("sk-ws-opencodex-placeholder");
+    const body = buildSampleProto("synthetic-placeholder-key");
     const r1 = await fetch(url, { method: "POST", headers: { "content-type": "application/proto", authorization: "Basic host-a" }, body });
     const r2 = await fetch(url, { method: "POST", headers: { "content-type": "application/proto", authorization: "Basic host-b" }, body });
     expect(r1.status).toBe(200);
@@ -221,20 +272,43 @@ describe("devin pass-through public HTTP lane", () => {
     expect(extractMetadataStrings(calls[1]!.bytes).get(3)).not.toBe(extractMetadataStrings(calls[2]!.bytes).get(3));
   });
 
-  test("rejects unauthorized key and invalid RPC paths before reaching upstream", async () => {
+  test("rejects browser Origin, unsupported content types, invalid paths, unauthorized keys, and paused pools", async () => {
+    const base = `http://127.0.0.1:${proxy!.port}/devin/${hubKey}/exa.seat_management_pb.SeatManagementService/GetUserStatus`;
+    const auth = "Basic synthetic-placeholder-key-synthetic-placeholder-key";
+
     const badKey = await fetch(`http://127.0.0.1:${proxy!.port}/devin/wrong-key/exa.seat_management_pb.SeatManagementService/GetUserStatus`, {
-      method: "POST",
-      headers: { "content-type": "application/proto" },
-      body: buildSampleProto("sk-ws-placeholder"),
+      method: "POST", headers: { "content-type": "application/proto", authorization: auth }, body: buildSampleProto("synthetic-placeholder-key"),
     });
     expect(badKey.status).toBe(401);
 
     const badPath = await fetch(`http://127.0.0.1:${proxy!.port}/devin/${hubKey}/etc/passwd`, {
-      method: "POST",
-      headers: { "content-type": "application/proto" },
-      body: Buffer.alloc(0),
+      method: "POST", headers: { "content-type": "application/proto", authorization: auth }, body: Buffer.alloc(0),
     });
     expect(badPath.status).toBe(404);
+
+    const browserReq = await fetch(base, {
+      method: "POST", headers: { "content-type": "application/proto", origin: "https://evil.example", authorization: auth }, body: buildSampleProto("synthetic-placeholder-key"),
+    });
+    expect(browserReq.status).toBe(403);
+
+    const badCt = await fetch(base, {
+      method: "POST", headers: { "content-type": "application/json", authorization: auth }, body: "{}",
+    });
+    expect(badCt.status).toBe(415);
+
+    const badGrpcWeb = await fetch(base, {
+      method: "POST", headers: { "content-type": "application/grpc-web+proto", authorization: auth }, body: Buffer.from([0, 0, 0, 0, 0]),
+    });
+    expect(badGrpcWeb.status).toBe(415);
     expect(calls).toHaveLength(0);
+
+    // Pausing all accounts returns 503 (unavailable), not 429 (cooling down).
+    for (const row of listAccounts("devin")) {
+      await setAccountPaused("devin", row.id, true);
+    }
+    const pausedRes = await fetch(base, {
+      method: "POST", headers: { "content-type": "application/proto", authorization: auth }, body: buildSampleProto("synthetic-placeholder-key"),
+    });
+    expect(pausedRes.status).toBe(503);
   });
 });
