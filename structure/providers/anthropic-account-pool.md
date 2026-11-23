@@ -268,6 +268,7 @@ returns `invalid_provider` for an unconfigured instance. Account, grant and oper
 unknown-outcome retry ownership and session consent stay bound to that instance.
 An upstream rate limit on a status read returns `429 rate_limited` with a validated,
 browser-readable `Retry-After`. It does not report an empty grant list or authorize a claim.
+The dashboard defers both status reads and claim attempts until that deadline, retaining any unresolved operation ID.
 An already-authorized grant request reports Anthropic credential rejection as `424 upstream_auth_rejected`,
 a superseded account as `409 account_changed`, and a temporary credential-resolution failure as
 `503 credential_unavailable`. These outcomes do not invalidate the dashboard session.
@@ -518,7 +519,8 @@ stale affinity authority.
 committed credential and provider UUID. Physical sends acquire family admission before spend/send
 accounting, release the lease on every exit and attribute quota only to the actual sending generation.
 Bounded pre-output refusal recovery uses `src/oauth/anthropic-account-refusal.ts`; optional tried-account
-exclusions apply only to alternate selection, preserving the permitted same-account throttle retry.
+exclusions apply only to alternate selection. A same-account throttle retry never changes Active or
+replaces a newer session binding; it only sends if the original account still owns the route or session.
 Rejected bodies are disposed before rebinding; output consumption never re-enters account recovery.
 Account changes may start a cold cache. The proxy does not share caches across accounts. The [strict variant](../transports/strict-messages.md) keeps this account authority, replaces authentication only, returns the first response without replay, and settles refusals for subsequent requests only (`canRetry: false`).
 

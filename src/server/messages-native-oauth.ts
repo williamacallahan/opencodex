@@ -50,6 +50,7 @@ export interface NativeOAuthBinding {
   readonly routeTarget: string;
   readonly selection: Selection;
   readonly requiresAffinity?: true;
+  readonly sameAccountRetry?: true;
   readonly snapshot: OAuthAccessSnapshot;
   /** Anthropic account UUID from the same stored generation, distinct from snapshot.accountId. */
   readonly providerAccountUuid?: string;
@@ -113,6 +114,8 @@ export interface NativeOAuthBindingOptions {
   model?: string;
   /** An account proposed by the shared pre-output refusal recovery policy. */
   candidateAccountId?: string;
+  /** The account that served the original attempt, not a vote to change Active. */
+  previousAccountId?: string;
   /** Selection captured before asynchronous refusal classification or throttle wait. */
   expectedRecoverySelection?: Selection | null;
   expectedRecoveryRouteDecision?: AnthropicRouteDecision | null;
@@ -171,7 +174,8 @@ export async function resolveNativeOAuthBindingForInstance(
     if (!routeIsCurrent(instance, config, model, routeDecision)) continue;
     // An already-bound conversation can use its own seat without changing the default for new sessions.
     const retainsAffinity = proposed.reason === "affinity" && proposed.accountId === accountId;
-    const committed = retainsAffinity ? selection : await commitOAuthAccountSelection(instance, candidate.accountId, {
+    const retriesSameAccount = recoveryAccountId !== undefined && recoveryAccountId === options.previousAccountId;
+    const committed = retainsAffinity || retriesSameAccount ? selection : await commitOAuthAccountSelection(instance, candidate.accountId, {
       expectedSelection: selection,
       expectedCredentialGeneration: candidate.generation,
       requireUsableAccount: true,
@@ -181,15 +185,18 @@ export async function resolveNativeOAuthBindingForInstance(
     if (committed) {
       if (!routeIsCurrent(instance, config, model, routeDecision)
         || manualSelectionGeneration !== routing.captureAnthropicManualSelectionGeneration()) continue;
-      if (!retainsAffinity && !routing.commitAnthropicSelectionRouting(candidate.accountId, selection, committed, {
+      if (!retainsAffinity && !retriesSameAccount && !routing.commitAnthropicSelectionRouting(candidate.accountId, selection, committed, {
         config, sessionKey, model, routeDecision,
         reason: accountId === proposed.accountId ? proposed.reason : undefined,
         expectedCredentialGeneration: candidate.generation,
       })) continue;
       const row = getAccountCredentialWithStatus(instance, candidate.accountId);
-      if (!row || row.credential.access !== candidate.accessToken || credentialGeneration(row.credential) !== candidate.generation) continue;
-      const binding: NativeOAuthBinding = { instance, routeTarget, selection: committed, snapshot: candidate, providerAccountUuid: row.credential.accountId, routeDecision, sessionKey, model, config, manualSelectionGeneration, affinityResetGeneration, ...(retainsAffinity ? { requiresAffinity: true } : {}) };
-      if (nativeOAuthBindingIsCurrent(binding)) return binding;
+      if (row && row.credential.access === candidate.accessToken && credentialGeneration(row.credential) === candidate.generation) {
+        const requiresAffinity = retainsAffinity || (retriesSameAccount && selection.accountId !== accountId);
+        const binding: NativeOAuthBinding = { instance, routeTarget, selection: committed, snapshot: candidate, providerAccountUuid: row.credential.accountId, routeDecision, sessionKey, model, config, manualSelectionGeneration, affinityResetGeneration, ...(requiresAffinity ? { requiresAffinity: true } : {}), ...(retriesSameAccount ? { sameAccountRetry: true } : {}) };
+        if (nativeOAuthBindingIsCurrent(binding)) return binding;
+      }
+      if (retriesSameAccount) throw new NativeOAuthSelectionChangedError();
     }
   }
   throw new NativeOAuthSelectionChangedError();

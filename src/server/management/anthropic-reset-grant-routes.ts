@@ -114,12 +114,18 @@ function defaultDepsFor(ctx: ManagementContext, provider: AnthropicInstanceId): 
       const recovery = anthropicCooldownRecoveryFor(provider);
       const incarnation = recovery.reserveAnthropicAccountIncarnation(accountId);
       const epoch = captureProviderAccountQuotaEpoch(provider);
-      const snapshot = await getValidAccessSnapshotForAccount(provider, accountId, { requireUsableAccount: true });
-      const current = getAccountSet(provider)?.accounts.find(row => row.id === accountId);
-      if (!initial || !current || initial.loginId !== current.loginId || initial.addedAt !== current.addedAt
-        || recovery.anthropicAccountIncarnation(accountId) !== incarnation || captureProviderAccountQuotaEpoch(provider) !== epoch) throw new GrantAccountChangedError();
+      const assertAccountCurrent = () => {
+        const current = getAccountSet(provider)?.accounts.find(row => row.id === accountId);
+        if (!targetCurrent() || !initial || !current || initial.loginId !== current.loginId || initial.addedAt !== current.addedAt
+          || recovery.anthropicAccountIncarnation(accountId) !== incarnation || captureProviderAccountQuotaEpoch(provider) !== epoch) throw new GrantAccountChangedError();
+      };
+      const snapshot = await getValidAccessSnapshotForAccount(provider, accountId, { requireUsableAccount: true }).catch((error: unknown) => {
+        assertAccountCurrent();
+        throw error;
+      });
+      assertAccountCurrent();
       owner = captureAnthropicPhysicalSendOwnership(snapshot);
-      if (!targetCurrent() || !owner) throw new GrantAccountChangedError();
+      if (!owner) throw new GrantAccountChangedError();
       return snapshot.accessToken;
     },
     admitReset: (accountId, evidence) => admitAnthropicAccountAfterReset(provider, accountId, evidence),

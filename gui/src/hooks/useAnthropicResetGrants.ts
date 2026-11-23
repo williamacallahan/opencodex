@@ -49,7 +49,7 @@ export interface AnthropicResetGrantSnapshot {
 export type AnthropicGrantEntry =
   | { status: "loading" }
   | { status: "ready"; snapshot: AnthropicResetGrantSnapshot }
-  | { status: "error"; reason: "auth" | "upstream" | "rate_limited" };
+  | { status: "error"; reason: "auth" | "session" | "upstream" | "rate_limited" };
 
 export type AnthropicSpendOutcome =
   | { kind: "settled"; code: string; replayed: boolean; resetsLeft: number | null }
@@ -281,7 +281,7 @@ export function useAnthropicResetGrants({ apiBase, provider = "anthropic", accou
       }
       setEntry(accountId, snapshot
         ? { status: "ready", snapshot }
-        : { status: "error", reason: response.status === 401 || errorCode(raw) === "auth_failed" ? "auth" : "upstream" });
+        : { status: "error", reason: response.status === 401 ? "session" : ownsResponse && errorCode(raw) === "auth_failed" ? "auth" : "upstream" });
     } catch {
       if (!current()) return;
       setEntry(accountId, { status: "error", reason: "upstream" });
@@ -314,6 +314,10 @@ export function useAnthropicResetGrants({ apiBase, provider = "anthropic", accou
     const prior = grantHolds.get(key);
     if (prior && (prior.inFlight || prior.operationId !== request.operationId || prior.grantId !== request.grantId))
       return { kind: "unknown", code: "in_flight" };
+    if ((grantReadDeadlines.get(key) ?? 0) > Date.now()) {
+      setEntry(accountId, { status: "error", reason: "rate_limited" });
+      return { kind: "refused", code: "rate_limited" };
+    }
     // Publish before fetch: closing or pausing during the request cannot lose its identity.
     updateHold(key, request.operationId, { ...request, inFlight: true });
     const spendEpoch = epoch.current;
@@ -326,7 +330,7 @@ export function useAnthropicResetGrants({ apiBase, provider = "anthropic", accou
         signal: bounded.signal,
       });
       if (!response.ok) {
-        const code = errorCode(await response.json().catch(() => null));
+        const code = response.status === 401 ? "session_required" : errorCode(await response.json().catch(() => null));
         if (response.status === 429 && code === "rate_limited") {
           if (!prior) updateHold(key, request.operationId, null);
           recordGrantReadDeadline(key, response);
@@ -357,7 +361,7 @@ export function useAnthropicResetGrants({ apiBase, provider = "anthropic", accou
       if (grantHolds.get(key)?.operationId === request.operationId)
         updateHold(key, request.operationId, { ...request, inFlight: false });
     }
-  }, [apiBase, provider, namespace, read]);
+  }, [apiBase, provider, namespace, read, setEntry]);
 
   return { entries: store.namespace === namespace ? store.entries : NO_ENTRIES, held, refresh, spend };
 }

@@ -738,7 +738,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
               // The OAuth twin of the key check below: re-resolve through the same selection
               // owner when the committed account or its credential moved since the build.
               for (let attempt = 0; !nativeOAuthBindingIsCurrent(oauthBinding); attempt++) {
-                if (attempt >= 3) throw new NativeOAuthSelectionChangedError();
+                if (attempt >= 3 || (oauthBinding.sameAccountRetry && oauthBinding.manualSelectionGeneration === anthropicRoutingFor(oauthBinding.instance).captureAnthropicManualSelectionGeneration())) throw new NativeOAuthSelectionChangedError();
                 try {
                   oauthBinding = await resolveNativeOAuthBindingForInstance(nativeInstance!, config, { routeTarget, sessionKey: options.sessionKey, model: route.modelId, expectedAffinityResetGeneration: oauthBinding.affinityResetGeneration });
                 } catch (error) {
@@ -1006,7 +1006,6 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
     let oauthFailovers = 0;
     while (oauthBinding && (response.status === 429 || response.status === 403 || response.status === 401)) {
       const sendingBinding = oauthBinding;
-      const expectedRecoverySelection = sendingBinding.selection;
       triedAccountIds.add(sendingBinding.snapshot.accountId);
       const nextAccountId = await rotateAnthropicAccountOnResponseForInstance(sendingBinding.instance, response, {
         config, accountId: sendingBinding.snapshot.accountId, model: route.modelId,
@@ -1026,7 +1025,8 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
       discard(response);
       oauthBinding = await resolveNativeOAuthBindingForInstance(nativeInstance!, config, { routeTarget,
         sessionKey: options.sessionKey, model: route.modelId, candidateAccountId: nextAccountId,
-        expectedRecoverySelection, expectedRecoveryRouteDecision: sendingBinding.routeDecision, expectedAffinityResetGeneration: sendingBinding.affinityResetGeneration,
+        previousAccountId: sendingBinding.snapshot.accountId, expectedRecoverySelection: sendingBinding.selection,
+        expectedRecoveryRouteDecision: sendingBinding.routeDecision, expectedAffinityResetGeneration: sendingBinding.affinityResetGeneration,
       });
       oauthFailovers++;
       rebuildFor(oauthProvider(oauthBinding));
