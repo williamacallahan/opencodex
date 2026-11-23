@@ -332,8 +332,10 @@ export async function listCodexAuthAccountsSnapshot(
       identityGeneration: captureMainAccountIdentityGeneration() }
     : await fetchMainAccountInfoAttempt(forceRefresh, 1, undefined, false, forceRefresh, false, runtimeConfig);
   const observedMainIdentity = getObservedMainCodexCollisionIdentity();
+  const initialRecords = loadCodexAccountRecordSnapshot();
   const refreshedPool = await mapWithConcurrency(poolAccounts, POOL_QUOTA_REFRESH_CONCURRENCY, async account => {
-    const cred = getCodexAccountCredential(account.id);
+    const initialRecord = codexAccountRecordFromSnapshot(initialRecords, account.id);
+    const cred = initialRecord?.deletedAt == null ? initialRecord?.credential ?? null : null;
     let quotaResult: PoolQuotaResult;
     if (!cred) {
       quotaResult = { quota: null, needsReauth: true };
@@ -341,7 +343,7 @@ export async function listCodexAuthAccountsSnapshot(
       quotaResult = {
         quota: getAccountQuota(account.id),
         needsReauth: false,
-        credentialGeneration: readCodexAccountRecord(account.id)?.generation,
+        credentialGeneration: initialRecord?.generation,
         quotaProbeSkipped: true,
       };
     } else {
@@ -349,7 +351,7 @@ export async function listCodexAuthAccountsSnapshot(
         // Credits are process-local while pool quota is hydrated from disk, so right after a
         // restart the cache would hide credits for up to POOL_CACHE_TTL. Bypass it once per
         // identity when the switch is on and nothing has been observed yet.
-        const creditsIdentity = runtimeConfig.showCodexCredits === true ? poolQuotaHistoryIdentity(account.id) ?? null : null;
+        const creditsIdentity = runtimeConfig.showCodexCredits === true ? poolQuotaHistoryIdentityOf(initialRecord) ?? null : null;
         const creditsUnobserved = creditsIdentity !== null && !hasCodexCreditsObservation(account.id, creditsIdentity);
         const held = options.holdExhausted === true && isExhaustedPoolQuotaReadHeld(account.id, Date.now());
         quotaResult = await fetchPoolAccountQuota(account.id, (forceRefresh && !held) || creditsUnobserved, account.plan, getValidCodexToken,
@@ -360,7 +362,7 @@ export async function listCodexAuthAccountsSnapshot(
         quotaResult = {
           quota: getAccountQuota(account.id),
           needsReauth: false,
-          credentialGeneration: readCodexAccountRecord(account.id)?.generation,
+          credentialGeneration: initialRecord?.generation,
           quotaProbeSkipped: true,
         };
       }
@@ -385,7 +387,8 @@ export async function listCodexAuthAccountsSnapshot(
   const withQuota = refreshedPool.flatMap(({ accountId, quotaResult }) => {
     const currentAccount = configuredPoolAccount(runtimeConfig, accountId);
     if (!currentAccount) return [];
-    const currentCredential = getCodexAccountCredential(accountId);
+    const storeRecord = codexAccountRecordFromSnapshot(storeRecords, accountId);
+    const currentCredential = storeRecord?.deletedAt == null ? storeRecord?.credential ?? null : null;
     if (!currentCredential) {
       return [poolAccountDto(
         runtimeConfig,
@@ -396,12 +399,12 @@ export async function listCodexAuthAccountsSnapshot(
         getCodexAccountPriority(runtimeConfig, accountId),
         maskEmails,
         undefined,
-        codexAccountRecordFromSnapshot(storeRecords, accountId),
+        storeRecord,
       )];
     }
     const resultGeneration = quotaResult.credentialGeneration ?? quotaResult.freshCredentialGeneration;
     const generationLive = resultGeneration === undefined
-      || isCodexAccountGenerationLive(accountId, resultGeneration);
+      || (!!storeRecord?.credential && storeRecord.deletedAt == null && storeRecord.generation === resultGeneration);
     const effectiveQuotaResult = !generationLive
       ? { quota: null, needsReauth: false }
       : quotaResult;
@@ -424,7 +427,7 @@ export async function listCodexAuthAccountsSnapshot(
       maskEmails,
       codexUpstreamAccountKey(identitySecret, verifiedAccountId,
         user.conflict ? undefined : user.userId),
-      codexAccountRecordFromSnapshot(storeRecords, accountId),
+      storeRecord,
     )];
   });
   const projectSnapshot = (mainRefreshRefused = false): CodexAuthAccountsSnapshot => {

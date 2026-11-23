@@ -34,7 +34,7 @@ import {
 } from "../../lib/errors";
 import { normalizeUpstreamErrorText } from "./core-errors";
 import { resolveClientRetryAfter, validateClientRetryAfterHeader } from "../../lib/retry-after";
-import { isUpstreamQuotaToken } from "../../lib/upstream-condition";
+import { classifyUpstreamCondition, isUpstreamQuotaToken } from "../../lib/upstream-condition";
 import { isAnthropicBillingFailure } from "../../providers/anthropic-billing-refusal";
 import { formatErrorResponse } from "../../bridge";
 import { upstreamCodeForComboFailure } from "../../bridge/errors";
@@ -346,4 +346,21 @@ export function isLateAttributionRefusal(failure: ConsumedComboFailure): boolean
     && failure.response.status === 413
     && failure.upstreamCode === "request_too_large"
     && failure.upstreamMessage === OLLAMA_LATE_ATTRIBUTION_LIMIT_MESSAGE;
+}
+
+/** Log classified member failures, omitting local zero-send Reserve capacity yields. */
+export function warnComboTargetFailure(
+  comboLabel: string,
+  targetLabel: string,
+  failure: ConsumedComboFailure,
+  elapsedMs: number,
+  skipZeroSendReserveYield: boolean,
+): void {
+  if (skipZeroSendReserveYield) return;
+  const reason = classifyUpstreamCondition({
+    status: failure.response.status, code: failure.upstreamCode, type: failure.upstreamType, message: failure.upstreamMessage,
+  });
+  console.warn(
+    `[combo] ${comboLabel}: ${targetLabel} failed with ${failure.response.status} after ${elapsedMs}ms${reason ? `: ${reason}` : ""}`,
+  );
 }

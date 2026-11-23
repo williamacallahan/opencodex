@@ -1669,4 +1669,50 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(nativeAccounts).toEqual([`fixture-workspace-${B}`]);
     expect(wire).not.toContain(item.encrypted_content);
   });
+
+  test("zero Reserve eligibility starts directly on relay without native 429 noise and still falls back to ordinary Luna", async () => {
+    const cfg = config();
+    updateAccountQuota(A, 100, now + 86_400_000);
+    updateAccountQuota(B, 40, now + 86_400_000);
+    setAccountQuotaFromParsed(A, { customWindows: [{ label: "Luna Reserve", percent: 100, resetAt: now + 604_800_000, observedAt: now }] });
+    setAccountQuotaFromParsed(B, { customWindows: [{ label: "Luna Reserve", percent: 100, resetAt: now + 604_800_000, observedAt: now }] });
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const ok = await post(cfg);
+      expect(ok.status).toBe(200);
+      expect(calls).toEqual(["relay:gpt-6-luna"]);
+      expect(warn.mock.calls.flat().join("\n")).not.toContain("failed with 429");
+
+      calls.length = 0;
+      relay = refusedConnect;
+      const fallback = await post(cfg);
+      expect(fallback.status).toBe(200);
+      expect(calls).toEqual(["relay:gpt-6-luna", "native:gpt-6-luna"]);
+
+      // A healthy non-Luna primary target ahead of native Luna must never be hijacked to relay when Reserve is empty.
+      calls.length = 0;
+      relay = (_req, body) => sse(body.model, "relay-unexpected");
+      const cfgWithPrimary = config(
+        { other: { adapter: "openai-responses", authMode: "key", apiKey: "other-key", baseUrl: "https://other.example.test/v1" } },
+        [
+          { provider: "other", model: "gpt-5" },
+          { provider: "openai", model: "gpt-6-luna" },
+          { provider: "relay", model: "gpt-6-luna" },
+        ],
+      );
+      globalThis.fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (request.url.startsWith("https://other.example.test/")) {
+          calls.push("other:gpt-5");
+          return sse("gpt-5", "ok");
+        }
+        return sse("gpt-6-luna", "unexpected");
+      }, { preconnect() {} });
+      const primaryOk = await post(cfgWithPrimary);
+      expect(primaryOk.status).toBe(200);
+      expect(calls).toEqual(["other:gpt-5"]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });

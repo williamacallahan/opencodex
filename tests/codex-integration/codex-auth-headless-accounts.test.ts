@@ -283,4 +283,37 @@ describe("account listing without a native Codex home", () => {
     expect(existsSync(mutationPath)).toBe(false);
     expect(existsSync(nativeHome)).toBe(false);
   });
+
+  test("listCodexAuthAccountsSnapshot reads codex-accounts.json in O(1) snapshot passes instead of O(N) per-account reads", async () => {
+    const fs = await import("node:fs");
+    const { listCodexAuthAccountsSnapshot } = await import("../../src/codex/auth-api/account-list");
+    const { updateAccountQuota } = await import("../../src/codex/quota");
+    const future = Date.now() + 3_600_000;
+    const ids = Array.from({ length: 20 }, (_, i) => `pool-seat-${i}`);
+    for (const id of ids) {
+      saveCodexAccountCredential(id, {
+        accessToken: `access-${id}`, refreshToken: `refresh-${id}`,
+        chatgptAccountId: `ws-${id}`, expiresAt: future,
+      });
+      updateAccountQuota(id, 10 + (ids.indexOf(id) % 50), future);
+    }
+    const cfg: OcxConfig = {
+      ...config(),
+      showCodexCredits: true,
+      codexAccounts: ids.map(id => ({ id, email: `${id}@example.test`, plan: "plus", isMain: false })),
+    };
+    const accountsPath = join(root, "codex-accounts.json");
+    const spy = spyOn(fs, "readFileSync");
+    try {
+      const start = performance.now();
+      const snapshot = await listCodexAuthAccountsSnapshot(cfg, false);
+      const elapsedMs = performance.now() - start;
+      const storeReads = spy.mock.calls.filter(([target]) => String(target) === accountsPath).length;
+      expect(snapshot.accounts.filter(account => !account.isMain)).toHaveLength(20);
+      expect(storeReads).toBeLessThanOrEqual(2);
+      expect(elapsedMs).toBeLessThan(500);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });

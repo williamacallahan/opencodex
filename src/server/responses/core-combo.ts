@@ -6,7 +6,6 @@ import { clientFacingModelLabel, clientFacingModelText } from "../../lib/error-d
 import { projectLocalModelRefusalLog } from "../request-log-failure-detail";
 import { withPhysicalSendAdmission } from "../../lib/provider-admission-wait";
 import { carryProxyErrorContext, hasProxyErrorMessage, isProxyError, markProxyError } from "../../lib/client-error-body";
-import { classifyUpstreamCondition } from "../../lib/upstream-condition";
 import { effectiveAzureOutputBudget } from "../../adapters/azure";
 import { responsesSpendTarget } from "./request-spend-target";
 import { buildResponsesTransport } from "../../adapters/openai-responses/transport";
@@ -114,6 +113,7 @@ import {
   createChildPassthroughCallbackGate,
   consumeComboFailure,
   isLateAttributionRefusal,
+  warnComboTargetFailure,
 } from "./core-combo-failure";
 import {
   linkRequestSessionLane,
@@ -136,7 +136,7 @@ import {
 } from "../relay";
 import { preflightComboStreamResponse } from "./combo-stream-preflight";
 import { isOwnerCapacityRefusal } from "./owner-capacity-refusal";
-import { advanceLunaLegAfterFailure, isReserveSeatQuotaRefusal, nativeLunaTarget, onlyReplayIncompatibleTargetsRemain, planLunaReserveLegs, portCoolingLunaOwnerBeforeDispatch, portLunaConversationTarget, portSpentLunaReasoning, portUnavailableLunaTurn, prepareLunaReplay, relayProvedNotStarted } from "./combo-luna-legs";
+import { advanceLunaLegAfterFailure, isReserveSeatQuotaRefusal, nativeLunaTarget, onlyReplayIncompatibleTargetsRemain, planLunaReserveLegs, portCoolingLunaOwnerBeforeDispatch, portLunaConversationTarget, portSpentLunaReasoning, portUnavailableLunaTurn, prepareLunaReplay, relayProvedNotStarted, resolveEmptyLunaReserveStart } from "./combo-luna-legs";
 import { createPoolReserveWalk, modelHasPoolReserve, type PoolCapacityIntent } from "../../codex/pool-reserve";
 import { requiredToolContractOf } from "./combo-required-tool-contract";
 import {
@@ -776,6 +776,7 @@ export async function executeComboResponses(
   const conversationPin = !turnRebuilt && recalledPick && (!boundTargetKey || boundTargetKey === targetKey(recalledPick.target))
     && (!lunaLegs || targetKey(recalledPick.target) === lunaLegs.nativeKey) ? recalledPick : undefined;
   let evaluatedStrictReserve = false;
+  let skippedEmptyReserve = false;
   let lunaStage: "off" | "reserve" | "relay" | "done" = "off";
   let encryptedTaskRecoveryAttempted = false;
   let recoveryFailureReason: AgentTaskRecoveryFailureReason | undefined;
@@ -842,10 +843,10 @@ export async function executeComboResponses(
     waitForCooldownMs: combo.waitForCooldownMs,
     abortSignal: options.abortSignal,
   });
-  let pick = conversationPin ?? await pickWithWait({
-    eligible: targetEligible,
-    now: initialNow,
-  });
+  let pick = conversationPin ?? await pickWithWait({ eligible: targetEligible, now: initialNow });
+  ({ pick, evaluatedStrictReserve, lunaStage, skippedEmptyReserve } = await resolveEmptyLunaReserveStart({
+    config, lunaLegs, conversationPin, boundTargetKey, currentPick: pick, targetEligible, pickWithWait, now: initialNow,
+  }));
   // Opt-in JEV session pin (#7525); override routes neither read nor write it, like the lane recall.
   const jevPin = options.compactionRoutingOverride || options.mainHardLockFallbackOverride
     ? undefined
@@ -927,7 +928,9 @@ export async function executeComboResponses(
       aliases: [requestedModel],
       from: resolvedComboDestination(config, primaryTarget),
       to: resolvedComboDestination(config, pick.target),
-      trigger: primaryCooling ? "cooldown" : comboTargetSkipTrigger(config, primaryTarget, initialNow),
+      trigger: primaryCooling ? "cooldown"
+        : skippedEmptyReserve && targetKey(primaryTarget) === lunaLegs?.nativeKey ? "quota_exhausted"
+        : comboTargetSkipTrigger(config, primaryTarget, initialNow),
       admission: options.admission,
       retryAfter: primaryCooling ? comboCooldownRetryAfterSeconds(comboId, initialNow) ?? null : null,
       now: initialNow,
@@ -1181,7 +1184,7 @@ export async function executeComboResponses(
     if (options.abortSignal?.aborted) return clientCancelledResponse();
     const firstComboTarget = comboTargetsDispatched === 0;
     const legTargetKey = targetKey(pick.target);
-    if (lunaLegs && firstComboTarget) lunaStage = legTargetKey === lunaLegs.nativeKey ? "reserve" : legTargetKey === lunaLegs.relayKey ? "relay" : "off";
+    if (lunaLegs && firstComboTarget && !evaluatedStrictReserve) lunaStage = legTargetKey === lunaLegs.nativeKey ? "reserve" : legTargetKey === lunaLegs.relayKey ? "relay" : "off";
     if (lunaLegs && legTargetKey === lunaLegs.nativeKey && !evaluatedStrictReserve) {
       lunaStage = "reserve";
       evaluatedStrictReserve = true;
@@ -1831,15 +1834,6 @@ export async function executeComboResponses(
         usage: failure.usage ?? childLog.usage,
       };
     }
-    // A bare status made a revoked credential read as a provider outage. Log the classified
-    // condition (a closed member), never upstream-authored code or message text.
-    const failureReason = classifyUpstreamCondition({
-      status: failure.response.status, code: failure.upstreamCode, type: failure.upstreamType, message: failure.upstreamMessage,
-    });
-    console.warn(
-      `[combo] ${comboLogLabel(config, comboId)}: ${comboTargetLogLabel(config, comboId, pick.target)} failed with ${failure.response.status}`
-        + ` after ${Date.now() - started}ms${failureReason ? `: ${failureReason}` : ""}`,
-    );
     const failureNow = Date.now();
     const attemptedTargets: string[] = pick.attempted;
     const classifiedScope = comboFailureCooldownScope(failure.response.status, failure.classificationText, {
@@ -1848,9 +1842,12 @@ export async function executeComboResponses(
       openRouterOpaque400: failure.openRouterOpaque400,
       providerModerationRefusal: failure.providerModerationRefusal,
     });
-    // A Reserve-window rejection is narrower than explicit provider-wide evidence.
     const reserveCapacityRefused = legIntent === "reserve-only" && (attempt.sendCount === 0
       || isReserveSeatQuotaRefusal(failure, classifiedScope));
+    warnComboTargetFailure(
+      comboLogLabel(config, comboId), comboTargetLogLabel(config, comboId, pick.target),
+      failure, failureNow - started, legIntent === "reserve-only" && attempt.sendCount === 0,
+    );
     const pooledRelay = hasUpstreamSeatPool(targetRoute, childLog.providerAdapter);
     const relayCooldown = pooledRelay
       ? relayFailureCooldownMs(failure.response.status, failure.relayRetryAfterHeader, combo.cooldownMs, failureNow) : undefined;

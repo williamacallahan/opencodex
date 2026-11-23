@@ -6,7 +6,7 @@ import { consumeComboFailure } from "./core-combo-failure";
 import { isNonReplayableResponse } from "../../lib/upstream-retry";
 import { wasAccountAutoPaused } from "../../oauth/account-auto-pause";
 import { isReserveQuotaCode } from "./combo-stream-preflight";
-import { modelHasPoolReserve } from "../../codex/pool-reserve";
+import { createPoolReserveWalk, modelHasPoolReserve } from "../../codex/pool-reserve";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { isCodexLbProvider } from "../../providers/quota/codex-lb-url";
 import type { RouteResult } from "../../router";
@@ -351,4 +351,29 @@ export async function advanceLunaLegAfterFailure(args: {
     ? await args.pickOrdinary(args.attemptedTargets.filter(key => key !== args.legs.nativeKey))
     : null;
   return { lunaStage: nextStage, pick: ordinaryPick ?? args.pick };
+}
+
+/** Skip strict Reserve when zero pool seats hold Reserve capacity; preserves ordinary Luna fallback. */
+export async function resolveEmptyLunaReserveStart(args: {
+  config: OcxConfig;
+  lunaLegs: LunaReserveLegPlan | undefined;
+  conversationPin: ComboPick | undefined;
+  boundTargetKey: string | undefined;
+  currentPick: ComboPick | null;
+  targetEligible: (target: ComboTarget) => boolean;
+  pickWithWait: (opts: { eligible: (target: ComboTarget) => boolean; now?: number }) => Promise<ComboPick | null>;
+  now: number;
+}): Promise<{ pick: ComboPick | null; evaluatedStrictReserve: boolean; lunaStage: "off" | "relay" | "done"; skippedEmptyReserve: boolean }> {
+  if (args.conversationPin || args.boundTargetKey || !args.lunaLegs
+    || !args.currentPick || targetKey(args.currentPick.target) !== args.lunaLegs.nativeKey
+    || createPoolReserveWalk(args.config, args.now).remaining.size > 0) {
+    return { pick: args.currentPick, evaluatedStrictReserve: false, lunaStage: "off", skippedEmptyReserve: false };
+  }
+  const relayPick = await args.pickWithWait({
+    eligible: target => targetKey(target) === args.lunaLegs!.relayKey && args.targetEligible(target),
+    now: args.now,
+  });
+  return relayPick
+    ? { pick: relayPick, evaluatedStrictReserve: true, lunaStage: "relay", skippedEmptyReserve: true }
+    : { pick: args.currentPick, evaluatedStrictReserve: true, lunaStage: "done", skippedEmptyReserve: false };
 }
