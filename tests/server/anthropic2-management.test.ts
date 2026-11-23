@@ -92,7 +92,7 @@ test("a stale live B row after a durable save answers saved with the bookkeeping
   expect(loadConfig().providers.anthropic2!.anthropicAccountPool?.autoSwitchThreshold).toBe(22);
 });
 
-test("B account mutations retire only B provider-level, routing and account quota rows", async () => {
+test("Pool 2 selection keeps account readings; removal retires only Pool 2 quota", async () => {
   const now = Date.now();
   const report = (provider: string, fiveHourPercent: number): ProviderQuotaReport => ({
     provider, label: provider, source: "anthropic:oauth-usage", quota: { fiveHourPercent, updatedAt: now }, updatedAt: now,
@@ -110,6 +110,8 @@ test("B account mutations retire only B provider-level, routing and account quot
     expect(getCachedProviderQuota("anthropic", now)?.fiveHourPercent).toBe(11);
     expect(getCachedProviderQuota("anthropic2", now)).toBeNull();
     expect(getCachedProviderAccountQuota("anthropic", "same")?.fiveHourPercent).toBe(5);
-    expect(getCachedProviderAccountQuota("anthropic2", "same")).toBeNull();
+    const secondaryQuota = getCachedProviderAccountQuota("anthropic2", "same");
+    if (method === "PUT") expect(secondaryQuota?.fiveHourPercent).toBe(5);
+    else expect(secondaryQuota).toBeNull();
   }
 });

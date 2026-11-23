@@ -677,7 +677,7 @@ for (const kind of ["oauth", "api-key"] as const) {
   });
 }
 
-test("healthy SSE skips the 30-second roster poll while unhealthy SSE still recovers, and background refreshes never flash loading", async () => {
+test("healthy SSE skips idle roster reads but catches a failed selection refresh and passive quota changes", async () => {
   let stream!: ReadableStreamDefaultController<Uint8Array>;
   const scheduledPolls: Array<() => void> = [];
   const origSetInterval = globalThis.setInterval;
@@ -693,6 +693,10 @@ test("healthy SSE skips the 30-second roster poll while unhealthy SSE still reco
   });
   try {
     const reads: string[] = [];
+    let activeAccountId = "a";
+    let accountLabel = "Acct A";
+    let quotaMode = "probe";
+    let failNextRoster = false;
     const encoder = new TextEncoder();
     const send = (event: string, data: unknown) => {
       stream.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
@@ -711,7 +715,8 @@ test("healthy SSE skips the 30-second roster poll while unhealthy SSE still reco
       if (url.pathname === "/api/oauth/providers") return Response.json({ providers: ["cursor"] });
       if (url.pathname === "/api/oauth/status") return Response.json({ loggedIn: true });
       if (url.pathname === "/api/oauth/accounts") {
-        return Response.json({ activeAccountId: "a", accounts: [{ id: "a", alias: "Acct A", active: true, quotaMode: "probe" }] });
+        if (failNextRoster) { failNextRoster = false; return Response.json({}, { status: 503 }); }
+        return Response.json({ activeAccountId, accounts: [{ id: activeAccountId, alias: accountLabel, active: true, quotaMode }] });
       }
       if (url.pathname === "/api/codex-auth/accounts") return Response.json({ accounts: [] });
       if (url.pathname === "/api/codex-auth/active") return Response.json({ activeCodexAccountId: null });
@@ -738,11 +743,18 @@ test("healthy SSE skips the 30-second roster poll while unhealthy SSE still reco
     const afterHealthyPoll = reads.filter(r => r.startsWith("/api/oauth/accounts")).length;
     expect(afterHealthyPoll).toBe(beforeHealthyPoll);
 
-    // Once SSE closes and the reader loop settles connection = null, the recovery poll runs again.
-    await act(async () => { stream.close(); await Promise.resolve(); await Promise.resolve(); });
+    activeAccountId = "b";
+    accountLabel = "Acct B";
+    quotaMode = "passive";
+    failNextRoster = true;
+    await act(async () => { send("account-selection", { provider: "cursor", kind: "oauth", revision: 1 }); });
     await act(async () => { for (const fn of scheduledPolls) fn(); });
-    const afterClosedPoll = reads.filter(r => r.startsWith("/api/oauth/accounts")).length;
-    expect(afterClosedPoll).toBeGreaterThan(afterHealthyPoll);
+    expect(container.textContent).toContain("Acct B");
+
+    accountLabel = "Acct B updated";
+    await act(async () => { for (const fn of scheduledPolls) fn(); });
+    expect(container.textContent).toContain("Acct B updated");
+    await act(async () => { stream.close(); });
   } finally {
     Object.defineProperty(globalThis, "setInterval", { configurable: true, value: origSetInterval });
   }

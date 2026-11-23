@@ -38,7 +38,7 @@ type ConnectionTestState = {
 };
 
 export default function ProviderOverview({
-  item, preset, usageTotals, quotaReport, currentQuotaReading, onRefreshQuota, oauthEmail, activeAccountId, currentAccountLabel, oauth,
+  item, preset, usageTotals, quotaReport, currentQuotaReading, onRefreshQuota, oauthEmail, activeQuotaCredentialId, currentAccountLabel, oauth,
   apiBase, connectionIdentity, probeController, availableModels = [], selectedModels, modelRows, modelRowsReady = false,
   modelsLoading = false, modelsLoadFailed = false, onRetryModels, onOpenAccounts, onOpenModelsTab, onOpenModels, onOpenConnect,
   onEditSettings, onViewUsage, onUpdateProvider,
@@ -52,7 +52,7 @@ export default function ProviderOverview({
   currentQuotaReading?: AccountQuotaReading;
   onRefreshQuota?: () => Promise<boolean>;
   oauthEmail?: string;
-  activeAccountId?: string;
+  activeQuotaCredentialId?: string;
   currentAccountLabel?: string;
   /** Login state for OAuth summaries that carry no email (e.g. Cursor/Kimi). */
   oauth?: { loggedIn?: boolean; needsReauth?: boolean };
@@ -498,7 +498,7 @@ export default function ProviderOverview({
         )}
       </section>
 
-      <ProviderCurrentQuota key={`${item.name}:${activeAccountId ?? ""}`} report={quotaReport} reading={currentQuotaReading} onRefreshQuota={onRefreshQuota} />
+      <ProviderCurrentQuota key={`${item.name}:${item.authMode}:${activeQuotaCredentialId ?? ""}`} report={quotaReport} reading={currentQuotaReading} onRefreshQuota={onRefreshQuota} />
       </aside>
     </div>
     </>

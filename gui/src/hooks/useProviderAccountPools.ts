@@ -460,7 +460,7 @@ export function useProviderAccountPools(deps: {
     return results.every(Boolean);
   }, [apiBase, aliveRef, captureIsCurrent, readRoster, renderCapture, serverIdentity]);
 
-  const refreshAccountRosters = useCallback(async (target?: AccountSelectionTarget, signal?: AbortSignal): Promise<boolean> => {
+  const refreshAccountRosters = useCallback(async (target?: AccountSelectionTarget, signal?: AbortSignal, background = false): Promise<boolean> => {
     if (!aliveRef.current || !mountedRef.current || serverRef.current !== serverIdentity
       || !captureIsCurrent(renderCapture) || signal?.aborted) return false;
     const targets: AccountSelectionTarget[] = target ? [target] : Object.entries(config?.providers ?? {}).flatMap<AccountSelectionTarget>(([provider, p]) =>
@@ -475,12 +475,12 @@ export function useProviderAccountPools(deps: {
       const ownsRoster = () => aliveRef.current && mountedRef.current && serverRef.current === serverIdentity
         && captureIsCurrent(renderCapture) && rosterGenerationRef.current[key] === generation && !selectionMutationsRef.current.has(key);
       const currentRequest = () => ownsRoster() && !signal?.aborted;
-      setAccountLoadStateIfChanged(setAccountLoadStates, provider, "loading", () => kind === "oauth" && currentRequest(), true);
+      setAccountLoadStateIfChanged(setAccountLoadStates, provider, "loading", () => kind === "oauth" && currentRequest(), background);
       try {
         if (kind === "oauth") {
           const data = await readRoster<{ activeAccountId?: string | null; accounts?: OAuthAccount[] }>(
             `${apiBase}/api/oauth/accounts?provider=${encodeURIComponent(provider)}`, signal);
-          if (!Array.isArray(data.accounts)) throw new Error("Invalid account roster");
+          if (!Array.isArray(data.accounts) || signal?.aborted) throw new Error("Account roster could not be verified");
           if (!currentRequest()) return false;
           const rows = selectionRows(data.accounts, data.activeAccountId);
           setAccountSets(current => {
@@ -506,7 +506,7 @@ export function useProviderAccountPools(deps: {
         return true;
       } catch {
         // A missed invalidation read does not change quota health; recovery retries it.
-        setAccountLoadStateIfChanged(setAccountLoadStates, provider, "error", () => kind === "oauth" && ownsRoster(), true);
+        setAccountLoadStateIfChanged(setAccountLoadStates, provider, "error", () => kind === "oauth" && ownsRoster(), background);
         return false;
       }
     }));

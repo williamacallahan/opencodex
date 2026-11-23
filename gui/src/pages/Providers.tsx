@@ -450,10 +450,13 @@ export default function Providers({ apiBase, targetKey, targetLabel }: { apiBase
     switchAccount, pauseAccount, setAccountPoolThreshold, setAccountThreshold, switchApiKey, pauseApiKey, removeApiKey, addApiKeyValue, editCredentialAlias,
     removeAccount, activeAccountNeedsReauth,
   } = pools;
-  const refreshSelection = useCallback((target?: AccountSelectionTarget) => {
-    if (target && !(target.kind === "oauth" ? oauthCardProviders : keyCardProviders).includes(target.provider)) return Promise.resolve(true);
-    return refreshAccountRosters(target);
-  }, [refreshAccountRosters, oauthCardProviders, keyCardProviders]);
+  const failedRosterRefresh = useRef<{ targetKey: string } | null>(null);
+  const refreshSelection = useCallback(async (target?: AccountSelectionTarget) => {
+    if (target && !(target.kind === "oauth" ? oauthCardProviders : keyCardProviders).includes(target.provider)) return true;
+    const refreshed = await refreshAccountRosters(target, undefined, true);
+    if (!refreshed) failedRosterRefresh.current = { targetKey: draftTargetKey };
+    return refreshed;
+  }, [refreshAccountRosters, oauthCardProviders, keyCardProviders, draftTargetKey]);
   const selectionStream = useAccountSelectionEvents(apiBase, draftTargetKey, config !== null, refreshSelection);
   useLayoutEffect(() => { selectionStreamRef.current = selectionStream; }, [selectionStream]);
   const refreshCodexPool = codexPool.load;
@@ -484,9 +487,18 @@ export default function Providers({ apiBase, targetKey, targetLabel }: { apiBase
   useKeyedClientResource(`provider-rosters:${rosterKey}`, [rosterKey], async signal => {
     // Existing bootstrap effects own the first enriched reads. This resource is recovery only.
     if (rosterRecoveryKeyRef.current !== rosterKey) { rosterRecoveryKeyRef.current = rosterKey; return true; }
-    if (selectionStream.isHealthy()) return true;
-    selectionStream.recover();
-    return refreshAccountRosters(undefined, signal);
+    const failed = failedRosterRefresh.current;
+    const healthy = selectionStream.isHealthy();
+    if (!healthy || failed?.targetKey === draftTargetKey) {
+      if (!healthy) selectionStream.recover();
+      const refreshed = await refreshAccountRosters(undefined, signal, true);
+      if (refreshed && failedRosterRefresh.current === failed) failedRosterRefresh.current = null;
+      return refreshed;
+    }
+    // Selection events do not announce changes to usage observed on inference responses.
+    const passive = oauthCardProviders.filter(provider => accountSets[provider]?.accounts.some(account => account.quotaMode === "passive"));
+    const refreshed = await Promise.all(passive.map(provider => refreshAccountRosters({ provider, kind: "oauth" }, signal, true)));
+    return refreshed.every(Boolean);
   }, { enabled: config !== null, pollMs: 30_000 });
   const jsonEditor = useJsonConfigEditor({
     apiBase, targetKey: draftTargetKey, config,

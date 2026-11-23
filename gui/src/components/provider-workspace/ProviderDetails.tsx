@@ -421,7 +421,7 @@ export default function ProviderDetails({
             currentQuotaReading={currentQuotaReading}
             onRefreshQuota={onRefreshQuota}
             oauthEmail={oauthEmail}
-            activeAccountId={activeOAuthAccount?.id}
+            activeQuotaCredentialId={currentQuotaReading?.id}
             currentAccountLabel={authSurface === "oauth-accounts" && accountLoadState === "ready" && activeOAuthAccount
               ? oauthAccountDisplayLabel(accounts ?? [], activeOAuthAccount, t) : undefined}
             oauth={oauth}

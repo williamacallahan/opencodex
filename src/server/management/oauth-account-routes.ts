@@ -111,17 +111,12 @@ function isDevinCloudDirectProvider(provider: string): boolean {
 }
 
 /**
- * Quota invalidation after an account mutation. A B mutation retires only B's provider-level
- * report, routing row and per-account rows; A's cache, epochs and in-flight probes survive.
- * Other providers keep the global clear; `accountRows` also drops that provider's account rows.
+ * Pool 2 invalidation leaves Pool 1 untouched. Selection changes invalidate the report,
+ * not the underlying account measurements.
  */
 function clearQuotaCachesAfterAccountMutation(provider: string, accountRows: boolean): void {
-  if (provider === "anthropic2") {
-    clearProviderQuotaCacheFor(provider);
-    clearAccountQuotaCache(provider);
-    return;
-  }
-  clearProviderQuotaCache();
+  if (provider === "anthropic2") clearProviderQuotaCacheFor(provider);
+  else clearProviderQuotaCache();
   if (accountRows) clearAccountQuotaCache(provider);
 }
 
