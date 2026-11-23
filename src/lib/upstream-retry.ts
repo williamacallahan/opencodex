@@ -73,7 +73,7 @@ export function inspectedPolicyRefusal(response: Response): PolicyRefusal | unde
  */
 export async function inspectPolicyRefusal(response: Response, signal?: AbortSignal): Promise<PolicyRefusal | undefined> {
   const known = policyRefusals.get(response);
-  if (known || policyInspected.has(response) || response.ok || !response.body || response.bodyUsed) return known;
+  if (known || policyInspected.has(response) || response.ok || response.bodyUsed) return known;
   try {
     const body = await readBoundedResponseBody(response.clone(), { signal, maxBytes: POLICY_REFUSAL_PEEK_BYTES, totalTimeoutMs: POLICY_REFUSAL_PEEK_MS });
     if (!body.truncated && !body.oversized) {
