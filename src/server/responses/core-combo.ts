@@ -664,7 +664,8 @@ export async function executeComboResponses(
   let unavailableOrdinaryTarget: string | undefined;
   const targetEligible = (target: (typeof combo.targets)[number]): boolean =>
     (!boundTargetKey || boundTargetKey === targetKey(target)) && unavailableOrdinaryTarget !== targetKey(target)
-    && payloadEligible(target) && recoveryEligible(target);
+    && (!turnRebuilt || scopedRoute(target) !== undefined
+      && (!rebuiltFromTarget || comboHopAllowed(rebuiltFromTarget, target))) && payloadEligible(target) && recoveryEligible(target);
   const initialNow = Date.now();
   const comboLane = options.claudeBridgePoolSession;
   // A later turn of a known conversation stays on the target that served the previous one while that target
@@ -690,6 +691,7 @@ export async function executeComboResponses(
   };
   let handleOwner = comboTurnStateOwner(req.headers, body);
   let turnRebuilt = false;
+  let rebuiltFromTarget: (typeof combo.targets)[number] | undefined;
   const pinEligible = (target: (typeof combo.targets)[number]): boolean => {
     if (handleOwner) {
       const route = scopedRoute(target);
@@ -761,7 +763,9 @@ export async function executeComboResponses(
       if (lunaReplay.reason === "previous-response-id") return missingPrevious();
       const fresh = handleOwner ? (!handleOwner.hasLiveHandle() ? rebuildTurn() : undefined)
         : lunaReplay.reason === "encrypted-reasoning" ? rebuildTurn() : undefined;
-      if (fresh === undefined) return unavailableOwner(!handleOwner && lunaReplay.reason !== "turn-state");
+      if (fresh === undefined) return !owner && !handleOwner && lunaCandidate && lunaReplay.reason === "encrypted-reasoning"
+        ? unavailableCodexTurnOwnerResponse() : unavailableOwner(!handleOwner && lunaReplay.reason !== "turn-state");
+      rebuiltFromTarget = owner;
       handleOwner = undefined;
       turnRebuilt = true;
       dispatchBody = replayEligibilityBody = fresh;
@@ -839,7 +843,7 @@ export async function executeComboResponses(
     // Every pick, including the recovery picks that skip `targetEligible`, keeps metered
     // targets away from callers that may not spend on them.
     eligible: target => (!boundTargetKey || targetKey(target) === boundTargetKey) && (meteredAllowed || !target.metered)
-      && (!turnRebuilt || scopedRoute(target) !== undefined) && (pickOptions.eligible?.(target) ?? true),
+      && (pickOptions.eligible?.(target) ?? true),
     waitForCooldownMs: combo.waitForCooldownMs,
     abortSignal: options.abortSignal,
   });
@@ -916,7 +920,7 @@ export async function executeComboResponses(
   // reason (cooling down, provider disabled, cached quota spent, ineligible for this request),
   // makes a proactive hop, so the fallback policy decides before anything is sent. Both ends are
   // the resolved destinations, after provider aliases and blockedModelRedirects.
-  const primaryTarget = combo.targets[0];
+  const primaryTarget = rebuiltFromTarget ?? combo.targets[0];
   // An allowed hop is recorded only once its dispatch is admitted below.
   let pendingHopCommit: (() => void) | undefined;
   if (!conversationPin && (combo.strategy ?? "failover") === "failover" && primaryTarget
@@ -1793,7 +1797,7 @@ export async function executeComboResponses(
         eligible: target => (fresh === undefined || scopedRoute(target) !== undefined) && targetEligible(target),
         hopAllowed: comboHopAllowed, pickTarget: pickWithWait,
         exclude: [...failedPick.attempted, legTargetKey], isPreDispatch: false, alreadyReserveOnly: portedReserveOnly,
-        forbidSameTarget: isLunaStoreMismatchResponse(failure.response),
+        forbidSameTarget: isLunaStoreMismatchResponse(failure.response), noOwnerSend: fresh !== undefined,
         aborted: () => Boolean(options.abortSignal?.aborted || req.signal.aborted), now: Date.now(),
       });
       if (options.abortSignal?.aborted || req.signal.aborted) return clientCancelledResponse();

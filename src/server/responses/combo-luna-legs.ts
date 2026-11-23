@@ -217,6 +217,8 @@ export async function portLunaConversationTarget(args: {
   isPreDispatch?: boolean;
   alreadyReserveOnly: boolean;
   forbidSameTarget?: boolean;
+  /** No request reached the old owner, so even a one-seat pool can start this turn fresh. */
+  noOwnerSend?: boolean;
   aborted?: () => boolean;
   now: number;
 }): Promise<{ pick: ComboPick; plan: LunaReserveLegPlan | undefined; reserveOnly: boolean; retryReserve: boolean; lunaStage: "off" | "reserve" | "relay" | "done" } | null> {
@@ -238,8 +240,8 @@ export async function portLunaConversationTarget(args: {
     if (startNative) return { pick: startNative, plan, reserveOnly: false, retryReserve: false, lunaStage: "reserve" };
   }
 
-  const retryReserve = !skipNativeTarget
-    && canWalkRemainingNativeReserve(args.config, args.comboId, args.fromTarget, nativeKey, args.alreadyReserveOnly, args.now);
+  const retryReserve = !skipNativeTarget && (args.noOwnerSend && fromKey === nativeKey
+    || canWalkRemainingNativeReserve(args.config, args.comboId, args.fromTarget, nativeKey, args.alreadyReserveOnly, args.now));
   if (retryReserve) {
     const nativeRetry = await args.pickTarget({
       allowCooldownReprobe: false,

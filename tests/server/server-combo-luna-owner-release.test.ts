@@ -73,12 +73,12 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
-async function post(input: unknown[], log: RequestLogContext = { provider: "", model: "" }, headers: Record<string, string> = {}, extra = {}) {
+async function post(input: unknown[], log: RequestLogContext = { provider: "", model: "" }, headers: Record<string, string> = {}, extra = {}, routing = config) {
   const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
     headers: { "content-type": "application/json", "thread-id": "luna-owner-release", ...headers },
     body: JSON.stringify({ model: "combo/luna", input, store: false, stream: true,
       tools: [{ type: "function", name: "lookup", parameters: { type: "object", properties: {} } }], ...extra }),
-  }), config, log, { admission: { kind: "loopback", source: "loopback" } });
+  }), routing, log, { admission: { kind: "loopback", source: "loopback" } });
   return { status: response.status, headers: response.headers, text: await response.text() };
 }
 
@@ -142,6 +142,27 @@ test.each(["no handle", "no recall or handle", "expired header", "expired metada
     expect(nativeBody?.input.filter(entry => entry.call_id)).toEqual([call("native"), output("native")]);
   },
 );
+
+test("a zero-send owner refusal can rebuild on the only configured Reserve seat", async () => {
+  const oneSeat: OcxConfig = { ...config, combos: { luna: { strategy: "failover", targets: [native] } } };
+  expect((await post([question], undefined, {}, {}, oneSeat)).status).toBe(200);
+  clearThreadAccountMap();
+  const log: RequestLogContext = { provider: "", model: "" };
+  nativeReply = () => completed("single_seat", []);
+  const result = await post(nativeHistory, log, {}, {}, oneSeat);
+  expect(result.status).toBe(200);
+  expect(result.text).toContain("resp_single_seat");
+  expect(log.attempts?.map(attempt => [attempt.sendCount, attempt.wireModel]))
+    .toEqual([[0, undefined], [1, "gpt-reserve"]]);
+});
+
+test("missing owner and an incomplete tool history are terminal even without a turn handle", async () => {
+  const result = await post([question, reasoning("native"), output("native")]);
+  expect(result.status).toBe(409);
+  expect(result.headers.get("x-should-retry")).toBe("false");
+  expect(nativeRequest).toBeUndefined();
+  expect(relayInput).toEqual([]);
+});
 
 test("HTTP resumes a Pi tool turn after both owner records are lost", async () => {
   saveConfig(config);
