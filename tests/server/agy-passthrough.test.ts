@@ -340,6 +340,21 @@ describe("agy pass-through public HTTP lane", () => {
     expect(await turn()).toBe(bearer(2));
   });
 
+  test("the Accounts tab learns which account serves agy now from the hub's own choices", async () => {
+    await launch();
+    const { agyServing } = await import("../../src/server/agy-passthrough-accounts");
+    const rows = getAccountSet("google-antigravity")!.accounts;
+    expect(rows.map(row => agyServing(row.id))).toEqual([null, null, null]);
+    reply = () => Response.json({});
+    const before = calls.length;
+    expect((await post("loadCodeAssist", "{}")).status).toBe(200);
+    expect(calls).toHaveLength(before + 1);
+    const served = rows.find(row => `Bearer ${row.credential.access}` === calls.at(-1)!.headers.get("authorization"))!;
+    expect(agyServing(served.id)).toEqual({ active: true, lastAt: expect.any(Number) });
+    expect(agyServing(served.id, Date.now() + 11 * 60_000)?.active).toBe(false);
+    expect(rows.filter(row => row.id !== served.id).map(row => agyServing(row.id))).toEqual([null, null]);
+  });
+
   test("a cooling account's caller moves to an owner of its project before an emptier account of another project", async () => {
     await launch();
     const { mergeAccountCredential } = await import("../../src/oauth/store");

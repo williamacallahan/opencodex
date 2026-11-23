@@ -1,3 +1,4 @@
+import { formatRelativeTime, relativeTimeLabelsFromT } from "../../provider-workspace/usage";
 import { anthropicSubscriptionLabel } from "../../../../src/providers/anthropic-subscription";
 import { anthropicInstanceRowShapeMatches, isAnthropicInstanceId } from "../../../../src/providers/anthropic-instance-id";
 /**
@@ -620,7 +621,13 @@ export default function ProviderAuthPanel({
                         {account.paused && (
                           <span className="pwi-auth-row-secondary faint">{t("pws.accountPausedHint")}</span>
                         )}
+                        {account.agyServing !== undefined && (
+                          <span className="pwi-auth-row-secondary faint">{account.agyServing
+                            ? `${t("pws.agyLastRequest")}: ${formatRelativeTime(account.agyServing.lastAt, relativeTimeLabelsFromT(t))}`
+                            : t("pws.agyNoRequest")}</span>
+                        )}
                       </span>
+                      {account.agyServing?.active && <span className="badge badge-green">{t("pws.agyServingNow")}</span>}
                       {healthLabel && (
                         <span className={oauthHealthBadgeClass(healthStatus)}>{healthLabel}</span>
                       )}

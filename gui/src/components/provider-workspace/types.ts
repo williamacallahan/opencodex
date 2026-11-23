@@ -82,6 +82,8 @@ export type OAuthAccountRow = AccountQuotaReading & {
   healthLabel?: string;
   healthSummary?: string;
   healthAction?: string;
+  /** Antigravity under agy-only: whether the hub routes an agy sign-in to this account now, and its last agy request. */
+  agyServing?: { active: boolean; lastAt: number } | null;
 };
 
 export type ApiKeyRow = AccountQuotaReading & {

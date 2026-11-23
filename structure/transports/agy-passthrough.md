@@ -65,6 +65,10 @@ fallback. `tests/server/agy-passthrough.test.ts` and
   and it is written back to the stored credential only while that sign-in still holds the slot. The caller map is process-local and
   bounded; a restart, or agy refreshing its own token (about hourly), starts a new caller, whose next
   `loadCodeAssist` may land on another account.
+- The Accounts tab shows which account serves agy: `agyServing` reports, from these choices alone,
+  whether an account served an agy sign-in in the last 10 minutes and when it last served one
+  (process-local, so empty after a restart). agy's own screen shows its local sign-in's email, which
+  the hub replaces on every call, so it never names the serving account.
 - The catalog gather leaves a Cloud Code row out while the switch is on (`captureGatherFlight`), so an
   operator row left from before the switch neither lists models nor breaks other providers' listing.
 
