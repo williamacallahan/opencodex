@@ -30,6 +30,24 @@ import { getEffectiveCodexAutoSwitchThreshold, isCodexAccountAutoSwitchThreshold
 import { withCodexAccountPauseGroup } from "./account-pause-group";
 import { PERMANENT_PAUSE_REASONS } from "../../oauth/account-resume-health";
 
+function buildCodexActiveSelectionPayload(config: OcxConfig) {
+  const runtimeConfig = getRuntimeConfig(config);
+  return {
+    activeCodexAccountId: getEffectiveActiveCodexAccountId(runtimeConfig) ?? null,
+    pinned: isEffectiveCodexAccountPinned(runtimeConfig),
+    // Which account carries the pin, not just whether the active one does. Under
+    // round-robin or fill-first the pin caps the tier ceiling at its own tier while the
+    // strategy cursor moves freely inside that tier, so `pinned` alone goes false on a
+    // sibling's turn even though the pin is still suppressing every higher tier. The id
+    // lets a surface mark the account the operator actually chose.
+    pinnedAccountId: pinnedCodexAccountId(runtimeConfig) ?? null,
+    autoSwitchThreshold: runtimeConfig.autoSwitchThreshold ?? 80,
+    upstreamFailoverThreshold: runtimeConfig.upstreamFailoverThreshold ?? 3,
+    accountPoolStrategy: normalizeCodexAccountPoolStrategy(runtimeConfig.accountPoolStrategy),
+    accountPoolStickyLimit: normalizeAccountPoolStickyLimit(runtimeConfig.accountPoolStickyLimit),
+  };
+}
+
 export async function handleCodexAuthAPI(
   req: Request,
   url: URL,
@@ -45,7 +63,10 @@ export async function handleCodexAuthAPI(
   }
   if (url.pathname === "/api/codex-auth/accounts" && req.method === "GET") {
     const forceRefresh = url.searchParams.get("refresh") === "1" || url.searchParams.get("refresh") === "true";
-    return jsonResponse({ accounts: await listCodexAuthAccounts(config, forceRefresh) });
+    return jsonResponse({
+      accounts: await listCodexAuthAccounts(config, forceRefresh),
+      active: buildCodexActiveSelectionPayload(config),
+    });
   }
 
   if (url.pathname === "/api/codex-auth/accounts/refresh" && req.method === "POST") {
@@ -314,21 +335,7 @@ export async function handleCodexAuthAPI(
   }
 
   if (url.pathname === "/api/codex-auth/active" && req.method === "GET") {
-    const runtimeConfig = getRuntimeConfig(config);
-    return jsonResponse({
-      activeCodexAccountId: getEffectiveActiveCodexAccountId(runtimeConfig) ?? null,
-      pinned: isEffectiveCodexAccountPinned(runtimeConfig),
-      // Which account carries the pin, not just whether the active one does. Under
-      // round-robin or fill-first the pin caps the tier ceiling at its own tier while the
-      // strategy cursor moves freely inside that tier, so `pinned` alone goes false on a
-      // sibling's turn even though the pin is still suppressing every higher tier. The id
-      // lets a surface mark the account the operator actually chose.
-      pinnedAccountId: pinnedCodexAccountId(runtimeConfig) ?? null,
-      autoSwitchThreshold: runtimeConfig.autoSwitchThreshold ?? 80,
-      upstreamFailoverThreshold: runtimeConfig.upstreamFailoverThreshold ?? 3,
-      accountPoolStrategy: normalizeCodexAccountPoolStrategy(runtimeConfig.accountPoolStrategy),
-      accountPoolStickyLimit: normalizeAccountPoolStickyLimit(runtimeConfig.accountPoolStickyLimit),
-    });
+    return jsonResponse(buildCodexActiveSelectionPayload(config));
   }
 
   if (url.pathname === "/api/codex-auth/auto-switch" && req.method === "PUT") {

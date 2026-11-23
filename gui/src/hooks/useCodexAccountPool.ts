@@ -215,13 +215,37 @@ interface CodexAccountUsageSummary {
 /** In-memory last-good snapshot (not sessionStorage — accounts carry emails/ids). */
 const lastGoodByBase = new Map<string, { accounts: CodexAccountEntry[]; activeId: string | null }>();
 
+export interface UseCodexAccountPoolOptions {
+  shouldSkipBackgroundPoll?: () => boolean;
+}
+
+interface CodexActiveSelectionPayload {
+  activeCodexAccountId?: string | null;
+  pinned?: boolean;
+  pinnedAccountId?: string | null;
+  autoSwitchThreshold?: number;
+  upstreamFailoverThreshold?: number;
+  accountPoolStrategy?: string;
+  accountPoolStickyLimit?: number;
+}
+
+function isCodexActivePayload(value: unknown): value is CodexActiveSelectionPayload {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    && "activeCodexAccountId" in value;
+}
+
 function normalizeAccountAutoSwitchThreshold(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100
     ? value
     : null;
 }
 
-export function useCodexAccountPool(apiBase: string, enabled = true, targetKey?: string): CodexAccountPoolController {
+export function useCodexAccountPool(
+  apiBase: string,
+  enabled = true,
+  targetKey?: string,
+  options?: UseCodexAccountPoolOptions,
+): CodexAccountPoolController {
   const seedKey = targetKey ?? apiBase;
   // The hook's render owns the target for its loads and actions; a module target change
   // that has not re-rendered this hook cannot retarget a stale read or mutation.
@@ -329,6 +353,11 @@ export function useCodexAccountPool(apiBase: string, enabled = true, targetKey?:
     pendingActiveIdRef.current = null;
     lastActiveRef.current = null;
   }, [seedKey, targetEpoch]);
+  const accountsCarriesActiveRef = useRef(false);
+  const shouldSkipBackgroundPollRef = useRef(options?.shouldSkipBackgroundPoll);
+  useLayoutEffect(() => {
+    shouldSkipBackgroundPollRef.current = options?.shouldSkipBackgroundPoll;
+  });
   useEffect(() => {
     if (previousSeedKeyRef.current === seedKey) return;
     previousSeedKeyRef.current = seedKey;
@@ -336,6 +365,7 @@ export function useCodexAccountPool(apiBase: string, enabled = true, targetKey?:
     hasAccountsRef.current = false;
     hasLoadedRef.current = false;
     initialLoadKeyRef.current = null;
+    accountsCarriesActiveRef.current = false;
   }, [seedKey]);
   const pauseMutationRef = useRef<MutationLease | null>(null);
   // Its own gate, deliberately not the pause one: re-ordering one account and pausing
@@ -418,6 +448,42 @@ export function useCodexAccountPool(apiBase: string, enabled = true, targetKey?:
 
       let nextAccounts: CodexAccountEntry[] | null = null;
       let nextActiveId: string | null | undefined;
+      let fallbackActiveOk = true;
+      const skipSeparateActive = accountsCarriesActiveRef.current;
+
+      const applyActivePayload = (active: Record<string, unknown>) => {
+        const serverActiveId = (active.activeCodexAccountId as string | null | undefined) ?? null;
+        const pending = pendingActiveIdRef.current;
+        if (pending && pending.staleReadsRemaining > 0 && serverActiveId !== pending.id) {
+          // Allow one eventually-consistent response to preserve the accepted value,
+          // but ensure a repeated mismatch can reconcile legitimate routing changes.
+          pending.staleReadsRemaining -= 1;
+        } else {
+          pendingActiveIdRef.current = null;
+          nextActiveId = serverActiveId;
+          setActiveId(serverActiveId);
+        }
+        lastActiveRef.current = { key: targetSeedKey, value: active };
+        setActivePinnedId(typeof active.pinnedAccountId === "string" ? active.pinnedAccountId : null);
+        for (const observer of observers) {
+          observer.acceptActiveRead(active, revisions.get(observer)!);
+        }
+      };
+
+      const fetchAndApplyActive = async (): Promise<boolean> => {
+        try {
+          const response = await targetFetch(capture, `${apiBase}/api/codex-auth/active`, { signal: bounded.signal });
+          if (!response.ok) throw new Error("active account load failed");
+          const active = await response.json() as Record<string, unknown>;
+          if (loadIsCurrent()) applyActivePayload(active);
+          return true;
+        } catch {
+          if (loadIsCurrent()) {
+            for (const observer of observers) observer.rejectActiveRead();
+          }
+          return false;
+        }
+      };
 
       const accountsTask = (async (): Promise<boolean> => {
         try {
@@ -427,6 +493,8 @@ export function useCodexAccountPool(apiBase: string, enabled = true, targetKey?:
           });
           if (!response.ok) throw new Error("account load failed");
           const payload = await response.json();
+          const embeddedActive = isCodexActivePayload(payload.active) ? payload.active : null;
+          accountsCarriesActiveRef.current = embeddedActive !== null;
           if (loadIsCurrent()) {
             // Selection order is required downstream (badge, select). Normalizing here keeps
             // a payload without it from rendering a NaN order on every card.
@@ -457,46 +525,27 @@ export function useCodexAccountPool(apiBase: string, enabled = true, targetKey?:
             // painted here. Waiting for /active to finish would leave the just-replaced rows
             // labelled as pre-refresh ones for as long as that read's budget allows.
             setRefreshFailed(false);
+            if (skipSeparateActive && embeddedActive !== null) {
+              applyActivePayload(embeddedActive as unknown as Record<string, unknown>);
+            }
+          }
+          if (skipSeparateActive && embeddedActive === null) {
+            fallbackActiveOk = await fetchAndApplyActive();
           }
           return true;
         } catch {
-          return false;
-        }
-      })();
-
-      const activeTask = (async (): Promise<boolean> => {
-        try {
-          const response = await targetFetch(capture, `${apiBase}/api/codex-auth/active`, { signal: bounded.signal });
-          if (!response.ok) throw new Error("active account load failed");
-          const active = await response.json();
-          if (loadIsCurrent()) {
-            const serverActiveId = active.activeCodexAccountId ?? null;
-            const pending = pendingActiveIdRef.current;
-            if (pending && pending.staleReadsRemaining > 0 && serverActiveId !== pending.id) {
-              // Allow one eventually-consistent response to preserve the accepted value,
-              // but ensure a repeated mismatch can reconcile legitimate routing changes.
-              pending.staleReadsRemaining -= 1;
-            } else {
-              pendingActiveIdRef.current = null;
-              nextActiveId = serverActiveId;
-              setActiveId(serverActiveId);
-            }
-            lastActiveRef.current = { key: targetSeedKey, value: active };
-            setActivePinnedId(typeof active.pinnedAccountId === "string" ? active.pinnedAccountId : null);
-            for (const observer of observers) {
-              observer.acceptActiveRead(active, revisions.get(observer)!);
-            }
-          }
-          return true;
-        } catch {
-          if (loadIsCurrent()) {
+          accountsCarriesActiveRef.current = false;
+          if (skipSeparateActive && loadIsCurrent()) {
             for (const observer of observers) observer.rejectActiveRead();
           }
           return false;
         }
       })();
 
-      const [accountsOk, activeOk] = await Promise.all([accountsTask, activeTask]);
+      const activeTask = skipSeparateActive ? Promise.resolve(true) : fetchAndApplyActive();
+
+      const [accountsOk, activeTaskOk] = await Promise.all([accountsTask, activeTask]);
+      const activeOk = skipSeparateActive ? (accountsOk && fallbackActiveOk) : activeTaskOk;
       // A newer load, or a target change this read predates, owns the surface now.
       if (!loadIsCurrent()) return false;
       if (accountsOk) {
@@ -569,10 +618,12 @@ export function useCodexAccountPool(apiBase: string, enabled = true, targetKey?:
   }, [enabled, needsQuotaFill, pauseCount, load]);
 
   // Background refresh, suspended while any pause lease is held — and fully paused
-  // (no timer, no traffic) while the tab is hidden.
+  // (no timer, no traffic) while the tab is hidden or an external poll gate asks to skip.
   useEffect(() => {
     if (!enabled || pauseCount > 0) return;
-    return startVisibilityPoll(() => { if (pauseTokensRef.current!.size === 0) void load(); }, REFRESH_INTERVAL_MS);
+    return startVisibilityPoll(() => {
+      if (pauseTokensRef.current!.size === 0 && !shouldSkipBackgroundPollRef.current?.()) void load();
+    }, REFRESH_INTERVAL_MS);
   }, [enabled, load, pauseCount]);
 
   const pauseRefresh = useCallback((): PauseToken => {

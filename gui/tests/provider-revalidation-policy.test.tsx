@@ -168,6 +168,159 @@ test("turning credits off hides a cached relay balance without remounting the wo
   await act(async () => { releaseReport?.(Response.json({ reports: [] })); });
 });
 
+test("subsequent Codex pool loads skip /api/codex-auth/active once /api/codex-auth/accounts embeds active state", async () => {
+  const seen: string[] = [];
+  let activeCalls = 0;
+  let accountCalls = 0;
+  let currentActiveId = "acc-1";
+  const fallback = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      seen.push(url.pathname + url.search);
+      if (url.pathname === "/api/config") {
+        return Response.json({
+          port: 10100, defaultProvider: "openai",
+          providers: {
+            openai: { adapter: "openai-responses", authMode: "forward", codexAccountMode: "pool", baseUrl: "https://chatgpt.com/backend-api/codex" },
+          },
+        });
+      }
+      if (url.pathname === "/api/oauth/providers") return Response.json({ providers: [] });
+      if (url.pathname === "/api/oauth/status") return Response.json({ loggedIn: true });
+      if (url.pathname === "/api/codex-auth/accounts" || url.pathname === "/api/codex-auth/accounts/refresh") {
+        accountCalls += 1;
+        return Response.json({
+          accounts: [
+            { id: "main", email: "main@example.test", isMain: true, hasCredential: true, priority: 0, quota: null },
+            { id: "acc-1", email: "acc1@example.test", isMain: false, hasCredential: true, priority: 1, quota: null },
+          ],
+          active: {
+            activeCodexAccountId: currentActiveId,
+            pinned: false,
+            pinnedAccountId: null,
+            autoSwitchThreshold: 80,
+            upstreamFailoverThreshold: 3,
+            accountPoolStrategy: "round-robin",
+            accountPoolStickyLimit: 1,
+          },
+        });
+      }
+      if (url.pathname === "/api/codex-auth/active") {
+        activeCalls += 1;
+        return Response.json({
+          activeCodexAccountId: currentActiveId,
+          pinned: false,
+          pinnedAccountId: null,
+          autoSwitchThreshold: 80,
+          upstreamFailoverThreshold: 3,
+          accountPoolStrategy: "round-robin",
+          accountPoolStickyLimit: 1,
+        });
+      }
+      return fallback(input as never, init as never);
+    },
+  });
+
+  await mount();
+  const provider = container.querySelector<HTMLButtonElement>(".providers-workspace-rail-row");
+  expect(provider).not.toBeNull();
+  await act(async () => { provider!.click(); });
+  const initialActiveCalls = activeCalls;
+  expect(accountCalls).toBeGreaterThanOrEqual(1);
+
+  currentActiveId = "acc-2";
+  const refresh = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+    .find(button => button.textContent?.includes("Refresh quotas"));
+  expect(refresh).toBeDefined();
+  await act(async () => { refresh!.click(); await new Promise(resolve => setTimeout(resolve, 50)); });
+  expect(accountCalls).toBeGreaterThanOrEqual(2);
+  expect(activeCalls).toBe(initialActiveCalls);
+});
+
+test("30s Codex background poll is skipped while healthy SSE is open on another provider, and switching to OpenAI refreshes", async () => {
+  const capturedIntervals: Array<{ cb: () => void; ms?: number }> = [];
+  const origSetInterval = testWindow.setInterval.bind(testWindow);
+  const origGlobalSetInterval = globalThis.setInterval;
+  const spySetInterval = ((fn: TimerHandler, ms?: number, ...args: unknown[]) => {
+    if (typeof fn === "function") capturedIntervals.push({ cb: () => fn(...args), ms });
+    return origSetInterval(fn, ms, ...args);
+  }) as typeof setInterval;
+  Object.defineProperty(testWindow, "setInterval", { configurable: true, value: spySetInterval });
+  Object.defineProperty(globalThis, "setInterval", { configurable: true, value: spySetInterval });
+  let stream!: ReadableStreamDefaultController<Uint8Array>;
+  let codexAccountReads = 0;
+  try {
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      value: async (input: RequestInfo | URL) => {
+        const url = new URL(String(input), "http://localhost");
+        if (url.pathname === "/api/accounts/events") {
+          return new Response(new ReadableStream<Uint8Array>({ start(controller) { stream = controller; } }), {
+            headers: { "Content-Type": "text/event-stream" },
+          });
+        }
+        if (url.pathname === "/api/config") {
+          return Response.json({
+            port: 10100, defaultProvider: "anthropic",
+            providers: {
+              anthropic: { adapter: "anthropic", authMode: "oauth", baseUrl: "https://api.anthropic.com" },
+              openai: { adapter: "openai-responses", authMode: "forward", codexAccountMode: "pool", baseUrl: "https://chatgpt.com/backend-api/codex" },
+            },
+          });
+        }
+        if (url.pathname === "/api/oauth/providers") return Response.json({ providers: ["anthropic"] });
+        if (url.pathname === "/api/oauth/status") return Response.json({ loggedIn: true });
+        if (url.pathname === "/api/oauth/accounts") return Response.json({ activeAccountId: "a1", accounts: [{ id: "a1", active: true }] });
+        if (url.pathname === "/api/provider-quotas") return Response.json({ reports: [] });
+        if (url.pathname === "/api/codex-auth/accounts") {
+          codexAccountReads += 1;
+          return Response.json({
+            accounts: [{ id: "main", email: "main@example.test", isMain: true, hasCredential: true, priority: 0, quota: null }],
+            active: { activeCodexAccountId: "main", autoSwitchThreshold: 80, accountPoolStrategy: "round-robin", accountPoolStickyLimit: 1 },
+          });
+        }
+        if (url.pathname === "/api/codex-auth/active") {
+          return Response.json({ activeCodexAccountId: "main", autoSwitchThreshold: 80, accountPoolStrategy: "round-robin", accountPoolStickyLimit: 1 });
+        }
+        if (url.pathname === "/api/selected-models") return Response.json({ models: {} });
+        if (url.pathname === "/api/usage") return Response.json({ providers: [], models: [] });
+        if (url.pathname === "/api/provider-presets") return Response.json({ presets: [] });
+        return Response.json({});
+      },
+    });
+
+    await mount();
+    await act(async () => {
+      stream.enqueue(new TextEncoder().encode('event: ready\r\ndata: {"revision":0}\r\n\r\n'));
+      await new Promise(resolve => setTimeout(resolve, 40));
+    });
+    const anthropicOption = Array.from(container.querySelectorAll<HTMLElement>('[role="option"]'))
+      .find(option => option.textContent?.includes("Anthropic"));
+    expect(anthropicOption).toBeDefined();
+    await act(async () => { anthropicOption!.click(); await new Promise(resolve => setTimeout(resolve, 40)); });
+
+    const baselineReads = codexAccountReads;
+    const codexPoll = capturedIntervals.filter(entry => entry.ms === 30_000);
+    expect(codexPoll.length).toBeGreaterThanOrEqual(1);
+    await act(async () => {
+      for (const entry of codexPoll) entry.cb();
+      await new Promise(resolve => setTimeout(resolve, 40));
+    });
+    expect(codexAccountReads).toBe(baselineReads);
+
+    const openaiOption = Array.from(container.querySelectorAll<HTMLElement>('[role="option"]'))
+      .find(option => option.textContent?.includes("OpenAI"));
+    expect(openaiOption).toBeDefined();
+    await act(async () => { openaiOption!.click(); await new Promise(resolve => setTimeout(resolve, 50)); });
+    expect(codexAccountReads).toBeGreaterThan(baselineReads);
+  } finally {
+    Object.defineProperty(globalThis, "setInterval", { configurable: true, value: origGlobalSetInterval });
+    stream?.close();
+  }
+});
+
 test("account data arriving per provider does not re-read the quota endpoint", async () => {
   await mount();
 
