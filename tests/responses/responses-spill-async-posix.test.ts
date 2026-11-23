@@ -7,6 +7,7 @@ import {
   readFileSync,
   readdirSync,
   statSync,
+  unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -496,6 +497,9 @@ describe("Responses previous_response_id async POSIX spill state", () => {
     const oldFile = spillFileNames(home)[0]!;
     rememberResponseState({ input: "replacement" }, fixedResponse("resp_circular_replace", [circular]));
     expect(responseStateMetrics()).toMatchObject({ residentCount: 0, spillStubCount: 0, tombstoneCount: 1 });
+    // Old generation unlink is deferred until the replacement tombstone is durable in the snapshot.
+    expect(existsSync(join(responseSpillDirectory(home), oldFile))).toBe(true);
+    await flushResponseState();
     expect(existsSync(join(responseSpillDirectory(home), oldFile))).toBe(false);
   });
 
@@ -658,5 +662,38 @@ describe("Responses previous_response_id async POSIX spill state", () => {
     await flushPendingResponseSpillsForTests();
     expect(links).toBe(2);
     expect(responseStateMetrics()).toMatchObject({ spillStubCount: 1, spillWriteFailures: 0 });
+  });
+
+  test("tombstoning a pending-spill replacement cancels the queued job and reclaims its superseded spill", async () => {
+    setResponseStateByteCapForTests(1_024);
+    rememberLarge("resp_pending_tombstone", "a".repeat(8_000));
+    await flushPendingResponseSpillsForTests();
+    expect(spillFileNames(home)).toHaveLength(1);
+
+    // Queue a replacement spill that inherits G1, then tombstone it with an unmeasurable circular value before settle.
+    rememberLarge("resp_pending_tombstone", "b".repeat(8_000));
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    rememberResponseState({ input: "tombstone" }, fixedResponse("resp_pending_tombstone", [circular]), undefined, { force: true });
+
+    await flushPendingResponseSpillsForTests();
+    await flushResponseState();
+    expect(responseStateMetrics()).toMatchObject({ residentCount: 0, tombstoneCount: 1 });
+    expect(getSpilledResponseBytesForTests()).toBe(0);
+    expect(spillFileNames(home)).toEqual([]);
+  });
+
+  test("post-publish temp unlink error cleans up the newly published spill destination file", async () => {
+    setSpillIoForTest({
+      unlink(path) {
+        if (path.endsWith(".tmp")) throw Object.assign(new Error("temp unlink denied"), { code: "EACCES" });
+        unlinkSync(path);
+      },
+    });
+    setResponseStateByteCapForTests(1_024);
+    rememberLarge("resp_post_publish_fail", "p".repeat(8_000));
+    await flushPendingResponseSpillsForTests();
+    expect(responseStateMetrics()).toMatchObject({ residentCount: 0, tombstoneCount: 1, spillWriteFailures: 1 });
+    expect(spillFileNames(home)).toEqual([]);
   });
 });

@@ -270,7 +270,8 @@ export async function runWithCompactionRecovery(
         options.accountLoad.lease = null;
       }
       fallback = await dispatch(child, config, logCtx, {
-        ...options, clientModelLabel: firstOptions.clientModelLabel, compactionRecoveryAttempted: true, compactionRecoveryPermit: recoveryPermit,
+        ...options, preParsedBody: undefined, preParsedBodyBytes: undefined, preParsedBodyCharged: false,
+        clientModelLabel: firstOptions.clientModelLabel, compactionRecoveryAttempted: true, compactionRecoveryPermit: recoveryPermit,
         compactionRoutingOverride: { sourceModel: originalModel },
         onRequestBodyRead: undefined, onRequestBodyParsed: undefined,
         onCompactionRecoveryRoute: undefined, onCompactionRecoveryAdapterEvent: undefined,

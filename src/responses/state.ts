@@ -410,6 +410,12 @@ function replaceWithSpillFailure(
   }
 }
 
+function replaceEntryWithTombstone(id: string, expected?: StoredResponseState): void {
+  const superseded = cancelPendingResponseSpill(id);
+  replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
+  if (superseded) deferSpillUnlink(superseded);
+}
+
 function swapResidentForSpill(id: string, expected: ResidentResponseState, ref: ResponseSpillRef): boolean {
   const base: Omit<SpilledResponseState, "sizeBytes"> = {
     kind: "spill",
@@ -440,7 +446,7 @@ function setResidentEntry(id: string, entry: ResidentInput): void {
   const expected = states.get(id);
   const candidate = measureResidentEntry(id, entry);
   if (!candidate) {
-    replaceWithSpillFailure(id, expected);
+    replaceEntryWithTombstone(id, expected);
     // A tombstone is tiny but still resident state: the hard-cap invariant
     // must hold on EVERY mutation path (review C2-1 — with a test cap below
     // tombstone size, skipping the prune leaves the store over cap).
@@ -477,7 +483,7 @@ function admitOversizedCandidate(
   const spillCap = responseSpillPayloadCap();
   if (exceedsSpillCap(id, candidate, spillCap)) {
     admissionCounters.oversizedDrops += 1;
-    replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
+    replaceEntryWithTombstone(id, expected);
     return;
   }
   replaceWithPendingResponseSpill(id, candidate, expected, { directAdmission: true });

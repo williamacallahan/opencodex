@@ -780,6 +780,7 @@ export async function writeResponseSpillDurablyAsync(
       if (!OWNED_SPILL_NAME.test(fileName)) throw new Error("Response spill name allocation failed");
       const destinationPath = join(dir, fileName);
       if (publicationControl) publicationControl.destinationPath = destinationPath;
+      let published = false;
       try {
         throwIfPublicationSuperseded(publicationControl);
         await publishNoReplaceAsync(
@@ -789,6 +790,7 @@ export async function writeResponseSpillDurablyAsync(
           options.retryTimedOutOnce === true,
           publicationControl,
         );
+        published = true;
         throwIfPublicationSuperseded(publicationControl);
         await fsyncDirectoryBestEffortAsync(dir);
         await unlinkAsync(publishTempPath, true);
@@ -800,8 +802,8 @@ export async function writeResponseSpillDurablyAsync(
         return { version: 1, fileName, digest, payloadBytes: bytes.byteLength };
       } catch (error) {
         if (publicationControl?.superseded) throw error;
-        if (publicationControl) publicationControl.destinationPath = null;
-        if (isErrno(error, "EEXIST")) continue;
+        if (publicationControl && !published) publicationControl.destinationPath = null;
+        if (isErrno(error, "EEXIST") && !published) continue;
         throw error;
       }
     }
