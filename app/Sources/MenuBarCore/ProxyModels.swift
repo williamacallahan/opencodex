@@ -255,9 +255,46 @@ public extension QuotaReport {
     ///
     /// Providers with no numeric window normalize to a nil percent so the UI renders an
     /// em dash rather than a misleading zero.
+    private static func matchesWord(_ text: String, tokens: [String]) -> Bool {
+        let lower = text.lowercased()
+        let scalars = lower.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? $0 : UnicodeScalar(" ") }
+        let words = String(String.UnicodeScalarView(scalars)).split(separator: " ").map(String.init)
+        return tokens.contains { words.contains($0) }
+    }
+
+    private static func isAntigravityGeminiWindow(_ window: NormalizedQuota) -> Bool {
+        let label = window.windowLabel.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if label == "gem" || label.hasPrefix("gem (") || label == "argon" || label.hasPrefix("argon (") {
+            return true
+        }
+        return matchesWord("\(window.windowLabel) \(window.modelId ?? "")", tokens: ["gemini", "argon"])
+    }
+
+    private static func isAntigravityClaudeWindow(_ window: NormalizedQuota) -> Bool {
+        if isAntigravityGeminiWindow(window) { return false }
+        let label = window.windowLabel.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if label == "cla" || label.hasPrefix("cla (") {
+            return true
+        }
+        let combined = "\(window.windowLabel) \(window.modelId ?? "")".lowercased()
+        if combined.contains("gpt-oss") || combined.contains("gpt_oss") {
+            return true
+        }
+        return matchesWord(combined, tokens: ["claude", "opus", "sonnet", "fable", "3p"])
+    }
+
     func normalized() -> NormalizedQuota {
         let name = label ?? provider
-        let windows = normalizedWindows().filter { $0.modelId == nil }
+        let allWindows = normalizedWindows()
+        let windows: [NormalizedQuota]
+        if provider == "google-antigravity" {
+            windows = allWindows.filter { window in
+                guard !Self.isAntigravityClaudeWindow(window) else { return false }
+                return window.modelId == nil || Self.isAntigravityGeminiWindow(window)
+            }
+        } else {
+            windows = allWindows.filter { $0.modelId == nil }
+        }
 
         // Longer horizons rank higher only as a tie-breaker.
         func horizonRank(_ label: String) -> Int {

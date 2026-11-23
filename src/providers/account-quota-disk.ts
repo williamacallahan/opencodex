@@ -16,7 +16,7 @@ import { atomicWriteFile, getConfigDir } from "../config";
 import { withConfigDirHardeningSettled } from "../config/paths";
 import type { ProviderQuota } from "./quota-types";
 import type { KiroPersistedQuota, KiroPersistedVerdict } from "./kiro-account-state-disk";
-import { ACCOUNT_QUOTA_TTL_MS } from "./quota-wire";
+import { ACCOUNT_QUOTA_TTL_MS, hasFutureQuotaReset, PASSIVE_OBSERVATION_MAX_AGE_MS } from "./quota-wire";
 
 const FILENAME = "provider-account-quota-cache.json";
 
@@ -30,13 +30,10 @@ const FILENAME = "provider-account-quota-cache.json";
  */
 export const DISK_MAX_AGE_MS = 6 * 60 * 60_000;
 /**
- * An agy observation is the only Antigravity reading under `nativeHarnessOnly`, and an account agy
- * is not using gets no newer one. It is kept a little past a weekly window, shown with its age,
- * so a hub restart never blanks an idle account.
+ * An agy observation (or setup-token header observation) is passive and idle seats get no newer
+ * one. It is kept past a weekly window so restarts never blank valid active reset windows.
  */
-const AGY_OBSERVATION_MAX_AGE_MS = 8 * 24 * 60 * 60_000;
-// The longer retention is for display only: getCachedProviderAccountQuota, which routing and the
-// quota pool read, still ignores an agy observation older than DISK_MAX_AGE_MS.
+const AGY_OBSERVATION_MAX_AGE_MS = PASSIVE_OBSERVATION_MAX_AGE_MS;
 const PERSIST_DEBOUNCE_MS = 250;
 /** Match the reset ledger's maximum deferral under sustained quota observations. */
 const MAX_PERSIST_DEFERRAL_MS = 1_000;
@@ -71,7 +68,13 @@ export function readPersistedAccountQuotas(now = Date.now()): Map<string, Provid
       if (!quota || typeof quota !== "object" || typeof quota.updatedAt !== "number"
         || !Number.isFinite(quota.updatedAt)) continue;
       const agyObservation = key.startsWith("google-antigravity\0") && typeof (quota as KiroPersistedQuota).identity === "string";
-      if (now - quota.updatedAt > (agyObservation ? AGY_OBSERVATION_MAX_AGE_MS : DISK_MAX_AGE_MS)) continue;
+      const anthropicKey = key.startsWith("anthropic\0") || key.startsWith("anthropic2\0");
+      const rawAnthropicGen = (quota as AnthropicPersistedQuota).anthropicCredentialGeneration;
+      const validAnthropicGen = anthropicKey && typeof rawAnthropicGen === "string" && /^[a-f0-9]{64}$/.test(rawAnthropicGen);
+      const maxAgeMs = agyObservation || (validAnthropicGen && hasFutureQuotaReset(quota, now))
+        ? AGY_OBSERVATION_MAX_AGE_MS
+        : DISK_MAX_AGE_MS;
+      if (now - quota.updatedAt > maxAgeMs) continue;
       if (key.startsWith("kiro\0") && (quota.updatedAt > now
         || typeof (quota as KiroPersistedQuota).identity !== "string"
         || !/^[a-f0-9]{64}$/.test((quota as KiroPersistedQuota).identity))) continue;

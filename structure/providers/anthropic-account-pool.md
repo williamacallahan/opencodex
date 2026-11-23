@@ -243,13 +243,11 @@ and a different-identity replacement publish no rotation, so their old readings 
 invalidates the primary pool. `fetchAnthropicQuota` (`src/providers/quota/vendor-probes-oauth.ts`)
 uses the same account reader as the Accounts tab. An enabled pool with two or more accounts
 waits for the bounded reads and then computes an equal-weight estimate from current account
-readings. Setup tokens contribute only from observed response headers. Missing, stale, paused,
-or reauthenticating seats are flagged as incomplete; if none can contribute, the report gives
-coverage without a percentage. A single account or disabled pool uses only the active reading.
-Report ownership follows the configured instance and account roster. A newer reading for the
-same roster updates the estimate at publication without another upstream request. Reset detection
-sees only the active seat's own reading, never the pool estimate
-(`tests/providers/provider-anthropic-pool-capacity.test.ts`).
+readings. Setup tokens contribute from observed headers (retained up to `PASSIVE_OBSERVATION_MAX_AGE_MS`
+while a reset stays future; tagged `observed: true`). Missing, stale, paused, or reauthenticating seats
+flag incomplete; if none contribute, coverage reports no percentage. A single account or disabled pool
+uses the active reading. Report ownership follows the instance and roster; a newer reading updates the
+estimate without probing, and reset detection sees only the active seat (`tests/providers/provider-anthropic-pool-capacity.test.ts`).
 
 A probe that yields no quota names one closed `quotaFailure` code from
 `src/providers/quota/failure-codes.ts`: `account_unavailable` when no usable credential could

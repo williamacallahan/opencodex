@@ -18,7 +18,8 @@ import {
 } from "../kiro-usage";
 import { captureConfigGeneration } from "../../lib/state-store-sweeper";
 import { aggregateCodexPoolCapacity, CODEX_CAPACITY_MAX_QUOTA_AGE_MS, type CodexCapacityQuota } from "../codex-capacity";
-import { asRecord, normalizePercent, normalizeResetAt, readQuotaJson, REQUEST_TIMEOUT_MS, toFiniteNumber } from "../quota-wire";
+import { asRecord, hasFutureQuotaReset, normalizePercent, normalizeResetAt, PASSIVE_OBSERVATION_MAX_AGE_MS, readQuotaJson, REQUEST_TIMEOUT_MS, toFiniteNumber } from "../quota-wire";
+import { isAntigravityGeminiWindow, stripAntigravityClaudeQuota } from "../antigravity-window-family";
 import { providerCodexAccountMode } from "../registry";
 import {
   accountReportCurrent, accountReportProjection, observedQuotaFor,
@@ -352,40 +353,67 @@ export async function fetchAnthropicQuota(
   const project = (): ProviderQuotaReport | null => {
     if (!current()) return null;
     const now = Date.now();
+    const isPassiveFresh = (quota: ProviderQuota | null | undefined, at: number, isPassive: boolean) => {
+      if (!quota) return false;
+      const age = at - quota.updatedAt;
+      if (age < CODEX_CAPACITY_MAX_QUOTA_AGE_MS) return true;
+      return isPassive && age <= PASSIVE_OBSERVATION_MAX_AGE_MS && hasFutureQuotaReset(quota, at);
+    };
     const rows = roster.accounts.map(row => ({
       isMain: false,
       active: row.id === roster.activeAccountId,
       weight: 1,
       paused: row.paused === true,
       needsReauth: row.needsReauth === true,
+      passive: row.credential.refresh === "",
       quota: getCachedProviderAccountQuota(instance, row.id),
     }));
-    const activeQuota = rows.find(row => row.active && !row.paused && !row.needsReauth)?.quota ?? null;
+    const activeIndex = roster.accounts.findIndex(row => row.id === roster.activeAccountId && !row.paused && !row.needsReauth);
+    const activeRow = activeIndex >= 0 ? roster.accounts[activeIndex] : undefined;
+    const activeQuota = activeIndex >= 0 ? rows[activeIndex]?.quota ?? null : null;
+    const activeIsPassive = activeRow?.credential.refresh === "";
     const source = "anthropic:oauth-usage";
     const capacity = pooled ? aggregateCodexPoolCapacity(rows, now) : null;
-    const quotaReport = capacity?.aggregation ? {
+    const passiveEligibleRows = roster.accounts
+      .map((row, index) => ({ row, quota: rows[index]?.quota ?? null }))
+      .filter(({ row }) => !row.paused && !row.needsReauth);
+    const passiveBacked = pooled
+      ? passiveEligibleRows.some(({ row, quota }) => row.credential.refresh === "" && isPassiveFresh(quota, now, true))
+        || (passiveEligibleRows.length > 0 && passiveEligibleRows.every(({ row }) => row.credential.refresh === ""))
+      : activeIsPassive;
+    const activeQuotaFresh = activeQuota !== null && isPassiveFresh(activeQuota, now, activeIsPassive);
+    const builtSingleReport = !capacity?.aggregation && activeQuotaFresh ? report(provider, source, activeQuota) : null;
+    const quotaReport: ProviderQuotaReport | null = capacity?.aggregation ? {
       provider,
       label: providerLabel(provider),
       source,
       quota: capacity.quota ?? { updatedAt: now },
       updatedAt: capacity.quota?.updatedAt ?? now,
+      ...(passiveBacked ? { observed: true } : {}),
       aggregation: publicCapacityAggregation(capacity.aggregation, capacity.quota ? "aggregate" : "coverage-only"),
-    } : activeQuota && now - activeQuota.updatedAt < CODEX_CAPACITY_MAX_QUOTA_AGE_MS
-      ? report(provider, source, activeQuota) : null;
+    } : builtSingleReport ? {
+      ...builtSingleReport,
+      ...(passiveBacked ? { observed: true } : {}),
+    } : null;
     if (!quotaReport) return null;
     // A changed measurement calls for re-projection, not rejection as a different account.
     accountReportCurrent.set(quotaReport, current);
-    const quotaEvidence = (quota: ProviderQuota | null, at: number) => {
+    const quotaEvidence = (quota: ProviderQuota | null, at: number, isPassive: boolean) => {
       if (!quota) return null;
       const { updatedAt, ...windows } = quota;
-      return JSON.stringify([at - updatedAt < CODEX_CAPACITY_MAX_QUOTA_AGE_MS, windows]);
+      return JSON.stringify([isPassiveFresh({ ...quota, updatedAt }, at, isPassive), windows]);
     };
     const evidence = roster.accounts.flatMap((row, index) =>
       !row.paused && !row.needsReauth && (pooled || row.id === roster.activeAccountId)
-        ? [{ id: row.id, quota: quotaEvidence(rows[index]?.quota ?? null, now) }] : []);
+        ? [{
+          id: row.id,
+          isPassive: row.credential.refresh === "",
+          quota: quotaEvidence(rows[index]?.quota ?? null, now, row.credential.refresh === ""),
+        }] : []);
     accountReportProjection.set(quotaReport, { project, isFresh: () => {
       const checkedAt = Date.now();
-      return evidence.every(({ id, quota }) => quotaEvidence(getCachedProviderAccountQuota(instance, id), checkedAt) === quota);
+      return evidence.every(({ id, isPassive, quota }) =>
+        quotaEvidence(getCachedProviderAccountQuota(instance, id), checkedAt, isPassive) === quota);
     } });
     // The pool estimate must never become the reset detector's reading of its active account.
     if (pooled || !activeProbeSucceeded) {
@@ -488,10 +516,14 @@ export async function fetchPassiveProviderQuota(provider: string): Promise<Provi
  * necessarily one agy used. It is display only: reset detection skips its `agy-observation` source.
  */
 export function fetchObservedAntigravityQuota(provider: string): ProviderQuotaReport | null {
-  const family = (quota: ProviderQuota) => quota.customWindows?.some(window => window.modelId === undefined) === true;
+  const family = (quota: ProviderQuota) => quota.customWindows?.some(window =>
+    window.modelId === undefined && isAntigravityGeminiWindow(window)) === true;
   let freshest: ProviderQuota | null = null;
-  for (const { quota } of readPassiveProviderAccountQuotas(provider)) {
-    if (!quota) continue;
+  for (const { quota: rawQuota } of readPassiveProviderAccountQuotas(provider)) {
+    if (!rawQuota) continue;
+    const quota = stripAntigravityClaudeQuota(rawQuota);
+    if (!quota.customWindows?.length && quota.fiveHourPercent === undefined
+      && quota.weeklyPercent === undefined && quota.monthlyPercent === undefined) continue;
     const better = !freshest || (family(quota) !== family(freshest) ? family(quota) : quota.updatedAt > freshest.updatedAt);
     if (better) freshest = quota;
   }

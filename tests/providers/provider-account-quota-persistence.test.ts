@@ -266,3 +266,23 @@ test("a snapshot still waiting for ACL admission is dropped by cancellation", as
     acl.resetHardenedStateForTests();
   }
 });
+
+test("Anthropic rows with valid generation and future resets survive > 6h up to 8d; resetless rows still expire at 6h", async () => {
+  const day = 24 * 60 * 60_000;
+  const now = Date.now();
+  const futureKey = "anthropic\u0000acct-future";
+  const tooOldKey = "anthropic\u0000acct-too-old";
+  const noResetKey = "anthropic\u0000acct-no-reset";
+  const expiredResetKey = "anthropic\u0000acct-expired-reset";
+  const gen = "b".repeat(64);
+  schedulePersistAccountQuotas(() => [
+    [futureKey, { fiveHourPercent: 20, fiveHourResetAt: now - 60_000, weeklyPercent: 35, weeklyResetAt: now + 5 * day, updatedAt: now - 2 * day, anthropicCredentialGeneration: gen }],
+    [tooOldKey, { weeklyPercent: 35, weeklyResetAt: now + day, updatedAt: now - 9 * day, anthropicCredentialGeneration: gen }],
+    [noResetKey, { fiveHourPercent: 20, updatedAt: now - 2 * day, anthropicCredentialGeneration: gen }],
+    [expiredResetKey, { fiveHourPercent: 20, fiveHourResetAt: now - 1_000, updatedAt: now - 2 * day, anthropicCredentialGeneration: gen }],
+  ]);
+  await settle();
+  const restored = readPersistedAccountQuotas(now);
+  expect([...restored.keys()]).toEqual([futureKey]);
+  expect(restored.get(futureKey)?.weeklyPercent).toBe(35);
+});

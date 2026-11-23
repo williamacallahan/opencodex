@@ -534,4 +534,48 @@ describe("agy pass-through public HTTP lane", () => {
       readSpy.mockRestore();
     }
   });
+
+  test("Antigravity observations and passthrough balancing ignore Claude usage and rank by highest Gemini usage", async () => {
+    await launch();
+    const { mergeAccountCredential } = await import("../../src/oauth/store");
+    const { observedAntigravityAccountQuota, recordPassiveAccountQuota } = await import("../../src/providers/quota/account-cache");
+    const { fetchObservedAntigravityQuota } = await import("../../src/providers/quota/vendor-probes-oauth");
+    const { antigravityLoginIdentity } = await import("../../src/providers/antigravity-quota-identity");
+    const { chooseAgyAccount } = await import("../../src/server/agy-passthrough-accounts");
+    const accounts = getAccountSet("google-antigravity")!.accounts;
+    const [acctA, acctB] = accounts as [typeof accounts[number], typeof accounts[number]];
+    for (const row of [acctA, acctB]) {
+      await mergeAccountCredential("google-antigravity", row.id, { ...row.credential, projectId: "shared-gemini-project" });
+    }
+    const now = Date.now();
+    // Account A is low on Gemini (20%), high on Claude (95%); Account B is high on Argon/Gemini (42%), low on Claude (5%).
+    recordPassiveAccountQuota("google-antigravity", acctA.id, {
+      customWindows: [
+        { label: "Gem", percent: 20 },
+        { label: "Gem (Weekly)", percent: 36.67 },
+        { label: "Cla", percent: 95 },
+        { label: "Cla (Weekly)", percent: 51.12 },
+      ],
+      updatedAt: now - 10_000,
+    }, Number.MAX_SAFE_INTEGER, antigravityLoginIdentity(acctA.id, acctA.credential));
+    recordPassiveAccountQuota("google-antigravity", acctB.id, {
+      customWindows: [
+        { label: "Gem", percent: 25 },
+        { label: "Argon (Weekly)", modelId: "gemini-4-argon", percent: 42 },
+        { label: "Cla (Weekly)", percent: 5 },
+      ],
+      updatedAt: now,
+    }, Number.MAX_SAFE_INTEGER, antigravityLoginIdentity(acctB.id, acctB.credential));
+
+    const obsA = observedAntigravityAccountQuota(acctA.id);
+    expect(obsA?.customWindows?.map(w => w.label)).toEqual(["Gem", "Gem (Weekly)"]);
+    const providerRow = fetchObservedAntigravityQuota("google-antigravity");
+    expect(providerRow?.quota.customWindows?.some(w => w.label.startsWith("Cla"))).toBe(false);
+    // All remaining accounts (C, etc.) should rank above or before A if unmeasured; isolate A vs B by removing others or measuring usage directly on shared owners with others high:
+    for (const rest of accounts.slice(2)) {
+      await mergeAccountCredential("google-antigravity", rest.id, { ...rest.credential, projectId: "other-project" });
+    }
+    const chosen = chooseAgyAccount({ project: "shared-gemini-project", callerKey: "gemini-usage-test", mayRotate: true }, now);
+    expect(chosen).toMatchObject({ kind: "account", accountId: acctA.id });
+  });
 });

@@ -9,7 +9,7 @@ import { credentialGeneration, getAccountCredential, getAccountCredentialWithSta
 import { subscribeOAuthCredentialRotations } from "../../lib/account-selection-events";
 import { isAnthropicInstanceId, type AnthropicInstanceId } from "../anthropic-instance-id";
 import type { GenerationContext } from "../../lib/state-store-sweeper";
-import { ACCOUNT_QUOTA_TTL_MS, toFiniteNumber } from "../quota-wire";
+import { ACCOUNT_QUOTA_TTL_MS, PASSIVE_OBSERVATION_MAX_AGE_MS, toFiniteNumber } from "../quota-wire";
 import { clearKiroAccountUsageState, hydrateKiroUsageVerdict, kiroPersistableVerdicts, reconcileKiroAccountUsageState } from "../kiro-usage";
 import { kiroEvidenceIdentity, sanitizeKiroQuota, type KiroPersistedQuota } from "../kiro-account-state-disk";
 import { type AnthropicPersistedQuota, cancelPendingAccountQuotaPersist, DISK_MAX_AGE_MS, readPersistedAccountQuotas, readPersistedKiroVerdicts, schedulePersistAccountQuotas } from "../account-quota-disk";
@@ -22,6 +22,7 @@ import { isWeeklyAllowancePercent, type AccountQuotaMode, type ProviderQuota, ty
 import type { OcxConfig, OcxProviderConfig } from "../../types";
 import { nativeHarnessOnly } from "../../lib/native-harness";
 import { ANTIGRAVITY_OAUTH_STORE_KEY, antigravityLoginIdentity } from "../antigravity-quota-identity";
+import { stripAntigravityClaudeQuota } from "../antigravity-window-family";
 
 /** Match oauth/index REFRESH_SKEW_MS — use stored access without refresh when still fresh. */
 const ACCOUNT_TOKEN_SKEW_MS = 60_000;
@@ -296,6 +297,7 @@ subscribeOAuthCredentialRotations(({ provider, accountId, previousGeneration, ne
 });
 
 export function getCachedProviderAccountQuota(provider: string, accountId: string): ProviderQuota | null {
+  hydrateAccountQuotaCache();
   const entry = accountQuotaCache.get(accountCacheKey(provider, accountId));
   if (provider === "kiro") {
     const account = getAccountSet("kiro")?.accounts.find(row => row.id === accountId);
@@ -526,17 +528,26 @@ export function observedAntigravityAccountQuota(
   const credential = knownCredential !== undefined
     ? knownCredential
     : getAccountCredential(ANTIGRAVITY_OAUTH_STORE_KEY, accountId);
-  return credential && entry.identity === antigravityLoginIdentity(accountId, credential)
-    ? entry.quota : null;
+  if (!credential || entry.identity !== antigravityLoginIdentity(accountId, credential)) return null;
+  const stripped = stripAntigravityClaudeQuota(entry.quota);
+  return hasQuotaRows(stripped) ? stripped : null;
 }
 
 export function sweepExpiredProviderAccountQuotaRows(now = Date.now()): number {
   let removed = 0;
   for (const [key, entry] of accountQuotaCache) {
-    // Anthropic observations extend retention, never the usage probe's eligibility clock.
-    const retainedAt = isAnthropicAccountCacheKey(key)
-      ? Math.max(entry.ts, entry.quota?.updatedAt ?? 0)
-      : entry.ts;
+    let retainedAt = entry.ts;
+    if (isAnthropicAccountCacheKey(key)) {
+      const separator = key.indexOf("\0");
+      const instance = key.slice(0, separator) as AnthropicInstanceId;
+      const accountId = key.slice(separator + 1);
+      if (getAccountCredential(instance, accountId)?.refresh === "") {
+        const normalized = normalizeAnthropicQuota(entry.quota, now);
+        if (normalized && normalized.updatedAt + PASSIVE_OBSERVATION_MAX_AGE_MS > now) continue;
+      }
+      // Anthropic observations extend retention, never the usage probe's eligibility clock.
+      retainedAt = Math.max(entry.ts, entry.quota?.updatedAt ?? 0);
+    }
     if (retainedAt + ACCOUNT_QUOTA_TTL_MS > now) continue;
     accountQuotaCache.delete(key);
     lastPersistedAnthropicHeaderQuota.delete(key);

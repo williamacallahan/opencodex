@@ -21,6 +21,28 @@ export const CACHE_TTL_MS = 5 * 60_000;
  */
 export const ACCOUNT_QUOTA_TTL_MS = 10 * 60_000;
 
+/** Max disk/cache retention for passive in-band quota observations across restarts and idle windows. */
+export const PASSIVE_OBSERVATION_MAX_AGE_MS = 8 * 24 * 60 * 60_000;
+
+export function hasFutureQuotaReset(
+  quota: {
+    fiveHourResetAt?: number;
+    weeklyResetAt?: number;
+    monthlyResetAt?: number;
+    customWindows?: ReadonlyArray<{ resetAt?: number }>;
+    displayWindows?: ReadonlyArray<{ resetAt?: number }>;
+  },
+  now: number,
+): boolean {
+  const hasFuture = (value: unknown): boolean =>
+    typeof value === "number" && Number.isFinite(value) && value > 0 && (epochMillis(value) ?? 0) > now;
+  return hasFuture(quota.fiveHourResetAt)
+    || hasFuture(quota.weeklyResetAt)
+    || hasFuture(quota.monthlyResetAt)
+    || !!quota.customWindows?.some(window => hasFuture(window.resetAt))
+    || !!quota.displayWindows?.some(window => hasFuture(window.resetAt));
+}
+
 export const REQUEST_TIMEOUT_MS = 8_000;
 
 export const QUOTA_RESPONSE_MAX_BYTES = 512 * 1024;

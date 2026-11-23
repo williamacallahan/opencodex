@@ -247,6 +247,35 @@ enum ModelDecodingSuite {
             t.isNil(onlyModel.normalized().percent, "model-only compact percent")
         }
 
+        t.test("quotas: antigravity ignores Claude windows and reports highest Gemini or Argon model") {
+            let summaryJson = """
+            {"provider":"google-antigravity","label":"Google","quota":{
+             "customWindows":[
+              {"label":"Gem","percent":21.84},
+              {"label":"Gem (Weekly)","percent":36.67},
+              {"label":"Cla","percent":8.55},
+              {"label":"Cla (Weekly)","percent":51.12}
+             ]}}
+            """
+            let summaryReport = try decode(QuotaReport.self, summaryJson)
+            t.equal(summaryReport.normalized().windowLabel, "Gem (Weekly)")
+            t.equal(summaryReport.normalized().percent, 36.67)
+
+            let modelJson = """
+            {"provider":"google-antigravity","label":"Google","quota":{
+             "customWindows":[
+              {"label":"Gem","percent":20},
+              {"label":"Argon (Weekly)","modelId":"gemini-4-argon","percent":62},
+              {"label":"gemini-3.8-flash-high","modelId":"gemini-3.8-flash-high","percent":78},
+              {"label":"claude-sonnet-4-6","modelId":"claude-sonnet-4-6","percent":99},
+              {"label":"aux","modelId":"aux","percent":100}
+             ]}}
+            """
+            let modelReport = try decode(QuotaReport.self, modelJson)
+            t.equal(modelReport.normalized().windowLabel, "gemini-3.8-flash-high")
+            t.equal(modelReport.normalized().percent, 78)
+        }
+
         t.test("quotas: an absent quota normalizes to a nil percent") {
             let normalized = try decode(QuotaReport.self, #"{"provider":"p","label":"P"}"#).normalized()
             t.isNil(normalized.percent, "percent")

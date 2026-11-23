@@ -259,3 +259,59 @@ describe("quota reset detection observes the active seat, not the pooled estimat
     expect(captured).toEqual([]);
   });
 });
+
+test("setup-token pool accounts survive idle age and restart hydration with observed capacity", async () => {
+  const { removeAccount, saveCredential: saveOAuthCredential } = await import("../../src/oauth/store");
+  const {
+    getCachedProviderAccountQuota,
+    recordAnthropicAccountQuotaFromHeaders,
+    sweepExpiredProviderAccountQuotaRows,
+  } = await import("../../src/providers/quota/account-cache");
+  const { settleAccountQuotaPersistForTests } = await import("../../src/providers/account-quota-disk");
+  const { freshQuotaReportsFromResponse } = await import("../../gui/src/provider-workspace/report");
+  for (const id of ids) await removeAccount("anthropic", id);
+  await saveOAuthCredential("anthropic", { access: "setup-a", refresh: "", expires: Date.now() + 86_400_000, accountId: "setup-a", source: "oauth" });
+  await saveOAuthCredential("anthropic", { access: "setup-b", refresh: "", expires: Date.now() + 86_400_000, accountId: "setup-b", source: "oauth" });
+  const setupIds = getAccountSet("anthropic")!.accounts.map(account => account.id);
+  await setActiveAccount("anthropic", setupIds[0]!);
+
+  const now = Date.now();
+  const realNow = Date.now;
+  let clock = now - 2 * 60 * 60_000;
+  Date.now = () => clock;
+  try {
+    const resetSec = String(Math.floor((now + 5 * 86_400_000) / 1000));
+    recordAnthropicAccountQuotaFromHeaders(setupIds[0]!, new Headers({
+      "anthropic-ratelimit-unified-5h-utilization": "0.25",
+      "anthropic-ratelimit-unified-5h-reset": String(Math.floor((clock + 60_000) / 1000)),
+      "anthropic-ratelimit-unified-7d-utilization": "0.6",
+      "anthropic-ratelimit-unified-7d-reset": resetSec,
+    }), 0);
+    recordAnthropicAccountQuotaFromHeaders(setupIds[1]!, new Headers({
+      "anthropic-ratelimit-unified-7d-utilization": "0.2",
+      "anthropic-ratelimit-unified-7d-reset": resetSec,
+    }), 0);
+    await new Promise(resolve => setTimeout(resolve, 350));
+    await settleAccountQuotaPersistForTests();
+
+    clock = now;
+    expect(sweepExpiredProviderAccountQuotaRows(now)).toBe(0);
+    clearAccountQuotaCache();
+    expect(getCachedProviderAccountQuota("anthropic", setupIds[0]!)?.weeklyPercent).toBe(60);
+    expect(getCachedProviderAccountQuota("anthropic", setupIds[0]!)?.fiveHourPercent).toBeUndefined();
+    expect(getCachedProviderAccountQuota("anthropic", setupIds[1]!)?.weeklyPercent).toBe(20);
+
+    const report = await fetchAnthropicQuota("anthropic", config(true));
+    expect(report?.observed).toBe(true);
+    expect(report?.quota.weeklyPercent).toBeCloseTo(40, 5);
+    expect(report?.aggregation).toMatchObject({
+      includedAccounts: 2,
+      staleQuotaAccounts: 0,
+      currentAccount: { quota: { weeklyPercent: 60 } },
+    });
+    const guiReports = freshQuotaReportsFromResponse([report], now);
+    expect(guiReports.anthropic?.observed).toBe(true);
+  } finally {
+    Date.now = realNow;
+  }
+});

@@ -1,4 +1,5 @@
 import { codexPlanKey, codexPlanValue } from "../codex/plan";
+import { PASSIVE_OBSERVATION_MAX_AGE_MS } from "./quota-wire";
 
 export const CODEX_CONFIGURED_CAPACITY_WEIGHTS = {
   plus: 1,
@@ -69,6 +70,8 @@ export interface CodexCapacityAccount {
   weight?: number;
   paused: boolean;
   needsReauth?: boolean;
+  /** True when readings come passively from in-band response headers (no polling probe). */
+  passive?: boolean;
   quota: CodexCapacityQuota | null;
 }
 
@@ -160,12 +163,28 @@ function hasKnownQuotaWindow(quota: CodexCapacityQuota | null): quota is CodexCa
     || !!quota.customWindows?.some(window => normalizedPercent(window.percent) !== undefined);
 }
 
+function hasFutureCapacityReset(quota: CodexCapacityQuota, now: number): boolean {
+  return futureResetMs(quota.fiveHourResetAt, now) !== undefined
+    || futureResetMs(quota.weeklyResetAt, now) !== undefined
+    || futureResetMs(quota.monthlyResetAt, now) !== undefined
+    || !!quota.customWindows?.some(window => futureResetMs(window.resetAt, now) !== undefined);
+}
+
+function isCapacityQuotaFresh(account: CodexCapacityAccount, now: number): boolean {
+  const quota = account.quota;
+  if (!quota || !Number.isFinite(quota.updatedAt)) return false;
+  const age = now - quota.updatedAt;
+  if (age <= CODEX_CAPACITY_MAX_QUOTA_AGE_MS) return true;
+  return account.passive === true
+    && age <= PASSIVE_OBSERVATION_MAX_AGE_MS
+    && hasFutureCapacityReset(quota, now);
+}
+
 function currentQuotaForDisplay(account: CodexCapacityAccount, now: number): CodexCapacityQuota | null {
   const quota = account.quota;
-  const fresh = !!quota
-    && Number.isFinite(quota.updatedAt)
-    && now - quota.updatedAt <= CODEX_CAPACITY_MAX_QUOTA_AGE_MS;
-  return !account.paused && !account.needsReauth && fresh && hasKnownQuotaWindow(quota) ? quota : null;
+  return !account.paused && !account.needsReauth && isCapacityQuotaFresh(account, now) && hasKnownQuotaWindow(quota)
+    ? quota
+    : null;
 }
 
 function addWindow(
@@ -245,9 +264,7 @@ export function aggregateCodexPoolCapacity(
     if (account.paused) pausedAccounts += 1;
     if (account.needsReauth) reauthAccounts += 1;
     const quota = account.quota;
-    const quotaFresh = !!quota
-      && Number.isFinite(quota.updatedAt)
-      && now - quota.updatedAt <= CODEX_CAPACITY_MAX_QUOTA_AGE_MS;
+    const quotaFresh = isCapacityQuotaFresh(account, now);
     if (quota && !quotaFresh) staleQuotaAccounts += 1;
     const standard = quota ? [
       ["fiveHour", quota.fiveHourPercent, quota.fiveHourResetAt],

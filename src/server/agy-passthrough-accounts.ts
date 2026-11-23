@@ -21,6 +21,7 @@ import { randomInt } from "node:crypto";
 import { credentialGeneration, listAccounts, mergeAccountCredential } from "../oauth/store";
 import { eligibleFailoverAccounts, genericFailoverRetryAfterSeconds } from "../oauth/generic-account-failover";
 import { ANTIGRAVITY_OAUTH_STORE_KEY, antigravityLoginIdentity } from "../providers/antigravity-quota-identity";
+import { isAntigravityGeminiWindow } from "../providers/antigravity-window-family";
 import { DISK_MAX_AGE_MS } from "../providers/account-quota-disk";
 import { observedAntigravityAccountQuota } from "../providers/quota/account-cache";
 
@@ -78,9 +79,9 @@ function rememberLearnedProject(accountId: string, project: string, login: strin
 }
 
 /**
- * An account's most-used current Gem or Cla window, from agy's own reading of the slot's current
- * sign-in within the routing horizon (six hours). An account with no such reading counts as unused,
- * so it is chosen, and agy's next quota call reads it.
+ * An account's most-used current Gemini window (excluding Claude windows and stale readings),
+ * from agy's own reading of the slot's current sign-in within the routing horizon (six hours).
+ * An account with no such reading counts as unused, so it is chosen and agy reads it next.
  */
 function bindingUsage(
   accountId: string,
@@ -90,7 +91,8 @@ function bindingUsage(
   const knownCredential = rosterById ? (rosterById.get(accountId)?.credential ?? null) : undefined;
   const quota = observedAntigravityAccountQuota(accountId, knownCredential);
   const windows = quota && now - quota.updatedAt <= DISK_MAX_AGE_MS ? quota.customWindows ?? [] : [];
-  return windows.reduce((most, window) => window.modelId === undefined && (window.resetAt === undefined || window.resetAt > now)
+  return windows.reduce((most, window) => isAntigravityGeminiWindow(window)
+    && (window.resetAt === undefined || window.resetAt > now)
     ? Math.max(most, window.percent) : most, 0);
 }
 
