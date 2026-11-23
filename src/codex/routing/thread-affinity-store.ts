@@ -110,6 +110,8 @@ type Scope = {
   anchors: Map<string, { family: string; thread: string; at: number }>;
   threadKeys: Map<string, { rowKey: string; scopes: Map<string, string> }>;
   issuerKeys: Map<string, string>;
+  persistedThreads: Map<string, string>;
+  persistedIssuers: Map<string, string>;
   consulted: Set<string>;
   timer?: ReturnType<typeof setTimeout>;
   pruneTimer?: ReturnType<typeof setInterval>;
@@ -424,6 +426,8 @@ function scope(acquiredHome?: string): Scope | undefined {
     anchors: carried?.home === home ? carried.anchors : new Map(),
     threadKeys: carried?.home === home ? carried.threadKeys : new Map(),
     issuerKeys: carried?.home === home ? carried.issuerKeys : new Map(),
+    persistedThreads: new Map(),
+    persistedIssuers: new Map(),
     consulted: new Set(),
     scheduled: false,
   };
@@ -528,6 +532,8 @@ function poison(s: Scope): void {
   s.issuers.clear();
   s.threadKeys.clear();
   s.issuerKeys.clear();
+  s.persistedThreads.clear();
+  s.persistedIssuers.clear();
   if (s.timer) clearTimeout(s.timer);
   warning();
 }
@@ -555,11 +561,13 @@ function scheduleTouch(s: Scope): void {
   }, 1000);
   s.timer.unref();
 }
-function prune(db: Database, now: number): void {
+function prune(db: Database, now: number, capRows = true): void {
   for (const table of ["threads", "issuers"])
     db.query(`DELETE FROM ${table} WHERE last_used_at < ? OR last_used_at > ?`).run(now - TTL, now);
   db.query("DELETE FROM threads WHERE created_at > ?").run(now);
-  db.exec("DELETE FROM threads WHERE rowid IN (SELECT rowid FROM threads ORDER BY (scope LIKE 'model-detour:%') ASC, last_used_at DESC, row_key, scope LIMIT -1 OFFSET 2048); DELETE FROM issuers WHERE rowid IN (SELECT rowid FROM issuers ORDER BY last_used_at DESC, row_key LIMIT -1 OFFSET 2048)");
+  if (capRows) {
+    db.exec("DELETE FROM threads WHERE rowid IN (SELECT rowid FROM threads ORDER BY (scope LIKE 'model-detour:%') ASC, last_used_at DESC, row_key, scope LIMIT -1 OFFSET 2048); DELETE FROM issuers WHERE rowid IN (SELECT rowid FROM issuers ORDER BY last_used_at DESC, row_key LIMIT -1 OFFSET 2048)");
+  }
 }
 function pruneOnly(s: Scope): boolean {
   if (!s.db || s.disabled) return false;
@@ -627,7 +635,7 @@ function flush(s: Scope, clean: boolean): boolean {
     }
     // Again after the log: rows the log just inserted take their live last-used time.
     applyTouches(s, db);
-    prune(db, Date.now());
+    prune(db, Date.now(), s.log.length > 0 || clean);
     // Both 1.0 and 1 read as the number 1 in v1. Its final UPDATE writes INTEGER 1;
     // only a snapshot-aware shutdown writes REAL 1 and a fresh negative rowid (the secret uses a positive rowid).
     // Read the 64-bit generation as text so it never rounds through a JavaScript number.
@@ -651,6 +659,8 @@ function flush(s: Scope, clean: boolean): boolean {
     s.log = [];
     s.threads.clear();
     s.issuers.clear();
+    if (s.persistedThreads.size > 2048) s.persistedThreads.clear();
+    if (s.persistedIssuers.size > 2048) s.persistedIssuers.clear();
     s.failures = 0;
     return true;
   } catch (error) {
@@ -659,6 +669,8 @@ function flush(s: Scope, clean: boolean): boolean {
     } catch {
       /* preserve failure */
     }
+    s.persistedThreads.clear();
+    s.persistedIssuers.clear();
     if (attempt === 0 && error instanceof Error && "code" in error && error.code === "SQLITE_FULL" && pruneOnly(s)) continue;
     if (++s.failures >= 3) poison(s);
     else warning();
@@ -790,6 +802,7 @@ export function adoptStoredThreadRows(
       }
       rememberThreadKey(s, key, rk, r.scope, r.account_id);
       if (s.poisoned) return [];
+      s.persistedThreads.set(`${rk}\0${r.scope}`, `${r.account_id}\0${r.fence}\0${r.created_at}`);
       result.push({
         scope: r.scope,
         accountId: r.account_id,
@@ -848,12 +861,35 @@ export function adoptStoredIssuer(
         : CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER;
     rememberIssuerKey(s, key, rk);
     if (s.poisoned) return;
+    s.persistedIssuers.set(rk, `${r.account_id}\0${r.fence ?? ""}`);
     consulted(s, `i:${rk}`);
     return { issuer: result, storedAccountId: r.account_id, storedFence: r.fence };
   } catch {
     warning();
     return;
   }
+}
+export function isThreadRowPersisted(
+  key: string,
+  scopeName: string,
+  row: StoredThreadRow,
+): boolean {
+  if (isRequestOwnedAffinityKey(key)) return false;
+  const s = usable();
+  if (!s || s.poisoned || row.accountId === "__main__" || !row.fence) return false;
+  const rk = rowKey(s, key, "conversation");
+  return !!rk && s.persistedThreads.get(`${rk}\0${scopeName}`) === `${row.accountId}\0${row.fence}\0${row.createdAt}`;
+}
+export function isIssuerRowPersisted(
+  key: string,
+  id: string,
+  fence: string | null,
+): boolean {
+  if (isRequestOwnedAffinityKey(key)) return false;
+  const s = usable();
+  if (!s || s.poisoned || id === "__main__") return false;
+  const rk = rowKey(s, key, "issuer");
+  return !!rk && s.persistedIssuers.get(rk) === `${id}\0${fence ?? ""}`;
 }
 export function recordThreadBind(
   key: string,
@@ -867,6 +903,7 @@ export function recordThreadBind(
   if (!rk) return;
   rememberThreadKey(s, key, rk, scopeName, row.accountId);
   if (s.poisoned) return;
+  s.persistedThreads.set(`${rk}\0${scopeName}`, `${row.accountId}\0${row.fence}\0${row.createdAt}`);
   enqueue(s, {
     kind: "bind",
     key: rk,
@@ -897,8 +934,13 @@ export function recordThreadDelete(key: string, scopeName?: string): void {
   const rk = rowKey(s, key, "conversation");
   if (!rk) return;
   const known = s.threadKeys.get(key);
-  if (scopeName === undefined) s.threadKeys.delete(key);
-  else if (known) { known.scopes.delete(scopeName); if (!known.scopes.size) s.threadKeys.delete(key); }
+  if (scopeName === undefined) {
+    s.threadKeys.delete(key);
+    for (const k of s.persistedThreads.keys()) if (k.startsWith(`${rk}\0`)) s.persistedThreads.delete(k);
+  } else {
+    s.persistedThreads.delete(`${rk}\0${scopeName}`);
+    if (known) { known.scopes.delete(scopeName); if (!known.scopes.size) s.threadKeys.delete(key); }
+  }
   enqueue(
     s,
     scopeName === undefined
@@ -923,6 +965,9 @@ export function recordThreadAccountDeleted(key: string, id: string): void {
   if (!s) return;
   const rk = rowKey(s, key, "conversation");
   if (!rk) return;
+  for (const [k, v] of s.persistedThreads) {
+    if (k.startsWith(`${rk}\0`) && v.startsWith(`${id}\0`)) s.persistedThreads.delete(k);
+  }
   const known = s.threadKeys.get(key);
   if (known) {
     for (const [scopeName, account] of known.scopes) if (account === id) known.scopes.delete(scopeName);
@@ -933,6 +978,9 @@ export function recordThreadAccountDeleted(key: string, id: string): void {
 export function recordAccountPinsCleared(id: string): void {
   const s = writableScope(true);
   if (s) {
+    for (const [k, v] of s.persistedThreads) {
+      if (v.startsWith(`${id}\0`)) s.persistedThreads.delete(k);
+    }
     for (const [key, entry] of s.threadKeys) {
       for (const [scopeName, account] of entry.scopes) if (account === id) entry.scopes.delete(scopeName);
       if (!entry.scopes.size) s.threadKeys.delete(key);
@@ -948,6 +996,7 @@ export function recordAllCleared(): void {
   const s = writableScope(true);
   if (s) {
     s.threadKeys.clear(); s.issuerKeys.clear();
+    s.persistedThreads.clear(); s.persistedIssuers.clear();
     enqueue(s, {
       kind: "clearAll",
       sql: "DELETE FROM threads; DELETE FROM issuers",
@@ -960,6 +1009,7 @@ export function recordThreadsCleared(): void {
   const s = writableScope(true);
   if (s) {
     s.threadKeys.clear();
+    s.persistedThreads.clear();
     enqueue(s, { kind: "clearThreads", sql: "DELETE FROM threads", args: [] });
   }
 }
@@ -980,6 +1030,7 @@ export function recordIssuerSet(
   if (!rk) return;
   rememberIssuerKey(s, key, rk);
   if (s.poisoned) return;
+  s.persistedIssuers.set(rk, `${id}\0${fence ?? ""}`);
   enqueue(s, {
     kind: "issuerSet",
     key: rk,
@@ -1002,6 +1053,7 @@ export function recordIssuerDelete(key: string): void {
   const rk = rowKey(s, key, "issuer");
   if (rk) {
     s.issuerKeys.delete(key);
+    s.persistedIssuers.delete(rk);
     enqueue(s, {
       kind: "issuerDelete",
       key: rk,
@@ -1014,6 +1066,7 @@ export function recordIssuersCleared(): void {
   const s = writableScope(true);
   if (s) {
     s.issuerKeys.clear();
+    s.persistedIssuers.clear();
     enqueue(s, { kind: "clearIssuers", sql: "DELETE FROM issuers", args: [] });
   }
 }

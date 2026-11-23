@@ -479,4 +479,20 @@ describe("request-history unchanged partial tail", () => {
       }
     });
   });
+
+  test("tail ingest commits inserted rows, metadata, and lastError clear in one transaction", () => {
+    withIndex((handle, path) => {
+      fs.writeFileSync(path, JSON.stringify(entry("tx-1", 10)) + "\n" + JSON.stringify(entry("tx-2", 20)) + "\n");
+      const txSpy = spyOn(handle, "transaction");
+      try {
+        expect(metaValue(handle, HISTORY_META_KEYS.lastError)).toBe("rebuilt");
+        expect(ingestSourceTail(handle, path, 0, { clearLastErrorOnInsert: true })).toBe(2);
+        expect(txSpy).toHaveBeenCalledTimes(1);
+        expect(Number(metaValue(handle, HISTORY_META_KEYS.indexedRows))).toBe(2);
+        expect(metaValue(handle, HISTORY_META_KEYS.lastError)).toBe("");
+      } finally {
+        txSpy.mockRestore();
+      }
+    });
+  });
 });

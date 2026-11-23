@@ -1105,14 +1105,21 @@ export function createSpendReservationLedger(options: {
   const evictSends = (at: number, force: boolean): number => {
     const cutoff = at - policy.retentionMs;
     const candidates: { send: string; resolvedAt: number }[] = [];
-    for (const [send, reservation] of reservations) {
-      if (isLive(reservation.status) || seedForSend(send)) continue;
-      if (!force && reservation.resolvedAt >= cutoff) continue;
-      candidates.push({ send, resolvedAt: reservation.resolvedAt });
-    }
     if (force) {
-      candidates.sort((a, b) => a.resolvedAt - b.resolvedAt);
-      candidates.length = Math.min(candidates.length, 1);
+      let oldest: { send: string; resolvedAt: number } | undefined;
+      for (const [send, reservation] of reservations) {
+        if (isLive(reservation.status) || seedForSend(send)) continue;
+        if (!oldest || reservation.resolvedAt < oldest.resolvedAt) {
+          oldest = { send, resolvedAt: reservation.resolvedAt };
+        }
+      }
+      if (oldest) candidates.push(oldest);
+    } else {
+      for (const [send, reservation] of reservations) {
+        if (isLive(reservation.status) || seedForSend(send)) continue;
+        if (reservation.resolvedAt >= cutoff) continue;
+        candidates.push({ send, resolvedAt: reservation.resolvedAt });
+      }
     }
     let removed = 0;
     for (const candidate of candidates) {

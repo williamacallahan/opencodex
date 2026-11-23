@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -1076,4 +1076,12 @@ test("a live save merges concurrent disabledModels edits by member", () => {
   saveConfigPreservingClaudeCode(live);
 
   expect(diskConfig().disabledModels).toEqual(["test/seeded", "test/live-hidden", "test/hand-hidden"]);
+});
+
+test("an unchanged mutatePersistedConfig fast-paths without creating config-mutation.sqlite", () => {
+  const lockDbPath = join(home, "config-mutation.sqlite");
+  rmSync(lockDbPath, { force: true });
+  const outcome = mutatePersistedConfig(() => ({ changed: false, value: "noop" }));
+  expect(outcome).toEqual({ status: "unchanged", value: "noop" });
+  expect(existsSync(lockDbPath)).toBe(false);
 });

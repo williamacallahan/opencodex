@@ -4,7 +4,7 @@
  * origin fails the case. Requests reach the hub through `node:http`, which, like agy, sends no
  * `Accept` header unless told to, so header preservation is observable end to end.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
@@ -512,4 +512,26 @@ describe("agy pass-through public HTTP lane", () => {
         : { "google-antigravity": undefined, anthropic: undefined });
     });
   }
+
+  test("chooseAgyAccount resolves project-scoped and project-less calls in a single auth.json read", async () => {
+    await launch();
+    const fs = await import("node:fs");
+    const { chooseAgyAccount } = await import("../../src/server/agy-passthrough-accounts");
+    const authPath = join(home, "auth.json");
+    const readSpy = spyOn(fs, "readFileSync");
+    try {
+      const countAuthReads = () => readSpy.mock.calls.filter(([target]) => String(target) === authPath).length;
+      const beforeProject = countAuthReads();
+      const projectChoice = chooseAgyAccount({ project: "synthetic-project-one", callerKey: "caller-single-read", mayRotate: false });
+      expect(projectChoice.kind).toBe("account");
+      expect(countAuthReads() - beforeProject).toBe(1);
+
+      const beforeProjectless = countAuthReads();
+      const projectlessChoice = chooseAgyAccount({ project: undefined, callerKey: "caller-single-read", mayRotate: true });
+      expect(projectlessChoice.kind).toBe("account");
+      expect(countAuthReads() - beforeProjectless).toBe(1);
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
 });

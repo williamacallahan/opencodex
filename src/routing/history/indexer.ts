@@ -524,11 +524,12 @@ function refreshOnceLockedSync(caller: RefreshCaller): RequestHistoryIndexMeta {
   if (tailNextOffset < Number(revision.size)) {
     // A routing-time read indexes a bounded slice and leaves the rest for the next call, so a
     // backlog never stalls the request that happens to find it.
-    const inserted = ingestSourceTail(handle, revision.path, tailNextOffset,
-      caller === "routing" ? { endOffset: tailNextOffset + ROUTING_TAIL_INGEST_MAX_BYTES } : {});
-    // A clean tail ingest proves the index is healthy: clear any earlier
-    // rebuild marker so status readers can distinguish rebuilds from tails.
-    if (inserted > 0) setMeta(handle, HISTORY_META_KEYS.lastError, "");
+    // A clean tail ingest proves the index is healthy: clear any earlier rebuild marker inside the
+    // same SQLite transaction so status readers can distinguish rebuilds from tails.
+    ingestSourceTail(handle, revision.path, tailNextOffset, {
+      ...(caller === "routing" ? { endOffset: tailNextOffset + ROUTING_TAIL_INGEST_MAX_BYTES } : {}),
+      clearLastErrorOnInsert: true,
+    });
   }
   return metaFor(handle);
 }

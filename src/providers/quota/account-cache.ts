@@ -130,6 +130,14 @@ export const accountQuotaCache = new Map<string, AccountQuotaCacheEntry>();
 export let explicitAccountEpoch = 0;
 let allAccountQuotaEpoch = 0;
 const providerAccountQuotaEpochs = new Map<string, number>();
+const ANTHROPIC_HEADER_PERSIST_TOUCH_INTERVAL_MS = 60_000;
+const lastPersistedAnthropicHeaderQuota = new Map<string, { signature: string; updatedAt: number }>();
+
+function anthropicHeaderPersistSignature(quota: ProviderQuota | null, generation: string | null | undefined): string {
+  if (!quota) return "";
+  const { updatedAt: _updatedAt, ...rest } = quota;
+  return JSON.stringify([generation ?? "", rest]);
+}
 /** Instance-owned cache clears do not revoke an unrelated account's probe. */
 export function captureProviderAccountQuotaEpoch(provider: string): number {
   return allAccountQuotaEpoch + (providerAccountQuotaEpochs.get(provider) ?? 0);
@@ -309,6 +317,7 @@ export function setCachedProviderAccountQuotaForTests(
   quota: ProviderQuota | null,
 ): void {
   const key = accountCacheKey(provider, accountId);
+  lastPersistedAnthropicHeaderQuota.delete(key);
   if (quota === null) {
     accountQuotaCache.delete(key);
     return;
@@ -384,22 +393,41 @@ export function recordAnthropicAccountQuotaFromHeadersForInstance(
   const generation = credential && credentialGeneration(credential);
   const previous = anthropicQuotaEntryIsCurrent(instance, accountId, candidate) ? candidate : undefined;
   if (observed.customWindows) observeAnthropicFamilyQuota(accountId, observed.customWindows, observed.updatedAt);
+  const nextQuota = normalizeAnthropicQuota({
+    ...normalizeAnthropicQuota(previous?.quota, observed.updatedAt), ...observed,
+    ...(observed.customWindows ? { customWindows: mergeAnthropicFamilyWindows(previous?.quota?.customWindows, observed.customWindows) } : {}),
+  }, observed.updatedAt);
   accountQuotaCache.set(key, {
     ...previous,
     ...(generation ? { anthropicCredentialGeneration: generation, isCurrent: undefined } : {}),
     // Headers do not prove that the last usage probe succeeded.
     ts: previous?.ts ?? 0,
-    quota: normalizeAnthropicQuota({
-      ...normalizeAnthropicQuota(previous?.quota, observed.updatedAt), ...observed,
-      ...(observed.customWindows ? { customWindows: mergeAnthropicFamilyWindows(previous?.quota?.customWindows, observed.customWindows) } : {}),
-    }, observed.updatedAt),
+    quota: nextQuota,
   });
   // Advisory evidence is published for the primary pool only; Pool 2 stays unknown to decisions.
   if (instance === "anthropic" && generation && generation === decisionCredentialGeneration && decisionQuotaSinkActive()) {
     bindRawDecisionWindows(observed, rawAnthropicHeaderWindows(headers, observed.updatedAt));
     publishAnthropicDecisionQuota(accountId, generation, observed, true);
   }
-  persistAccountQuotaCache();
+  const previousPersisted = lastPersistedAnthropicHeaderQuota.get(key);
+  const signature = anthropicHeaderPersistSignature(nextQuota, generation);
+  const previousSignature = previous
+    ? anthropicHeaderPersistSignature(
+      normalizeAnthropicQuota(previous.quota, observed.updatedAt),
+      previous.anthropicCredentialGeneration,
+    )
+    : "";
+  const observedUpdatedAt = nextQuota?.updatedAt ?? observed.updatedAt;
+  const withinTouchCooldown = previous !== undefined
+    && previousSignature === signature
+    && previousPersisted !== undefined
+    && previousPersisted.signature === signature
+    && observedUpdatedAt >= previousPersisted.updatedAt
+    && observedUpdatedAt - previousPersisted.updatedAt < ANTHROPIC_HEADER_PERSIST_TOUCH_INTERVAL_MS;
+  if (!withinTouchCooldown) {
+    lastPersistedAnthropicHeaderQuota.set(key, { signature, updatedAt: observedUpdatedAt });
+    persistAccountQuotaCache();
+  }
 }
 
 /** Legacy recorder: config/roster generation is numeric and distinct from bearer ownership. */
@@ -488,11 +516,17 @@ export function readPassiveProviderAccountQuotas(provider: string): ProviderAcco
  * An Antigravity account's agy observation, only while it belongs to the slot's current sign-in.
  * A row probed before `nativeHarnessOnly` carries no sign-in and is never shown as an observation.
  */
-export function observedAntigravityAccountQuota(accountId: string): ProviderQuota | null {
+export function observedAntigravityAccountQuota(
+  accountId: string,
+  knownCredential?: ReturnType<typeof getAccountCredential>,
+): ProviderQuota | null {
   hydrateAccountQuotaCache();
   const entry = accountQuotaCache.get(accountCacheKey(ANTIGRAVITY_OAUTH_STORE_KEY, accountId));
-  const credential = getAccountCredential(ANTIGRAVITY_OAUTH_STORE_KEY, accountId);
-  return entry?.quota && entry.identity && credential && entry.identity === antigravityLoginIdentity(accountId, credential)
+  if (!entry?.quota || !entry.identity) return null;
+  const credential = knownCredential !== undefined
+    ? knownCredential
+    : getAccountCredential(ANTIGRAVITY_OAUTH_STORE_KEY, accountId);
+  return credential && entry.identity === antigravityLoginIdentity(accountId, credential)
     ? entry.quota : null;
 }
 
@@ -505,6 +539,7 @@ export function sweepExpiredProviderAccountQuotaRows(now = Date.now()): number {
       : entry.ts;
     if (retainedAt + ACCOUNT_QUOTA_TTL_MS > now) continue;
     accountQuotaCache.delete(key);
+    lastPersistedAnthropicHeaderQuota.delete(key);
     removed += 1;
   }
   return removed;
@@ -517,6 +552,7 @@ export function reconcileProviderAccountQuotaRows(context: GenerationContext): n
   for (const key of accountQuotaCache.keys()) {
     if (context.oauthAccountKeys.has(key)) continue;
     accountQuotaCache.delete(key);
+    lastPersistedAnthropicHeaderQuota.delete(key);
     removed += 1;
   }
   // Kiro exhaustion rows are keyed identically, so they retire with their quota row; a
@@ -552,6 +588,7 @@ export function clearAccountQuotaCache(provider?: string): void {
     allAccountQuotaEpoch += 1;
     accountQuotaCache.clear();
     accountQuotaInflight.clear();
+    lastPersistedAnthropicHeaderQuota.clear();
     clearKiroAccountUsageState();
     // A cleared cache must not be re-seeded from the file it was just cleared of, and any
     // pending write of the old rows is abandoned.
@@ -564,6 +601,9 @@ export function clearAccountQuotaCache(provider?: string): void {
   const prefix = `${provider}\u0000`;
   for (const key of [...accountQuotaCache.keys()]) {
     if (key.startsWith(prefix)) accountQuotaCache.delete(key);
+  }
+  for (const key of [...lastPersistedAnthropicHeaderQuota.keys()]) {
+    if (key.startsWith(prefix)) lastPersistedAnthropicHeaderQuota.delete(key);
   }
   clearKiroAccountUsageState(prefix);
   // Drop in-flight probes too so a late resolve cannot repopulate after logout/remove.
@@ -581,6 +621,7 @@ export function forgetCachedProviderAccountQuota(provider: string, accountId: st
   hydrateAccountQuotaCache();
   const key = accountCacheKey(provider, accountId);
   accountQuotaCache.delete(key);
+  lastPersistedAnthropicHeaderQuota.delete(key);
   for (const flight of [...accountQuotaInflight.keys()]) {
     if (flight === key || flight.startsWith(key + "\u0000")) accountQuotaInflight.delete(flight);
   }

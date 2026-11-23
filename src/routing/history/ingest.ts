@@ -162,6 +162,8 @@ export interface IngestOptions {
    * recorded and the next refresh picks up later appends as a tail.
    */
   endOffset?: number;
+  /** Clear `lastError` inside the metadata commit transaction when rows are inserted. */
+  clearLastErrorOnInsert?: boolean;
 }
 
 export function ingestSourceTail(
@@ -247,13 +249,23 @@ export function ingestSourceTail(
       }
       position += bytesRead;
     }
-    if (pending.length > 0) commitBatch();
     const indexedRows = metaNumber(dbHandle, HISTORY_META_KEYS.indexedRows);
-    setMeta(dbHandle, HISTORY_META_KEYS.indexedOffset, nextOffset);
-    setMeta(dbHandle, HISTORY_META_KEYS.indexedRows, indexedRows + inserted);
-    setMeta(dbHandle, HISTORY_META_KEYS.sourceSize, size);
-    setMeta(dbHandle, HISTORY_META_KEYS.sourceMtimeMs, Number(stat.mtimeNs) / 1_000_000);
-    setMeta(dbHandle, HISTORY_META_KEYS.builtAtMs, Date.now());
+    const builtAtMs = Date.now();
+    const sourceMtimeMs = Number(stat.mtimeNs) / 1_000_000;
+    dbHandle.transaction((rows: Array<Array<string | number | null>>) => {
+      for (const row of rows) {
+        inserted += insert.run(...row).changes;
+      }
+      setMeta(dbHandle, HISTORY_META_KEYS.indexedOffset, nextOffset);
+      setMeta(dbHandle, HISTORY_META_KEYS.indexedRows, indexedRows + inserted);
+      setMeta(dbHandle, HISTORY_META_KEYS.sourceSize, size);
+      setMeta(dbHandle, HISTORY_META_KEYS.sourceMtimeMs, sourceMtimeMs);
+      setMeta(dbHandle, HISTORY_META_KEYS.builtAtMs, builtAtMs);
+      if (options.clearLastErrorOnInsert && inserted > 0) {
+        setMeta(dbHandle, HISTORY_META_KEYS.lastError, "");
+      }
+    })(pending);
+    pending = [];
     if (nextOffset < size && tailRevision(fstatSync(fd, { bigint: true })) === revision) {
       tailObservations.set(dbHandle, { path, revision, nextOffset, endOffset: options.endOffset });
     }

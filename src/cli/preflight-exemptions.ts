@@ -3,6 +3,8 @@ import { isOrchestratedUpdateArgv } from "../update/orchestrated-arguments.mjs";
 /** Identify command namespaces whose execution must not trigger automatic shim repair. */
 export function skipsCodexShimAutoRestore(command: string | undefined, args: string[]): boolean {
   if (command === "uninstall" || command === "remove") return true;
+  // Local config reads/writes/validation must not trigger Codex shim repair side effects.
+  if (command === "config") return true;
   // Contract discovery and orchestrated update must validate before any repair.
   if (command === "capabilities") return true;
   // Reading the bounded link diagnostics file must not repair, harden or create anything first.

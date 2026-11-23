@@ -226,7 +226,7 @@ describe("Codex shim CLI auto-restore policy", () => {
       const nativeBefore = readFileSync(launchers[0]);
       const stateBefore = readFileSync(statePath);
       rmSync(wrappers[0]);
-      for (const command of ["status", "doctor"]) {
+      for (const command of ["status", "doctor", "config"]) {
         const { deps, warnings } = cliDeps({ status: "healthy" }, { restore: autoRestoreCodexShim });
         maybeAutoRestoreCodexShim(command, [command], deps);
         expect(warnings).toEqual([]);

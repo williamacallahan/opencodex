@@ -351,3 +351,76 @@ test("row keys survive a failed reopen, so a later delete still reaches its row 
   resetCodexAffinityStoreForTests(); lease = acquireSpendLedgerOwner();
   expect(adoptStoredThreadRows(key(), Date.now())).toEqual([]);
 });
+
+test("re-binding an unchanged thread or issuer coalesces as a touch instead of an immediate transaction", async () => {
+  const affinity = await import("../../src/codex/routing/thread-affinity");
+  registerThreadAffinityLiveState();
+  lease = acquireSpendLedgerOwner();
+  saveCodexAccountCredential("account-a", {
+    accessToken: "access-a",
+    refreshToken: "refresh-a",
+    expiresAt: Date.now() + 60_000,
+    chatgptAccountId: "chat-a",
+  });
+  saveCodexAccountCredential("account-b", {
+    accessToken: "access-b",
+    refreshToken: "refresh-b",
+    expiresAt: Date.now() + 60_000,
+    chatgptAccountId: "chat-b",
+  });
+  const now = Date.now();
+  const threadKey = codexConversationKeyFor("coalesce-family", "coalesce-thread");
+  affinity.bindThreadAffinity(threadKey, "account-a", now - 2_000, "shared");
+  affinity.rememberConversationStateIssuer(threadKey, "account-a", now - 2_000, {
+    generation: 1,
+    chatgptAccountId: "chat-a",
+  });
+  await Promise.resolve();
+  flushCodexAffinityStoreForTests();
+
+  const originalExec = Database.prototype.exec;
+  let begins = 0;
+  Database.prototype.exec = function (sql: string) {
+    if (sql === "BEGIN IMMEDIATE") begins += 1;
+    return originalExec.call(this, sql);
+  };
+  try {
+    affinity.bindThreadAffinity(threadKey, "account-a", now - 1_000, "shared");
+    affinity.rememberConversationStateIssuer(threadKey, "account-a", now - 1_000, {
+      generation: 1,
+      chatgptAccountId: "chat-a",
+    });
+    await Promise.resolve();
+    expect(begins).toBe(0);
+    expect(affinity.getThreadAffinity(threadKey, "shared")?.lastUsedAt).toBe(now - 1_000);
+    expect(affinity.peekConversationStateIssuer(threadKey, now - 1_000)).toBe("account-a");
+
+    affinity.bindThreadAffinity(threadKey, "account-b", now - 500, "shared");
+    await Promise.resolve();
+    expect(begins).toBe(1);
+  } finally {
+    Database.prototype.exec = originalExec;
+  }
+
+  // A bind recorded before the anchor is known must still insert into SQLite once the anchor exists.
+  affinity.bindThreadAffinity("unanchored-thread", "account-a", now - 400, "shared");
+  affinity.rememberConversationStateIssuer("unanchored-thread", "account-a", now - 400, {
+    generation: 1,
+    chatgptAccountId: "chat-a",
+  });
+  await Promise.resolve();
+  const { noteCodexAffinityAnchorForTests } = await import("../../src/codex/routing/thread-affinity-store");
+  noteCodexAffinityAnchorForTests("unanchored-thread", "unanchored-family", "unanchored-thread");
+  affinity.bindThreadAffinity("unanchored-thread", "account-a", now - 200, "shared");
+  affinity.rememberConversationStateIssuer("unanchored-thread", "account-a", now - 200, {
+    generation: 1,
+    chatgptAccountId: "chat-a",
+  });
+  await Promise.resolve();
+  flushCodexAffinityStoreForTests();
+  lease.release();
+  lease = acquireSpendLedgerOwner();
+  noteCodexAffinityAnchorForTests("unanchored-thread", "unanchored-family", "unanchored-thread");
+  expect(adoptStoredThreadRows("unanchored-thread", Date.now(), "shared")).toHaveLength(1);
+  expect(adoptStoredIssuer("unanchored-thread", Date.now())?.issuer).toBe("account-a");
+});

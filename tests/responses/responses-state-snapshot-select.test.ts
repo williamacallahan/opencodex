@@ -63,4 +63,33 @@ describe("responses-state snapshot payload bytes", () => {
       expect(snapshotPayload(kept)).toBe(JSON.stringify({ version: 2, states: kept.map(entry => JSON.parse(entry)) }));
     }
   });
+
+  test("memoizes serialized strings per immutable state instance and re-serializes on replacement", () => {
+    const states = fixtureStates();
+    let itemAccesses = 0;
+    const tracked: StoredResponseState = {
+      kind: "resident",
+      createdAt: 7,
+      get items() {
+        itemAccesses += 1;
+        return ["tracked-item"];
+      },
+      sizeBytes: 32,
+    };
+    states.set("resp_tracked", tracked);
+    const first = snapshotPayload(selectSnapshotEntries(states, 10_000, RESIDENT_ENTRY_MAX_BYTES));
+    expect(itemAccesses).toBe(1);
+    const second = snapshotPayload(selectSnapshotEntries(states, 10_000, RESIDENT_ENTRY_MAX_BYTES));
+    expect(second).toBe(first);
+    expect(itemAccesses).toBe(1);
+    states.set("resp_tracked", {
+      kind: "resident",
+      createdAt: 8,
+      items: ["replaced-item"],
+      sizeBytes: 32,
+    });
+    const third = snapshotPayload(selectSnapshotEntries(states, 10_000, RESIDENT_ENTRY_MAX_BYTES));
+    expect(third).toContain("replaced-item");
+    expect(third).not.toContain("tracked-item");
+  });
 });
