@@ -20,7 +20,7 @@ const MAX_FLUSH_DELAY_MS = 4_000;
 const MAX_LOAD_ATTEMPTS = 3;
 const SHUTDOWN_ATTEMPTS = 5;
 const SHUTDOWN_RETRY_MS = 200;
-const MAX_PERSISTED_RESERVE_STREAK_IDLE_MS = 30 * 60_000;
+const MAX_PERSISTED_RESERVE_STREAK_IDLE_MS = 60 * 60_000;
 const ACCOUNT_KEY_PREFIX = "a\0";
 const SCOPED_KEY_PREFIX = "s\0";
 
@@ -106,28 +106,31 @@ function serializeForDisk(health: CodexUpstreamHealth): CodexUpstreamHealth {
   return persisted;
 }
 
+export function codexHealthRowHorizon(row: CodexUpstreamHealth): number {
+  return Math.max(
+    finiteNumber(row.cooldownUntil) ?? 0,
+    finiteNumber(row.quotaAvoidUntil) ?? 0,
+    finiteNumber(row.softAvoidUntil) ?? 0,
+    (finiteNumber(row.reserveRefusalStreak) ?? 0) > 0
+      ? Math.max(finiteNumber(row.cooldownUntil) ?? 0, finiteNumber(row.lastFailureAt) ?? 0) +
+        MAX_PERSISTED_RESERVE_STREAK_IDLE_MS
+      : 0,
+  );
+}
+
 export function isCodexHealthRowAlive(row: CodexUpstreamHealth, now: number): boolean {
   if ((finiteNumber(row.cooldownUntil) ?? 0) > now) return true;
   if ((finiteNumber(row.quotaAvoidUntil) ?? 0) > now) return true;
   if ((finiteNumber(row.softAvoidUntil) ?? 0) > now) return true;
   if (
     (finiteNumber(row.reserveRefusalStreak) ?? 0) > 0 &&
-    (finiteNumber(row.lastFailureAt) ?? 0) + MAX_PERSISTED_RESERVE_STREAK_IDLE_MS > now
+    Math.max(finiteNumber(row.cooldownUntil) ?? 0, finiteNumber(row.lastFailureAt) ?? 0) +
+      MAX_PERSISTED_RESERVE_STREAK_IDLE_MS >
+      now
   ) {
     return true;
   }
   return false;
-}
-
-function rowHorizon(row: CodexUpstreamHealth): number {
-  return Math.max(
-    finiteNumber(row.cooldownUntil) ?? 0,
-    finiteNumber(row.quotaAvoidUntil) ?? 0,
-    finiteNumber(row.softAvoidUntil) ?? 0,
-    (finiteNumber(row.reserveRefusalStreak) ?? 0) > 0
-      ? (finiteNumber(row.lastFailureAt) ?? 0) + MAX_PERSISTED_RESERVE_STREAK_IDLE_MS
-      : 0,
-  );
 }
 
 function readStoredRows(path: string): Record<string, CodexUpstreamHealth> {
@@ -324,7 +327,7 @@ class CodexHealthCooldownStore {
           if (!own || !isCodexHealthRowAlive(own, now)) continue;
           const persisted = serializeForDisk(own);
           const other = out[key];
-          out[key] = other && rowHorizon(other) > rowHorizon(persisted) ? other : persisted;
+          out[key] = other && codexHealthRowHorizon(other) > codexHealthRowHorizon(persisted) ? other : persisted;
         }
         mkdirSync(dir, { recursive: true });
         atomicWriteFile(path, JSON.stringify(out));

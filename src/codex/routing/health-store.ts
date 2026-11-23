@@ -5,7 +5,11 @@ import { POOL_KEY_CODEX } from "../pool-rotation";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import type { OcxConfig } from "../../types";
 import type { CodexCooldownSource } from "./cooldown-math";
-import { codexHealthCooldownStore, isCodexHealthRowAlive } from "./health-cooldown-store";
+import {
+  codexHealthCooldownStore,
+  codexHealthRowHorizon,
+  isCodexHealthRowAlive,
+} from "./health-cooldown-store";
 
 export type CodexUpstreamHealth = {
   consecutiveFailures: number;
@@ -168,8 +172,11 @@ export function setScopedHealth(accountId: string, scope: CodexQuotaScope, healt
   }
   scopes.set(scope, health);
   const now = Date.now();
-  if (isCodexHealthRowAlive(health, now)) codexHealthCooldownStore.markScopedDirty(accountId, scope);
-  else if (previous !== undefined && isCodexHealthRowAlive(previous, now)) {
+  if (isCodexHealthRowAlive(health, now)) {
+    const shortened = previous !== undefined && codexHealthRowHorizon(health) < codexHealthRowHorizon(previous);
+    if (shortened) codexHealthCooldownStore.markScopedReplaced(accountId, scope);
+    else codexHealthCooldownStore.markScopedDirty(accountId, scope);
+  } else if (previous !== undefined && isCodexHealthRowAlive(previous, now)) {
     codexHealthCooldownStore.markScopedDeleted(accountId, scope);
   }
 }
@@ -383,8 +390,11 @@ export function setAccountHealth(accountId: string, health: CodexUpstreamHealth)
   const previous = upstreamHealth.get(accountId);
   upstreamHealth.set(accountId, health);
   const now = Date.now();
-  if (isCodexHealthRowAlive(health, now)) codexHealthCooldownStore.markAccountDirty(accountId);
-  else if (previous !== undefined && isCodexHealthRowAlive(previous, now)) {
+  if (isCodexHealthRowAlive(health, now)) {
+    const shortened = previous !== undefined && codexHealthRowHorizon(health) < codexHealthRowHorizon(previous);
+    if (shortened) codexHealthCooldownStore.markAccountReplaced(accountId);
+    else codexHealthCooldownStore.markAccountDirty(accountId);
+  } else if (previous !== undefined && isCodexHealthRowAlive(previous, now)) {
     codexHealthCooldownStore.markAccountDeleted(accountId);
   }
 }
@@ -403,7 +413,8 @@ export function noteScopedCodexSuccess(
   accountId: string, scope: CodexQuotaScope, now: number, reserveGeneration: number | undefined,
 ): void {
   const current = scopedHealthFor(accountId, scope);
-  if (scope === "reserve" && (current?.cooldownUntil ?? 0) > now) return;
+  const hasActiveCooldown = (current?.cooldownUntil ?? 0) > now;
+  if (scope === "reserve" && hasActiveCooldown) return;
   const reserveSuccess = scope === "reserve" && reserveGeneration !== undefined
     && isCodexAccountGenerationLive(accountId, reserveGeneration) ? { at: now, credentialGeneration: reserveGeneration } : undefined;
   if (!reserveSuccess && (!current || !carriesQuotaRefusal(current))) return;
@@ -412,8 +423,20 @@ export function noteScopedCodexSuccess(
     lastFailureAt: _refusedAt,
     quotaAvoidUntil: _avoid,
     reserveRefusalStreak: _streak,
-    ...retained
+    ...retainedBase
   } = current ?? { consecutiveFailures: 0 };
+  const retained = hasActiveCooldown
+    ? retainedBase
+    : (() => {
+      const {
+        capacityEvidence: _capacity,
+        cooldownUntil: _until,
+        cooldownSince: _since,
+        cooldownSource: _source,
+        ...withoutExpiredCooldown
+      } = retainedBase;
+      return withoutExpiredCooldown;
+    })();
   const wallNow = Date.now();
   if (reserveSuccess) {
     const updated = { ...retained, reserveSuccess };

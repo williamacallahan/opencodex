@@ -6,11 +6,15 @@ import { CODEX_MAX_RESERVE_REFUSAL_BACKOFF_MS, computeReserveRefusalCooldown } f
 import {
   clearCodexAccountCooldown,
   flushCodexHealthCooldowns,
+  getAccountHealth,
   getCodexAccountCooldownUntil,
+  isCodexQuotaAvoided,
   noteScopedCodexSuccess,
   reloadCodexHealthCooldownsForTests,
   scopedHealthFor,
+  setAccountHealth,
 } from "../../src/codex/routing/health-store";
+import { resetCodexRoutingForManualSelection } from "../../src/codex/routing/active-account";
 import {
   clearCodexCooldownRecoveryProbeState,
   runCodexCooldownRecoveryProbes,
@@ -260,10 +264,13 @@ describe("Reserve quota scope", () => {
     const explicit = computeReserveRefusalCooldown({ now: t0, retryAfter: "45" }, 4, "acct-alpha");
     expect(explicit).toEqual({ until: t0 + 45_000, source: "retry-after" });
 
-    // Real Reserve completion resets streak back to 60s.
+    // Real Reserve completion resets streak, clears expired cooldown fields, and deletes disk row.
     t += CODEX_MAX_RESERVE_REFUSAL_BACKOFF_MS * 2;
     noteScopedCodexSuccess("reserve-fixture", "reserve", t, undefined);
     expect(scopedHealthFor("reserve-fixture", "reserve")?.reserveRefusalStreak).toBeUndefined();
+    expect(flushCodexHealthCooldowns()).toBe(true);
+    reloadCodexHealthCooldownsForTests();
+    expect(getCodexQuotaHealthSnapshot("reserve-fixture", "reserve", Date.now() + 1)).toBeNull();
     recordCodexUpstreamOutcome(config, "reserve-fixture", 429, { modelId: "gpt-reserve", poolReserve: true, now: t + 10 });
     expect(getCodexQuotaHealthSnapshot("reserve-fixture", "reserve", t + 11)?.cooldownUntil).toBe(t + 10 + 60_000);
 
@@ -272,6 +279,39 @@ describe("Reserve quota scope", () => {
     expect(scopedHealthFor("reserve-fixture", "reserve")?.reserveRefusalStreak).toBe(2);
     expect(clearCodexAccountCooldown("reserve-fixture", t + 120_001)).toBe(true);
     expect(scopedHealthFor("reserve-fixture", "reserve")?.reserveRefusalStreak).toBeUndefined();
+  });
+
+  test("shortened writes clear older quotaAvoidUntil on disk and Tier-5 streak survives after expiry", () => {
+    const config = makeConfig();
+    const now = Date.now();
+    // Write a 1h quotaAvoidUntil alongside a live 60s cooldown, flush to disk, then overrule avoidance.
+    setAccountHealth("manual-seat", {
+      consecutiveFailures: 0,
+      cooldownUntil: now + 60_000,
+      quotaAvoidUntil: now + 3_600_000,
+    });
+    expect(flushCodexHealthCooldowns()).toBe(true);
+    resetCodexRoutingForManualSelection("manual-seat");
+    expect(getAccountHealth("manual-seat")?.quotaAvoidUntil).toBeUndefined();
+    expect(flushCodexHealthCooldowns()).toBe(true);
+    reloadCodexHealthCooldownsForTests();
+    expect(isCodexQuotaAvoided("manual-seat", undefined, now + 1)).toBe(false);
+    expect(getCodexAccountCooldownUntil("manual-seat", now + 1)).toBe(now + 60_000);
+
+    // Tier-5 refusal whose cooldownUntil (>30m with jitter) has expired still keeps its streak on reload.
+    for (let i = 0; i < 5; i += 1) {
+      recordCodexUpstreamOutcome(config, "tier5-streak", 429, {
+        modelId: "gpt-reserve",
+        poolReserve: true,
+        now: now - (39 - i) * 60_000,
+      });
+    }
+    const snapBefore = scopedHealthFor("tier5-streak", "reserve");
+    expect(snapBefore?.reserveRefusalStreak).toBe(5);
+    expect(snapBefore?.cooldownUntil).toBeLessThanOrEqual(now);
+    expect(flushCodexHealthCooldowns()).toBe(true);
+    reloadCodexHealthCooldownsForTests();
+    expect(scopedHealthFor("tier5-streak", "reserve")?.reserveRefusalStreak).toBe(5);
   });
 
   test("unexpired Reserve streak and account cooldown persist across reload and delete on recovery", () => {
