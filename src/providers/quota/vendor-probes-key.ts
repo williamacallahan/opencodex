@@ -1138,7 +1138,8 @@ async function fetchNeuralwattQuota(provider: string, config: OcxProviderConfig)
     const used = Math.max(0, totalCredits - remainingCredits);
     const percent = normalizePercent((used / totalCredits) * 100);
     if (percent !== undefined) {
-      quota.customWindows = [...(quota.customWindows ?? []), { label: "Prepaid credits", percent }];
+      // A prepaid balance is credits, not a plan window: it never outranks the kWh plan in a headline.
+      quota.creditsUsd = { used, limit: totalCredits, remaining: Math.max(0, remainingCredits), percent };
       windows += 1;
     }
   }

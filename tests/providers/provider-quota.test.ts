@@ -1905,7 +1905,8 @@ describe("fetchProviderQuotaReports", () => {
     expect(result.reports[0]?.source).toBe("neuralwatt:quota");
     expect(result.reports[0]?.quota.fiveHourPercent).toBe(25);
     // Utilization is CONSUMED credits: (10 − 7) / 10 = 30%, not the 70% remaining.
-    expect(result.reports[0]?.quota.customWindows?.[0]).toMatchObject({ label: "Prepaid credits", percent: 30 });
+    expect(result.reports[0]?.quota.creditsUsd).toEqual({ used: 3, limit: 10, remaining: 7, percent: 30 });
+    expect(result.reports[0]?.quota.customWindows).toBeUndefined();
   });
 
   test("Neuralwatt quota never sends the key to a non-canonical base URL", async () => {
