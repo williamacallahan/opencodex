@@ -158,11 +158,12 @@ test("timestamp touches coalesce and shutdown flushes the latest use", async () 
   let writes = 0; const store = owner("anthropic", (...args) => { writes++; atomicWriteFile(...args); });
   const now = Date.now(); store.set(key, { accountId: id, lastUsedAt: now - 100 }); await store.flush();
   store.set(key, { accountId: id, lastUsedAt: now - 50 }); store.set(key, { accountId: id, lastUsedAt: now });
+  await new Promise(resolve => setTimeout(resolve, 1_100));
   expect(writes).toBe(1); runOptionalShutdownHooks();
   expect((await settleBackgroundWork({ timeoutMs: 5_000 })).settled).toBe(true);
   expect(writes).toBe(2);
   expect(JSON.parse(readFileSync(path(), "utf8")).entries[0].lastUsedAt).toBe(now);
-});
+}, 10_000);
 
 test("2000 bindings use one auth snapshot per hydration, touch and invalidation", async () => {
   const { store, data } = await snapshot();

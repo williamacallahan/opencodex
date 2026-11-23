@@ -247,8 +247,13 @@ export function isProactivePreferenceEnabled(config: OcxConfig, providerName: st
 }
 
 /** Accounts that may serve traffic right now: not cooled, not flagged for reauth. */
-export function eligibleFailoverAccounts(providerName: string, now = Date.now(), family?: QuotaModelFamily): string[] {
-  return eligibleIdsIn(getAccountSet(providerName), providerName, now, family);
+export function eligibleFailoverAccounts(
+  providerName: string,
+  now = Date.now(),
+  family?: QuotaModelFamily,
+  accountSet: ReturnType<typeof getAccountSet> = getAccountSet(providerName),
+): string[] {
+  return eligibleIdsIn(accountSet, providerName, now, family);
 }
 
 /** Whether an account's own model listing includes `model`; undefined when unknown. */

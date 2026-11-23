@@ -555,11 +555,13 @@ function scheduleTouch(s: Scope): void {
   }, 1000);
   s.timer.unref();
 }
-function prune(db: Database, now: number): void {
+function prune(db: Database, now: number, capRows = true): void {
   for (const table of ["threads", "issuers"])
     db.query(`DELETE FROM ${table} WHERE last_used_at < ? OR last_used_at > ?`).run(now - TTL, now);
   db.query("DELETE FROM threads WHERE created_at > ?").run(now);
-  db.exec("DELETE FROM threads WHERE rowid IN (SELECT rowid FROM threads ORDER BY (scope LIKE 'model-detour:%') ASC, last_used_at DESC, row_key, scope LIMIT -1 OFFSET 2048); DELETE FROM issuers WHERE rowid IN (SELECT rowid FROM issuers ORDER BY last_used_at DESC, row_key LIMIT -1 OFFSET 2048)");
+  if (capRows) {
+    db.exec("DELETE FROM threads WHERE rowid IN (SELECT rowid FROM threads ORDER BY (scope LIKE 'model-detour:%') ASC, last_used_at DESC, row_key, scope LIMIT -1 OFFSET 2048); DELETE FROM issuers WHERE rowid IN (SELECT rowid FROM issuers ORDER BY last_used_at DESC, row_key LIMIT -1 OFFSET 2048)");
+  }
 }
 function pruneOnly(s: Scope): boolean {
   if (!s.db || s.disabled) return false;
@@ -627,7 +629,7 @@ function flush(s: Scope, clean: boolean): boolean {
     }
     // Again after the log: rows the log just inserted take their live last-used time.
     applyTouches(s, db);
-    prune(db, Date.now());
+    prune(db, Date.now(), s.log.length > 0 || clean);
     // Both 1.0 and 1 read as the number 1 in v1. Its final UPDATE writes INTEGER 1;
     // only a snapshot-aware shutdown writes REAL 1 and a fresh negative rowid (the secret uses a positive rowid).
     // Read the 64-bit generation as text so it never rounds through a JavaScript number.

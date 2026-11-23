@@ -351,3 +351,54 @@ test("row keys survive a failed reopen, so a later delete still reaches its row 
   resetCodexAffinityStoreForTests(); lease = acquireSpendLedgerOwner();
   expect(adoptStoredThreadRows(key(), Date.now())).toEqual([]);
 });
+
+test("re-binding an unchanged thread or issuer coalesces as a touch instead of an immediate transaction", async () => {
+  const affinity = await import("../../src/codex/routing/thread-affinity");
+  registerThreadAffinityLiveState();
+  lease = acquireSpendLedgerOwner();
+  saveCodexAccountCredential("account-a", {
+    accessToken: "access-a",
+    refreshToken: "refresh-a",
+    expiresAt: Date.now() + 60_000,
+    chatgptAccountId: "chat-a",
+  });
+  saveCodexAccountCredential("account-b", {
+    accessToken: "access-b",
+    refreshToken: "refresh-b",
+    expiresAt: Date.now() + 60_000,
+    chatgptAccountId: "chat-b",
+  });
+  const now = Date.now();
+  const threadKey = codexConversationKeyFor("coalesce-family", "coalesce-thread");
+  affinity.bindThreadAffinity(threadKey, "account-a", now - 1_000, "shared");
+  affinity.rememberConversationStateIssuer(threadKey, "account-a", now - 1_000, {
+    generation: 1,
+    chatgptAccountId: "chat-a",
+  });
+  await Promise.resolve();
+  flushCodexAffinityStoreForTests();
+
+  const originalExec = Database.prototype.exec;
+  let begins = 0;
+  Database.prototype.exec = function (sql: string) {
+    if (sql === "BEGIN IMMEDIATE") begins += 1;
+    return originalExec.call(this, sql);
+  };
+  try {
+    affinity.bindThreadAffinity(threadKey, "account-a", now, "shared");
+    affinity.rememberConversationStateIssuer(threadKey, "account-a", now, {
+      generation: 1,
+      chatgptAccountId: "chat-a",
+    });
+    await Promise.resolve();
+    expect(begins).toBe(0);
+    expect(affinity.getThreadAffinity(threadKey, "shared")?.lastUsedAt).toBe(now);
+    expect(affinity.peekConversationStateIssuer(threadKey, now)).toBe("account-a");
+
+    affinity.bindThreadAffinity(threadKey, "account-b", now + 100, "shared");
+    await Promise.resolve();
+    expect(begins).toBe(1);
+  } finally {
+    Database.prototype.exec = originalExec;
+  }
+});

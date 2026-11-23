@@ -183,4 +183,13 @@ describe("Anthropic failover quorum cache", () => {
     hasAnthropicFailoverQuorum(start + 1);
     expect(storeWasRead()).toBe(true);
   });
+
+  test("a quorum fill across a multi-account pool reads auth.json once, not once per account", async () => {
+    const start = Date.now();
+    await seed(5);
+    forgetAnthropicFailoverQuorum();
+    const before = authReadCount();
+    expect(hasAnthropicFailoverQuorum(start)).toBe(true);
+    expect(authReadCount() - before).toBe(1);
+  });
 });

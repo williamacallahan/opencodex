@@ -50,6 +50,15 @@ export function mutatePersistedConfig<T>(
   if (observed.diagnostics.source !== "file" || observed.raw === undefined) {
     return { status: "unavailable", reason: unavailableConfigMutationReason(observed) };
   }
+  if (!persistedConfigMutationBeforeCommitForTests) {
+    const precheck = mutate(structuredClone(observed.diagnostics.config));
+    if (!precheck.changed) {
+      const rechecked = readConfigFileSnapshot();
+      if (rechecked.diagnostics.source === "file" && rechecked.raw === observed.raw) {
+        return { status: "unchanged", value: precheck.value };
+      }
+    }
+  }
   return withConfigMutationLockSync(() => {
     let base = readConfigFileSnapshot();
     for (let attempt = 0; attempt < CONFIG_MUTATION_MAX_REBASE_ATTEMPTS; attempt += 1) {

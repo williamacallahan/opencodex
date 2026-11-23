@@ -287,8 +287,15 @@ export function rememberConversationStateIssuer(
   const fence = record?.credential && record.deletedAt == null && credential
     && record.generation === credential.generation && record.credential.chatgptAccountId === credential.chatgptAccountId
     ? identityFence(record.quotaHistoryIdentity) : undefined;
+  const previous = conversationStateIssuerMap.get(bindingKey);
   if (accountId === MAIN_CODEX_ACCOUNT_ID) recordIssuerDelete(bindingKey);
-  else if (accountId !== CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER) recordIssuerSet(bindingKey, accountId, fence ?? null, now);
+  else if (accountId !== CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER) {
+    if (previous && previous.storedAccountId === undefined && previous.accountId === accountId && previous.fence === fence) {
+      recordIssuerTouch(bindingKey);
+    } else {
+      recordIssuerSet(bindingKey, accountId, fence ?? null, now);
+    }
+  }
   conversationStateIssuerMap.set(bindingKey, { accountId, lastUsedAt: now, fence });
   pruneConversationStateIssuers(now);
 }
@@ -570,8 +577,11 @@ function bindThreadAffinityForScope(
     lastUsedAt: observed?.lastUsedAt ?? now,
     lastReevalAt: observed?.lastReevalAt ?? now,
   };
-  if (fence) recordThreadBind(threadId, scope, { scope, accountId, fence, createdAt: entry.createdAt, lastUsedAt: entry.lastUsedAt });
-  else recordThreadDelete(threadId, scope);
+  if (fence) {
+    if (!(previous && previous.accountId === accountId && previous.identityFence === fence && previous.createdAt === entry.createdAt)) {
+      recordThreadBind(threadId, scope, { scope, accountId, fence, createdAt: entry.createdAt, lastUsedAt: entry.lastUsedAt });
+    }
+  } else recordThreadDelete(threadId, scope);
   affinities.set(scope, entry);
   if (!previous) threadAffinityEntryTotal += 1;
   threadAccountMap.set(threadId, affinities);

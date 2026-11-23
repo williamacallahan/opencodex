@@ -441,6 +441,15 @@ async function anthropicNativePassthrough(
       { code: "body_overflow", value: bodyGuard.maxBytes });
   }
   const text = bodyResult.text;
+  let parsedErrorBody: unknown;
+  let parsedErrorBodyReady = false;
+  const parseErrorBodyOnce = (): unknown => {
+    if (!parsedErrorBodyReady) {
+      parsedErrorBodyReady = true;
+      try { parsedErrorBody = JSON.parse(text); } catch { /* non-JSON errors keep original recognition evidence */ }
+    }
+    return parsedErrorBody;
+  };
   if (upstream.ok) {
     try {
       const parsed = JSON.parse(text) as { usage?: Rec };
@@ -452,19 +461,17 @@ async function anthropicNativePassthrough(
     const statusReason = `Provider error ${upstream.status}`;
     recordLocalFailureDetail(logCtx, statusReason, { code: "provider_error" }, { upstreamEvidence: true });
     if (text.length <= PASSTHROUGH_ERROR_DETAIL_MAX_CHARS) {
-      try {
-        const parsed: unknown = JSON.parse(text);
-        if (isRec(parsed) && parsed.type === "error" && isRec(parsed.error)) {
-          const upstreamType = parsed.error.type;
-          const knownType = PASSTHROUGH_ERROR_TYPES.find(type => type === upstreamType);
-          if (knownType) {
-            recordLocalFailureDetail(logCtx, `${statusReason}: ${knownType}`, { code: "provider_error", type: knownType }, { upstreamEvidence: true });
-          }
-          // The condition is classified here from the upstream message; only the closed member is kept.
-          const upstreamMessage = typeof parsed.error.message === "string" ? parsed.error.message : undefined;
-          logCtx.upstreamCondition = classifyUpstreamCondition({ status: upstream.status, type: knownType, message: upstreamMessage });
+      const parsed = parseErrorBodyOnce();
+      if (isRec(parsed) && parsed.type === "error" && isRec(parsed.error)) {
+        const upstreamType = parsed.error.type;
+        const knownType = PASSTHROUGH_ERROR_TYPES.find(type => type === upstreamType);
+        if (knownType) {
+          recordLocalFailureDetail(logCtx, `${statusReason}: ${knownType}`, { code: "provider_error", type: knownType }, { upstreamEvidence: true });
         }
-      } catch { /* Malformed errors keep the fixed status-only diagnostic. */ }
+        // The condition is classified here from the upstream message; only the closed member is kept.
+        const upstreamMessage = typeof parsed.error.message === "string" ? parsed.error.message : undefined;
+        logCtx.upstreamCondition = classifyUpstreamCondition({ status: upstream.status, type: knownType, message: upstreamMessage });
+      }
     }
   }
   finalize(upstream.status, { closeReason: "non_stream" });
@@ -473,8 +480,7 @@ async function anthropicNativePassthrough(
     status: upstream.status,
     headers: { ...rateLimitHeaders, "Content-Type": messagesSuccessContentType(upstream.headers), ...(retryAfter ? { "Retry-After": retryAfter } : {}) },
   });
-  let parsed: unknown;
-  try { parsed = JSON.parse(text); } catch { /* non-JSON errors keep original recognition evidence */ }
+  const parsed = parseErrorBodyOnce();
   const error = isRec(parsed) && isRec(parsed.error) ? parsed.error : isRec(parsed) ? parsed : {};
   const isError = !upstream.ok;
   const originalMessage = typeof error.message === "string" ? error.message : "";

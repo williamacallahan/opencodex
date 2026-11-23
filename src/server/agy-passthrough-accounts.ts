@@ -63,22 +63,41 @@ function rememberCaller(callerKey: string, accountId: string, now: number): void
   }
 }
 
+function rememberLearnedProject(accountId: string, project: string, login: string): void {
+  learnedProjects.delete(accountId);
+  learnedProjects.set(accountId, { project, login });
+  while (learnedProjects.size > CALLER_AFFINITY_LIMIT) {
+    const oldest = learnedProjects.keys().next().value;
+    if (oldest === undefined) break;
+    learnedProjects.delete(oldest);
+  }
+}
+
 /**
  * An account's most-used current Gem or Cla window, from agy's own reading of the slot's current
  * sign-in within the routing horizon (six hours). An account with no such reading counts as unused,
  * so it is chosen, and agy's next quota call reads it.
  */
-function bindingUsage(accountId: string, now: number): number {
-  const quota = observedAntigravityAccountQuota(accountId);
+function bindingUsage(
+  accountId: string,
+  now: number,
+  rosterById?: ReadonlyMap<string, ReturnType<typeof listAccounts>[number]>,
+): number {
+  const knownCredential = rosterById ? (rosterById.get(accountId)?.credential ?? null) : undefined;
+  const quota = observedAntigravityAccountQuota(accountId, knownCredential);
   const windows = quota && now - quota.updatedAt <= DISK_MAX_AGE_MS ? quota.customWindows ?? [] : [];
   return windows.reduce((most, window) => window.modelId === undefined && (window.resetAt === undefined || window.resetAt > now)
     ? Math.max(most, window.percent) : most, 0);
 }
 
 /** The least-used of `candidates`; equally used accounts take turns. Call it only for a selection that is used. */
-function leastUsed(candidates: readonly string[], now: number): string | undefined {
+function leastUsed(
+  candidates: readonly string[],
+  now: number,
+  rosterById?: ReadonlyMap<string, ReturnType<typeof listAccounts>[number]>,
+): string | undefined {
   if (candidates.length === 0) return undefined;
-  const usage = new Map(candidates.map(id => [id, bindingUsage(id, now)]));
+  const usage = new Map(candidates.map(id => [id, bindingUsage(id, now, rosterById)]));
   const lowest = Math.min(...usage.values());
   const tied = candidates.filter(id => usage.get(id) === lowest);
   const id = tied[rotationCursor % tied.length];
@@ -96,40 +115,53 @@ function projectOf(row: ReturnType<typeof listAccounts>[number]): string | undef
 export function chooseAgyAccount(request: AgyAccountRequest, now = Date.now()): AgyAccountChoice {
   const roster = listAccounts(ANTIGRAVITY_OAUTH_STORE_KEY);
   if (roster.length === 0) return { kind: "pool-empty" };
-  const usable = (accountId: string) => roster.some(row => row.id === accountId && row.paused !== true && row.needsReauth !== true);
+  const rosterById = new Map(roster.map(row => [row.id, row]));
+  const usableRow = (row: (typeof roster)[number] | undefined) =>
+    row !== undefined && row.paused !== true && row.needsReauth !== true;
+  const usable = (accountId: string) => usableRow(rosterById.get(accountId));
+  const accountSet = { activeAccountId: roster[0]!.id, accounts: roster };
   if (request.project !== undefined) {
     const owners = roster.filter(row => projectOf(row) === request.project);
     if (owners.length === 0) return { kind: "project-unowned" };
     const callerAccount = callerAccounts.get(request.callerKey)?.accountId;
+    const ownerIds = new Set(owners.map(row => row.id));
     const nextOwner = () => {
-      const id = leastUsed(eligibleFailoverAccounts(ANTIGRAVITY_OAUTH_STORE_KEY, now).filter(id => owners.some(row => row.id === id)), now);
-      return owners.find(row => row.id === id) ?? owners.find(row => usable(row.id));
+      const id = leastUsed(
+        eligibleFailoverAccounts(ANTIGRAVITY_OAUTH_STORE_KEY, now, undefined, accountSet).filter(candidateId => ownerIds.has(candidateId)),
+        now,
+        rosterById,
+      );
+      return (id !== undefined ? rosterById.get(id) : undefined) ?? owners.find(usableRow);
     };
-    const owner = owners.find(row => row.id === callerAccount && usable(row.id)) ?? nextOwner();
+    const owner = owners.find(row => row.id === callerAccount && usableRow(row)) ?? nextOwner();
     if (!owner) return { kind: "project-account-unavailable" };
     rememberCaller(request.callerKey, owner.id, now);
     return { kind: "account", accountId: owner.id };
   }
-  const eligible = eligibleFailoverAccounts(ANTIGRAVITY_OAUTH_STORE_KEY, now);
+  const eligible = eligibleFailoverAccounts(ANTIGRAVITY_OAUTH_STORE_KEY, now, undefined, accountSet);
   const previous = callerAccounts.get(request.callerKey);
   // Accounts owning the caller's current project: a move among them keeps agy's cached project and its
   // open trajectories valid on the new token (measured live: every moved writeTrajectoryAcls 200).
-  const current = previous && roster.find(row => row.id === previous.accountId);
+  const current = previous ? rosterById.get(previous.accountId) : undefined;
   const project = current && projectOf(current);
   const sameProject = project === undefined ? []
-    : eligible.filter(id => id !== previous?.accountId && roster.some(row => row.id === id && projectOf(row) === project));
+    : eligible.filter(id => {
+      if (id === previous?.accountId) return false;
+      const row = rosterById.get(id);
+      return row !== undefined && projectOf(row) === project;
+    });
   if (previous && now - previous.at < CALLER_AFFINITY_TTL_MS
     && (request.mayRotate ? eligible.includes(previous.accountId) : usable(previous.accountId))) {
     // A turn boundary (`loadCodeAssist`) may move the caller to a clearly less-used same-project account.
-    const emptiest = request.mayRotate && sameProject.length > 0 ? Math.min(...sameProject.map(id => bindingUsage(id, now))) : undefined;
-    const accountId = emptiest !== undefined && bindingUsage(previous.accountId, now) - emptiest >= BALANCE_MARGIN_PERCENT
-      ? leastUsed(sameProject, now) ?? previous.accountId : previous.accountId;
+    const emptiest = request.mayRotate && sameProject.length > 0 ? Math.min(...sameProject.map(id => bindingUsage(id, now, rosterById))) : undefined;
+    const accountId = emptiest !== undefined && bindingUsage(previous.accountId, now, rosterById) - emptiest >= BALANCE_MARGIN_PERCENT
+      ? leastUsed(sameProject, now, rosterById) ?? previous.accountId : previous.accountId;
     rememberCaller(request.callerKey, accountId, now);
     return { kind: "account", accountId };
   }
   // A new caller, or one whose account is cooling: an owner of its project first, else any account
   // (that loadCodeAssist answer hands agy the new account's project).
-  const accountId = leastUsed(sameProject.length > 0 ? sameProject : eligible, now);
+  const accountId = leastUsed(sameProject.length > 0 ? sameProject : eligible, now, rosterById);
   if (accountId === undefined) {
     return { kind: "pool-exhausted", retryAfterSeconds: genericFailoverRetryAfterSeconds(ANTIGRAVITY_OAUTH_STORE_KEY, now) };
   }
@@ -144,7 +176,7 @@ export function chooseAgyAccount(request: AgyAccountRequest, now = Date.now()): 
 export function learnAgyAccountProject(accountId: string, project: string, login: string | undefined): void {
   const account = listAccounts(ANTIGRAVITY_OAUTH_STORE_KEY).find(row => row.id === accountId);
   if (!login || !account?.credential || antigravityLoginIdentity(accountId, account.credential) !== login) return;
-  learnedProjects.set(accountId, { project, login });
+  rememberLearnedProject(accountId, project, login);
   if (account.credential.projectId === project) return;
   void mergeAccountCredential(ANTIGRAVITY_OAUTH_STORE_KEY, accountId, { ...account.credential, projectId: project },
     { expectedGeneration: credentialGeneration(account.credential) }).catch(() => {

@@ -14,6 +14,24 @@ import type { StoredResponseState } from "../state";
  * strings are returned instead of the entries: serializing the whole selection
  * again would walk up to the full snapshot budget a second time per write.
  */
+const serializedEntryCache = new WeakMap<StoredResponseState, { id: string; entry: string; size: number }>();
+
+function serializeSnapshotEntry(
+  id: string,
+  state: StoredResponseState,
+): { entry: string; size: number } {
+  const cached = serializedEntryCache.get(state);
+  if (cached && cached.id === id) return cached;
+  const payload = state.kind === "resident"
+    ? (() => { const { sizeBytes: _sizeBytes, kind: _kind, ...resident } = state; return resident; })()
+    : (() => { const { sizeBytes: _sizeBytes, ...smallState } = state; return smallState; })();
+  const entry = JSON.stringify([id, payload]);
+  const size = Buffer.byteLength(entry, "utf8");
+  const record = { id, entry, size };
+  serializedEntryCache.set(state, record);
+  return record;
+}
+
 export function selectSnapshotEntries(
   states: ReadonlyMap<string, StoredResponseState>,
   totalMaxBytes: number,
@@ -26,18 +44,14 @@ export function selectSnapshotEntries(
   // both snapshot caps at up to 2x the intended size.
   for (const [id, state] of ordered) {
     if (state.kind === "resident") continue;
-    const { sizeBytes: _sizeBytes, ...smallState } = state;
-    const entry = JSON.stringify([id, smallState]);
-    const size = Buffer.byteLength(entry, "utf8");
+    const { entry, size } = serializeSnapshotEntry(id, state);
     if (total + size > totalMaxBytes) continue;
     total += size;
     persisted.set(id, entry);
   }
   for (const [id, state] of ordered) {
     if (state.kind !== "resident") continue;
-    const { sizeBytes: _sizeBytes, kind: _kind, ...resident } = state;
-    const entry = JSON.stringify([id, resident]);
-    const size = Buffer.byteLength(entry, "utf8");
+    const { entry, size } = serializeSnapshotEntry(id, state);
     if (size > residentEntryMaxBytes) continue;
     if (total + size > totalMaxBytes) break;
     total += size;

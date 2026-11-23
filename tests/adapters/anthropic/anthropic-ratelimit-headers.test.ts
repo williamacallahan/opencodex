@@ -828,4 +828,26 @@ describe("Anthropic known-reset expiry", () => {
     expect(disk.rows[`anthropic\u0000${id}`]).toEqual({ fiveHourPercent: 41, updatedAt: start, anthropicCredentialGeneration: ownedBy(id!) });
     expect(disk.rows["zai\u0000untouched"]).toEqual(saved);
   });
+
+  test("repeated identical header bars within 60s update memory without scheduling redundant disk writes", () => {
+    return (async () => {
+      const [id] = await seed(1);
+      const timer = spyOn(globalThis, "setTimeout");
+      try {
+        observe(id!, { "anthropic-ratelimit-unified-5h-utilization": "0.41" });
+        const firstTimers = timer.mock.calls.length;
+        expect(firstTimers).toBe(1);
+        now += 5_000;
+        observe(id!, { "anthropic-ratelimit-unified-5h-utilization": "0.41" });
+        expect(getCachedProviderAccountQuota("anthropic", id!)?.updatedAt).toBe(now);
+        expect(timer.mock.calls.length).toBe(firstTimers);
+        now += 5_000;
+        observe(id!, { "anthropic-ratelimit-unified-5h-utilization": "0.42" });
+        expect(getCachedProviderAccountQuota("anthropic", id!)?.fiveHourPercent).toBe(42);
+        expect(timer.mock.calls.length).toBe(firstTimers + 1);
+      } finally {
+        timer.mockRestore();
+      }
+    })();
+  });
 });
