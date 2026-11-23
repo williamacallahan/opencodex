@@ -132,6 +132,8 @@ async function clearDevinCloudDirectCaches(): Promise<void> {
 }
 import { ACCOUNT_IMPORT_DEADLINE_MS, ACCOUNT_IMPORT_MAX_REQUEST_BYTES } from "../../oauth/account-import";
 import { readBoundedJsonRequestBody } from "../request-decompress";
+import { agyServing } from "../agy-passthrough-accounts";
+import { nativeHarnessOnly } from "../../lib/native-harness";
 
 // ACCOUNT_IMPORT_DEADLINE_MS is the shared CLI/server import window. Individual
 // provider requests keep their own shorter timeouts; this is only the server-side
@@ -544,7 +546,8 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
             ...(isAnthropicOAuthInstance(provider) && supportsPause ? { autoSwitchThresholdOverride: full?.autoSwitchThresholdOverride ?? null,
               effectiveAutoSwitchThreshold: effectiveAnthropicAccountThresholdForInstance(provider as AnthropicInstanceId, config, full),
               autoSwitchThreshold: effectiveAnthropicAccountThresholdForInstance(provider as AnthropicInstanceId, config) } : {}),
-            ...(provider === "kiro" && full ? kiroAutoSelection(full) : {}) };
+            ...(provider === "kiro" && full ? kiroAutoSelection(full) : {}),
+            ...(provider === "google-antigravity" && nativeHarnessOnly() ? { agyServing: agyServing(summary.id) } : {}) };
         }),
       };
     };

@@ -317,6 +317,7 @@ export function setCachedProviderAccountQuotaForTests(
   quota: ProviderQuota | null,
 ): void {
   const key = accountCacheKey(provider, accountId);
+  lastPersistedAnthropicHeaderQuota.delete(key);
   if (quota === null) {
     accountQuotaCache.delete(key);
     return;
@@ -410,8 +411,16 @@ export function recordAnthropicAccountQuotaFromHeadersForInstance(
   }
   const previousPersisted = lastPersistedAnthropicHeaderQuota.get(key);
   const signature = anthropicHeaderPersistSignature(nextQuota, generation);
+  const previousSignature = previous
+    ? anthropicHeaderPersistSignature(
+      normalizeAnthropicQuota(previous.quota, observed.updatedAt),
+      previous.anthropicCredentialGeneration,
+    )
+    : "";
   const observedUpdatedAt = nextQuota?.updatedAt ?? observed.updatedAt;
-  const withinTouchCooldown = previousPersisted !== undefined
+  const withinTouchCooldown = previous !== undefined
+    && previousSignature === signature
+    && previousPersisted !== undefined
     && previousPersisted.signature === signature
     && observedUpdatedAt >= previousPersisted.updatedAt
     && observedUpdatedAt - previousPersisted.updatedAt < ANTHROPIC_HEADER_PERSIST_TOUCH_INTERVAL_MS;
@@ -530,6 +539,7 @@ export function sweepExpiredProviderAccountQuotaRows(now = Date.now()): number {
       : entry.ts;
     if (retainedAt + ACCOUNT_QUOTA_TTL_MS > now) continue;
     accountQuotaCache.delete(key);
+    lastPersistedAnthropicHeaderQuota.delete(key);
     removed += 1;
   }
   return removed;
@@ -542,6 +552,7 @@ export function reconcileProviderAccountQuotaRows(context: GenerationContext): n
   for (const key of accountQuotaCache.keys()) {
     if (context.oauthAccountKeys.has(key)) continue;
     accountQuotaCache.delete(key);
+    lastPersistedAnthropicHeaderQuota.delete(key);
     removed += 1;
   }
   // Kiro exhaustion rows are keyed identically, so they retire with their quota row; a
@@ -610,6 +621,7 @@ export function forgetCachedProviderAccountQuota(provider: string, accountId: st
   hydrateAccountQuotaCache();
   const key = accountCacheKey(provider, accountId);
   accountQuotaCache.delete(key);
+  lastPersistedAnthropicHeaderQuota.delete(key);
   for (const flight of [...accountQuotaInflight.keys()]) {
     if (flight === key || flight.startsWith(key + "\u0000")) accountQuotaInflight.delete(flight);
   }

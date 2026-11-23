@@ -6,7 +6,7 @@ import type { CodexThreadLineage } from "../lineage";
 import type { CodexQuotaScope } from "./health-store";
 import type { TransientProbeLease } from "../../routing/probe-lease";
 import { clearPoolRecoveryState } from "../../routing/probe-lease";
-import { identityFence, adoptStoredThreadRows, adoptStoredIssuer, CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER, registerCodexAffinityLiveState, recordThreadBind, recordThreadTouch, recordThreadDelete, recordThreadAccountDeleted, recordAccountPinsCleared, recordAllCleared, recordThreadsCleared, recordIssuerSet, recordIssuerTouch, recordIssuerDelete, recordIssuersCleared } from "./thread-affinity-store";
+import { identityFence, adoptStoredThreadRows, adoptStoredIssuer, CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER, registerCodexAffinityLiveState, isThreadRowPersisted, isIssuerRowPersisted, recordThreadBind, recordThreadTouch, recordThreadDelete, recordThreadAccountDeleted, recordAccountPinsCleared, recordAllCleared, recordThreadsCleared, recordIssuerSet, recordIssuerTouch, recordIssuerDelete, recordIssuersCleared } from "./thread-affinity-store";
 export { CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER } from "./thread-affinity-store";
 
 export type ThreadAffinityEntry = {
@@ -290,7 +290,13 @@ export function rememberConversationStateIssuer(
   const previous = conversationStateIssuerMap.get(bindingKey);
   if (accountId === MAIN_CODEX_ACCOUNT_ID) recordIssuerDelete(bindingKey);
   else if (accountId !== CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER) {
-    if (previous && previous.storedAccountId === undefined && previous.accountId === accountId && previous.fence === fence) {
+    if (
+      previous
+      && previous.storedAccountId === undefined
+      && previous.accountId === accountId
+      && previous.fence === fence
+      && isIssuerRowPersisted(bindingKey, accountId, fence ?? null)
+    ) {
       recordIssuerTouch(bindingKey);
     } else {
       recordIssuerSet(bindingKey, accountId, fence ?? null, now);
@@ -578,8 +584,17 @@ function bindThreadAffinityForScope(
     lastReevalAt: observed?.lastReevalAt ?? now,
   };
   if (fence) {
-    if (!(previous && previous.accountId === accountId && previous.identityFence === fence && previous.createdAt === entry.createdAt)) {
-      recordThreadBind(threadId, scope, { scope, accountId, fence, createdAt: entry.createdAt, lastUsedAt: entry.lastUsedAt });
+    const storedRow = { scope, accountId, fence, createdAt: entry.createdAt, lastUsedAt: entry.lastUsedAt };
+    if (
+      !(
+        previous
+        && previous.accountId === accountId
+        && previous.identityFence === fence
+        && previous.createdAt === entry.createdAt
+        && isThreadRowPersisted(threadId, scope, storedRow)
+      )
+    ) {
+      recordThreadBind(threadId, scope, storedRow);
     }
   } else recordThreadDelete(threadId, scope);
   affinities.set(scope, entry);

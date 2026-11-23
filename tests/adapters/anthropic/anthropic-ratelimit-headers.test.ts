@@ -845,6 +845,10 @@ describe("Anthropic known-reset expiry", () => {
         observe(id!, { "anthropic-ratelimit-unified-5h-utilization": "0.42" });
         expect(getCachedProviderAccountQuota("anthropic", id!)?.fiveHourPercent).toBe(42);
         expect(timer.mock.calls.length).toBe(firstTimers + 1);
+        setCachedProviderAccountQuotaForTests("anthropic", id!, null);
+        now += 5_000;
+        observe(id!, { "anthropic-ratelimit-unified-5h-utilization": "0.42" });
+        expect(timer.mock.calls.length).toBe(firstTimers + 2);
       } finally {
         timer.mockRestore();
       }

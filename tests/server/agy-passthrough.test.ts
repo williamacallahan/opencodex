@@ -340,6 +340,33 @@ describe("agy pass-through public HTTP lane", () => {
     expect(await turn()).toBe(bearer(2));
   });
 
+  test("the Accounts tab shows which account sent agy's requests to Google, and nothing for a refused one", async () => {
+    await launch();
+    const { managementFetch } = await import("../helpers/management-auth");
+    const { agyServing } = await import("../../src/server/agy-passthrough-accounts");
+    const { mergeAccountCredential } = await import("../../src/oauth/store");
+    const roster = async () => (await (await managementFetch(`http://127.0.0.1:${proxy!.port}/api/oauth/accounts?provider=google-antigravity`)).json() as
+      { accounts: Array<{ id: string; agyServing?: { active: boolean; lastAt: number } | null }> }).accounts;
+    expect((await roster()).map(row => row.agyServing)).toEqual([null, null, null]);
+    // A request refused before any send leaves every account unmarked.
+    const two = getAccountSet("google-antigravity")!.accounts.find(row => row.credential.projectId === "synthetic-project-two")!;
+    await setAccountPaused("google-antigravity", two.id, true);
+    expect((await post("streamGenerateContent", generate)).status).toBe(503);
+    expect(calls).toHaveLength(0);
+    expect((await roster()).map(row => row.agyServing)).toEqual([null, null, null]);
+    reply = () => Response.json({});
+    expect((await post("loadCodeAssist", "{}")).status).toBe(200);
+    expect(calls).toHaveLength(1);
+    const served = getAccountSet("google-antigravity")!.accounts.find(row => `Bearer ${row.credential.access}` === calls[0]!.headers.get("authorization"))!;
+    const rows = await roster();
+    expect(rows.find(row => row.id === served.id)?.agyServing).toEqual({ active: true, lastAt: expect.any(Number) });
+    expect(rows.filter(row => row.id !== served.id).map(row => row.agyServing)).toEqual([null, null]);
+    expect(agyServing(served.id, Date.now() + 11 * 60_000)?.active).toBe(false);
+    // Another Google sign-in in that slot has sent nothing yet.
+    await mergeAccountCredential("google-antigravity", served.id, { ...served.credential, refresh: "synthetic-refresh-other", accountId: "synthetic-other" });
+    expect((await roster()).find(row => row.id === served.id)?.agyServing).toBeNull();
+  });
+
   test("a cooling account's caller moves to an owner of its project before an emptier account of another project", async () => {
     await launch();
     const { mergeAccountCredential } = await import("../../src/oauth/store");

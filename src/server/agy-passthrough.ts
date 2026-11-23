@@ -21,7 +21,7 @@ import { isDraining, tryAdmitTurn } from "./lifecycle";
 import { messagesEndToEndHeaders } from "./messages-native-integrity";
 import { disableResponsesRequestTimeout } from "./responses/fetch-helpers";
 import { addFinalRequestLog, nextRequestLogId, type RequestLogContext } from "./request-log";
-import { chooseAgyAccount, learnAgyAccountProject, type AgyAccountChoice } from "./agy-passthrough-accounts";
+import { chooseAgyAccount, learnAgyAccountProject, noteAgySent, type AgyAccountChoice } from "./agy-passthrough-accounts";
 import { sendExactly, type ExactResponse } from "./agy-passthrough-send";
 import { forceRefreshOAuthAccessSnapshot, getValidAccessSnapshotForAccount } from "../oauth";
 import { rotateGenericOAuthAccountOn429 } from "../oauth/generic-account-failover";
@@ -313,6 +313,7 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
     return cancelled ? refuse(499, "request cancelled") : refuse(503, "could not reach Google Cloud Code");
   }
   upstreamStatus = upstream.status;
+  noteAgySent(choice.accountId, quotaLogin);
   if (upstream.status === 429) {
     // The pool needs no translatable provider row; give the cooldown owner the OAuth row it keys on.
     const poolRow: OcxProviderConfig = { adapter: "google", authMode: "oauth", baseUrl: REGISTRY_ORIGIN };
