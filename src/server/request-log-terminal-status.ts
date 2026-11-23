@@ -3,8 +3,10 @@ import {
   cyberPolicyTerminalError,
   httpStatusFromTerminalError,
   isRateLimitOrQuotaFailureMessage,
+  isThroughputLimitText,
   recognizedUpstreamError,
 } from "../lib/errors";
+import { isDefiniteContextOverflow } from "../lib/context-overflow-verdict";
 import { redactSecretString } from "../lib/redact";
 import { STRUCTURED_QUOTA_CODES } from "../bridge/errors";
 import { outboundCredentials, type OutboundCredentialRegistry } from "../lib/outbound-credential-registry";
@@ -21,6 +23,7 @@ export interface UpstreamErrorDiagnostics {
 
 interface TerminalStatusContext extends UpstreamErrorDiagnostics {
   terminalHttpStatus?: number;
+  bareContextOverflow?: true;
   terminalErrorCode?: typeof CYBER_POLICY_ERROR_CODE;
   causeHint?: RequestFailureCause;
 }
@@ -243,6 +246,7 @@ function captureTerminalHttpStatus(
   const type = json.type;
   const terminal = type === "response.failed" || type === "response.completed" || type === "response.incomplete";
   if (!terminal && type !== "error") return;
+  if (terminal) delete logCtx.bareContextOverflow;
   if (terminal && provisionalStatuses.has(logCtx)) {
     const provisional = provisionalStatuses.get(logCtx);
     provisionalStatuses.delete(logCtx);
@@ -297,13 +301,16 @@ function captureTerminalHttpStatus(
     const structured = recognizedUpstreamError({
       code: codedError?.code,
       type: candidates.slice(0, -1).find(candidate => typeof candidate?.type === "string")?.type,
-      message: codedError?.message,
     });
-    const wrapped = wrappedServerErrorStatus(json);
-    // An explicit server status outranks inferred context overflow. Unknown classes only use
-    // the wrapper; without it the row keeps the synthetic 502.
-    const status = structured?.code === "context_length_exceeded" && wrapped !== undefined
-      ? wrapped : structured?.httpStatus ?? wrapped;
+    const wrapper = codexWsWrapperStatus(json as Record<string, unknown>);
+    const error = json.error ?? json;
+    if (error.code === "context_length_exceeded" && (json.code === undefined || json.code === error.code)
+      && (error === json || error.type === undefined || error.type === "invalid_request_error")
+      && (wrapper === undefined || wrapper === 400) && typeof error.message === "string"
+      && !isThroughputLimitText(error.message.slice(0, 16_384)) && isDefiniteContextOverflow(400, error.message)) {
+      logCtx.bareContextOverflow = true;
+    }
+    const status = structured?.httpStatus ?? wrappedServerErrorStatus(json);
     if (status !== undefined) noteStatus(status);
     return;
   }

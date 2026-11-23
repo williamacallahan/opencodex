@@ -245,6 +245,8 @@ export interface RequestLogContext extends UpstreamErrorDiagnostics {
   upstreamCondition?: UpstreamCondition; // classified at capture where the evidence is not kept on the context
   /** HTTP status derived from a terminal `response.failed` SSE payload (429/401/503/etc.). */
   terminalHttpStatus?: number;
+  /** Bare context refusal evidence for the final log only, never for routing or account health. */
+  bareContextOverflow?: true;
   /** Status of an upstream `error` event that ended a 200 Messages stream; the row stays 200, a combo child reads it. */
   streamErrorStatus?: number;
   /** Bytes other than a ping followed that upstream `error` event, so a retry would repeat output. */
@@ -1418,7 +1420,8 @@ function writeFinalRequestLog(
   // A coordinated (attemptStatus) write carries an authoritative outer outcome; skip the heuristic.
   const effectiveStatus = attemptStatus === undefined && !shutdown && status >= 500 && logCtx.upstreamError && isClientClosedMessage(logCtx.upstreamError)
     ? 499
-    : status;
+    : status === 502 && meta?.terminalStatus === "failed" && logCtx.terminalSource === "synthetic" && logCtx.bareContextOverflow
+      ? 400 : status;
   // Locally assigned codes name proxy refusals that status and upstream text cannot reconstruct.
   const errorCode = logCtx.upstreamErrorCode === REASONING_LOOP_ERROR_CODE && effectiveStatus >= 400
     ? REASONING_LOOP_ERROR_CODE : logCtx.errorCode ?? requestLogErrorCode(

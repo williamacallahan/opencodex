@@ -80,15 +80,28 @@ describe("normalizeLogErrorCode", () => {
 });
 
 test.each([
-  ["The input exceeds the context window.", undefined, 400],
-  ["Rate limit: too many tokens per minute.", undefined, 502],
-  ["The input exceeds the context window.", 503, 503],
-] as const)("records the bare context signal %s with declared status %s as %s", (message, status, expected) => {
-  const context: RequestLogContext = { model: "fixture", provider: "fixture" };
+  ["Your input exceeds the context window of this model.", "invalid_request_error", undefined, undefined, 400],
+  ["Rate limit: too many tokens per minute.", "invalid_request_error", undefined, undefined, 502],
+  ["Unsupported parameter: user", "invalid_request_error", undefined, undefined, 502],
+  ["", "invalid_request_error", undefined, undefined, 502],
+  ["Your input exceeds the context window of this model.", "server_error", undefined, undefined, 502],
+  ["Your input exceeds the context window of this model.", "invalid_request_error", 503, undefined, 503],
+  ["Your input exceeds the context window of this model.", "invalid_request_error", 409, "server_is_overloaded", 503],
+] as const)("reports bare context evidence %s, type %s, wrapper %s, terminal %s as %s", (message, errorType, status, terminal, expected) => {
+  const context: RequestLogContext = { model: "fixture", provider: "fixture", terminalSource: "synthetic" };
   inspectResponseLogSsePayload(context, JSON.stringify({ type: "error", status,
-    error: { type: "invalid_request_error", code: "context_length_exceeded", message } }));
-  expect(httpStatusForRequestLogTerminal("failed", context)).toBe(expected);
-  expect(context.upstreamErrorCode).toBe("context_length_exceeded");
+    error: { type: errorType, code: "context_length_exceeded", message } }));
+  const adopted = { ...context };
+  expect(httpStatusForRequestLogTerminal("failed", adopted)).toBe(status === 503 ? 503 : 502);
+  if (terminal) {
+    adopted.terminalSource = "upstream";
+    inspectResponseLogSsePayload(adopted, JSON.stringify({ type: "response.failed",
+      response: { error: { type: "server_error", code: terminal, message: "Server is overloaded" } } }));
+  }
+  const rows: RequestLogEntry[] = [];
+  addFinalRequestLog("context-fixture", Date.now(), adopted, httpStatusForRequestLogTerminal("failed", adopted),
+    { terminalStatus: "failed" }, row => rows.push(row));
+  expect(rows[0]?.status).toBe(expected);
 });
 
 describe("errorDetailFor", () => {
