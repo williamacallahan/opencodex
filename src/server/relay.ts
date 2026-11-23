@@ -41,6 +41,7 @@ import { clientWireLogOf } from "./inference/client-wire";
 import { knownModelIdentity } from "../lib/model-identity";
 import { recordClientWireRequestLog } from "./inference/client-wire-log";
 import { nativeResponseFingerprint } from "./responses/native-response-json";
+import { wrappedServerErrorStatus } from "./request-log-terminal-status";
 import { nativeResponseOutput } from "./responses/native-response-output";
 
 const nativePassthroughSseResponses = new WeakSet<Response>();
@@ -259,6 +260,7 @@ function boundedBareUpstreamError(payload: unknown): {
   refusalCode: string | undefined;
   errorType: string | undefined;
   errorCode: string | undefined;
+  serverStatus: number | undefined;
 } | undefined {
   const root = asJsonRecord(payload);
   if (!root || root.type !== "error") return undefined;
@@ -282,13 +284,15 @@ function boundedBareUpstreamError(payload: unknown): {
     .find(candidate => candidate !== undefined)?.slice(0, 128);
   const refusalCode = isTerminalRefusalCode(code) ? code
     : message === undefined || candidates.some(candidate => candidate && hasStructuredErrorVerdict(candidate)) ? undefined : safetyRefusalCodeFromMessage(message);
-  if (message !== undefined) return { message, refusalCode, errorType, errorCode: code };
+  const serverStatus = wrappedServerErrorStatus(root);
+  if (message !== undefined) return { message, refusalCode, errorType, errorCode: code, serverStatus };
   if (refusalCode === undefined) return undefined;
   return {
     message: terminalRefusalFallbackMessage(refusalCode),
     refusalCode,
     errorType,
     errorCode: code,
+    serverStatus,
   };
 }
 
@@ -301,6 +305,7 @@ export type SseTerminalOutputBoundary = {
   upstreamRefusalCode(): string | undefined;
   upstreamErrorType(): string | undefined;
   upstreamErrorCode(): string | undefined;
+  upstreamServerStatus(): number | undefined;
   dispose(): void;
 };
 
@@ -357,6 +362,7 @@ export function createSseTerminalOutputBoundary(
   let upstreamRefusalCode: string | undefined;
   let upstreamErrorType: string | undefined;
   let upstreamErrorCode: string | undefined;
+  let upstreamServerStatus: number | undefined;
   let inputBytes = 0;
   let outputBytes = 0;
   let framesSeen = 0;
@@ -393,6 +399,7 @@ export function createSseTerminalOutputBoundary(
         upstreamRefusalCode = bare.refusalCode;
         upstreamErrorType = bare.errorType;
         upstreamErrorCode = bare.errorCode;
+        upstreamServerStatus = bare.serverStatus;
       }
       const safetyBuffering = dropSafetyBuffering && parsed !== undefined
         ? codexSafetyBufferingBlockAction(parsed) : "keep";
@@ -482,6 +489,7 @@ export function createSseTerminalOutputBoundary(
     upstreamRefusalCode: () => upstreamRefusalCode,
     upstreamErrorType: () => upstreamErrorType,
     upstreamErrorCode: () => upstreamErrorCode,
+    upstreamServerStatus: () => upstreamServerStatus,
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -503,7 +511,7 @@ export function relaySseWithFailedTail(
   body: ReadableStream<Uint8Array>,
   upstream: AbortController,
   onClientGone?: (reason?: unknown) => void,
-  opts?: { upstreamError?: string; terminalBoundary?: CodexSafetyBufferingFilterOptions; maskCredential?: (text: string) => string },
+  opts?: { upstreamError?: string; terminalBoundary?: CodexSafetyBufferingFilterOptions; maskCredential?: (text: string) => string; onSyntheticServerStatus?: (status: number) => void },
 ): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   const encoder = new TextEncoder();
@@ -551,6 +559,8 @@ export function relaySseWithFailedTail(
               // protocol terminal arrived. Make that state explicit so Codex
               // does not treat HTTP 200 + bare EOF as a retryable disconnect.
               const upstreamError = terminalBoundary.upstreamError() ?? opts?.upstreamError;
+              const serverStatus = terminalBoundary.upstreamServerStatus();
+              if (serverStatus !== undefined && upstreamError !== undefined) opts?.onSyntheticServerStatus?.(serverStatus);
               controller.enqueue(upstreamError === undefined
                 ? adapterEofIncompleteFrame(encoder)
                 : upstreamErrorTailFrame(

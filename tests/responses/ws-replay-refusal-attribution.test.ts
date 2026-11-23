@@ -39,8 +39,8 @@ afterEach(async () => {
   }
 });
 
-async function turn(canonical: boolean, reset: boolean) {
-  const config = { port: 0, defaultProvider: "fixture", websockets: true, providers: {
+async function turn(canonical: boolean, reset: boolean, stream?: { mode: "auto" | "eager-relay"; genuine?: true }) {
+  const config = { port: 0, defaultProvider: "fixture", websockets: true, streamMode: stream?.mode, providers: {
     fixture: { adapter: "openai-responses", upstreamWebsocket: false, retryOn429: { enabled: false },
       ...(canonical
         ? { baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward", codexAccountMode: "direct" }
@@ -53,6 +53,17 @@ async function turn(canonical: boolean, reset: boolean) {
       ? "https://chatgpt.com/backend-api/codex/responses" : "https://fixture.invalid/v1/responses");
     sends++;
     if (reset) throw Object.assign(new Error("synthetic connection reset"), { code: "ECONNRESET" });
+    if (stream) {
+      const bare = { type: "error", status: 503, error: {
+        type: "invalid_request_error", code: "context_length_exceeded", message: "Your input exceeds the context window of this model.",
+      } };
+      const genuine = { type: "response.failed", response: { status: "failed", error: {
+        type: "rate_limit_error", code: "rate_limit_exceeded", message: "Fixture rate limit",
+      } } };
+      const events = stream.genuine ? [bare, genuine] : [bare];
+      return new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+        { headers: { "content-type": "text/event-stream" } });
+    }
     return Response.json({ error: { type: "rate_limit_error", code: "rate_limit_exceeded", message: "Fixture rate limit" } },
       { status: 429, headers: { "retry-after": "7" } });
   }) as typeof fetch;
@@ -67,7 +78,7 @@ async function turn(canonical: boolean, reset: boolean) {
     await until(() => !ws.data.cancel && !ws.data.nativeControl);
   };
   handler.message(ws, JSON.stringify({ type: "response.create", model: "fixture/gpt-test", input: "fixture", store: false }));
-  await until(() => frames.some(frame => frame.type === "error") && !ws.data.cancel);
+  await until(() => frames.some(frame => frame.type === (stream ? "response.failed" : "error")) && !ws.data.cancel);
   expect(sends).toBe(1);
   expect(getRequestLogEntries()).toHaveLength(1);
   const row = getRequestLogEntries()[0]!;
@@ -98,4 +109,20 @@ test("WebSocket ingress retains a genuine upstream 429 as rate-limit evidence", 
   expect(row.failureCause).toBe("rate-limit");
   expect(row.attempts![0]!.failureCause).toBe("rate-limit");
   expect(row.terminalSource).not.toBe("synthetic");
+});
+
+for (const mode of ["auto", "eager-relay"] as const) {
+  test(`${mode} WebSocket records the wrapper 503 when EOF requires a synthetic terminal`, async () => {
+    const { row, error } = await turn(false, false, { mode });
+    expect(error.status).toBe(503);
+    expect(row.status).toBe(503);
+    expect(row.attempts![0]!.status).toBe(503);
+    expect(row.terminalSource).toBe("synthetic");
+  });
+}
+
+test("a genuine WebSocket terminal supersedes a bare wrapper 503", async () => {
+  const { row } = await turn(false, false, { mode: "eager-relay", genuine: true });
+  expect(row.status).toBe(429);
+  expect(row.terminalSource).toBe("upstream");
 });

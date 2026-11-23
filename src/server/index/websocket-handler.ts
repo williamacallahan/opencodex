@@ -357,6 +357,7 @@ export function createWebsocketHandler(
             if (workflow?.admitted) turnAdmissionLease.attach(workflow.lease);
             ws.data.nativeControl = nativeControl;
             let terminalRecorder: ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined;
+            let syntheticServerStatus: number | undefined;
             const response = await handleResponses(req, config, logCtx, {
               advisorAdmissionPolicy,
               ...(wsAdmission ? { admission: wsAdmission } : {}),
@@ -368,6 +369,7 @@ export function createWebsocketHandler(
               onFirstOutput: () => recordFirstOutput(logCtx, start),
               onCodexAuthContextResolved: context => updateCodexWebSocketAuthContext(ws, context),
               recordTerminalOutcomes: false,
+              onNativePassthroughTerminal: (_status, serverStatus) => { syntheticServerStatus = serverStatus; },
               setTerminalOutcomeRecorder: recorder => {
                 terminalRecorder = recorder;
               },
@@ -397,8 +399,10 @@ export function createWebsocketHandler(
                 // EOF/error fallbacks are not origin terminals. Preserve any earlier
                 // synthetic provenance on a generated SSE tail as well.
                 if (source === "synthetic" || logCtx.terminalSource === undefined) logCtx.terminalSource = source;
-                terminalRecorder?.(status, logCtx.terminalHttpStatus);
-                finalizeLog(httpStatusForRequestLogTerminal(status, logCtx), {
+                const tailStatus = status === "failed" ? syntheticServerStatus : undefined;
+                if (tailStatus !== undefined) logCtx.terminalSource = "synthetic";
+                terminalRecorder?.(status, tailStatus ?? logCtx.terminalHttpStatus);
+                finalizeLog(tailStatus ?? httpStatusForRequestLogTerminal(status, logCtx), {
                   terminalStatus: status,
                   closeReason: "terminal",
                 });

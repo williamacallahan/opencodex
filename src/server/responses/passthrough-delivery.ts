@@ -1238,6 +1238,8 @@ export async function deliverPassthroughResponse(
       const forceCodexWsEagerRelay = isCodexWsUpstreamResponse(upstreamResponse);
       const inlineEagerRewrite = needsClientRewrite
         && (forceCodexWsEagerRelay || win32EagerRewrite || eagerPath?.useEagerRelay === true);
+      const onSyntheticServerStatus = options.inboundTransport === "websocket"
+        ? (status: number) => options.onNativePassthroughTerminal?.("failed", status) : undefined;
       if (forceCodexWsEagerRelay || eagerPath?.useEagerRelay || win32EagerRewrite) {
         const turnAc = new AbortController();
         linkAbortSignal(upstream, turnAc.signal);
@@ -1311,7 +1313,7 @@ export async function deliverPassthroughResponse(
           },
         }, {
           clientGoneSignal: options.abortSignal,
-          terminalBoundary: codexSafetyBufferingOptions,
+          onSyntheticServerStatus, terminalBoundary: codexSafetyBufferingOptions,
           maskCredential,
           ...(inlineEagerRewrite ? { rewriteBudget: translatorBudget } : {}),
           ...(logCtx.upstreamError === undefined ? {} : { upstreamError: logCtx.upstreamError }),
@@ -1407,7 +1409,7 @@ export async function deliverPassthroughResponse(
           responseEffects.responseCompletionCancelled = true;
           clientGone.abort(reason);
         },
-        { upstreamError: logCtx.upstreamError, terminalBoundary: codexSafetyBufferingOptions, maskCredential },
+        { upstreamError: logCtx.upstreamError, terminalBoundary: codexSafetyBufferingOptions, maskCredential, onSyntheticServerStatus },
       );
       return markNativePassthroughSseResponse(new Response(clientBody, {
         status: upstreamResponse.status,

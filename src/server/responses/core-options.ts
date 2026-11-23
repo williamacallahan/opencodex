@@ -197,7 +197,7 @@ export interface HandleResponsesOptions {
   onResponseComplete?: (model: string, responsesStore?: string, proofs?: readonly IssuedReasoningProof[], responseId?: string) => void;
   recordTerminalOutcomes?: boolean;
   setTerminalOutcomeRecorder?: (recorder: ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined) => void;
-  onNativePassthroughTerminal?: (status: ResponsesTerminalStatus) => void;
+  onNativePassthroughTerminal?: (status: ResponsesTerminalStatus, syntheticServerStatus?: number) => void;
   onNativePassthroughCancel?: () => void;
   /** Internal deterministic clock/timer seam for provider terminal repair. */
   responsesTerminalRepairScheduler?: ResponsesTerminalRepairScheduler;

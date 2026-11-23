@@ -270,7 +270,7 @@ export function usageFromComboFailureText(text: string): OcxUsage | undefined {
 
 export function createChildPassthroughCallbackGate(options: HandleResponsesOptions) {
   type Pending =
-    | { kind: "terminal"; status: ResponsesTerminalStatus }
+    | { kind: "terminal"; status: ResponsesTerminalStatus; syntheticServerStatus?: number }
     | { kind: "cancel" };
   let state: "pending" | "committed" | "discarded" = "pending";
   let pending: Pending | undefined;
@@ -279,7 +279,7 @@ export function createChildPassthroughCallbackGate(options: HandleResponsesOptio
   let completionAccepted = false;
   let completionRejected = false;
   const publish = (value: Pending): void => {
-    if (value.kind === "terminal") options.onNativePassthroughTerminal?.(value.status);
+    if (value.kind === "terminal") options.onNativePassthroughTerminal?.(value.status, value.syntheticServerStatus);
     else options.onNativePassthroughCancel?.();
   };
   const publishCompletion = (): void => {
@@ -299,7 +299,7 @@ export function createChildPassthroughCallbackGate(options: HandleResponsesOptio
     pending ??= value;
   };
   return {
-    onTerminal: (status: ResponsesTerminalStatus) => receive({ kind: "terminal", status }),
+    onTerminal: (status: ResponsesTerminalStatus, syntheticServerStatus?: number) => receive({ kind: "terminal", status, syntheticServerStatus }),
     onCancel: () => receive({ kind: "cancel" }),
     onResponseComplete: (...completion: Parameters<NonNullable<HandleResponsesOptions["onResponseComplete"]>>) => {
       if (state === "discarded" || completionRejected || completionAccepted || !completion[0].trim()) return;

@@ -151,7 +151,7 @@ export async function runWithCompactionRecovery(
       else if (event.type !== "done") partialOutput = true;
     },
     onResponseComplete: (...completion) => snapshot ? gate.onResponseComplete(...completion) : options.onResponseComplete?.(...completion),
-    onNativePassthroughTerminal: status => snapshot ? gate.onTerminal(status) : options.onNativePassthroughTerminal?.(status),
+    onNativePassthroughTerminal: (...terminal) => snapshot ? gate.onTerminal(...terminal) : options.onNativePassthroughTerminal?.(...terminal),
     onNativePassthroughCancel: () => snapshot ? gate.onCancel() : options.onNativePassthroughCancel?.(),
   };
   try {

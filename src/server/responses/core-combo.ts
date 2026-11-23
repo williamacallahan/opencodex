@@ -1408,7 +1408,7 @@ export async function executeComboResponses(
         }
         options.onResponseComplete?.(model, store, proofs, responseId);
       },
-      onNativePassthroughTerminal: status => {
+      onNativePassthroughTerminal: (status, syntheticServerStatus) => {
         // A committed stream can acquire terminal metadata after preflight copied
         // the child log. Publish it before the outer logger finalizes, but only
         // through the gate: discarded attempts must never affect the parent.
@@ -1430,7 +1430,7 @@ export async function executeComboResponses(
         if (childLog.causeHint !== undefined) logCtx.causeHint = childLog.causeHint;
         // A committed stream that ends failed is a target failure too; incomplete is an answer.
         if (status === "failed") jevPin?.forget();
-        options.onNativePassthroughTerminal?.(status);
+        options.onNativePassthroughTerminal?.(status, syntheticServerStatus);
       },
     });
     const retainedRefusal = (stream: Response) => ({ response: stream, deliver() { callbackGate.commit(); return stream; } });

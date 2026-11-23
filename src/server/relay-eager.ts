@@ -86,6 +86,7 @@ export type EagerRelayOptions = {
   postCancelDrainBytes?: number;
   /** Last known upstream failure to preserve when EOF would otherwise become adapter_eof. */
   upstreamError?: string;
+  onSyntheticServerStatus?: (status: number) => void;
   /** Optional client-facing hint policy; inspection retains original frames. */
   terminalBoundary?: CodexSafetyBufferingFilterOptions;
   /** Mask the selected outbound credential in synthetic failures. */
@@ -341,6 +342,8 @@ export function relaySseEagerBounded(
                 terminalBoundary.upstreamErrorType(),
                 terminalBoundary.upstreamErrorCode(),
               );
+            const serverStatus = terminalBoundary.upstreamServerStatus();
+            if (serverStatus !== undefined && upstreamError !== undefined) opts?.onSyntheticServerStatus?.(serverStatus);
             queuedBytes += upstreamErrorFrame.byteLength + terminalSentinel.byteLength;
             try {
               controllerRef?.enqueue(upstreamErrorFrame);
