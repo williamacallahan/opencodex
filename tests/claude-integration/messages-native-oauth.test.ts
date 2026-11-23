@@ -22,7 +22,7 @@ import { clearUpstreamHostHealth, getUpstreamHostHealth, upstreamHostHealthKey }
 import { handleClaudeMessages } from "../../src/server/claude-messages";
 import { clearComboRecallForTests } from "../../src/server/responses/combo-session-recall";
 import * as familyQuota from "../../src/oauth/anthropic-model-quota";
-import { anthropicRoutingFor, anthropicSessionAffinitySizeForTests, resetAnthropicSessionAffinityConfirmed } from "../../src/oauth/anthropic-routing";
+import { anthropicRoutingFor, anthropicSessionAffinitySizeForTests, bindAnthropicSessionAffinity, resetAnthropicSessionAffinityConfirmed } from "../../src/oauth/anthropic-routing";
 import { NativeOAuthSelectionChangedError, nativeOAuthBindingIsCurrent, resolveNativeOAuthBinding } from "../../src/server/messages-native-oauth";
 import { getRequestLogEntries } from "../../src/server/request-log";
 import { providerRequestPacingStatus, resetProviderRequestPacingForTest, waitForProviderRequestSlot } from "../../src/providers/request-pacing";
@@ -656,6 +656,25 @@ describe("overlapping native pool dispatch", () => {
   });
 });
 
+
+test("a same-account retry does not replace a newer session binding or Active", async () => {
+  const [first, newer] = await seed(2);
+  const config = fixtureConfig();
+  config.anthropicAccountPool = { enabled: true };
+  const sessionKey = "fixture-retry-reassigned";
+  bindAnthropicSessionAffinity(sessionKey, first!);
+  await setActiveAccount("anthropic", newer!);
+  const sentBinding = await resolveNativeOAuthBinding(config, { sessionKey });
+  expect(sentBinding.snapshot.accountId).toBe(first!);
+  bindAnthropicSessionAffinity(sessionKey, newer!);
+  const active = captureOAuthAccountSelection("anthropic");
+  await expect(resolveNativeOAuthBinding(config, {
+    sessionKey, candidateAccountId: first, previousAccountId: sentBinding.snapshot.accountId,
+    expectedRecoverySelection: sentBinding.selection, expectedAffinityResetGeneration: sentBinding.affinityResetGeneration,
+  })).rejects.toBeInstanceOf(NativeOAuthSelectionChangedError);
+  expect(captureOAuthAccountSelection("anthropic")).toEqual(active);
+  expect((await resolveNativeOAuthBinding(config, { sessionKey })).snapshot.accountId).toBe(newer!);
+});
 
 test("a reset during retry selection preserves the active account", async () => {
   const ids = await seed(2);

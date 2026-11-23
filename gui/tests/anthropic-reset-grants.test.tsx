@@ -191,6 +191,47 @@ test("reopening the providers panel preserves the grant read's Retry-After", asy
   }
 });
 
+test("a management 401 asks for a dashboard session, not an Anthropic sign-in", async () => {
+  globalThis.fetch = Object.assign(async () => new Response(null, { status: 401 }), { preconnect: originalFetch.preconnect });
+  const { container, root } = await mount();
+  try {
+    await click(container, "[data-anthropic-grant-badge]");
+    expect(container.textContent).toContain("Open the dashboard from its own login");
+    expect(container.textContent).not.toContain("Sign in to this Anthropic account");
+  } finally {
+    await act(async () => { root.unmount(); });
+  }
+});
+
+test("a throttled held attempt waits before retrying with the same operation ID", async () => {
+  const realNow = Date.now;
+  let instant = realNow();
+  Date.now = () => instant;
+  const posts: string[] = [];
+  globalThis.fetch = Object.assign(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method !== "POST") return Response.json(SNAPSHOT);
+    posts.push(String(init.body));
+    if (posts.length === 1) throw new TypeError("connection reset");
+    if (posts.length === 2) return Response.json({ error: { code: "rate_limited" } }, { status: 429, headers: { "Retry-After": "120" } });
+    return Response.json({ code: "already_used", resetsLeft: 0 });
+  }, { preconnect: originalFetch.preconnect });
+  const { container, root } = await mount();
+  try {
+    await click(container, "[data-anthropic-grant-badge]");
+    await click(container, "[data-anthropic-grant-use]");
+    await click(container, "[data-anthropic-grant-confirm]");
+    await click(container, "[data-anthropic-grant-retry]");
+    await click(container, "[data-anthropic-grant-retry]");
+    expect(posts).toHaveLength(2);
+    instant += 120_000;
+    await click(container, "[data-anthropic-grant-retry]");
+    expect(posts).toEqual([posts[0]!, posts[0]!, posts[0]!]);
+  } finally {
+    await act(async () => { root.unmount(); });
+    Date.now = realNow;
+  }
+});
+
 test("the badge counts unspent resets and the dialog retries an unknown outcome with the same id", async () => {
   const posts: Array<Record<string, unknown>> = [];
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
