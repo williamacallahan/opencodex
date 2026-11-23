@@ -119,9 +119,9 @@ async function tick(): Promise<void> {
 
 let harnessController: ReturnType<typeof useAnthropicResetGrants> | undefined;
 
-function Harness() {
+function Harness({ targetKey }: { targetKey?: string }) {
   const t = useT();
-  const controller = useAnthropicResetGrants({ apiBase: "", accountIds: ["acct-1"], enabled: true });
+  const controller = useAnthropicResetGrants({ apiBase: "", targetKey, accountIds: ["acct-1"], enabled: true });
   harnessController = controller;
   const [open, setOpen] = useState(false);
   return (
@@ -135,14 +135,14 @@ function Harness() {
   );
 }
 
-async function mount(): Promise<{ container: HTMLElement; root: Root }> {
+async function mount(targetKey?: string): Promise<{ container: HTMLElement; root: Root }> {
   const container = testWindow.document.createElement("div") as unknown as HTMLElement;
   testWindow.document.body.appendChild(container as never);
   const { createRoot } = await import("react-dom/client");
   let root!: Root;
   await act(async () => {
     root = createRoot(container);
-    root.render(<LanguageProvider><Harness /></LanguageProvider>);
+    root.render(<LanguageProvider><Harness targetKey={targetKey} /></LanguageProvider>);
   });
   await tick();
   await tick();
@@ -167,9 +167,15 @@ test("reopening the providers panel preserves the grant read's Retry-After", asy
     return reads === 1 ? new Response(null, { status: 429, headers: { "Retry-After": "120" } }) : Response.json(SNAPSHOT);
   }, { preconnect: originalFetch.preconnect });
   try {
-    const first = await mount();
+    const first = await mount("fixture-hub-a");
     await act(async () => { first.root.unmount(); });
-    const reopened = await mount();
+    const other = await mount("fixture-hub-b");
+    try {
+      expect(other.container.querySelector("[data-anthropic-grant-badge]")?.getAttribute("data-anthropic-grant-badge")).toBe("1");
+    } finally {
+      await act(async () => { other.root.unmount(); });
+    }
+    const reopened = await mount("fixture-hub-a");
     try {
       await click(reopened.container, "[data-anthropic-grant-badge]");
       expect(reopened.container.querySelector("[data-anthropic-grant-use]")).toBeNull();
@@ -311,6 +317,21 @@ test("a refused same-id retry keeps holding the attempt instead of offering a ne
   await click(container, "[data-anthropic-grant-retry]");
   expect(container.querySelector("[data-anthropic-grant-retry]")).toBeNull();
   await act(async () => { root.unmount(); });
+});
+
+test("a definite first-spend refusal does not lock the picker", async () => {
+  globalThis.fetch = (async (_input, init) => init?.method === "POST"
+    ? Response.json({ error: { code: "upstream_auth_rejected" } }, { status: 424 }) : Response.json(SNAPSHOT)) as typeof fetch;
+  const { container, root } = await mount("fixture-first-refusal");
+  try {
+    await click(container, "[data-anthropic-grant-badge]");
+    await click(container, "[data-anthropic-grant-use]");
+    await click(container, "[data-anthropic-grant-confirm]");
+    expect(container.querySelector("[data-anthropic-grant-retry]")).toBeNull();
+    expect(container.querySelector("[data-anthropic-grant-use]")).not.toBeNull();
+  } finally {
+    await act(async () => { root.unmount(); });
+  }
 });
 
 test("a replayed refusal reads as that refusal, not as a success", async () => {

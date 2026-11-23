@@ -114,19 +114,16 @@ function defaultDepsFor(ctx: ManagementContext, provider: AnthropicInstanceId): 
       const recovery = anthropicCooldownRecoveryFor(provider);
       const incarnation = recovery.reserveAnthropicAccountIncarnation(accountId);
       const epoch = captureProviderAccountQuotaEpoch(provider);
-      const assertAccountCurrent = () => {
+      try {
+        const snapshot = await getValidAccessSnapshotForAccount(provider, accountId, { requireUsableAccount: true });
+        owner = captureAnthropicPhysicalSendOwnership(snapshot);
+        if (!owner) throw new GrantAccountChangedError();
+        return snapshot.accessToken;
+      } finally {
         const current = getAccountSet(provider)?.accounts.find(row => row.id === accountId);
         if (!targetCurrent() || !initial || !current || initial.loginId !== current.loginId || initial.addedAt !== current.addedAt
           || recovery.anthropicAccountIncarnation(accountId) !== incarnation || captureProviderAccountQuotaEpoch(provider) !== epoch) throw new GrantAccountChangedError();
-      };
-      const snapshot = await getValidAccessSnapshotForAccount(provider, accountId, { requireUsableAccount: true }).catch((error: unknown) => {
-        assertAccountCurrent();
-        throw error;
-      });
-      assertAccountCurrent();
-      owner = captureAnthropicPhysicalSendOwnership(snapshot);
-      if (!owner) throw new GrantAccountChangedError();
-      return snapshot.accessToken;
+      }
     },
     admitReset: (accountId, evidence) => admitAnthropicAccountAfterReset(provider, accountId, evidence),
   };
