@@ -293,19 +293,18 @@ function captureTerminalHttpStatus(
     return;
   }
   if (type === "error") {
+    const codedError = candidates.find(candidate => typeof candidate?.code === "string");
     const structured = recognizedUpstreamError({
-      code: candidates.find(candidate => typeof candidate?.code === "string")?.code,
+      code: codedError?.code,
       type: candidates.slice(0, -1).find(candidate => typeof candidate?.type === "string")?.type,
+      message: codedError?.message,
     });
-    if (structured) {
-      noteStatus(structured.httpStatus);
-      return;
-    }
-    // An unrecognized class keeps only the status the upstream itself stated on the WebSocket
-    // wrapper. Nothing is invented here: with no wrapper status the row stays the synthetic 502, and
-    // combo preflight still reads its wider set of explicit event fields after this one.
     const wrapped = wrappedServerErrorStatus(json);
-    if (wrapped !== undefined) noteStatus(wrapped);
+    // An explicit server status outranks inferred context overflow. Unknown classes only use
+    // the wrapper; without it the row keeps the synthetic 502.
+    const status = structured?.code === "context_length_exceeded" && wrapped !== undefined
+      ? wrapped : structured?.httpStatus ?? wrapped;
+    if (status !== undefined) noteStatus(status);
     return;
   }
   if (type !== "response.failed" || !responseError || typeof responseError !== "object") return;

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   addFinalRequestLog, addRequestLog, clearRequestLogsForTests, getRequestLogEntries, requestLogEntryFromPersistedUsage,
+  httpStatusForRequestLogTerminal, inspectResponseLogSsePayload,
   type RequestLogContext, type RequestLogEntry,
 } from "../../src/server/request-log";
 import { recordLocalFailureDetail, recordUpstreamValidationDetail } from "../../src/server/request-log-failure-detail";
@@ -76,6 +77,18 @@ describe("normalizeLogErrorCode", () => {
     expect(normalizeLogErrorCode(undefined, 500)).toBeUndefined();
     expect(normalizeLogErrorCode("", 500)).toBeUndefined();
   });
+});
+
+test.each([
+  ["The input exceeds the context window.", undefined, 400],
+  ["Rate limit: too many tokens per minute.", undefined, 502],
+  ["The input exceeds the context window.", 503, 503],
+] as const)("records the bare context signal %s with declared status %s as %s", (message, status, expected) => {
+  const context: RequestLogContext = { model: "fixture", provider: "fixture" };
+  inspectResponseLogSsePayload(context, JSON.stringify({ type: "error", status,
+    error: { type: "invalid_request_error", code: "context_length_exceeded", message } }));
+  expect(httpStatusForRequestLogTerminal("failed", context)).toBe(expected);
+  expect(context.upstreamErrorCode).toBe("context_length_exceeded");
 });
 
 describe("errorDetailFor", () => {
