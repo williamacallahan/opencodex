@@ -14,9 +14,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteFile, getConfigDir } from "../config";
 import { withConfigDirHardeningSettled } from "../config/paths";
-import type { ProviderQuota } from "./quota-types";
+import type { ProviderQuota, ProviderQuotaWindow } from "./quota-types";
 import type { KiroPersistedQuota, KiroPersistedVerdict } from "./kiro-account-state-disk";
-import { ACCOUNT_QUOTA_TTL_MS, hasFutureQuotaReset, PASSIVE_OBSERVATION_MAX_AGE_MS } from "./quota-wire";
+import { ACCOUNT_QUOTA_TTL_MS, epochMillis, PASSIVE_OBSERVATION_MAX_AGE_MS } from "./quota-wire";
 
 const FILENAME = "provider-account-quota-cache.json";
 
@@ -56,6 +56,37 @@ let persistWrite: Promise<void> = Promise.resolve();
 /** Test seam: wait for a fired persistence callback's admitted write (as settleQuotaPersistenceForTests). */
 export function settleAccountQuotaPersistForTests(): Promise<void> { return persistWrite; }
 
+function futureReset(resetAt: unknown, now: number): boolean {
+  return typeof resetAt === "number" && (epochMillis(resetAt) ?? 0) > now;
+}
+
+/** Beyond the normal snapshot lifetime, only a live reset extends its own measurement. */
+function retainedAnthropicSnapshot(quota: ProviderQuota, now: number, expired: boolean): ProviderQuota | null {
+  const retained = { ...quota };
+  let hasFutureWindow = false;
+  for (const [percent, reset] of [
+    ["fiveHourPercent", "fiveHourResetAt"], ["weeklyPercent", "weeklyResetAt"], ["monthlyPercent", "monthlyResetAt"],
+  ] as const) {
+    if (typeof quota[percent] === "number" && Number.isFinite(quota[percent]) && futureReset(quota[reset], now)) {
+      hasFutureWindow = true;
+    } else if (expired) {
+      delete retained[percent];
+      delete retained[reset];
+    }
+  }
+  for (const field of ["customWindows", "displayWindows"] as const) {
+    const windows = quota[field];
+    const valid = Array.isArray(windows) ? windows.filter((window: ProviderQuotaWindow) =>
+      window && typeof window.label === "string" && Number.isFinite(window.percent)
+      && (!expired || futureReset(window.resetAt, now))) : [];
+    if (valid.length) {
+      retained[field] = valid;
+      if (expired) hasFutureWindow = true;
+    } else delete retained[field];
+  }
+  return expired && !hasFutureWindow ? null : retained;
+}
+
 /** Read the snapshot. Returns an empty map for a missing, corrupt or stale file. */
 export function readPersistedAccountQuotas(now = Date.now()): Map<string, ProviderQuota> {
   const rows = new Map<string, ProviderQuota>();
@@ -71,18 +102,19 @@ export function readPersistedAccountQuotas(now = Date.now()): Map<string, Provid
       const anthropicKey = key.startsWith("anthropic\0") || key.startsWith("anthropic2\0");
       const rawAnthropicGen = (quota as AnthropicPersistedQuota).anthropicCredentialGeneration;
       const validAnthropicGen = anthropicKey && typeof rawAnthropicGen === "string" && /^[a-f0-9]{64}$/.test(rawAnthropicGen);
-      const maxAgeMs = agyObservation || (validAnthropicGen && hasFutureQuotaReset(quota, now))
-        ? AGY_OBSERVATION_MAX_AGE_MS
-        : DISK_MAX_AGE_MS;
-      if (now - quota.updatedAt > maxAgeMs) continue;
+      const age = now - quota.updatedAt;
+      const maxAgeMs = agyObservation || validAnthropicGen ? AGY_OBSERVATION_MAX_AGE_MS : DISK_MAX_AGE_MS;
+      if (age > maxAgeMs) continue;
       if (key.startsWith("kiro\0") && (quota.updatedAt > now
         || typeof (quota as KiroPersistedQuota).identity !== "string"
         || !/^[a-f0-9]{64}$/.test((quota as KiroPersistedQuota).identity))) continue;
-      if (key.startsWith("anthropic\0") || key.startsWith("anthropic2\0")) {
+      if (anthropicKey) {
         const { anthropicCredentialGeneration, ...bars } = quota as AnthropicPersistedQuota;
+        const retained: AnthropicPersistedQuota | null = retainedAnthropicSnapshot(bars, now, age > DISK_MAX_AGE_MS);
+        if (!retained) continue;
         // Legacy or malformed ownership remains historical, never bound to today's login.
-        rows.set(key, { ...bars, ...(typeof anthropicCredentialGeneration === "string"
-          && /^[a-f0-9]{64}$/.test(anthropicCredentialGeneration) ? { anthropicCredentialGeneration } : {}) } as AnthropicPersistedQuota);
+        if (validAnthropicGen) retained.anthropicCredentialGeneration = anthropicCredentialGeneration;
+        rows.set(key, retained);
       } else rows.set(key, quota);
     }
   } catch {

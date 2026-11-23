@@ -81,6 +81,29 @@ describe("provider account quota persistence", () => {
     expect([...readPersistedAccountQuotas().keys()]).toEqual([agy]);
   });
 
+  test("an older Claude snapshot keeps its future weekly reset, not an undated five-hour reading", () => {
+    const now = Date.now();
+    const week = "anthropic\u0000weekly";
+    const next = "anthropic2\u0000next";
+    const reading = {
+      updatedAt: now - 7 * 60 * 60_000,
+      anthropicCredentialGeneration: "a".repeat(64),
+      fiveHourPercent: 100,
+      weeklyPercent: 24,
+      weeklyResetAt: now + 60 * 60_000,
+    };
+    writeFileSync(join(home, FILE), JSON.stringify({ version: 1, rows: {
+      [week]: { ...reading, customWindows: { broken: true }, displayWindows: [null] },
+      [next]: reading,
+    } }));
+    const expected = {
+      updatedAt: reading.updatedAt, anthropicCredentialGeneration: reading.anthropicCredentialGeneration,
+      weeklyPercent: 24, weeklyResetAt: reading.weeklyResetAt,
+    };
+    const loaded = readPersistedAccountQuotas(now);
+    for (const key of [week, next]) expect(loaded.get(key)).toEqual(expected);
+  });
+
   test("a corrupt file is ignored instead of breaking startup", () => {
     writeFileSync(join(home, FILE), "{ not json");
     expect(readPersistedAccountQuotas().size).toBe(0);

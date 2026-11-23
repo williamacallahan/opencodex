@@ -6,7 +6,7 @@ and separately identity-bound main-policy evidence; provider snapshots include K
 identity-bound exhaustion verdicts and Anthropic's private credential-generation digest in the
 existing row snapshot. Anthropic hydration strips that metadata from public quota bars, keeps its
 probe clock at zero, and treats missing or mismatched ownership as historical rather than current
-routing evidence. Only matching current ownership is persisted. Existing expiry rules still apply.
+routing evidence. Only matching current ownership is persisted. Beyond six hours, a future reset keeps only its own window for up to eight days; it cannot extend an undated sibling measurement.
 
 ## Automatic Pool Luna Reserve
 
