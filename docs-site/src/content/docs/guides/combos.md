@@ -751,6 +751,12 @@ For a native Codex pool, a seat with newly usable quota or Luna Reserve can serv
 before a target-specific 429 expires. Only a completed upstream turn clears the cooldown;
 that capacity does not override a provider-wide 429 or let another seat use a turn-state handle.
 
+If a Luna Responses turn loses its owning account before any request is sent, OpenCodex can
+start a fresh turn through Luna Reserve using the full `store: false` history, including completed
+tool calls and their results. If the request still needs state held by the old account, OpenCodex
+returns HTTP 409 instead of sending it elsewhere. Resend the full conversation without the old
+turn-state reference, or start a new conversation if that history is unavailable.
+
 ### Last-resort targets
 
 A brief cooldown on a preferred target otherwise routes straight to whatever
