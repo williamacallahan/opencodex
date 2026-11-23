@@ -26,7 +26,7 @@ import { observedAntigravityAccountQuota } from "../providers/quota/account-cach
 
 const CALLER_AFFINITY_LIMIT = 1024;
 const CALLER_AFFINITY_TTL_MS = 6 * 60 * 60_000;
-/** A sign-in that sent its last request within this long counts as being served now. */
+/** An account that sent agy's request to Google within this long counts as serving agy now. */
 const SERVING_NOW_MS = 10 * 60_000;
 /**
  * At a turn boundary a caller moves to another account only when that one is at least this many
@@ -38,7 +38,8 @@ const BALANCE_MARGIN_PERCENT = 10;
 /** The project Google returned to a slot, with the sign-in it was returned to; a new sign-in in the slot voids it. */
 const learnedProjects = new Map<string, { project: string; login: string }>();
 const callerAccounts = new Map<string, { accountId: string; at: number }>();
-const lastServedAt = new Map<string, number>();
+/** When each slot last sent an agy request to Google, with the pooled sign-in whose token it sent. */
+const lastServed = new Map<string, { at: number; login: string | undefined }>();
 // A random start spreads callers after a restart instead of sending the first one to account zero.
 let rotationCursor = randomInt(1_000_000);
 
@@ -59,7 +60,6 @@ export interface AgyAccountRequest {
 function rememberCaller(callerKey: string, accountId: string, now: number): void {
   callerAccounts.delete(callerKey);
   callerAccounts.set(callerKey, { accountId, at: now });
-  lastServedAt.set(accountId, now);
   while (callerAccounts.size > CALLER_AFFINITY_LIMIT) {
     const oldest = callerAccounts.keys().next().value;
     if (oldest === undefined) break;
@@ -156,21 +156,26 @@ export function learnAgyAccountProject(accountId: string, project: string, login
   });
 }
 
+/** Record that `accountId` sent an agy request to Google (whatever Google answered) with `login`'s token. */
+export function noteAgySent(accountId: string, login: string | undefined, now = Date.now()): void {
+  lastServed.set(accountId, { at: now, login });
+}
+
 /**
- * Whether this account serves an agy sign-in now and when it last served one, from the choices above;
- * null when it has served none since the hub started. Process-local, like the caller map.
+ * Whether this account sent agy's request to Google in the last ten minutes and when it last did;
+ * null when its current sign-in has sent none since the hub started. Process-local, like the caller map.
  */
 export function agyServing(accountId: string, now = Date.now()): { active: boolean; lastAt: number } | null {
-  const lastAt = lastServedAt.get(accountId);
-  if (lastAt === undefined) return null;
-  const active = [...callerAccounts.values()].some(entry => entry.accountId === accountId && now - entry.at < SERVING_NOW_MS);
-  return { active, lastAt };
+  const sent = lastServed.get(accountId);
+  const credential = listAccounts(ANTIGRAVITY_OAUTH_STORE_KEY).find(row => row.id === accountId)?.credential;
+  if (!sent || !credential || sent.login !== antigravityLoginIdentity(accountId, credential)) return null;
+  return { active: now - sent.at < SERVING_NOW_MS, lastAt: sent.at };
 }
 
 /** Test seam: forget process-local ownership and affinity. */
 export function resetAgyAccountState(): void {
   learnedProjects.clear();
   callerAccounts.clear();
-  lastServedAt.clear();
+  lastServed.clear();
   rotationCursor = 0;
 }
