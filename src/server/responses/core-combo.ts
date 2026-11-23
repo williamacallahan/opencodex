@@ -465,11 +465,6 @@ export async function executeComboResponses(
     comboId,
     targets: combo.targets,
   });
-  // The ladder's own scope, derived from what this combo DECLARES. It shares the request-wide
-  // counter with the holder that arrived on options -- a combo child already inherited that
-  // counter, but nothing read it as a limit across targets -- while its transition and
-  // alternate-target ledgers come from the target list rather than from the single-target
-  // account-move profile (#4546).
   // Expand previous_response_id before image policy and child dispatch so a
   // continuation that only references prior images still fails closed when
   // imageInput is disabled (and so targets see the full replayed input).
