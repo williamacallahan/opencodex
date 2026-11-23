@@ -105,6 +105,43 @@ export function portSpentLunaReasoning(body: unknown, expanded: boolean, headers
   return replay.kind === "portable" ? replay.body : undefined;
 }
 
+/** Only a self-contained, non-storing transcript can replace an unavailable turn owner. */
+export function portUnavailableLunaTurn(body: unknown, headers: Headers): unknown | undefined {
+  if (!isPlainObject(body) || body.store !== false || body.previous_response_id != null || body.background === true
+    || Object.hasOwn(body, "stream_id") || !Array.isArray(body.input)) return;
+  if (body.tools != null && (!Array.isArray(body.tools) || !body.tools.every(tool => isPlainObject(tool)
+    && (tool.type === "function" || tool.type === "custom") && typeof tool.name === "string" && tool.name.trim()))) return;
+  const inlineParts = (parts: unknown) => Array.isArray(parts) && parts.every(part => isPlainObject(part)
+    && ((part.type === "input_text" || part.type === "output_text") && typeof part.text === "string"
+      || part.type === "refusal" && typeof part.refusal === "string"
+      || part.type === "input_image" && typeof part.image_url === "string" && part.image_url.startsWith("data:image/")));
+  const calls = new Map<string, string>();
+  let hasUserInput = false;
+  for (const item of body.input) {
+    if (!isPlainObject(item)) return;
+    if (item.type === "function_call" || item.type === "custom_tool_call") {
+      if (typeof item.call_id !== "string" || !item.call_id.trim() || calls.has(item.call_id) || typeof item.name !== "string"
+        || !item.name.trim() || typeof (item.type === "function_call" ? item.arguments : item.input) !== "string") return;
+      calls.set(item.call_id, `${item.type}_output`);
+    } else if (item.type === "function_call_output" || item.type === "custom_tool_call_output") {
+      if (typeof item.call_id !== "string" || calls.get(item.call_id) !== item.type
+        || (typeof item.output !== "string" && !inlineParts(item.output))) return;
+      calls.set(item.call_id, "completed");
+    } else if (item.type === undefined || item.type === "message") {
+      if (typeof item.content !== "string" && !inlineParts(item.content)) return;
+      if (item.role === "user" && (typeof item.content === "string" ? item.content.trim()
+        : Array.isArray(item.content) && item.content.some(part => isPlainObject(part) && part.type === "input_text"
+          && typeof part.text === "string" && part.text.trim()))) hasUserInput = true;
+    } else if (item.type !== "reasoning") return;
+  }
+  if (!hasUserInput || [...calls.values()].some(state => state !== "completed")) return;
+  const clientMetadata = isPlainObject(body.client_metadata) ? { ...body.client_metadata } : undefined;
+  if (clientMetadata) delete clientMetadata[CODEX_TURN_STATE_HEADER];
+  const freshHeaders = new Headers(headers);
+  freshHeaders.delete(CODEX_TURN_STATE_HEADER);
+  return portSpentLunaReasoning(clientMetadata ? { ...body, client_metadata: clientMetadata } : body, false, freshHeaders);
+}
+
 export function nativeLunaTarget(combo: Combo, resolve: (target: ComboTarget) => RouteResult | undefined) {
   if (combo.strategy !== "failover") return;
   return combo.targets.find(target => {

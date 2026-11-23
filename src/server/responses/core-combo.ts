@@ -1,5 +1,6 @@
 import { isLegacyResponseExpansion } from "../../responses/state/body-policy";
-import { comboTurnStateOwner, withComboTurnStateOwner, CodexTurnStateOwnerUnavailableError } from "../turn-state-handles";
+import { comboTurnStateOwner, withComboTurnStateOwner, TURN_STATE_HEADER } from "../turn-state-handles";
+import { unavailableCodexTurnOwnerResponse } from "./codex-auth-error";
 import { comboLogLabel, comboTargetLogLabel } from "../../combos/resolve";
 import { clientFacingModelLabel, clientFacingModelText } from "../../lib/error-destination";
 import { projectLocalModelRefusalLog } from "../request-log-failure-detail";
@@ -12,7 +13,7 @@ import { buildResponsesTransport } from "../../adapters/openai-responses/transpo
 import { isMetaAiResponsesDestination } from "../../responses/muse-tool-name-alias";
 import { chatCanPreserveMandatoryToolChoice, hasMandatoryToolChoice } from "./combo-required-tool-contract";
 import { isPolicyCandidateRefusal, isMandatoryToolChoiceRefusal } from "./policy-request-scope";
-import { isCodexAccountCooldownResponse, isIssuerCapacityRefusal, isLunaStoreMismatchResponse } from "../../codex/account-cooldown-response";
+import { isCodexAccountCooldownResponse, isIssuerCapacityRefusal, isLunaStoreMismatchResponse, isUnavailableTurnOwner } from "../../codex/account-cooldown-response";
 import { resolveWireProtocolOverride } from "../adapter-resolve";
 import { parseSyntheticRowId } from "../fast-row";
 import { resolveOpenAiVirtualModel } from "../../providers/openai-virtual-models";
@@ -135,7 +136,7 @@ import {
 } from "../relay";
 import { preflightComboStreamResponse } from "./combo-stream-preflight";
 import { isOwnerCapacityRefusal } from "./owner-capacity-refusal";
-import { advanceLunaLegAfterFailure, isReserveSeatQuotaRefusal, nativeLunaTarget, onlyReplayIncompatibleTargetsRemain, planLunaReserveLegs, portCoolingLunaOwnerBeforeDispatch, portLunaConversationTarget, portSpentLunaReasoning, prepareLunaReplay, relayProvedNotStarted } from "./combo-luna-legs";
+import { advanceLunaLegAfterFailure, isReserveSeatQuotaRefusal, nativeLunaTarget, onlyReplayIncompatibleTargetsRemain, planLunaReserveLegs, portCoolingLunaOwnerBeforeDispatch, portLunaConversationTarget, portSpentLunaReasoning, portUnavailableLunaTurn, prepareLunaReplay, relayProvedNotStarted } from "./combo-luna-legs";
 import { createPoolReserveWalk, modelHasPoolReserve, type PoolCapacityIntent } from "../../codex/pool-reserve";
 import { requiredToolContractOf } from "./combo-required-tool-contract";
 import {
@@ -687,7 +688,8 @@ export async function executeComboResponses(
       return routeAllowedByScope(admissionScope, route) ? route : undefined;
     } catch { return undefined; }
   };
-  const handleOwner = comboTurnStateOwner(req.headers, body);
+  let handleOwner = comboTurnStateOwner(req.headers, body);
+  let turnRebuilt = false;
   const pinEligible = (target: (typeof combo.targets)[number]): boolean => {
     if (handleOwner) {
       const route = scopedRoute(target);
@@ -710,12 +712,11 @@ export async function executeComboResponses(
     const now = Date.now();
     const expiry = target && !config.providers[target.provider]?.disabled && scopedRoute(target) && pinEligible(target)
       ? earliestComboCooldownExpiry(comboId, [target], now) : undefined;
-    const message = handleOwner ? new CodexTurnStateOwnerUnavailableError().message
-      : "The owner of this conversation state is unavailable. The request was not sent.";
+    if (expiry === undefined && handleOwner) return unavailableCodexTurnOwnerResponse();
     const refusal = expiry !== undefined ? comboUnavailableResponse("The conversation owner is cooling down. No request was sent.", {
       retryAfter: String(Math.max(1, Math.ceil((expiry - now) / 1000))),
     }) : missingStore ? comboUnavailableResponse("The recorded conversation store is unavailable. No request was sent.")
-      : markProxyError(formatErrorResponse(409, "invalid_request_error", message));
+      : markProxyError(formatErrorResponse(409, "invalid_request_error", "The owner of this conversation state is unavailable. The request was not sent."));
     markResponseNonReplayable(refusal);
     return refusal;
   };
@@ -732,8 +733,12 @@ export async function executeComboResponses(
     && body.input.some(entry => isPlainObject(entry) && entry.type === "compaction_trigger"));
   let lunaReplay = handleOwner || projectStore || unresolvedPrevious ? prepareLunaReplay(body, comboReplaySnapshot.previousResponseInputExpanded && !localExpansion,
     req.headers, unreadableEncryptedAgentTask && encryptedTaskRecoveryAdmitted) : undefined;
-  const ported = (native || lunaCandidate) && lunaReplay?.kind === "bound" && lunaReplay.reason === "encrypted-reasoning"
+  const ported = lunaCandidate && lunaReplay?.kind === "bound" && lunaReplay.reason === "encrypted-reasoning"
     ? portSpentLunaReasoning(body, comboReplaySnapshot.previousResponseInputExpanded && !localExpansion, req.headers) : undefined;
+  const rebuildTurn = () => lunaCandidate && !unreadableEncryptedAgentTask && !localExpansion
+    && (options.sendBudget?.used ?? 0) === 0 && (options.inboundWire ?? "responses") === "responses"
+    && !options.compactionRoutingOverride && !options.mainHardLockFallbackOverride
+    ? portUnavailableLunaTurn(body, req.headers) : undefined;
   const statelessReasoningReplay = ported !== undefined && isPlainObject(body) && body.store === false
     && body.previous_response_id == null && body.background !== true && !Object.hasOwn(body, "stream_id");
   if (ported !== undefined) replayEligibilityBody = ported;
@@ -754,7 +759,14 @@ export async function executeComboResponses(
     if (!boundTargetKey) {
       if (options.abortSignal?.aborted || req.signal.aborted) return clientCancelledResponse();
       if (lunaReplay.reason === "previous-response-id") return missingPrevious();
-      return unavailableOwner(!handleOwner && lunaReplay.reason !== "turn-state");
+      const fresh = handleOwner ? (!handleOwner.hasLiveHandle() ? rebuildTurn() : undefined)
+        : lunaReplay.reason === "encrypted-reasoning" ? rebuildTurn() : undefined;
+      if (fresh === undefined) return unavailableOwner(!handleOwner && lunaReplay.reason !== "turn-state");
+      handleOwner = undefined;
+      turnRebuilt = true;
+      dispatchBody = replayEligibilityBody = fresh;
+      lunaReplay = { kind: "portable", body: fresh };
+      lunaLegs = native ? planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed, native) : undefined;
     }
   }
   if (localExpansion && legacyTarget !== undefined) {
@@ -762,7 +774,7 @@ export async function executeComboResponses(
     boundTargetKey = legacyTarget;
   }
   // Recall identifies a provider, not an account dependency. A portable relay pin cannot skip Reserve.
-  const conversationPin = recalledPick && (!boundTargetKey || boundTargetKey === targetKey(recalledPick.target))
+  const conversationPin = !turnRebuilt && recalledPick && (!boundTargetKey || boundTargetKey === targetKey(recalledPick.target))
     && (!lunaLegs || targetKey(recalledPick.target) === lunaLegs.nativeKey) ? recalledPick : undefined;
   let evaluatedStrictReserve = false;
   let lunaStage: "off" | "reserve" | "relay" | "done" = "off";
@@ -826,7 +838,8 @@ export async function executeComboResponses(
     routeConcreteModel,
     // Every pick, including the recovery picks that skip `targetEligible`, keeps metered
     // targets away from callers that may not spend on them.
-    eligible: target => (!boundTargetKey || targetKey(target) === boundTargetKey) && (meteredAllowed || !target.metered) && (pickOptions.eligible?.(target) ?? true),
+    eligible: target => (!boundTargetKey || targetKey(target) === boundTargetKey) && (meteredAllowed || !target.metered)
+      && (!turnRebuilt || scopedRoute(target) !== undefined) && (pickOptions.eligible?.(target) ?? true),
     waitForCooldownMs: combo.waitForCooldownMs,
     abortSignal: options.abortSignal,
   });
@@ -1154,9 +1167,10 @@ export async function executeComboResponses(
   const callerOutputCeilingTokens = logCtx.spendOutputCeilingTokens
     ?? (typeof callerBudget === "number" && Number.isFinite(callerBudget) && callerBudget > 0
       ? Math.trunc(callerBudget) : undefined);
-  const comboLegCount = boundTargetKey && ported !== undefined && lunaPair ? lunaPair.legCount + 1 : lunaLegs?.legCount ?? combo.targets.length;
+  const mayRebuildBoundLuna = boundTargetKey !== undefined && lunaCandidate;
+  const comboLegCount = mayRebuildBoundLuna && lunaPair ? lunaPair.legCount + 1 : lunaLegs?.legCount ?? combo.targets.length;
   let reserveWalk = isRequestExecutionBudget(options.sendBudget)
-    && (lunaLegs || portedBeforeDispatch || ported !== undefined && (lunaPair || lunaCandidate))
+    && (lunaLegs || portedBeforeDispatch || mayRebuildBoundLuna)
     ? createPoolReserveWalk(config) : undefined;
   const ordinaryPoolSends = 1 + CODEX_TEXT_GUARDED_BUDGET_POLICY.maxAlternateTargetSends;
   // A previously charged ledger can still visit unreported seats, but cannot grow its send limit.
@@ -1205,7 +1219,7 @@ export async function executeComboResponses(
         aliases: [requestedModel],
         from: lastFailedTarget,
         to: { provider: targetRoute.providerName, model: targetRoute.modelId },
-        trigger: fallbackTriggerForStatus(lastFailure.status),
+        trigger: isUnavailableTurnOwner(lastFailure) ? "unavailable" : fallbackTriggerForStatus(lastFailure.status),
         admission: options.admission,
         failureStatus: lastFailure.status,
         retryAfter: lastFailedRetryAfter ?? null,
@@ -1319,6 +1333,7 @@ export async function executeComboResponses(
       }
     }
     const childHeaders = buildComboChildHeaders(req.headers);
+    if (turnRebuilt) childHeaders.delete(TURN_STATE_HEADER);
     const childRequest = new Request(req.url, {
       method: req.method,
       headers: childHeaders,
@@ -1764,16 +1779,19 @@ export async function executeComboResponses(
       }
       return lastFailure;
     }
-    if (ported !== undefined && !handleOwner && boundTargetKey && !spentReplacement && (native || lunaCandidate)
-      && (attempt.sendCount === 0
-        ? ((!failure.nonReplayable && isIssuerCapacityRefusal(failure.response)) || isLunaStoreMismatchResponse(failure.response))
-        : (!failure.nonReplayable && isOwnerCapacityRefusal(failure.response.status, failure)))) {
+    const fresh = boundTargetKey && !hardRefusal && !spentReplacement && attempt.sendCount === 0
+      && isUnavailableTurnOwner(failure.response) && !comboSendScope?.ambiguousResendSpent ? rebuildTurn() : undefined;
+    const replacement = fresh ?? (!handleOwner && (attempt.sendCount === 0
+      ? ((!failure.nonReplayable && isIssuerCapacityRefusal(failure.response)) || isLunaStoreMismatchResponse(failure.response))
+      : (!failure.nonReplayable && isOwnerCapacityRefusal(failure.response.status, failure))) ? ported : undefined);
+    if (replacement !== undefined && boundTargetKey && !spentReplacement) {
       const failedPick: ComboPick = pick;
-      replayEligibilityBody = ported;
+      replayEligibilityBody = replacement;
       boundTargetKey = undefined;
       const selected = await portLunaConversationTarget({
         config, comboId, combo, fromTarget: failedPick.target, native, scopedRoute,
-        eligible: targetEligible, hopAllowed: comboHopAllowed, pickTarget: pickWithWait,
+        eligible: target => (fresh === undefined || scopedRoute(target) !== undefined) && targetEligible(target),
+        hopAllowed: comboHopAllowed, pickTarget: pickWithWait,
         exclude: [...failedPick.attempted, legTargetKey], isPreDispatch: false, alreadyReserveOnly: portedReserveOnly,
         forbidSameTarget: isLunaStoreMismatchResponse(failure.response),
         aborted: () => Boolean(options.abortSignal?.aborted || req.signal.aborted), now: Date.now(),
@@ -1781,7 +1799,8 @@ export async function executeComboResponses(
       if (options.abortSignal?.aborted || req.signal.aborted) return clientCancelledResponse();
       if (selected) {
         if (reserveWalk) reserveWalk = createPoolReserveWalk(config);
-        dispatchBody = ported; lunaReplay = { kind: "portable", body: ported };
+        if (fresh !== undefined) { handleOwner = undefined; turnRebuilt = true; }
+        dispatchBody = replacement; lunaReplay = { kind: "portable", body: replacement };
         lunaLegs = selected.plan; portedReserveOnly = selected.reserveOnly;
         lunaStage = selected.lunaStage;
         evaluatedStrictReserve = selected.lunaStage !== "off";

@@ -94,6 +94,7 @@ function presentedHandles(headers: Headers, body: unknown): string[] {
 }
 
 export interface ComboTurnStateOwner {
+  hasLiveHandle(): boolean;
   permitsProvider(providerName: string): boolean;
   forProvider(providerName: string): TurnStateOwner;
 }
@@ -106,6 +107,7 @@ export function comboTurnStateOwner(headers: Headers, body: unknown): ComboTurnS
   const caller = callerScope.getStore()?.caller ?? "unadmitted";
   const binding = live(handles[0]!, Date.now())?.binding;
   return {
+    hasLiveHandle: () => handles.some(handle => live(handle, Date.now()) !== undefined),
     permitsProvider: provider => binding !== undefined && binding.startsWith(routePrefix(caller, provider))
       && handles.every(handle => live(handle, Date.now())?.binding === binding),
     forProvider: provider => ownerForHandles(provider, handles, caller),

@@ -4,13 +4,17 @@ import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { clearAccountQuota, setAccountQuotaFromParsed, updateAccountQuota } from "../../src/codex/quota";
 import { clearCodexUpstreamHealth, clearThreadAccountMap } from "../../src/codex/routing";
 import { clearComboRecallForTests } from "../../src/server/responses/combo-session-recall";
+import { issueTurnStateHandle, resetTurnStateHandlesForTests, TURN_STATE_HEADER, turnStateBinding } from "../../src/server/turn-state-handles";
 import { handleResponses } from "../../src/server/responses";
+import { saveConfig } from "../../src/config";
+import { startServer } from "../../src/server";
 import { CODEX_RESPONSES_HTTP_URL } from "../../src/server/responses/codex-ws-request";
 import type { RequestLogContext } from "../../src/server/request-log";
 import type { OcxConfig } from "../../src/types";
 import { createTempHome } from "../helpers/temp-home";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 
+const clientFetch = globalThis.fetch;
 const model = "gpt-6-luna", seat = "owner-release-seat";
 const native = { provider: "openai", model }, relay = { provider: "relay", model };
 const relayUrl = "https://relay.example.test/backend-api/codex";
@@ -35,6 +39,8 @@ function completed(issuer: string, items: unknown[]) {
   return new Response([...frames, terminal].map(frame => `data: ${JSON.stringify(frame)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
 }
 let nativeReply: () => Response;
+let nativeRequest: Request | undefined;
+let nativeBody: { input: { type?: string; call_id?: string }[]; client_metadata?: Record<string, string> } | undefined;
 let relayReply: () => Response;
 let relayInput: { type?: string; call_id?: string }[];
 let cleanup: () => void;
@@ -51,9 +57,14 @@ beforeEach(() => {
   nativeReply = () => completed("native", [reasoning("native"), call("native")]);
   relayReply = () => completed("relay", [reasoning("relay"), call("relay")]);
   relayInput = [];
+  nativeRequest = undefined; nativeBody = undefined;
   const upstream = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(input, init);
-    if (request.url === CODEX_RESPONSES_HTTP_URL) return nativeReply();
+    if (request.url === CODEX_RESPONSES_HTTP_URL) {
+      nativeRequest = request;
+      nativeBody = await request.clone().json();
+      return nativeReply();
+    }
     if (request.url !== `${relayUrl}/v1/responses`) throw new Error(`unexpected upstream ${request.url}`);
     relayInput = (await request.json()).input;
     return relayReply();
@@ -62,13 +73,13 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
-async function post(input: unknown[], log: RequestLogContext = { provider: "", model: "" }) {
+async function post(input: unknown[], log: RequestLogContext = { provider: "", model: "" }, headers: Record<string, string> = {}, extra = {}) {
   const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
-    headers: { "content-type": "application/json", "thread-id": "luna-owner-release" },
+    headers: { "content-type": "application/json", "thread-id": "luna-owner-release", ...headers },
     body: JSON.stringify({ model: "combo/luna", input, store: false, stream: true,
-      tools: [{ type: "function", name: "lookup", parameters: { type: "object", properties: {} } }] }),
+      tools: [{ type: "function", name: "lookup", parameters: { type: "object", properties: {} } }], ...extra }),
   }), config, log, { admission: { kind: "loopback", source: "loopback" } });
-  return { status: response.status, text: await response.text() };
+  return { status: response.status, headers: response.headers, text: await response.text() };
 }
 
 function expectRelayHistory(issuers: string[]) {
@@ -107,4 +118,67 @@ test("a second tool result on the replacement store does not replay the old owne
   expect(result.status).toBe(200);
   expect(result.text).toContain("response.completed");
   expectRelayHistory(["native", "relay"]);
+});
+
+test.each(["no handle", "no recall or handle", "expired header", "expired metadata", "live but unavailable"] as const)(
+  "Luna starts a fresh Reserve turn with complete tool history (%s)", async mode => {
+    expect((await post([question])).text).toContain(reasoning("native").encrypted_content);
+    if (mode === "no recall or handle") clearComboRecallForTests();
+    const handle = mode.startsWith("no ") ? undefined : issueTurnStateHandle("fixture-turn-state", turnStateBinding("openai",
+      new Headers({ authorization: "Bearer fixture-other-access", "chatgpt-account-id": "fixture-other-seat" })));
+    if (mode !== "live but unavailable") resetTurnStateHandlesForTests();
+    clearThreadAccountMap();
+    nativeReply = () => completed("replacement", []);
+    const log: RequestLogContext = { provider: "", model: "" };
+    const headers: Record<string, string> = handle && mode !== "expired metadata" ? { [TURN_STATE_HEADER]: handle } : {};
+    const extra = mode === "expired metadata" ? { client_metadata: { [TURN_STATE_HEADER]: handle, keep: "client-value" } } : {};
+    const result = await post(nativeHistory, log, headers, extra);
+    expect(result.status).toBe(200);
+    expect(result.text).toContain("resp_replacement");
+    expect(log.attempts?.filter(attempt => attempt.sendCount).map(attempt => attempt.wireModel)).toEqual(["gpt-reserve"]);
+    expect(nativeRequest?.headers.get(TURN_STATE_HEADER)).toBeNull();
+    expect(nativeBody?.client_metadata?.[TURN_STATE_HEADER]).toBeUndefined();
+    expect(nativeBody?.input.filter(entry => entry.type === "reasoning")).toEqual([]);
+    expect(nativeBody?.input.filter(entry => entry.call_id)).toEqual([call("native"), output("native")]);
+  },
+);
+
+test("HTTP resumes a Pi tool turn after both owner records are lost", async () => {
+  saveConfig(config);
+  const server = startServer(0);
+  const request = (input: unknown[]) => clientFetch(new URL("/v1/responses", server.url), { method: "POST",
+    headers: { "content-type": "application/json", "thread-id": "pi-luna-restart" },
+    body: JSON.stringify({ model: "combo/luna", store: false, input, stream: true,
+      tools: [{ type: "function", name: "lookup", parameters: { type: "object", properties: {} } }] }),
+  });
+  try {
+    expect(await (await request([question])).text()).toContain(reasoning("native").encrypted_content);
+    clearComboRecallForTests(); clearThreadAccountMap();
+    nativeReply = () => completed("http_replacement", []);
+    const response = await request(nativeHistory);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("resp_http_replacement");
+    expect(nativeBody?.input.filter(entry => entry.call_id)).toEqual([call("native"), output("native")]);
+  } finally { await server.stop(true); }
+});
+
+test.each([
+  ["stored turn", nativeHistory, { store: true }],
+  ["unresolved response id", nativeHistory, { previous_response_id: "resp_missing" }],
+  ["item reference", [...nativeHistory, { type: "item_reference", id: "msg_missing" }], {}],
+  ["orphan result", [question, output("native")], {}],
+  ["pending tool call", [question, call("native")], {}],
+  ["missing tool arguments", [question, { ...call("native"), arguments: undefined }, output("native")], {}],
+  ["missing tool output", [question, call("native"), { ...output("native"), output: undefined }], {}],
+  ["provider-hosted tool", nativeHistory, { tools: [{ type: "code_interpreter", container: "cn_fixture" }] }],
+  ["uploaded file", [...nativeHistory, { type: "message", role: "user", content: [{ type: "input_file", file_id: "file_fixture" }] }], {}],
+] as const)("Luna never sends a fresh turn with a %s", async (_, input, extra) => {
+  const handle = issueTurnStateHandle("fixture-turn-state", turnStateBinding("openai", new Headers()));
+  resetTurnStateHandlesForTests();
+  const result = await post([...input], undefined, { [TURN_STATE_HEADER]: handle }, extra);
+  expect(result.status).toBe(409);
+  expect(result.headers.get("x-should-retry")).toBe("false");
+  expect(result.text).toContain("Resend the full conversation");
+  expect(nativeRequest).toBeUndefined();
+  expect(relayInput).toEqual([]);
 });

@@ -24,7 +24,15 @@ export function markLunaStoreMismatchResponse(response: Response): Response {
 }
 export const isLunaStoreMismatchResponse = (response: Response): boolean => lunaStoreMismatchResponses.has(response);
 
+const unavailableTurnOwnerResponses = new WeakSet<Response>();
+export function markUnavailableTurnOwner(response: Response): Response {
+  unavailableTurnOwnerResponses.add(response);
+  return response;
+}
+export const isUnavailableTurnOwner = (response: Response): boolean => unavailableTurnOwnerResponses.has(response);
+
 export function carryCodexAccountCooldownResponse(from: Response, to: Response): void {
+  if (isUnavailableTurnOwner(from)) markUnavailableTurnOwner(to);
   if (issuerCapacityResponses.has(from)) issuerCapacityResponses.add(to);
   if (accountCooldownResponses.has(from)) accountCooldownResponses.add(to);
   if (lunaStoreMismatchResponses.has(from)) lunaStoreMismatchResponses.add(to);
