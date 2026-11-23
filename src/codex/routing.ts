@@ -31,10 +31,9 @@ import { isCodexPoolRefreshCooling } from "./pool-refresh-backoff";
 import {
   classifyCodexUpstreamOutcome,
   computeCodexUsageScore,
-  computeQuotaCooldown,
+  computeQuotaCooldown, computeReserveRefusalCooldown,
   quotaAvoidUntilFor,
-  CODEX_FAILURE_WINDOW_MS,
-  CODEX_TRANSIENT_SOFT_AVOID_ESCALATION_MS,
+  CODEX_FAILURE_WINDOW_MS, CODEX_TRANSIENT_SOFT_AVOID_ESCALATION_MS,
   type CodexUpstreamOutcome,
   type CodexUpstreamOutcomeMeta,
 } from "./routing/cooldown-math";
@@ -1448,15 +1447,15 @@ export function recordCodexUpstreamOutcome(
 
   if (outcomeClass === "quota") {
     const capacityEvidence = { confirmed: false };
-    // A pool Reserve refusal's reset names the seat's spent plan window, not Reserve: ChatGPT never
-    // discloses Reserve and it comes and goes per seat, so only Retry-After holds it past the default
-    // (honoring that reset kept every seat off Reserve for hours after one refusal each, 2026-11-20).
-    const { until, source } = computeQuotaCooldown(meta.poolReserve ? { ...meta, resetAt: undefined } : meta);
+    const scopedPrior = quotaScope ? scopedHealthFor(accountId, quotaScope) : undefined;
+    // Pool Reserve resetAt names the seat's plan window, not Reserve, so only Retry-After overrides backoff.
+    const { until, source } = meta.poolReserve
+      ? computeReserveRefusalCooldown(meta, scopedPrior?.reserveRefusalStreak ?? 0, accountId)
+      : computeQuotaCooldown(meta);
     // Explicit Retry-After/default 429s remain account-wide unless this attempt used only Reserve.
     if (quotaScope && (source === "reset-derived" || meta.poolReserve)) {
-      const prior = scopedHealthFor(accountId, quotaScope);
-      const cooldownGeneration = (prior?.cooldownGeneration ?? 0) + 1;
-      const ownsLease = meta.probeQuotaScope === quotaScope && ownsProbeLease(prior, meta);
+      const cooldownGeneration = (scopedPrior?.cooldownGeneration ?? 0) + 1;
+      const ownsLease = meta.probeQuotaScope === quotaScope && ownsProbeLease(scopedPrior, meta);
       const cooldown: CodexUpstreamHealth = {
         consecutiveFailures: 0,
         lastFailureStatus,
@@ -1466,12 +1465,13 @@ export function recordCodexUpstreamOutcome(
         cooldownSince: now,
         cooldownSource: source,
         cooldownGeneration,
+        ...(meta.poolReserve ? { reserveRefusalStreak: (scopedPrior?.reserveRefusalStreak ?? 0) + 1 } : {}),
         ...(ownsLease
           ? { lastProbeAt: now }
           : {
-            ...(prior?.probeLeaseId !== undefined ? { probeLeaseId: prior.probeLeaseId } : {}),
-            ...(prior?.probeLeaseGeneration !== undefined ? { probeLeaseGeneration: prior.probeLeaseGeneration } : {}),
-            ...(prior?.lastProbeAt !== undefined ? { lastProbeAt: prior.lastProbeAt } : {}),
+            ...(scopedPrior?.probeLeaseId !== undefined ? { probeLeaseId: scopedPrior.probeLeaseId } : {}),
+            ...(scopedPrior?.probeLeaseGeneration !== undefined ? { probeLeaseGeneration: scopedPrior.probeLeaseGeneration } : {}),
+            ...(scopedPrior?.lastProbeAt !== undefined ? { lastProbeAt: scopedPrior.lastProbeAt } : {}),
         }),
       };
       setScopedHealth(accountId, quotaScope, cooldown);

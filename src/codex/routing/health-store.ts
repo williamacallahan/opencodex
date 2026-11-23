@@ -5,11 +5,14 @@ import { POOL_KEY_CODEX } from "../pool-rotation";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import type { OcxConfig } from "../../types";
 import type { CodexCooldownSource } from "./cooldown-math";
+import { codexHealthCooldownStore, isCodexHealthRowAlive } from "./health-cooldown-store";
 
 export type CodexUpstreamHealth = {
   consecutiveFailures: number;
   /** Consecutive healthy terminals observed while recovering from escalation level 2+. */
   consecutiveSuccesses?: number;
+  /** Consecutive Reserve quota refusals without an intervening completion. */
+  reserveRefusalStreak?: number;
   /** A completed Reserve turn is routing evidence, not a quota reading. */
   reserveSuccess?: { at: number; credentialGeneration: number };
   /** Shared by health writes that retain this cooldown, never by a replacement refusal. */
@@ -84,6 +87,8 @@ const upstreamHealth = new Map<string, CodexUpstreamHealth>();
  * from account-wide Retry-After/default throttles and transient health.
  */
 const quotaScopedHealth = new Map<string, Map<CodexQuotaScope, CodexUpstreamHealth>>();
+codexHealthCooldownStore.bindMaps(upstreamHealth, quotaScopedHealth);
+const ensureLoaded = (): void => codexHealthCooldownStore.ensureLoaded(upstreamHealth, quotaScopedHealth);
 /**
  * Spend a credential-failure health entry whose credential no longer exists (#2892 gap 4).
  *
@@ -94,11 +99,13 @@ const quotaScopedHealth = new Map<string, Map<CodexQuotaScope, CodexUpstreamHeal
  * with it the tag, so this can never delete evidence that belongs to a different failure.
  */
 export function dropSpentCredentialFailure(accountId: string): void {
+  ensureLoaded();
   const health = upstreamHealth.get(accountId);
   const generation = health?.credentialFailureGeneration;
   if (health === undefined || generation === undefined) return;
   if (isCodexAccountGenerationLive(accountId, generation)) return;
   upstreamHealth.delete(accountId);
+  codexHealthCooldownStore.markAccountDeleted(accountId);
 }
 let lastReconciledGeneration = 0;
 let liveHealthAccountIds = new Set<string>();
@@ -147,23 +154,33 @@ export function getCodexUpstreamHealth(
 }
 
 export function scopedHealthFor(accountId: string, scope: CodexQuotaScope): CodexUpstreamHealth | undefined {
+  ensureLoaded();
   return quotaScopedHealth.get(accountId)?.get(scope);
 }
 
 export function setScopedHealth(accountId: string, scope: CodexQuotaScope, health: CodexUpstreamHealth): void {
+  ensureLoaded();
   let scopes = quotaScopedHealth.get(accountId);
+  const previous = scopes?.get(scope);
   if (!scopes) {
     scopes = new Map();
     quotaScopedHealth.set(accountId, scopes);
   }
   scopes.set(scope, health);
+  const now = Date.now();
+  if (isCodexHealthRowAlive(health, now)) codexHealthCooldownStore.markScopedDirty(accountId, scope);
+  else if (previous !== undefined && isCodexHealthRowAlive(previous, now)) {
+    codexHealthCooldownStore.markScopedDeleted(accountId, scope);
+  }
 }
 
 export function deleteScopedHealth(accountId: string, scope: CodexQuotaScope): void {
+  ensureLoaded();
   const scopes = quotaScopedHealth.get(accountId);
   if (!scopes) return;
   scopes.delete(scope);
   if (scopes.size === 0) quotaScopedHealth.delete(accountId);
+  codexHealthCooldownStore.markScopedDeleted(accountId, scope);
 }
 
 /** Live quota-refusal avoidance for an account, including the lane the request belongs to. */
@@ -172,6 +189,7 @@ export function codexQuotaAvoidUntil(
   quotaScope: CodexQuotaScope | undefined,
   now: number,
 ): number | null {
+  ensureLoaded();
   const live = (value: number | undefined): number | null =>
     typeof value === "number" && Number.isFinite(value) && value > now ? value : null;
   const account = live(upstreamHealth.get(accountId)?.quotaAvoidUntil);
@@ -208,6 +226,7 @@ export function preservedCooldownFields(health: CodexUpstreamHealth | undefined)
 }
 
 export function getCodexAccountCooldownUntil(accountId: string, now = Date.now()): number | null {
+  ensureLoaded();
   const cooldownUntil = upstreamHealth.get(accountId)?.cooldownUntil;
   return typeof cooldownUntil === "number" && Number.isFinite(cooldownUntil) && cooldownUntil > now ? cooldownUntil : null;
 }
@@ -285,6 +304,7 @@ export function isCodexAccountInCooldown(accountId: string, now = Date.now()): b
  * case it exists for.
  */
 export function clearCodexAccountCooldown(accountId: string, now = Date.now()): boolean {
+  ensureLoaded();
   const clear = (health: CodexUpstreamHealth): CodexUpstreamHealth | null => {
     const cooldownUntil = health.cooldownUntil;
     const liveCooldown = typeof cooldownUntil === "number" && Number.isFinite(cooldownUntil) && cooldownUntil > now;
@@ -297,6 +317,7 @@ export function clearCodexAccountCooldown(accountId: string, now = Date.now()): 
       cooldownSource: _source,
       probeLeaseId: _leaseId,
       probeLeaseGeneration: _leaseGeneration,
+      reserveRefusalStreak: _streak,
       // Same reasoning as the probe recovery above: "the quota window moved" is a statement
       // about the whole refusal, so the avoidance it announced goes with the block it
       // produced. Keeping it would leave this escape hatch not escaping, because selection
@@ -312,11 +333,14 @@ export function clearCodexAccountCooldown(accountId: string, now = Date.now()): 
   };
 
   let cleared = false;
+  const wallNow = Date.now();
   const accountHealth = upstreamHealth.get(accountId);
   if (accountHealth) {
     const next = clear(accountHealth);
     if (next) {
       upstreamHealth.set(accountId, next);
+      if (isCodexHealthRowAlive(next, wallNow)) codexHealthCooldownStore.markAccountReplaced(accountId);
+      else codexHealthCooldownStore.markAccountDeleted(accountId);
       cleared = true;
     }
   }
@@ -324,6 +348,8 @@ export function clearCodexAccountCooldown(accountId: string, now = Date.now()): 
     const next = clear(health);
     if (next) {
       setScopedHealth(accountId, scope, next);
+      if (isCodexHealthRowAlive(next, wallNow)) codexHealthCooldownStore.markScopedReplaced(accountId, scope);
+      else codexHealthCooldownStore.markScopedDeleted(accountId, scope);
       cleared = true;
     }
   }
@@ -331,6 +357,7 @@ export function clearCodexAccountCooldown(accountId: string, now = Date.now()): 
 }
 
 export function getCodexAccountSoftAvoidUntil(accountId: string, now = Date.now()): number | null {
+  ensureLoaded();
   const softAvoidUntil = upstreamHealth.get(accountId)?.softAvoidUntil;
   return typeof softAvoidUntil === "number" && Number.isFinite(softAvoidUntil) && softAvoidUntil > now
     ? softAvoidUntil
@@ -347,15 +374,25 @@ export function isCodexAccountSoftAvoided(accountId: string, now = Date.now()): 
  * Map bindings themselves never leave this module.
  */
 export function getAccountHealth(accountId: string): CodexUpstreamHealth | undefined {
+  ensureLoaded();
   return upstreamHealth.get(accountId);
 }
 
 export function setAccountHealth(accountId: string, health: CodexUpstreamHealth): void {
+  ensureLoaded();
+  const previous = upstreamHealth.get(accountId);
   upstreamHealth.set(accountId, health);
+  const now = Date.now();
+  if (isCodexHealthRowAlive(health, now)) codexHealthCooldownStore.markAccountDirty(accountId);
+  else if (previous !== undefined && isCodexHealthRowAlive(previous, now)) {
+    codexHealthCooldownStore.markAccountDeleted(accountId);
+  }
 }
 
 export function deleteAccountHealth(accountId: string): void {
+  ensureLoaded();
   upstreamHealth.delete(accountId);
+  codexHealthCooldownStore.markAccountDeleted(accountId);
 }
 
 export function carriesQuotaRefusal(health: CodexUpstreamHealth | undefined): boolean {
@@ -370,11 +407,26 @@ export function noteScopedCodexSuccess(
   const reserveSuccess = scope === "reserve" && reserveGeneration !== undefined
     && isCodexAccountGenerationLive(accountId, reserveGeneration) ? { at: now, credentialGeneration: reserveGeneration } : undefined;
   if (!reserveSuccess && (!current || !carriesQuotaRefusal(current))) return;
-  const { lastFailureStatus: _refusal, lastFailureAt: _refusedAt, quotaAvoidUntil: _avoid, ...retained } =
-    current ?? { consecutiveFailures: 0 };
-  if (reserveSuccess) setScopedHealth(accountId, scope, { ...retained, reserveSuccess });
-  else if (Object.keys(retained).length > 1) setScopedHealth(accountId, scope, retained);
-  else deleteScopedHealth(accountId, scope);
+  const {
+    lastFailureStatus: _refusal,
+    lastFailureAt: _refusedAt,
+    quotaAvoidUntil: _avoid,
+    reserveRefusalStreak: _streak,
+    ...retained
+  } = current ?? { consecutiveFailures: 0 };
+  const wallNow = Date.now();
+  if (reserveSuccess) {
+    const updated = { ...retained, reserveSuccess };
+    setScopedHealth(accountId, scope, updated);
+    if (isCodexHealthRowAlive(updated, wallNow)) codexHealthCooldownStore.markScopedReplaced(accountId, scope);
+    else codexHealthCooldownStore.markScopedDeleted(accountId, scope);
+  } else if (Object.keys(retained).length > 1) {
+    setScopedHealth(accountId, scope, retained);
+    if (isCodexHealthRowAlive(retained, wallNow)) codexHealthCooldownStore.markScopedReplaced(accountId, scope);
+    else codexHealthCooldownStore.markScopedDeleted(accountId, scope);
+  } else {
+    deleteScopedHealth(accountId, scope);
+  }
 }
 
 /**
@@ -413,10 +465,15 @@ export function hasUnrecoveredCodexQuotaRefusal(accountId: string, quotaScope?: 
 }
 
 export function listScopedHealthEntries(accountId: string): Array<[CodexQuotaScope, CodexUpstreamHealth]> {
+  ensureLoaded();
   return [...(quotaScopedHealth.get(accountId) ?? [])];
 }
 
 export function deleteAllScopedHealth(accountId: string): void {
+  ensureLoaded();
+  for (const scope of quotaScopedHealth.get(accountId)?.keys() ?? []) {
+    codexHealthCooldownStore.markScopedDeleted(accountId, scope);
+  }
   quotaScopedHealth.delete(accountId);
 }
 
@@ -429,14 +486,17 @@ export function isHealthGenerationReconciled(generation: number): boolean {
 }
 
 export function pruneHealthAccountsForContext(codexAccountIds: ReadonlySet<string>): number {
+  ensureLoaded();
   let removed = 0;
   for (const accountId of upstreamHealth.keys()) {
     if (codexAccountIds.has(accountId)) continue;
     upstreamHealth.delete(accountId);
+    codexHealthCooldownStore.markAccountDeleted(accountId);
     removed += 1;
   }
-  for (const accountId of quotaScopedHealth.keys()) {
+  for (const [accountId, scopes] of quotaScopedHealth.entries()) {
     if (codexAccountIds.has(accountId)) continue;
+    for (const scope of scopes.keys()) codexHealthCooldownStore.markScopedDeleted(accountId, scope);
     quotaScopedHealth.delete(accountId);
     removed += 1;
   }
@@ -451,6 +511,17 @@ export function commitHealthReconcile(generation: number, codexAccountIds: Reado
 export function clearUpstreamHealthState(): void {
   upstreamHealth.clear();
   quotaScopedHealth.clear();
+  codexHealthCooldownStore.resetMemoryStateForClear();
+}
+
+export function flushCodexHealthCooldowns(): boolean {
+  return codexHealthCooldownStore.flush(upstreamHealth, quotaScopedHealth);
+}
+
+export function reloadCodexHealthCooldownsForTests(): void {
+  upstreamHealth.clear();
+  quotaScopedHealth.clear();
+  codexHealthCooldownStore.resetLoaderForTests();
 }
 
 export function resetHealthReconcileState(): void {
@@ -459,6 +530,8 @@ export function resetHealthReconcileState(): void {
 }
 
 export function deleteAllHealthForAccount(accountId: string): void {
+  ensureLoaded();
   upstreamHealth.delete(accountId);
   quotaScopedHealth.delete(accountId);
+  codexHealthCooldownStore.markAllForAccountDeleted(accountId);
 }
