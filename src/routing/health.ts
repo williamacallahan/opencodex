@@ -261,7 +261,8 @@ function computeHistoricalHealthEvidence(
     const where: string[] = ["provider = ?", "model = ?", "timestamp >= ?"];
     const values: Array<string | number> = [input.provider, input.model, now - HEALTH_WINDOW_MS];
     if (input.accountRef) {
-      where.push("api_key_id = ?");
+      // Unary + keeps SQLite on idx_requests_provider_model_ts instead of flipping to idx_requests_api_key.
+      where.push("+api_key_id = ?");
       values.push(input.accountRef);
     }
     const rows = handle.query(

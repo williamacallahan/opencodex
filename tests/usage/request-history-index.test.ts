@@ -612,6 +612,30 @@ describe("request-history index (RI-02)", () => {
         expectedIndex: "idx_requests_provider",
       },
       {
+        name: "provider+model",
+        sql: "EXPLAIN QUERY PLAN SELECT row_json, timestamp, request_id FROM requests WHERE provider = ? AND model = ? ORDER BY timestamp DESC, request_id DESC LIMIT 101",
+        args: ["p1", "m1"],
+        expectedIndex: "idx_requests_provider_model_ts",
+      },
+      {
+        name: "provider+model+cursor",
+        sql: "EXPLAIN QUERY PLAN SELECT row_json, timestamp, request_id FROM requests WHERE provider = ? AND model = ? AND (timestamp, request_id) < (?, ?) ORDER BY timestamp DESC, request_id DESC LIMIT 101",
+        args: ["p1", "m1", 5000, "tie-b"],
+        expectedIndex: "idx_requests_provider_model_ts",
+      },
+      {
+        name: "from+to+cursor",
+        sql: "EXPLAIN QUERY PLAN SELECT row_json, timestamp, request_id FROM requests WHERE timestamp >= ? AND (timestamp, request_id) < (?, ?) ORDER BY timestamp DESC, request_id DESC LIMIT 101",
+        args: [1000, 5000, "tie-b"],
+        expectedIndex: "idx_requests_ts",
+      },
+      {
+        name: "provider+from+to+cursor",
+        sql: "EXPLAIN QUERY PLAN SELECT row_json, timestamp, request_id FROM requests WHERE provider = ? AND timestamp >= ? AND (timestamp, request_id) < (?, ?) ORDER BY timestamp DESC, request_id DESC LIMIT 101",
+        args: ["p1", 1000, 5000, "tie-b"],
+        expectedIndex: "idx_requests_provider",
+      },
+      {
         name: "model+cursor",
         sql: "EXPLAIN QUERY PLAN SELECT row_json, timestamp, request_id FROM requests WHERE model = ? AND (timestamp, request_id) < (?, ?) ORDER BY timestamp DESC, request_id DESC LIMIT 101",
         args: ["m1", 5000, "tie-b"],
@@ -635,6 +659,37 @@ describe("request-history index (RI-02)", () => {
       const joined = steps.map(step => step.detail).join(" | ");
       expect(joined, check.name).toContain(check.expectedIndex);
       expect(joined, check.name).not.toContain("TEMP B-TREE");
+      if (check.sql.includes("(timestamp, request_id) < (?, ?)")) {
+        expect(joined, check.name).toContain("(timestamp,request_id)<(?,?)");
+      }
     }
+
+    // Skewed provider+model lookup must still pick idx_requests_provider_model_ts, not scan another provider's rows.
+    for (let i = 0; i < 60; i += 1) {
+      appendUsageEntry(entry(`skew-${i}`, 6000 + i, "other-heavy-provider", "shared-model", { status: 200 }));
+    }
+    appendUsageEntry(entry("target-hit", 5500, "sparse-provider", "shared-model", { status: 200 }));
+    const skewed = await queryRequestHistory({ provider: "sparse-provider", model: "shared-model" }, undefined, 10);
+    expect(skewed.rows.map(row => row.requestId)).toEqual(["target-hit"]);
+
+    // filters.to + cursor preserves exact pagination both when cursor.t <= to and when to < cursor.t.
+    for (const row of [
+      entry("b-4000-b", 4000, "win-p", "m1"),
+      entry("b-4000-a", 4000, "win-p", "m1"),
+      entry("b-3000", 3000, "win-p", "m1"),
+      entry("b-2000", 2000, "win-p", "m1"),
+    ]) appendUsageEntry(row);
+    const bounded1 = await queryRequestHistory({ provider: "win-p", from: 2000, to: 4000 }, undefined, 1);
+    expect(bounded1.rows.map(row => row.requestId)).toEqual(["b-4000-b"]);
+    const bounded2 = await queryRequestHistory({ provider: "win-p", from: 2000, to: 4000 }, bounded1.nextCursor, 2);
+    expect(bounded2.rows.map(row => row.requestId)).toEqual(["b-4000-a", "b-3000"]);
+    const bounded3 = await queryRequestHistory({ provider: "win-p", from: 2000, to: 4000 }, bounded2.nextCursor, 2);
+    expect(bounded3.rows.map(row => row.requestId)).toEqual(["b-2000"]);
+    expect(bounded3.hasMore).toBe(false);
+
+    // Passing a cursor at t=4000 while tightening filters.to=3000 keeps filters.to as the strict bound.
+    const narrowed = await queryRequestHistory({ provider: "win-p", from: 2000, to: 3000 }, bounded1.nextCursor, 5);
+    expect(narrowed.rows.map(row => row.requestId)).toEqual(["b-3000", "b-2000"]);
+    expect(narrowed.hasMore).toBe(false);
   });
 });

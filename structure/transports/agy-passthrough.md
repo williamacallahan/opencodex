@@ -109,7 +109,7 @@ identity headers. The strict Claude lane and the `/agy` lane share it.
 `src/server/agy-passthrough-send.ts` sends with the Node HTTP client because `fetch` adds a wildcard
 `Accept` to a request that has none; the Node client adds only `Host` and connection framing, follows
 no redirect, reuses a bounded LIFO HTTP/HTTPS agent pool (`AGENT_OPTIONS`) with idle-only 20-second
-keep-alive socket eviction (`IDLE_SOCKET_TIMEOUT_MS`), enforces separate 15-second connect and
+keep-alive socket eviction (`DEFAULT_AGY_IDLE_SOCKET_TIMEOUT_MS`), enforces separate 15-second connect and
 200-second response-header deadlines (`AgyUpstreamSendError`), and decodes nothing. Compressed ingress payloads
 for project lookup (`extractTopLevelJsonStringField`, zero-AST UTF-8 byte scan) and relayed quota
 answers decode asynchronously via promisified `node:zlib` helpers. Caught transport errors on send and mid-stream body reads emit a single-line JSON redacted

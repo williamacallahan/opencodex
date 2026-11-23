@@ -702,11 +702,10 @@ function queryRows(
   if (filters.profileId !== undefined) add("profile_id = ?", filters.profileId);
   if (filters.fallback !== undefined) add("fallback = ?", filters.fallback ? 1 : 0);
   if (filters.from !== undefined) add("timestamp >= ?", filters.from);
-  if (filters.to !== undefined) add("timestamp <= ?", filters.to);
-  if (cursor) {
+  if (cursor && (filters.to === undefined || cursor.t <= filters.to)) {
     where.push("(timestamp, request_id) < (?, ?)");
     values.push(cursor.t, cursor.i);
-  }
+  } else if (filters.to !== undefined) add("timestamp <= ?", filters.to);
   const whereSql = where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "";
   const rows = handle.query(
     `SELECT row_json, timestamp, request_id FROM requests${whereSql} ORDER BY timestamp DESC, request_id DESC LIMIT ?`,
