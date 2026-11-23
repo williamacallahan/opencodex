@@ -111,7 +111,7 @@ async function call(
   routeDeps: AnthropicResetGrantRouteDeps,
   body?: unknown,
   principal: ManagementContext["principal"] | "absent" = "gui-session",
-): Promise<{ status: number; json: Record<string, any> }> {
+): Promise<{ status: number; retryAfter: string | null; json: Record<string, any> }> {
   const url = new URL(`http://127.0.0.1:10100${path}`);
   const req = new Request(url, {
     method,
@@ -123,7 +123,7 @@ async function call(
   if (!response) throw new Error("route not handled");
   const text = await response.text();
   responses.push(text);
-  return { status: response.status, json: JSON.parse(text) };
+  return { status: response.status, retryAfter: response.headers.get("retry-after"), json: JSON.parse(text) };
 }
 
 const consume = (routeDeps: AnthropicResetGrantRouteDeps, body: Record<string, unknown> = { accountId: "acct-1", grantId: GRANT, operationId: OP }, principal?: ManagementContext["principal"] | "absent") =>
@@ -268,6 +268,8 @@ describe("GET /api/anthropic/reset-grants", () => {
     expect((await call("GET", "/api/anthropic/reset-grants?accountId=nope", deps(up))).json.error.code).toBe("no_account");
     const noToken = await call("GET", "/api/anthropic/reset-grants", deps(up, { accessTokenFor: async () => { throw new Error(`refresh failed for ${EMAIL} with ${TOKEN}`); } }));
     expect(noToken).toMatchObject({ status: 401, json: { error: { code: "auth_failed" } } });
+    up.status = () => new Response(`upstream said ${EMAIL}`, { status: 429, headers: { "Retry-After": "120" } });
+    expect(await call("GET", "/api/anthropic/reset-grants", deps(up))).toMatchObject({ status: 429, retryAfter: "120", json: { error: { code: "rate_limited" } } });
     up.status = () => new Response(`upstream said ${EMAIL}`, { status: 500 });
     expect(await call("GET", "/api/anthropic/reset-grants", deps(up))).toMatchObject({ status: 502, json: { error: { code: "upstream_unavailable" } } });
     up.status = () => Response.json({ cedar_ember: { eligible: "maybe" } });

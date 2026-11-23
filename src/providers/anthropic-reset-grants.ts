@@ -14,6 +14,7 @@
  * because the dashboard spends from what this module returns. Nothing here logs,
  * and no upstream body, token, or organization id leaves through an error message.
  */
+import { resolveClientRetryAfter } from "../lib/retry-after";
 import { CLAUDE_CLI_USER_AGENT } from "./claude-cli-identity";
 
 export const ANTHROPIC_API_ORIGIN = "https://api.anthropic.com";
@@ -62,11 +63,11 @@ export interface AnthropicResetGrantStatus {
   cooldownUntil: string | null;
 }
 
-export type AnthropicResetGrantErrorCode = "auth" | "upstream" | "malformed";
+export type AnthropicResetGrantErrorCode = "auth" | "rate_limited" | "upstream" | "malformed";
 
-/** A read failure. `message` is fixed text; upstream detail is never attached. */
+/** A read failure with no upstream body or private detail. */
 export class AnthropicResetGrantError extends Error {
-  constructor(readonly code: AnthropicResetGrantErrorCode) {
+  constructor(readonly code: AnthropicResetGrantErrorCode, readonly retryAfter?: string) {
     super(`Anthropic reset-grant read failed (${code})`);
     this.name = "AnthropicResetGrantError";
   }
@@ -241,6 +242,11 @@ async function getAccountJson(path: string, options: AnthropicAccountRequestOpti
     throw new AnthropicResetGrantError("upstream");
   }
   if (response.status === 401 || response.status === 403) throw new AnthropicResetGrantError("auth");
+  if (response.status === 429) {
+    throw new AnthropicResetGrantError("rate_limited", resolveClientRetryAfter({
+      status: response.status, upstreamRetryAfter: response.headers.get("retry-after"),
+    }));
+  }
   if (!response.ok) throw new AnthropicResetGrantError("upstream");
   try {
     return await response.json();

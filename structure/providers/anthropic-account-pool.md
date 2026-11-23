@@ -266,6 +266,8 @@ and Pool 2 uses `anthropic2-reset-grant-ledger.json`.
 query and the consume body, treats omission as the primary pool, echoes the provider and
 returns `invalid_provider` for an unconfigured instance. Account, grant and operation IDs,
 unknown-outcome retry ownership and session consent stay bound to that instance.
+An upstream rate limit on a status read returns `429 rate_limited` with a validated
+`Retry-After`. It does not report an empty grant list or authorize a claim.
 
 ## Pool-bound management surfaces
 

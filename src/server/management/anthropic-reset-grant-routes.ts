@@ -54,6 +54,7 @@ const MESSAGES = {
   auth_failed: "Sign in to this Anthropic account again.",
   account_paused: "This account is paused; resume it to read or use its resets.",
   upstream_unavailable: "Anthropic did not return the reset-grant status.",
+  rate_limited: "Anthropic rate-limited the reset-grant status read.",
   grant_not_usable: "This reset grant cannot be used right now.",
   operation_identity_mismatch: "This operation belongs to another account or grant.",
   in_flight: "This reset is still being processed.",
@@ -141,7 +142,14 @@ function ledgerFailure(ctx: ManagementContext, error: unknown, extra: Record<str
 }
 
 function readFailure(ctx: ManagementContext, error: unknown, extra: Record<string, unknown> = {}): Response {
-  if (error instanceof AnthropicResetGrantError && error.code === "auth") return fail(ctx, 401, "auth_failed", extra);
+  if (error instanceof AnthropicResetGrantError) {
+    if (error.code === "auth") return fail(ctx, 401, "auth_failed", extra);
+    if (error.code === "rate_limited") {
+      const response = fail(ctx, 429, "rate_limited", extra);
+      if (error.retryAfter !== undefined) response.headers.set("Retry-After", error.retryAfter);
+      return response;
+    }
+  }
   return fail(ctx, 502, "upstream_unavailable", extra);
 }
 
