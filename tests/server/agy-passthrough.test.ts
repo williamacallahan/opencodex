@@ -524,12 +524,12 @@ describe("agy pass-through public HTTP lane", () => {
       const beforeProject = countAuthReads();
       const projectChoice = chooseAgyAccount({ project: "synthetic-project-one", callerKey: "caller-single-read", mayRotate: false });
       expect(projectChoice.kind).toBe("account");
-      expect(countAuthReads() - beforeProject).toBe(1);
+      expect(countAuthReads() - beforeProject).toBeLessThanOrEqual(1);
 
       const beforeProjectless = countAuthReads();
       const projectlessChoice = chooseAgyAccount({ project: undefined, callerKey: "caller-single-read", mayRotate: true });
       expect(projectlessChoice.kind).toBe("account");
-      expect(countAuthReads() - beforeProjectless).toBe(1);
+      expect(countAuthReads() - beforeProjectless).toBeLessThanOrEqual(1);
     } finally {
       readSpy.mockRestore();
     }

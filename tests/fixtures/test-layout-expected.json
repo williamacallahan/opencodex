@@ -1723,5 +1723,9 @@
   "link-child-catalog-oracle.test.ts": "e2e-style",
   "messages-hybrid.test.ts": "claude-integration",
   "provider-quota-codex-lb.test.ts": "providers",
-  "claude-messages-token-estimate.test.ts": "claude-integration"
+  "claude-messages-token-estimate.test.ts": "claude-integration",
+  "responses-spill-async-posix.test.ts": "responses",
+  "agy-passthrough-resilience.test.ts": "server",
+  "oauth-store-cache.test.ts": "oauth",
+  "claude-messages-preparsed-budget.test.ts": "claude-integration"
 }

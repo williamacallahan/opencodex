@@ -9,9 +9,46 @@
 import { Agent as HttpAgent, request as httpRequest, type IncomingMessage } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 
-const httpsAgent = new HttpsAgent({ keepAlive: true });
-const httpAgent = new HttpAgent({ keepAlive: true });
+const AGENT_OPTIONS = {
+  keepAlive: true,
+  keepAliveMsecs: 15_000,
+  maxSockets: 256,
+  maxFreeSockets: 32,
+  scheduling: "lifo" as const,
+  timeout: 30_000,
+};
+const httpsAgent = new HttpsAgent(AGENT_OPTIONS);
+const httpAgent = new HttpAgent(AGENT_OPTIONS);
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "trailer", "te"]);
+export const DEFAULT_AGY_HEADER_TIMEOUT_MS = 30_000;
+
+export class AgyUpstreamSendError extends Error {
+  readonly phase: "connect" | "headers" | "aborted";
+  readonly code?: string;
+  readonly elapsedMs: number;
+  readonly host: string;
+  readonly reusedSocket?: boolean;
+
+  constructor(
+    message: string,
+    detail: {
+      phase: "connect" | "headers" | "aborted";
+      code?: string;
+      elapsedMs: number;
+      host: string;
+      reusedSocket?: boolean;
+      cause?: unknown;
+    },
+  ) {
+    super(message, detail.cause !== undefined ? { cause: detail.cause } : undefined);
+    this.name = "AgyUpstreamSendError";
+    this.phase = detail.phase;
+    this.code = detail.code;
+    this.elapsedMs = detail.elapsedMs;
+    this.host = detail.host;
+    this.reusedSocket = detail.reusedSocket;
+  }
+}
 
 export interface ExactResponse {
   readonly status: number;
@@ -48,13 +85,40 @@ function webBody(message: IncomingMessage): ReadableStream<Uint8Array> {
 }
 
 /** POST `body` to `url` with exactly `headers`; the response body streams back undecoded. */
-export function sendExactly(url: URL, headers: Headers, body: Uint8Array, signal: AbortSignal): Promise<ExactResponse> {
+export function sendExactly(
+  url: URL,
+  headers: Headers,
+  body: Uint8Array,
+  signal: AbortSignal,
+  headerTimeoutMs = DEFAULT_AGY_HEADER_TIMEOUT_MS,
+): Promise<ExactResponse> {
   return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    let phase: "connect" | "headers" | "aborted" = "connect";
+    let settled = false;
+    let detachSocketListener: (() => void) | undefined;
+    let headerTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const finish = () => {
+      if (headerTimer !== undefined) {
+        clearTimeout(headerTimer);
+        headerTimer = undefined;
+      }
+      detachSocketListener?.();
+      detachSocketListener = undefined;
+    };
+
     const outgoing: Record<string, string> = Object.fromEntries(headers);
     outgoing["content-length"] = String(body.byteLength);
     const secure = url.protocol === "https:";
     const send = secure ? httpsRequest : httpRequest;
     const req = send(url, { method: "POST", headers: outgoing, agent: secure ? httpsAgent : httpAgent, signal }, message => {
+      if (settled) {
+        message.destroy();
+        return;
+      }
+      settled = true;
+      finish();
       resolve({
         status: message.statusCode ?? 502,
         statusText: message.statusMessage ?? "",
@@ -62,7 +126,55 @@ export function sendExactly(url: URL, headers: Headers, body: Uint8Array, signal
         body: webBody(message),
       });
     });
-    req.on("error", reject);
+
+    const onSocket = (socket: { connecting?: boolean; pending?: boolean; on(ev: "connect", fn: () => void): void; removeListener(ev: "connect", fn: () => void): void }) => {
+      if (!socket.connecting && !socket.pending) {
+        phase = "headers";
+        return;
+      }
+      const onConnect = () => { phase = "headers"; };
+      socket.on("connect", onConnect);
+      detachSocketListener = () => socket.removeListener("connect", onConnect);
+    };
+    req.on("socket", onSocket);
+
+    if (headerTimeoutMs > 0) {
+      headerTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        finish();
+        const err = new AgyUpstreamSendError(`Upstream response header timeout after ${headerTimeoutMs}ms`, {
+          phase: signal.aborted ? "aborted" : phase,
+          code: "ETIMEDOUT",
+          elapsedMs: Math.max(0, Date.now() - startedAt),
+          host: url.host,
+          reusedSocket: (req as { reusedSocket?: boolean }).reusedSocket,
+        });
+        req.destroy(err);
+        reject(err);
+      }, headerTimeoutMs);
+    }
+
+    req.on("error", error => {
+      if (settled) return;
+      settled = true;
+      finish();
+      if (error instanceof AgyUpstreamSendError) {
+        reject(error);
+        return;
+      }
+      const code = error && typeof error === "object" && "code" in error
+        ? String((error as { code?: unknown }).code)
+        : undefined;
+      reject(new AgyUpstreamSendError(error instanceof Error ? error.message : String(error), {
+        phase: signal.aborted ? "aborted" : phase,
+        code,
+        elapsedMs: Math.max(0, Date.now() - startedAt),
+        host: url.host,
+        reusedSocket: (req as { reusedSocket?: boolean }).reusedSocket,
+        cause: error,
+      }));
+    });
     req.end(body);
   });
 }

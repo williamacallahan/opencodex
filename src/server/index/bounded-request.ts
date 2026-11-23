@@ -43,6 +43,14 @@ export async function readBoundedRequestText(req: Request, limit: number): Promi
 
 /** The same bounded read, returning the exact received bytes for callers that forward them unchanged. */
 export async function readBoundedRequestBytes(req: Request, limit: number): Promise<Uint8Array<ArrayBuffer> | null> {
+  const contentLengthHeader = req.headers.get("content-length");
+  if (contentLengthHeader !== null) {
+    const declared = Number(contentLengthHeader.trim());
+    if (Number.isInteger(declared) && declared > limit) {
+      await req.body?.cancel().catch(() => {});
+      return null;
+    }
+  }
   const body = req.body;
   if (!body) return new Uint8Array(0);
   const reader = body.getReader();
@@ -61,6 +69,16 @@ export async function readBoundedRequestBytes(req: Request, limit: number): Prom
     // Cancel rather than only releasing the lock: on the reject path the peer may still be
     // sending, and an uncancelled body keeps that transfer alive.
     await reader.cancel().catch(() => {});
+  }
+  if (chunks.length === 0) return new Uint8Array(0);
+  if (chunks.length === 1) {
+    const single = chunks[0]!;
+    if (single.buffer instanceof ArrayBuffer && single.byteOffset === 0 && single.byteLength === single.buffer.byteLength) {
+      return single as Uint8Array<ArrayBuffer>;
+    }
+    const copy = new Uint8Array(single.byteLength);
+    copy.set(single);
+    return copy;
   }
   const joined = new Uint8Array(total);
   let offset = 0;

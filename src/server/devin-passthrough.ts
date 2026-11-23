@@ -406,8 +406,18 @@ export async function handleDevinPassthrough(req: Request, ctx: DevinPassthrough
   try {
     const targetUrl = new URL(resolveDevinPassthroughBaseUrl(config, choice.apiBaseUrl) + parts.rpcPath + url.search);
     upstream = await sendExactly(targetUrl, headers, outgoingBody, controller.signal);
-  } catch {
+  } catch (error) {
     const cancelled = req.signal.aborted || controller.signal.aborted;
+    const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : undefined;
+    const phase = error && typeof error === "object" && "phase" in error ? String((error as { phase?: unknown }).phase) : undefined;
+    console.warn("[devin-passthrough] upstream failure", {
+      rpcPath: parts.rpcPath,
+      account: logCtx.accountLogLabel,
+      phase: phase ?? (cancelled ? "aborted" : "unknown"),
+      code: code ?? null,
+      cancelled,
+      draining: isDraining(),
+    });
     settle(cancelled ? 499 : 502);
     if (isDraining()) return refuse(503, "hub is restarting");
     return cancelled ? refuse(499, "request cancelled") : refuse(503, "could not reach Devin upstream");

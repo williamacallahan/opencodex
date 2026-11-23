@@ -58,8 +58,27 @@ export type AuthStoreBufferSnapshot =
   | { readonly kind: "malformed" };
 
 const authStoreDecoder = new TextDecoder("utf-8", { fatal: true });
+const AUTH_STORE_STAT_GUARD_MS = 50;
+
+interface AuthStoreCacheEntry {
+  readonly path: string;
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly size: bigint;
+  readonly mtimeNs: bigint;
+  readonly ctimeNs: bigint;
+  readonly store: AuthStore;
+  readonly hadLegacy: boolean;
+}
+
+let authStoreCache: AuthStoreCacheEntry | null = null;
 let lastReconciledGeneration = 0;
 let liveOAuthAccountKeys = new Set<string>();
+
+/** Test-only: drop the stat-validated `auth.json` cache. */
+export function clearAuthStoreCacheForTests(): void {
+  authStoreCache = null;
+}
 
 function oauthAccountKey(provider: string, accountId: string): string {
   return `${provider}\0${accountId}`;
@@ -397,18 +416,62 @@ function reportUnreadableAuthStore(path: string, raw: string | undefined): void 
   logOAuthEvent("level=error OAuth account store unreadable; serving an empty pool", { reason });
 }
 
+function captureAuthStoreCache(path: string, store: AuthStore, hadLegacy: boolean): void {
+  try {
+    const st = statSync(path, { bigint: true });
+    authStoreCache = {
+      path,
+      dev: st.dev,
+      ino: st.ino,
+      size: st.size,
+      mtimeNs: st.mtimeNs,
+      ctimeNs: st.ctimeNs,
+      store,
+      hadLegacy,
+    };
+  } catch {
+    authStoreCache = null;
+  }
+}
+
 /** Load and normalize the OAuth auth store with hardened permissions, and hand the result to the opt-in decision-quota slot (a no-op unless JEV quota signals are active). */
-function loadAuthStoreInternal(): { store: AuthStore; hadLegacy: boolean } {
+function loadAuthStoreInternal(options?: { bypassCache?: boolean }): { store: AuthStore; hadLegacy: boolean } {
   const path = getAuthStorePath();
+  if (!options?.bypassCache && authStoreCache && authStoreCache.path === path) {
+    try {
+      const st = statSync(path, { bigint: true });
+      if (
+        st.dev === authStoreCache.dev
+        && st.ino === authStoreCache.ino
+        && st.size === authStoreCache.size
+        && st.mtimeNs === authStoreCache.mtimeNs
+        && st.ctimeNs === authStoreCache.ctimeNs
+        && (process.platform === "win32" || (st.mode & 0o777n) === 0o600n)
+        && Date.now() - statTimeMs(st.mtimeNs) >= AUTH_STORE_STAT_GUARD_MS
+      ) {
+        clearUnreadableAuthStoreRecord();
+        notifyAuthStoreLoaded(authStoreCache.store);
+        return { store: authStoreCache.store, hadLegacy: authStoreCache.hadLegacy };
+      }
+    } catch {
+      authStoreCache = null;
+    }
+  }
   hardenConfigDir();
   hardenExistingSecret(path);
-  if (!existsSync(path)) { clearUnreadableAuthStoreRecord(); notifyAuthStoreLoaded({}); return { store: {}, hadLegacy: false }; }
+  if (!existsSync(path)) {
+    authStoreCache = null;
+    clearUnreadableAuthStoreRecord();
+    notifyAuthStoreLoaded({});
+    return { store: {}, hadLegacy: false };
+  }
   let result: { store: AuthStore; hadLegacy: boolean };
   let raw: string | undefined;
   try {
     raw = readFileSync(path, "utf-8");
     result = normalizeAuthStore(JSON.parse(raw));
   } catch {
+    authStoreCache = null;
     // Removed between the existence check and the read: absent, not unreadable.
     if (raw === undefined && !existsSync(path)) clearUnreadableAuthStoreRecord();
     else reportUnreadableAuthStore(path, raw);
@@ -416,6 +479,7 @@ function loadAuthStoreInternal(): { store: AuthStore; hadLegacy: boolean } {
     return { store: {}, hadLegacy: false };
   }
   clearUnreadableAuthStoreRecord();
+  captureAuthStoreCache(path, result.store, result.hadLegacy);
   // Outside the parse try: roster publication is advisory and must never route a loaded store into the invalid-config backup path.
   notifyAuthStoreLoaded(result.store);
   return result;
@@ -482,7 +546,9 @@ function persist(store: AuthStore): void {
     try { chmodSync(dir, 0o700); } catch { /* best-effort on existing dir */ }
   }
   hardenConfigDir();
-  publishCredentialSync(() => atomicWriteFileStreamed(getAuthStorePath(), fd => writeFileSync(fd, JSON.stringify(store, null, 2) + "\n")));
+  const path = getAuthStorePath();
+  publishCredentialSync(() => atomicWriteFileStreamed(path, fd => writeFileSync(fd, JSON.stringify(store, null, 2) + "\n")));
+  captureAuthStoreCache(path, store, false);
   clearUnreadableAuthStoreRecord();
   notifyAuthStoreLoaded(store);
 }
@@ -940,7 +1006,7 @@ function serializeMutation<T>(work: () => Promise<T>, retainedValues: readonly u
   return result;
 }
 export function mutateStore<T>(fn:(store:AuthStore)=>T|Promise<T>, retainedValues: readonly unknown[] = [], options?: { waitMs?: number; assertBeforePersist?: () => void; scrubLegacyBackup?: (result: T) => readonly string[]; finalizeResult?: (result: T, store: AuthStore) => void; afterPersist?: (result: T) => void; withConfigLock?: boolean }):Promise<T>{return serializeMutation(async()=>{const guard=await createOAuthFileLock({path:getAuthStoreLockPath(),staleAfterMs:30000}).acquire();try{
-    const { store, hadLegacy } = loadAuthStoreInternal();
+    const { store, hadLegacy } = loadAuthStoreInternal({ bypassCache: true });
     if (hadLegacy) backupLegacyOnce();
     const selections = new Map(Object.entries(store).map(([provider, set]) => [provider, {
       set,
@@ -1385,11 +1451,13 @@ export async function removeCredential(provider: string): Promise<"removed" | "n
 // ---------------------------------------------------------------------------
 
 export function getAccountSet(provider: string): ProviderAccountSet | null {
-  return loadAuthStore()[provider] ?? null;
+  const set = loadAuthStore()[provider];
+  return set ? { ...set, accounts: [...set.accounts] } : null;
 }
 
 export function listAccounts(provider: string): ProviderAccount[] {
-  return loadAuthStore()[provider]?.accounts ?? [];
+  const accounts = loadAuthStore()[provider]?.accounts;
+  return accounts ? [...accounts] : [];
 }
 
 export function listLiveOAuthAccountKeys(

@@ -131,15 +131,18 @@ export function chooseAgyAccount(request: AgyAccountRequest, now = Date.now()): 
     if (owners.length === 0) return { kind: "project-unowned" };
     const callerAccount = callerAccounts.get(request.callerKey)?.accountId;
     const ownerIds = new Set(owners.map(row => row.id));
+    const eligibleOwnerIds = new Set(
+      eligibleFailoverAccounts(ANTIGRAVITY_OAUTH_STORE_KEY, now, undefined, accountSet)
+        .filter(candidateId => ownerIds.has(candidateId)),
+    );
+    const preferred = callerAccount && eligibleOwnerIds.has(callerAccount)
+      ? owners.find(row => row.id === callerAccount && usableRow(row))
+      : undefined;
     const nextOwner = () => {
-      const id = leastUsed(
-        eligibleFailoverAccounts(ANTIGRAVITY_OAUTH_STORE_KEY, now, undefined, accountSet).filter(candidateId => ownerIds.has(candidateId)),
-        now,
-        rosterById,
-      );
+      const id = leastUsed([...eligibleOwnerIds], now, rosterById);
       return (id !== undefined ? rosterById.get(id) : undefined) ?? owners.find(usableRow);
     };
-    const owner = owners.find(row => row.id === callerAccount && usableRow(row)) ?? nextOwner();
+    const owner = preferred ?? nextOwner();
     if (!owner) return { kind: "project-account-unavailable" };
     rememberCaller(request.callerKey, owner.id, now);
     return { kind: "account", accountId: owner.id };

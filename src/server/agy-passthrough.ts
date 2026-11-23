@@ -14,7 +14,8 @@
  * `agy-passthrough-accounts.ts` owns the account choice.
  */
 import { createHash } from "node:crypto";
-import { brotliDecompressSync, gunzipSync, inflateSync, zstdDecompressSync } from "node:zlib";
+import { promisify } from "node:util";
+import { brotliDecompress, gunzip, inflate, zstdDecompress } from "node:zlib";
 import { admissionFields, resolveDataPlaneAdmissionSecret, type DataPlaneAdmission } from "./auth-cors";
 import { readBoundedRequestBytes } from "./index/bounded-request";
 import { isDraining, tryAdmitTurn } from "./lifecycle";
@@ -22,7 +23,7 @@ import { messagesEndToEndHeaders } from "./messages-native-integrity";
 import { disableResponsesRequestTimeout } from "./responses/fetch-helpers";
 import { addFinalRequestLog, nextRequestLogId, type RequestLogContext } from "./request-log";
 import { chooseAgyAccount, learnAgyAccountProject, noteAgySent, type AgyAccountChoice } from "./agy-passthrough-accounts";
-import { sendExactly, type ExactResponse } from "./agy-passthrough-send";
+import { AgyUpstreamSendError, sendExactly, type ExactResponse } from "./agy-passthrough-send";
 import { forceRefreshOAuthAccessSnapshot, getValidAccessSnapshotForAccount } from "../oauth";
 import { rotateGenericOAuthAccountOn429 } from "../oauth/generic-account-failover";
 import { extractProjectId } from "../oauth/google-antigravity";
@@ -102,17 +103,145 @@ function splitAgyPath(pathname: string): { key: string; method: string } | undef
   }
 }
 
+const gunzipAsync = promisify(gunzip);
+const inflateAsync = promisify(inflate);
+const brotliDecompressAsync = promisify(brotliDecompress);
+const zstdDecompressAsync = promisify(zstdDecompress);
+const utf8Decoder = new TextDecoder();
+
+/**
+ * Extract one top-level string field from raw UTF-8 JSON bytes without constructing
+ * an AST or decoding the whole request buffer into UTF-16.
+ */
+export function extractTopLevelJsonStringField(bytes: Uint8Array, field: string): string | undefined {
+  const skipWs = (pos: number): number => {
+    while (pos < bytes.length) {
+      const b = bytes[pos]!;
+      if (b !== 0x20 && b !== 0x09 && b !== 0x0A && b !== 0x0D) break;
+      pos += 1;
+    }
+    return pos;
+  };
+  const scanStr = (start: number): { end: number; escaped: boolean } | null => {
+    if (bytes[start] !== 0x22) return null;
+    let escaped = false;
+    let pos = start + 1;
+    while (pos < bytes.length) {
+      const b = bytes[pos]!;
+      if (b === 0x5C) {
+        escaped = true;
+        pos += 2;
+        continue;
+      }
+      if (b === 0x22) return { end: pos, escaped };
+      pos += 1;
+    }
+    return null;
+  };
+  const skipVal = (start: number): number => {
+    const b = bytes[start];
+    if (b === undefined) return -1;
+    if (b === 0x22) {
+      const str = scanStr(start);
+      return str ? str.end + 1 : -1;
+    }
+    if (b === 0x7B || b === 0x5B) {
+      let depth = 1;
+      let pos = start + 1;
+      while (pos < bytes.length && depth > 0) {
+        const ch = bytes[pos]!;
+        if (ch === 0x22) {
+          const str = scanStr(pos);
+          if (!str) return -1;
+          pos = str.end + 1;
+          continue;
+        }
+        if (ch === 0x7B || ch === 0x5B) depth += 1;
+        else if (ch === 0x7D || ch === 0x5D) depth -= 1;
+        pos += 1;
+      }
+      return depth === 0 ? pos : -1;
+    }
+    let pos = start;
+    while (pos < bytes.length) {
+      const ch = bytes[pos]!;
+      if (ch === 0x20 || ch === 0x09 || ch === 0x0A || ch === 0x0D || ch === 0x2C || ch === 0x7D || ch === 0x5D) break;
+      pos += 1;
+    }
+    return pos > start ? pos : -1;
+  };
+
+  let pos = skipWs(0);
+  if (bytes[pos] !== 0x7B) return undefined;
+  pos += 1;
+  const fieldBytes = Buffer.from(field, "utf8");
+  while (pos < bytes.length) {
+    pos = skipWs(pos);
+    if (bytes[pos] === 0x7D) return undefined;
+    const keyToken = scanStr(pos);
+    if (!keyToken) return undefined;
+    let matched = false;
+    if (!keyToken.escaped) {
+      const rawKeyLen = keyToken.end - (pos + 1);
+      if (rawKeyLen === fieldBytes.length) {
+        matched = true;
+        for (let i = 0; i < rawKeyLen; i += 1) {
+          if (bytes[pos + 1 + i] !== fieldBytes[i]) {
+            matched = false;
+            break;
+          }
+        }
+      }
+    } else {
+      try {
+        matched = JSON.parse(utf8Decoder.decode(bytes.subarray(pos, keyToken.end + 1))) === field;
+      } catch {
+        return undefined;
+      }
+    }
+    pos = skipWs(keyToken.end + 1);
+    if (bytes[pos] !== 0x3A) return undefined;
+    pos = skipWs(pos + 1);
+    if (pos >= bytes.length) return undefined;
+    if (matched) {
+      if (bytes[pos] !== 0x22) return undefined;
+      const valToken = scanStr(pos);
+      if (!valToken) return undefined;
+      if (!valToken.escaped) {
+        if (valToken.end === pos + 1) return undefined;
+        return utf8Decoder.decode(bytes.subarray(pos + 1, valToken.end));
+      }
+      try {
+        const value: unknown = JSON.parse(utf8Decoder.decode(bytes.subarray(pos, valToken.end + 1)));
+        return typeof value === "string" && value.length > 0 ? value : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+    pos = skipVal(pos);
+    if (pos < 0) return undefined;
+    pos = skipWs(pos);
+    if (bytes[pos] === 0x2C) {
+      pos += 1;
+      continue;
+    }
+    if (bytes[pos] === 0x7D) return undefined;
+    return undefined;
+  }
+  return undefined;
+}
+
 /** Decode a copy for reading only; null when the coding is one this lane does not read. */
-function decoded(bytes: Uint8Array, contentEncoding: string | null, maxOutputLength = MAX_AGY_REQUEST_BYTES): Uint8Array | null {
+async function decoded(bytes: Uint8Array, contentEncoding: string | null, maxOutputLength = MAX_AGY_REQUEST_BYTES): Promise<Uint8Array | null> {
   const coding = contentEncoding?.trim().toLowerCase();
   // Bounded: a small compressed body must not inflate past the caller's limit.
   const bound = { maxOutputLength };
   try {
     if (!coding || coding === "identity") return bytes;
-    if (coding === "gzip" || coding === "x-gzip") return gunzipSync(bytes, bound);
-    if (coding === "deflate") return inflateSync(bytes, bound);
-    if (coding === "br") return brotliDecompressSync(bytes, bound);
-    if (coding === "zstd") return zstdDecompressSync(bytes, bound);
+    if (coding === "gzip" || coding === "x-gzip") return await gunzipAsync(bytes, bound);
+    if (coding === "deflate") return await inflateAsync(bytes, bound);
+    if (coding === "br") return await brotliDecompressAsync(bytes, bound);
+    if (coding === "zstd") return await zstdDecompressAsync(bytes, bound);
   } catch {
     return null;
   }
@@ -120,18 +249,11 @@ function decoded(bytes: Uint8Array, contentEncoding: string | null, maxOutputLen
 }
 
 /** Read-only routing view of the body: the `project` it names. The forwarded bytes stay the originals. */
-function projectNamedBy(bytes: Uint8Array, contentEncoding: string | null): string | undefined | null {
-  const plain = decoded(bytes, contentEncoding);
+async function projectNamedBy(bytes: Uint8Array, contentEncoding: string | null): Promise<string | undefined | null> {
+  const plain = await decoded(bytes, contentEncoding);
   if (plain === null) return null;
   if (plain.byteLength === 0) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(new TextDecoder().decode(plain));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-    const project = (parsed as { project?: unknown }).project;
-    return typeof project === "string" && project.length > 0 ? project : undefined;
-  } catch {
-    return undefined;
-  }
+  return extractTopLevelJsonStringField(plain, "project");
 }
 
 /**
@@ -165,9 +287,9 @@ async function readRelayedJson(copy: ReadableStream<Uint8Array>, contentEncoding
       chunks.push(value);
     }
     // The decoded copy has the same bound, so a small compressed answer cannot expand past it.
-    const plain = decoded(Buffer.concat(chunks), contentEncoding, MAX_OBSERVED_ANSWER_BYTES);
+    const plain = await decoded(Buffer.concat(chunks), contentEncoding, MAX_OBSERVED_ANSWER_BYTES);
     if (!plain) return undefined;
-    const parsed: unknown = JSON.parse(new TextDecoder().decode(plain));
+    const parsed: unknown = JSON.parse(utf8Decoder.decode(plain));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
   } catch {
     return undefined;
@@ -252,7 +374,7 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
   disableResponsesRequestTimeout(req, ctx.server);
   const bytes = await readBoundedRequestBytes(req, MAX_AGY_REQUEST_BYTES);
   if (bytes === null) return refuse(413, "request body exceeds the pass-through limit");
-  const project = projectNamedBy(bytes, req.headers.get("content-encoding"));
+  const project = await projectNamedBy(bytes, req.headers.get("content-encoding"));
   if (project === null) return refuse(415, "unsupported request content-encoding");
   if (project === undefined && PROJECT_REQUIRED.test(parts.method)) return refuse(400, "a generation call must name its Cloud Code project");
 
@@ -306,8 +428,20 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
   let upstream: ExactResponse;
   try {
     upstream = await sendExactly(new URL(cloudCodeOrigin(config) + parts.method + url.search), headers, bytes, controller.signal);
-  } catch {
+  } catch (error) {
     const cancelled = req.signal.aborted || controller.signal.aborted;
+    const upstreamErr = error instanceof AgyUpstreamSendError ? error : undefined;
+    const code = upstreamErr?.code ?? (error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : undefined);
+    console.warn("[agy-passthrough] upstream failure", {
+      method: parts.method,
+      account: logCtx.accountLogLabel,
+      phase: upstreamErr?.phase ?? (cancelled ? "aborted" : "unknown"),
+      code: code ?? null,
+      elapsedMs: upstreamErr?.elapsedMs ?? Math.max(0, Date.now() - start),
+      reusedSocket: upstreamErr?.reusedSocket ?? null,
+      cancelled,
+      draining: isDraining(),
+    });
     settle(cancelled ? 499 : 502);
     if (isDraining()) return refuse(503, "hub is restarting");
     return cancelled ? refuse(499, "request cancelled") : refuse(503, "could not reach Google Cloud Code");
