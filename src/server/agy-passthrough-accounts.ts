@@ -21,7 +21,8 @@ import { randomInt } from "node:crypto";
 import { credentialGeneration, listAccounts, mergeAccountCredential } from "../oauth/store";
 import { eligibleFailoverAccounts, genericFailoverRetryAfterSeconds } from "../oauth/generic-account-failover";
 import { ANTIGRAVITY_OAUTH_STORE_KEY, antigravityLoginIdentity } from "../providers/antigravity-quota-identity";
-import { getCachedProviderAccountQuota } from "../providers/quota/account-cache";
+import { DISK_MAX_AGE_MS } from "../providers/account-quota-disk";
+import { observedAntigravityAccountQuota } from "../providers/quota/account-cache";
 
 const CALLER_AFFINITY_LIMIT = 1024;
 const CALLER_AFFINITY_TTL_MS = 6 * 60 * 60_000;
@@ -63,12 +64,13 @@ function rememberCaller(callerKey: string, accountId: string, now: number): void
 }
 
 /**
- * An account's most-used current Gem or Cla window, from agy's own quota readings of the last six
- * hours (the routing horizon of `getCachedProviderAccountQuota`). An account with no recent reading
- * counts as unused, so it is chosen, and agy's next quota call reads it.
+ * An account's most-used current Gem or Cla window, from agy's own reading of the slot's current
+ * sign-in within the routing horizon (six hours). An account with no such reading counts as unused,
+ * so it is chosen, and agy's next quota call reads it.
  */
 function bindingUsage(accountId: string, now: number): number {
-  const windows = getCachedProviderAccountQuota(ANTIGRAVITY_OAUTH_STORE_KEY, accountId)?.customWindows ?? [];
+  const quota = observedAntigravityAccountQuota(accountId);
+  const windows = quota && now - quota.updatedAt <= DISK_MAX_AGE_MS ? quota.customWindows ?? [] : [];
   return windows.reduce((most, window) => window.modelId === undefined && (window.resetAt === undefined || window.resetAt > now)
     ? Math.max(most, window.percent) : most, 0);
 }
@@ -110,21 +112,24 @@ export function chooseAgyAccount(request: AgyAccountRequest, now = Date.now()): 
   }
   const eligible = eligibleFailoverAccounts(ANTIGRAVITY_OAUTH_STORE_KEY, now);
   const previous = callerAccounts.get(request.callerKey);
+  // Accounts owning the caller's current project: a move among them keeps agy's cached project and its
+  // open trajectories valid on the new token (measured live: every moved writeTrajectoryAcls 200).
+  const current = previous && roster.find(row => row.id === previous.accountId);
+  const project = current && projectOf(current);
+  const sameProject = project === undefined ? []
+    : eligible.filter(id => id !== previous?.accountId && roster.some(row => row.id === id && projectOf(row) === project));
   if (previous && now - previous.at < CALLER_AFFINITY_TTL_MS
     && (request.mayRotate ? eligible.includes(previous.accountId) : usable(previous.accountId))) {
-    // A turn boundary (`loadCodeAssist`) may move the caller to a clearly less-used account, but only
-    // one that owns the caller's current project: then agy's cached project and its open
-    // trajectories stay valid on the new account (measured live: every moved writeTrajectoryAcls 200).
-    const current = roster.find(row => row.id === previous.accountId);
-    const sameProject = eligible.filter(id => id !== previous.accountId
-      && current !== undefined && projectOf(current) !== undefined && roster.some(row => row.id === id && projectOf(row) === projectOf(current)));
+    // A turn boundary (`loadCodeAssist`) may move the caller to a clearly less-used same-project account.
     const emptiest = request.mayRotate && sameProject.length > 0 ? Math.min(...sameProject.map(id => bindingUsage(id, now))) : undefined;
     const accountId = emptiest !== undefined && bindingUsage(previous.accountId, now) - emptiest >= BALANCE_MARGIN_PERCENT
       ? leastUsed(sameProject, now) ?? previous.accountId : previous.accountId;
     rememberCaller(request.callerKey, accountId, now);
     return { kind: "account", accountId };
   }
-  const accountId = leastUsed(eligible, now);
+  // A new caller, or one whose account is cooling: an owner of its project first, else any account
+  // (that loadCodeAssist answer hands agy the new account's project).
+  const accountId = leastUsed(sameProject.length > 0 ? sameProject : eligible, now);
   if (accountId === undefined) {
     return { kind: "pool-exhausted", retryAfterSeconds: genericFailoverRetryAfterSeconds(ANTIGRAVITY_OAUTH_STORE_KEY, now) };
   }

@@ -294,10 +294,12 @@ describe("agy pass-through public HTTP lane", () => {
     }
     expect(new Set(served).size).toBe(3);
     // Each caller then stays on the account it was given.
+    const given = served[0];
     served.length = 0;
-    await post("streamGenerateContent?alt=sse", '{"project":"shared-project"}', { authorization: "Bearer refreshed-a" });
-    await post("streamGenerateContent?alt=sse", '{"project":"shared-project"}', { authorization: "Bearer refreshed-a" });
-    expect(new Set(served).size).toBe(1);
+    for (let request = 0; request < 2; request++) {
+      expect((await post("streamGenerateContent?alt=sse", '{"project":"shared-project"}', { authorization: "Bearer refreshed-a" })).status).toBe(200);
+    }
+    expect(served).toEqual([given!, given!]);
   });
 
   test("at a turn boundary a caller moves to a clearly less-used account of its project, and every follow-up lands there", async () => {
@@ -336,6 +338,29 @@ describe("agy pass-through public HTTP lane", () => {
     // Within the margin it stays, so two close accounts do not trade it every turn.
     usage([36, 70, 40]);
     expect(await turn()).toBe(bearer(2));
+  });
+
+  test("a cooling account's caller moves to an owner of its project before an emptier account of another project", async () => {
+    await launch();
+    const { mergeAccountCredential } = await import("../../src/oauth/store");
+    const { recordPassiveAccountQuota } = await import("../../src/providers/quota/account-cache");
+    const { antigravityLoginIdentity } = await import("../../src/providers/antigravity-quota-identity");
+    const [one, two] = getAccountSet("google-antigravity")!.accounts;
+    for (const row of [one!, two!]) await mergeAccountCredential("google-antigravity", row.id, { ...row.credential, projectId: "shared-project" });
+    const rows = getAccountSet("google-antigravity")!.accounts;
+    rows.forEach((row, index) => recordPassiveAccountQuota("google-antigravity", row.id,
+      { customWindows: [{ label: "Gem (Weekly)", percent: [0, 30, 0][index]! }], updatedAt: Date.now() }, Number.MAX_SAFE_INTEGER,
+      antigravityLoginIdentity(row.id, row.credential)));
+    let status = 200;
+    reply = () => status === 200 ? Response.json({}) : new Response("{}", { status, headers: { "retry-after": "30" } });
+    expect((await post("loadCodeAssist", "{}", { authorization: "Bearer one-signin" })).status).toBe(200);
+    expect(calls.at(-1)!.headers.get("authorization")).toBe(`Bearer ${rows[0]!.credential.access}`);
+    // The first account hits its limit; the third is emptier but owns another project.
+    status = 429;
+    expect((await post("loadCodeAssist", "{}", { authorization: "Bearer one-signin" })).status).toBe(429);
+    status = 200;
+    expect((await post("loadCodeAssist", "{}", { authorization: "Bearer one-signin" })).status).toBe(200);
+    expect(calls.at(-1)!.headers.get("authorization")).toBe(`Bearer ${rows[1]!.credential.access}`);
   });
 
   test("a turn never moves a caller to an emptier account that does not own its project", async () => {
@@ -397,10 +422,12 @@ describe("agy pass-through public HTTP lane", () => {
     expect(limited.text).toBe('{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}');
     const cooled = served;
     reply = captured => { served = captured.headers.get("authorization")!; return Response.json({}); };
-    await post("writeTrajectoryAcls", '{"trajectoryId":"t"}');
+    const before = calls.length;
+    expect((await post("writeTrajectoryAcls", '{"trajectoryId":"t"}')).status).toBe(200);
     expect(served).toBe(cooled);
-    await post("loadCodeAssist", "{}");
+    expect((await post("loadCodeAssist", "{}")).status).toBe(200);
     expect(served).not.toBe(cooled);
+    expect(calls).toHaveLength(before + 2);
   });
 
   test("refuses before any upstream call when the key, client, project, account or switch does not qualify", async () => {
