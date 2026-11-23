@@ -508,8 +508,9 @@ Regression coverage: `tests/adapters/anthropic/anthropic-model-weekly-admission.
 
 `src/server/messages-native-oauth.ts` binds native Claude Messages through the same session,
 model-route and generation-fenced account authority as Responses. It rechecks current model routes
-across asynchronous preparation and before sending. Concurrent affine sessions retain their own
-account while a manual selection revokes stale affinity authority.
+across asynchronous preparation and before sending. An already-bound native session keeps its
+eligible account without changing the active account for new sessions. A manual selection revokes
+stale affinity authority.
 `src/server/messages-native.ts` preserves caller message/cache structure while substituting the
 committed credential and provider UUID. Physical sends acquire family admission before spend/send
 accounting, release the lease on every exit and attribute quota only to the actual sending generation.

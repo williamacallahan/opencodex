@@ -1095,6 +1095,8 @@ for the subscription and client conditions the pool is meant for.
 | `anthropicAccountPool.stickyLimit?` | `number` | `1` | Successful new-session binds retained on one round-robin selection. Range 1–100. |
 | `anthropicAccountPool.routes?` | `{name, match, accounts, fallback?}[]` | — | Ordered model routes for the enabled Anthropic OAuth pool. `match` is a full, case-sensitive model ID glob (`*` and `?`); first match wins. `accounts` contains stored account IDs, not aliases. Eligible accounts are limited to the route for initial selection and 429 retry. Without fallback, an empty route returns a local 401, or 429 with route-scoped `Retry-After` if all its declared accounts are cooling. With `fallback: true`, an all-cooling ordinary pool returns 429 with its earliest usable cooldown, even if a saved route account was removed; the client response never names the route; the proxy log uses `route:#<n>` for the rule’s 1-based position. `fallback: true` widens only when no routed account is eligible; fill-first then uses ordinary pool order. No matching rule retains normal selection; disabling the pool makes saved routes inactive. Invalid rules fail validated writes and prevent routed dispatch until corrected. `null` clears routes through the settings API. |
 
+For native Claude Messages, Active is the pool's selection for new sessions. A conversation already assigned to an eligible account can keep using it without changing Active.
+
 Anthropic OAuth vision and web-search helpers match these routes using each helper's own model,
 independently of the main request model. Each helper authenticates with its routed account, which
 can differ from the globally active account. If a strict helper route has no eligible account, the

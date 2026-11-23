@@ -152,6 +152,7 @@ import { admissionModelDeniedResponse, assertClientNamedModelEnabled, assertRout
 import { clientFacingModelLabel } from "../lib/error-destination";
 import { nativeMessagesToolScopeDenial } from "./messages-native-scope";
 import { retainUpstreamMessagesRequestId } from "./messages-response-headers";
+import { normalizeLogConversationId } from "./request-log-conversation";
 
 export {
   isNativeMessagesRouteEligible,
@@ -242,8 +243,9 @@ export async function handleStrictNativeMessages(
       options.logCtx.spendInputEstimateTokens = 0;
       options.logCtx.spendOutputCeilingTokens = 0;
     }
-    return await handleNativeMessages({ ...options, route, body, requestedModel: body.model, selector, integrity,
-      sessionKey: req.headers.get("session_id") ?? req.headers.get("x-claude-code-session-id") });
+    const sessionKey = req.headers.get("session_id")?.trim() || req.headers.get("x-claude-code-session-id")?.trim() || null;
+    options.logCtx.conversationId ??= normalizeLogConversationId(sessionKey);
+    return await handleNativeMessages({ ...options, route, body, requestedModel: body.model, selector, integrity, sessionKey });
   } catch (error) {
     if (error instanceof AdmissionModelDeniedError) return refuse(admissionModelDeniedResponse(error));
     if (error instanceof DisabledModelError) return refuse(ownedDisabledModelResponse(error.message));

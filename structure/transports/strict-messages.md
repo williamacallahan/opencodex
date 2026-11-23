@@ -86,6 +86,9 @@ failure terminates the body without synthetic frames. Bounded usage observation 
 separately from forwarding; unsupported or malformed coding and inspection overflow leave usage
 unresolved rather than inventing it. Counting goes upstream and settles as non-generation work.
 Body/turn leases last through response completion or cancellation for both endpoints.
+Strict dispatch uses the first nonblank `session_id` or `x-claude-code-session-id` as its
+session key. Logs store only its digest, so a CLI session can be matched to the serving
+account without changing the forwarded headers or body.
 Passive refusal inspection opts into the existing bounded-body reader and bounded request-content decoder
 for identity, gzip/x-gzip, deflate, br and zstd. Both compressed input and inflated output are capped;
 malformed, unsupported, oversized or interrupted bodies cannot authorize body-based refusal changes. This clone-only

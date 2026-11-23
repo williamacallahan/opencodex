@@ -562,12 +562,15 @@ describe("native pooled Messages dispatch", () => {
     await seed(2);
     const config = fixtureConfig();
     config.anthropicAccountPool = { enabled: true, strategy: "round-robin" };
-    for (const session of ["fixture-a", "fixture-b", "fixture-a"]) {
+    for (const session of ["fixture-a", "fixture-b"]) {
       expect((await send(config, { ...BODY, stream: false }, { session_id: session })).response.status).toBe(200);
     }
+    const activeAfterNewSession = captureOAuthAccountSelection("anthropic");
+    expect((await send(config, { ...BODY, stream: false }, { session_id: "fixture-a" })).response.status).toBe(200);
     const bearers = sent.map(entry => entry.headers.get("authorization"));
     expect(bearers[0]).not.toBe(bearers[1]);
     expect(bearers[2]).toBe(bearers[0]);
+    expect(captureOAuthAccountSelection("anthropic")).toEqual(activeAfterNewSession);
   });
 
   test("blank session_id retains affinity through the Claude Code session header", async () => {
@@ -1091,7 +1094,8 @@ describe("strict Messages OAuth public HTTP transport", () => {
       const ids = await seed(2);
       await setAccountPaused("anthropic", ids[0]!, true);
       await launch();
-      const response = await post(path);
+      const session = `strict-session-${crypto.randomUUID()}`;
+      const response = await post(path, raw, undefined, { session_id: " ", "x-claude-code-session-id": session });
       expect(response.status).toBe(200);
       expect(new Uint8Array(await response.arrayBuffer())).toEqual(path.endsWith("count_tokens")
         ? encode('{ "input_tokens":731, "future":-0 }') : answer);
@@ -1104,6 +1108,12 @@ describe("strict Messages OAuth public HTTP transport", () => {
       expect(captured[0]!.headers.has("x-api-key")).toBe(false);
       expect(captured[0]!.headers.get("anthropic-beta")).toBe("future-beta-2099");
       expect(captured[0]!.headers.get("anthropic-version")).toBe("2099-01-01");
+      expect(captured[0]!.headers.get("x-claude-code-session-id")).toBe(session);
+      if (!path.endsWith("count_tokens")) {
+        const key = new Bun.CryptoHasher("sha256").update(session).digest("hex").slice(0, 32);
+        expect(getRequestLogEntries().find(row => row.conversationId === key))
+          .toMatchObject({ status: 200, provider: formatAnthropicProviderForLog("anthropic", ids[1]) });
+      }
     });
 
     for (const status of [401, 429]) test(`strict OAuth ${status} on ${path} does not refresh or fail over`, async () => {

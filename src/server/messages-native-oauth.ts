@@ -49,6 +49,7 @@ export interface NativeOAuthBinding {
   /** Config-authorized physical destination, captured before any credential await. */
   readonly routeTarget: string;
   readonly selection: Selection;
+  readonly requiresAffinity?: true;
   readonly snapshot: OAuthAccessSnapshot;
   /** Anthropic account UUID from the same stored generation, distinct from snapshot.accountId. */
   readonly providerAccountUuid?: string;
@@ -161,7 +162,9 @@ export async function resolveNativeOAuthBindingForInstance(
     assertOwner();
     if (candidate.provider !== instance) throw new NativeOAuthSelectionChangedError();
     if (!routeIsCurrent(instance, config, model, routeDecision)) continue;
-    const committed = await commitOAuthAccountSelection(instance, candidate.accountId, {
+    // An already-bound conversation can use its own seat without changing the default for new sessions.
+    const retainsAffinity = !recoveryAccountId && proposed.reason === "affinity" && proposed.accountId === accountId;
+    const committed = retainsAffinity ? selection : await commitOAuthAccountSelection(instance, candidate.accountId, {
       expectedSelection: selection,
       expectedCredentialGeneration: candidate.generation,
       requireUsableAccount: true,
@@ -170,14 +173,14 @@ export async function resolveNativeOAuthBindingForInstance(
     if (committed) {
       if (!routeIsCurrent(instance, config, model, routeDecision)
         || manualSelectionGeneration !== routing.captureAnthropicManualSelectionGeneration()) continue;
-      if (!routing.commitAnthropicSelectionRouting(candidate.accountId, selection, committed, {
+      if (!retainsAffinity && !routing.commitAnthropicSelectionRouting(candidate.accountId, selection, committed, {
         config, sessionKey, model, routeDecision,
         reason: accountId === proposed.accountId ? proposed.reason : undefined,
         expectedCredentialGeneration: candidate.generation,
       })) continue;
       const row = getAccountCredentialWithStatus(instance, candidate.accountId);
       if (!row || row.credential.access !== candidate.accessToken || credentialGeneration(row.credential) !== candidate.generation) continue;
-      const binding: NativeOAuthBinding = { instance, routeTarget, selection: committed, snapshot: candidate, providerAccountUuid: row.credential.accountId, routeDecision, sessionKey, model, config, manualSelectionGeneration };
+      const binding: NativeOAuthBinding = { instance, routeTarget, selection: committed, snapshot: candidate, providerAccountUuid: row.credential.accountId, routeDecision, sessionKey, model, config, manualSelectionGeneration, ...(retainsAffinity ? { requiresAffinity: true } : {}) };
       if (nativeOAuthBindingIsCurrent(binding)) return binding;
     }
   }
@@ -205,7 +208,7 @@ export function nativeOAuthBindingIsCurrent(binding: NativeOAuthBinding): boolea
   // session's affinity. Manual selection clears affinity and precedes it in the selector.
   const selectionCurrent = sessionRoute?.reason === "affinity"
     && sessionRoute.accountId === binding.snapshot.accountId
-    || (selected?.accountId === binding.selection.accountId && selected?.revision === binding.selection.revision);
+    || (!binding.requiresAffinity && selected?.accountId === binding.selection.accountId && selected?.revision === binding.selection.revision);
   return selectionCurrent
     && !!row && !row.paused && !row.needsReauth && row.credential.expires > Date.now()
     && !routing.getAnthropicAccountHealthSnapshot(binding.snapshot.accountId)
