@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   clearResponseStateForTests,
   expandPreviousResponseInput,
+  flushPendingResponseSpillsForTests,
   previousResponseReplayPrefixLength,
   rememberResponseState,
   replayOverlapSkipsForTests,
@@ -327,7 +328,7 @@ describe("replay overlap: comparison is bounded", () => {
 });
 
 describe("replay overlap: contracts held elsewhere", () => {
-  test("the anchor survives a spill round-trip", () => {
+  test("the anchor survives a spill round-trip", async () => {
     // Regression: writeResponseSpillDurably rebuilds the payload field by field, so an
     // anchor threaded everywhere else was still dropped on the way to disk — and a spilled
     // entry silently stopped being deduplicable.
@@ -340,6 +341,7 @@ describe("replay overlap: contracts held elsewhere", () => {
         output: [{ type: "message", id: "msg_spilled", role: "assistant", content: big }],
       };
       rememberResponseState({ model: "m", input: "ask", store: true }, first);
+      await flushPendingResponseSpillsForTests();
 
       const result = expandPreviousResponseInput({
         model: "m",

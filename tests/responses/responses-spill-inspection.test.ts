@@ -14,6 +14,7 @@ import { setPlatformForTests } from "../../src/lib/windows-secret-acl";
 import {
   clearResponseStateForTests,
   clearResponseStateMemoryForTests,
+  flushPendingResponseSpillsForTests,
   flushResponseState,
   inspectResponseSpillStorage,
   rememberResponseState,
@@ -165,6 +166,7 @@ describe("response spill directory inspection", () => {
     rememberLarge("resp_swap", "a".repeat(8_000));
     await flushResponseState();
     rememberLarge("resp_swap", "b".repeat(8_000));
+    await flushPendingResponseSpillsForTests();
     // Between the stub swap and the next stable snapshot the OLD generation sits in
     // pendingSpillUnlinks: still owned, never an orphan. This is synchronous — the
     // debounced persist cannot interleave inside a single turn.

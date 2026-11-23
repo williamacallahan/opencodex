@@ -958,7 +958,7 @@ export async function executeResponsesRunTurn(
           onCompletedResponse: (response: Record<string, unknown>, providerState?: OcxProviderContinuationState) => {
             commitReasoningReplayServingRoute();
             rememberKiroDeliveredFinalAnswer(transportState.adapter.name, response);
-            if (!routedCompaction) {
+            if (!routedCompaction && inboundWire === "responses") {
               rememberResponseState(
                 parsed._rawBody,
                 response,
@@ -1125,15 +1125,17 @@ export async function executeResponsesRunTurn(
       });
       if (!routedCompaction) {
         rememberKiroDeliveredFinalAnswer(transportState.adapter.name, json);
-        rememberResponseState(
-          parsed._rawBody,
-          json,
-          continuationStateForResponse(providerState),
-          {
-            ...responseStateOptions(adapterNeedsForcedContinuation(transportState.adapter.name)),
-            retainForToolContinuation: adapterNeedsToolCallContinuation(transportState.adapter.name),
-          },
-        );
+        if (inboundWire === "responses") {
+          rememberResponseState(
+            parsed._rawBody,
+            json,
+            continuationStateForResponse(providerState),
+            {
+              ...responseStateOptions(adapterNeedsForcedContinuation(transportState.adapter.name)),
+              retainForToolContinuation: adapterNeedsToolCallContinuation(transportState.adapter.name),
+            },
+          );
+        }
       }
       // #1926 gap 2: the buffered path queued its signature persists inside
       // buildResponseJSON; bound the durability window before the JSON becomes

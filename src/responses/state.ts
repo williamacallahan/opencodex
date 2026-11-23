@@ -3,15 +3,14 @@ export { previousResponseReplayPrefixLength, previousResponseRestoredPrefixLengt
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { atomicWriteFileAsync, getConfigDir, resolveWriteTarget } from "../config";
-import { configuredAppOwnedMemoryBudgetBytes, enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
-import { windowsSecretAclApplies } from "../lib/windows-secret-acl";
+import { configuredAppOwnedMemoryBudgetBytes, enforceAppOwnedMemoryBudgetIfNeeded, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
 import { isValidProviderContinuationOwner } from "./provider-continuation";
 import type { OcxProviderContinuationOwner, OcxProviderContinuationState } from "../types";
 import {
   deleteResponseSpill, inspectResponseSpillDir, noteStubSwapForTest, prospectiveResponseSpillBytes,
   readResponseSpill, recoverOrphanedResponseSpills, resetPeriodicSpillSweepCursorForTests,
   responseSpillDirectory, responseSpillPayloadCap, sweepOrphanedResponseSpillsPeriodically,
-  type ResponseSpillDirInspection, type ResponseSpillRef, writeResponseSpillDurably,
+  type ResponseSpillDirInspection, type ResponseSpillRef,
 } from "./spill-store";
 import { collectReferencedSpillFileNames, snapshotReferencedSpillFileNames } from "./state/spill-inspect";
 import { selectSnapshotEntries, snapshotPayload } from "./state/snapshot-select";
@@ -142,8 +141,11 @@ export type PreviousResponseReplayFailure = {
 const states = new Map<string, StoredResponseState>();
 let storedResponseBytes = 0;
 let residentResponseBytes = 0;
+let spilledStateBytes = 0;
+let pendingSpillUnlinkBytes = 0;
 let oldestResidentId: string | undefined;
 let oldestResidentAt: number | null = null;
+let oldestCreatedAt: number | null = null;
 let byteCapOverride: number | null = null;
 let snapshotTotalCapOverride: number | null = null;
 let stateRevision = 0;
@@ -166,20 +168,16 @@ let lastSnapshotTarget: string | null = null;
  */
 async function snapshotOnDiskMatches(path: string, payload: string, payloadBytes: number): Promise<boolean> {
   try {
-    const file = Bun.file(path);
-    if (file.size !== payloadBytes) return false;
-    if (await file.text() !== payload) return false;
+    const stat = statSync(path);
+    if (stat.size !== payloadBytes) return false;
     // Content matching is not the whole invariant. This file holds persisted request
     // and response bodies, and `atomicWriteFileAsync` writes it owner-only; the
     // unconditional rewrite used to restore that on every mutation. Skipping without
     // checking would let a broadened mode persist indefinitely, so treat a widened
     // file as "does not match" and let the caller rewrite it through the hardening
     // path. POSIX only — Windows ACLs are re-applied by that same write path.
-    if (process.platform !== "win32") {
-      const mode = statSync(path).mode & 0o777;
-      if (mode !== 0o600) return false;
-    }
-    return true;
+    if (process.platform !== "win32" && (stat.mode & 0o777) !== 0o600) return false;
+    return await Bun.file(path).text() === payload;
   } catch {
     return false;
   }
@@ -199,12 +197,24 @@ const pendingSpillUnlinks: ResponseSpillRef[] = [];
 const PENDING_SPILL_UNLINKS_MAX = 128;
 
 
-function deferSupersededSpill(ref: ResponseSpillRef | undefined): void {
-  if (!ref) return;
+function deferSpillUnlink(ref: ResponseSpillRef): void {
   pendingSpillUnlinks.push(ref);
+  pendingSpillUnlinkBytes += ref.payloadBytes;
   while (pendingSpillUnlinks.length > PENDING_SPILL_UNLINKS_MAX) {
-    deleteResponseSpill(pendingSpillUnlinks.shift()!);
+    const evicted = pendingSpillUnlinks.shift()!;
+    pendingSpillUnlinkBytes = Math.max(0, pendingSpillUnlinkBytes - evicted.payloadBytes);
+    deleteResponseSpill(evicted);
   }
+}
+
+function takeOldestPendingSpillUnlink(): ResponseSpillRef | undefined {
+  const ref = pendingSpillUnlinks.shift();
+  if (ref) pendingSpillUnlinkBytes = Math.max(0, pendingSpillUnlinkBytes - ref.payloadBytes);
+  return ref;
+}
+
+function deferSupersededSpill(ref: ResponseSpillRef | undefined): void {
+  if (ref) deferSpillUnlink(ref);
 }
 
 
@@ -238,22 +248,11 @@ function spillByteCap(): number {
 }
 
 /**
- * Live total of durable spill payloads. Recomputed per call rather than carried as
- * a running counter: spilled entries reach `states` through several insertion paths
- * (demotion swap, direct oversized admission, snapshot reload), and one missed
- * increment there would silently disable the cap, where an O(MAX_STORED_RESPONSES)
- * walk cannot drift.
+ * O(1) live total of durable spill payloads maintained alongside `states` and
+ * `pendingSpillUnlinks` across the few centralized map/unlink mutation helpers.
  */
 function spilledResponseBytes(): number {
-  let total = 0;
-  for (const entry of states.values()) {
-    if (entry.kind === "spill") total += entry.spill.payloadBytes;
-  }
-  // Superseded generations awaiting a durable snapshot are still files on disk.
-  // Counting only `states` would let PENDING_SPILL_UNLINKS_MAX of them sit outside
-  // the budget while it reports itself satisfied.
-  for (const ref of pendingSpillUnlinks) total += ref.payloadBytes;
-  return total;
+  return spilledStateBytes + pendingSpillUnlinkBytes;
 }
 
 /**
@@ -329,18 +328,25 @@ function recomputeOldestResident(): void {
 function replaceMapEntry(id: string, next: StoredResponseState, expected?: StoredResponseState): boolean {
   const existing = states.get(id);
   if (expected && existing !== expected) return false;
-  storedResponseBytes -= existing?.sizeBytes ?? 0;
+  if (existing) {
+    storedResponseBytes -= existing.sizeBytes;
+    if (existing.kind === "resident") residentResponseBytes -= existing.sizeBytes;
+    else if (existing.kind === "spill") spilledStateBytes -= existing.spill.payloadBytes;
+    if (oldestCreatedAt !== null && existing.createdAt === oldestCreatedAt) oldestCreatedAt = null;
+    states.delete(id);
+  }
   storedResponseBytes += next.sizeBytes;
-  if (existing?.kind === "resident") {
-    residentResponseBytes -= existing.sizeBytes;
-  }
-  if (next.kind === "resident") {
-    residentResponseBytes += next.sizeBytes;
-  }
+  if (next.kind === "resident") residentResponseBytes += next.sizeBytes;
+  else if (next.kind === "spill") spilledStateBytes += next.spill.payloadBytes;
   if (storedResponseBytes < 0) storedResponseBytes = 0;
   if (residentResponseBytes < 0) residentResponseBytes = 0;
-  if (existing) states.delete(id);
+  if (spilledStateBytes < 0) spilledStateBytes = 0;
   states.set(id, next);
+  if (states.size === 1) {
+    oldestCreatedAt = next.createdAt;
+  } else if (oldestCreatedAt !== null && next.createdAt < oldestCreatedAt) {
+    oldestCreatedAt = next.createdAt;
+  }
   if (oldestResidentId === id) {
     recomputeOldestResident();
   } else if (next.kind === "resident" && (oldestResidentAt === null || next.createdAt < oldestResidentAt)) {
@@ -370,12 +376,15 @@ function deleteEntry(id: string, options: { deleteSpill?: boolean } = {}): void 
   if (!existing) return;
   const supersededSpill = cancelPendingResponseSpill(id);
   storedResponseBytes -= existing.sizeBytes;
-  if (existing.kind === "resident") {
-    residentResponseBytes -= existing.sizeBytes;
-  }
+  if (existing.kind === "resident") residentResponseBytes -= existing.sizeBytes;
+  else if (existing.kind === "spill") spilledStateBytes -= existing.spill.payloadBytes;
   if (storedResponseBytes < 0) storedResponseBytes = 0;
   if (residentResponseBytes < 0) residentResponseBytes = 0;
+  if (spilledStateBytes < 0) spilledStateBytes = 0;
   states.delete(id);
+  if (states.size === 0 || (oldestCreatedAt !== null && existing.createdAt === oldestCreatedAt)) {
+    oldestCreatedAt = null;
+  }
   if (oldestResidentId === id) recomputeOldestResident();
   stateRevision += 1;
   if (options.deleteSpill !== false) deleteOwnedSpills(existing);
@@ -390,19 +399,13 @@ function replaceWithSpillFailure(
   const existing = states.get(id);
   if (expected && existing !== expected) return;
   const failed = tombstone(id, expected?.createdAt ?? existing?.createdAt ?? now());
-  if (replaceMapEntry(id, failed, expected)) {
-    if (existing) {
-      if (options.deferSpillUnlink && existing.kind === "spill") {
-        // Crash consistency (same rule as replaceSpillEntryAtomically): the old
-        // durable snapshot still references this generation until the tombstone
-        // itself is durable — queue the unlink for the next stable persist.
-        pendingSpillUnlinks.push(existing.spill);
-        while (pendingSpillUnlinks.length > PENDING_SPILL_UNLINKS_MAX) {
-          deleteResponseSpill(pendingSpillUnlinks.shift()!);
-        }
-      } else {
-        deleteOwnedSpills(existing);
-      }
+  if (replaceMapEntry(id, failed, expected) && existing) {
+    if (options.deferSpillUnlink && existing.kind === "spill") {
+      // Crash consistency: the durable snapshot still references this generation
+      // until the tombstone itself is durable — queue the unlink for the next stable persist.
+      deferSpillUnlink(existing.spill);
+    } else {
+      deleteOwnedSpills(existing);
     }
   }
 }
@@ -425,53 +428,6 @@ function swapResidentForSpill(id: string, expected: ResidentResponseState, ref: 
   }
   noteStubSwapForTest();
   return true;
-}
-
-function replaceSpillEntryAtomically(
-  id: string,
-  expected: SpilledResponseState,
-  candidate: ResidentResponseState,
-): void {
-  try {
-    const ref = writeResponseSpillDurably(id, {
-      createdAt: candidate.createdAt,
-      ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
-      items: candidate.items,
-      ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
-      ...(candidate.providers ? { providers: candidate.providers } : {}),
-      ...(candidate.unforcedStoreFalse ? { unforcedStoreFalse: candidate.unforcedStoreFalse } : {}),
-    });
-    const base: Omit<SpilledResponseState, "sizeBytes"> = {
-      kind: "spill",
-      createdAt: candidate.createdAt,
-      ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
-      ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
-      ...(candidate.providers ? { providers: candidate.providers } : {}),
-      selfContained: candidate.selfContained,
-      ...(candidate.unforcedStoreFalse ? { unforcedStoreFalse: candidate.unforcedStoreFalse } : {}),
-      spill: ref,
-    };
-    const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
-    if (!replaceMapEntry(id, next, expected)) {
-      deleteResponseSpill(ref);
-      return;
-    }
-    noteSpillWriteSuccess();
-    noteStubSwapForTest();
-    // The old generation is NOT unlinked here (review C1-1): the new stub is
-    // only durable once the debounced snapshot flushes — a crash before that
-    // reloads the OLD stub, which must still find its file. Queue the unlink;
-    // persistNow() drains the queue only after the snapshot write succeeds.
-    pendingSpillUnlinks.push(expected.spill);
-    while (pendingSpillUnlinks.length > PENDING_SPILL_UNLINKS_MAX) {
-      deleteResponseSpill(pendingSpillUnlinks.shift()!);
-    }
-  } catch (error) {
-    noteSpillWriteFailure(error);
-    // deferSpillUnlink: the durable snapshot may still reference the old
-    // generation; deleting it now would strand the old stub after a crash.
-    replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
-  }
 }
 
 function exceedsSpillCap(id: string, candidate: ResidentResponseState, cap: number): boolean {
@@ -497,28 +453,21 @@ function setResidentEntry(id: string, entry: ResidentInput): void {
     pruneResponses();
     return;
   }
-  if (windowsSecretAclApplies() && (expected?.kind === "spill" || spillQueueSupersededSpillFor(id))) {
+  if (expected?.kind === "spill" || spillQueueSupersededSpillFor(id)) {
     replaceWithPendingResponseSpill(id, candidate, expected);
     pruneResponses();
     return;
   }
-  if (expected?.kind === "spill") {
-    replaceSpillEntryAtomically(id, expected, candidate);
-    pruneResponses();
-    return;
-  }
-  if (windowsSecretAclApplies()) cancelPendingResponseSpill(id);
+  cancelPendingResponseSpill(id);
   if (!replaceMapEntry(id, candidate, expected)) return;
   pruneResponses();
 }
 
 /**
  * Admission boundary for candidates that can never fit as resident (larger
- * than the whole resident-map cap). Writes them DIRECTLY to durable spill and
- * installs only the stub — the oversized candidate never becomes resident and
- * no unrelated resident is demoted to make room for it. Candidates above the
- * single-spill payload ceiling are tombstoned instead: retaining a spill the
- * replay ceiling would refuse to read is write-only waste.
+ * than the whole resident-map cap). Writes them DIRECTLY through the async
+ * spill queue and swaps to the bounded stub on settle so oversized entries
+ * never demote unrelated residents and never stall the event loop.
  */
 function admitOversizedCandidate(
   id: string,
@@ -531,59 +480,7 @@ function admitOversizedCandidate(
     replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
     return;
   }
-  if (windowsSecretAclApplies()) {
-    replaceWithPendingResponseSpill(id, candidate, expected, { directAdmission: true });
-    return;
-  }
-  try {
-    const ref = writeResponseSpillDurably(id, {
-      createdAt: candidate.createdAt,
-      ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
-      items: candidate.items,
-      ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
-      ...(candidate.providers ? { providers: candidate.providers } : {}),
-      ...(candidate.unforcedStoreFalse ? { unforcedStoreFalse: candidate.unforcedStoreFalse } : {}),
-    });
-    // Enforce the ceiling against the REAL envelope: the spill payload adds
-    // the {version, responseId, ...} wrapper, so a candidate within the
-    // wrapper's size of the cap would otherwise be retained unreadably.
-    if (ref.payloadBytes > responseSpillPayloadCap()) {
-      deleteResponseSpill(ref);
-      admissionCounters.oversizedDrops += 1;
-      replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
-      return;
-    }
-    const base: Omit<SpilledResponseState, "sizeBytes"> = {
-      kind: "spill",
-      createdAt: candidate.createdAt,
-      ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
-      ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
-      ...(candidate.providers ? { providers: candidate.providers } : {}),
-      selfContained: candidate.selfContained,
-      ...(candidate.unforcedStoreFalse ? { unforcedStoreFalse: candidate.unforcedStoreFalse } : {}),
-      spill: ref,
-    };
-    const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
-    if (!replaceMapEntry(id, next, expected)) {
-      deleteResponseSpill(ref);
-      return;
-    }
-    noteSpillWriteSuccess();
-    admissionCounters.directSpills += 1;
-    noteStubSwapForTest();
-    if (expected?.kind === "spill") {
-      // Same deferred-unlink rule as replaceSpillEntryAtomically: the new stub
-      // is durable only after the debounced snapshot, so the old generation
-      // stays until a stable persist drains the queue.
-      pendingSpillUnlinks.push(expected.spill);
-      while (pendingSpillUnlinks.length > PENDING_SPILL_UNLINKS_MAX) {
-        deleteResponseSpill(pendingSpillUnlinks.shift()!);
-      }
-    }
-  } catch (error) {
-    noteSpillWriteFailure(error);
-    replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
-  }
+  replaceWithPendingResponseSpill(id, candidate, expected, { directAdmission: true });
 }
 
 bindSpillQueueStore({
@@ -749,9 +646,10 @@ async function writeBoundedSnapshot(path: string, attemptLimit: number): Promise
 }
 
 function drainPendingSpillUnlinks(): void {
-  while (pendingSpillUnlinks.length > 0) {
-    const ref = pendingSpillUnlinks.shift()!;
+  let ref = takeOldestPendingSpillUnlink();
+  while (ref) {
     deleteResponseSpill(ref);
+    ref = takeOldestPendingSpillUnlink();
   }
 }
 
@@ -883,7 +781,7 @@ function enforceSpilledResponseBudget(requiredHeadroomBytes?: number): number {
   // PENDING_SPILL_UNLINKS_MAX already makes against unbounded disk. Evicting a
   // live continuation to make room for a dead file would be the wrong order.
   while (spilledBytes > spillByteCap() - headroom && pendingSpillUnlinks.length > 0) {
-    const ref = pendingSpillUnlinks.shift()!;
+    const ref = takeOldestPendingSpillUnlink()!;
     spilledBytes -= ref.payloadBytes;
     deleteResponseSpill(ref);
     if (admission) spillCounters.headroomEvictions += 1;
@@ -913,10 +811,26 @@ function enforceSpilledResponseBudget(requiredHeadroomBytes?: number): number {
   return before - spilledBytes;
 }
 
-function pruneResponses(at = now()): void {
-  for (const [id, state] of states) {
-    if (at - state.createdAt > RESPONSE_TTL_MS) deleteEntry(id);
+function expireOldEntries(at: number): number {
+  if (states.size === 0 || (oldestCreatedAt !== null && at - oldestCreatedAt <= RESPONSE_TTL_MS)) {
+    return 0;
   }
+  let removed = 0;
+  let minAlive = Number.POSITIVE_INFINITY;
+  for (const [id, state] of states) {
+    if (at - state.createdAt > RESPONSE_TTL_MS) {
+      deleteEntry(id);
+      removed += 1;
+    } else if (state.createdAt < minAlive) {
+      minAlive = state.createdAt;
+    }
+  }
+  oldestCreatedAt = states.size > 0 && Number.isFinite(minAlive) ? minAlive : null;
+  return removed;
+}
+
+function pruneResponses(at = now()): void {
+  expireOldEntries(at);
   while (states.size > MAX_STORED_RESPONSES) {
     const oldest = states.keys().next().value;
     if (!oldest) break;
@@ -924,42 +838,27 @@ function pruneResponses(at = now()): void {
   }
   // Demote residents durably; delete stubs/tombstones only when their metadata cannot fit the override.
   const cap = byteCap();
-  const candidates = [...states];
-  let candidateIndex = 0, hasPendingResident = false;
-  while (storedResponseBytes - currentPendingResidentBytes() > cap && states.size > 0) {
-    let oldestId: string | undefined;
-    for (; !oldestId && candidateIndex < candidates.length; candidateIndex += 1) {
-      const [id, candidate] = candidates[candidateIndex]!;
-      if (states.get(id) !== candidate || candidate.kind !== "resident") continue;
-      if (spillQueueHoldsResidentCandidate(id, candidate)) hasPendingResident = true;
-      else oldestId = id;
-    }
-    if (!oldestId && hasPendingResident) break;
-    if (!(oldestId ??= states.keys().next().value as string | undefined)) break;
-    const entry = states.get(oldestId)!;
-    if (entry.kind !== "resident") {
-      deleteEntry(oldestId);
-      continue;
-    }
-    if (windowsSecretAclApplies()) {
+  if (storedResponseBytes - currentPendingResidentBytes() > cap && states.size > 0) {
+    const candidates = [...states];
+    let candidateIndex = 0, hasPendingResident = false;
+    while (storedResponseBytes - currentPendingResidentBytes() > cap && states.size > 0) {
+      let oldestId: string | undefined;
+      for (; !oldestId && candidateIndex < candidates.length; candidateIndex += 1) {
+        const [id, candidate] = candidates[candidateIndex]!;
+        if (states.get(id) !== candidate || candidate.kind !== "resident") continue;
+        if (spillQueueHoldsResidentCandidate(id, candidate)) hasPendingResident = true;
+        else oldestId = id;
+      }
+      if (!oldestId && hasPendingResident) break;
+      if (!(oldestId ??= states.keys().next().value as string | undefined)) break;
+      const entry = states.get(oldestId)!;
+      if (entry.kind !== "resident") {
+        deleteEntry(oldestId);
+        continue;
+      }
       if (spillQueueShouldDeferDemotion(oldestId, entry, storedResponseBytes - currentPendingResidentBytes(), cap)) break;
       queuePendingResponseSpill(oldestId, entry);
       hasPendingResident = true;
-      continue;
-    }
-    try {
-      const ref = writeResponseSpillDurably(oldestId, {
-        createdAt: entry.createdAt,
-        ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
-        items: entry.items,
-        ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
-        ...(entry.providers ? { providers: entry.providers } : {}),
-        ...(entry.unforcedStoreFalse ? { unforcedStoreFalse: entry.unforcedStoreFalse } : {}),
-      });
-      if (swapResidentForSpill(oldestId, entry, ref)) noteSpillWriteSuccess();
-    } catch (error) {
-      noteSpillWriteFailure(error);
-      replaceWithSpillFailure(oldestId, entry);
     }
   }
   if (storedResponseBytes - currentPendingResidentBytes() <= cap) clearSpillQueueDemotionDrainCeiling();
@@ -968,12 +867,7 @@ function pruneResponses(at = now()): void {
 
 /** Periodic TTL-only sweep; count/byte eviction remains owned by mutation paths. */
 export function sweepExpiredResponseStates(at = now()): number {
-  let removed = 0;
-  for (const [id, state] of states) {
-    if (at - state.createdAt <= RESPONSE_TTL_MS) continue;
-    deleteEntry(id);
-    removed += 1;
-  }
+  const removed = expireOldEntries(at);
   // The disk ceiling needs a caller that does not depend on traffic. The return
   // value stays the TTL count so this function's existing contract is unchanged.
   const reclaimed = enforceSpilledResponseBudget();
@@ -1016,25 +910,8 @@ export function evictOldestResponseContinuationForBudget(): number {
   const id = oldestResidentId;
   const entry = states.get(id);
   if (!entry || entry.kind !== "resident") return 0;
-  if (windowsSecretAclApplies()) {
-    if (spillQueueShouldDeferDemotion(id, entry, storedResponseBytes - currentPendingResidentBytes(), byteCap())) return 0;
-    queuePendingResponseSpill(id, entry);
-  } else {
-    try {
-      const ref = writeResponseSpillDurably(id, {
-        createdAt: entry.createdAt,
-        ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
-        items: entry.items,
-        ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
-        ...(entry.providers ? { providers: entry.providers } : {}),
-        ...(entry.unforcedStoreFalse ? { unforcedStoreFalse: entry.unforcedStoreFalse } : {}),
-      });
-      if (swapResidentForSpill(id, entry, ref)) noteSpillWriteSuccess();
-    } catch (error) {
-      noteSpillWriteFailure(error);
-      replaceWithSpillFailure(id, entry);
-    }
-  }
+  if (spillQueueShouldDeferDemotion(id, entry, storedResponseBytes - currentPendingResidentBytes(), byteCap())) return 0;
+  queuePendingResponseSpill(id, entry);
   schedulePersist();
   const replacement = states.get(id);
   return !replacement || replacement.kind === "resident"
@@ -1305,7 +1182,7 @@ export function rememberResponseState(
     ...(Object.keys(normalizedProviderState).length > 0 ? { providers: normalizedProviderState } : {}),
     ...(unforcedStoreFalse ? { unforcedStoreFalse: true } : {}),
   });
-  enforceAppOwnedMemoryBudget();
+  enforceAppOwnedMemoryBudgetIfNeeded();
   schedulePersist();
 }
 
@@ -1337,8 +1214,11 @@ export function clearResponseStateMemoryForTests(): void {
   states.clear();
   storedResponseBytes = 0;
   residentResponseBytes = 0;
+  spilledStateBytes = 0;
+  pendingSpillUnlinkBytes = 0;
   oldestResidentId = undefined;
   oldestResidentAt = null;
+  oldestCreatedAt = null;
   stateRevision = 0;
   pendingSpillUnlinks.length = 0;
   resetSpillCountersForTests();

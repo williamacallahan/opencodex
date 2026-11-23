@@ -116,10 +116,11 @@ describe("Periodic orphan response-spill sweep", () => {
     expect(existsSync(join(responseSpillDirectory(home), orphan.fileName))).toBe(true);
   });
 
-  test("reclaims an aged orphan while the process keeps running", () => {
+  test("reclaims an aged orphan while the process keeps running", async () => {
     setResponseStateByteCapForTests(1_024);
     // rememberLarge forces ensureLoaded and leaves one live spill on disk.
     rememberLarge("resp_live_periodic", "l".repeat(8_000));
+    await flushPendingResponseSpillsForTests();
     const orphan = writeResponseSpillDurably("resp_orphan_periodic", {
       createdAt: Date.now(), items: ["orphan"],
     });
@@ -133,11 +134,13 @@ describe("Periodic orphan response-spill sweep", () => {
     setResponseStateByteCapForTests(1_024);
     rememberLarge("resp_keep_live", "k".repeat(8_000));
     rememberLarge("resp_keep_superseded", "o".repeat(8_000));
+    await flushPendingResponseSpillsForTests();
     const liveFile = spillFileNames(home).find(name => name.startsWith("resp_keep_live."))!;
     const supersededFile = spillFileNames(home).find(name => name.startsWith("resp_keep_superseded."))!;
     // A same-id replacement parks the old generation in pendingSpillUnlinks until the
     // next stable persist — the durable snapshot still names it, so it stays referenced.
     rememberLarge("resp_keep_superseded", "n".repeat(8_000));
+    await flushPendingResponseSpillsForTests();
     const young = writeResponseSpillDurably("resp_young_periodic", {
       createdAt: Date.now(), items: ["young"],
     });

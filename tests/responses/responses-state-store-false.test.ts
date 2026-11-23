@@ -17,6 +17,7 @@ import {
   clearResponseStateMemoryForTests,
   evictOldestResponseContinuationForBudget,
   expandPreviousResponseInput,
+  flushPendingResponseSpillsForTests,
   flushResponseState,
   rememberResponseState,
   responseStateMetrics,
@@ -453,6 +454,7 @@ describe("Responses unforced store:false ephemeral function call state", () => {
     rememberResponseState({ input: "call probe_echo", store: false }, response, undefined, qoderStateOptions);
     expect(responseStateMetrics().residentCount).toBe(1);
     evictOldestResponseContinuationForBudget();
+    await flushPendingResponseSpillsForTests();
     expect(responseStateMetrics().spillStubCount).toBe(1);
     await flushResponseState();
     const snapshot = readFileSync(join(home, "responses-state.json"), "utf8");

@@ -14,6 +14,7 @@ import {
   clearResponseStateForTests,
   clearResponseStateMemoryForTests,
   expandPreviousResponseInput,
+  flushPendingResponseSpillsForTests,
   flushResponseState,
   rememberResponseState,
   markBodyNonPersistable,
@@ -68,6 +69,7 @@ describe("Responses snapshot spill stub retention", () => {
   test.each([false, true])("restart cannot promote an upstream append to full history (spilled: %s)", async spilled => {
     setResponseStateByteCapForTests(spilled ? 1_024 : 1_000_000);
     rememberResponseState({ conversation: "upstream-only-history", input: "x".repeat(2_048) }, fixedResponse("resp_append", []));
+    if (spilled) await flushPendingResponseSpillsForTests();
     expect(responseStateMetrics().spillStubCount).toBe(spilled ? 1 : 0);
     await flushResponseState(); clearResponseStateMemoryForTests();
     const delta = { previous_response_id: "resp_append", input: "next" };
@@ -79,6 +81,7 @@ describe("Responses snapshot spill stub retention", () => {
     const spill = kind === "legacy spill", legacy = kind !== "stored prompt";
     setResponseStateByteCapForTests(spill ? 1_024 : 1_000_000);
     rememberResponseState({ input: "historical".repeat(500), ...(!legacy ? { prompt: { id: "pmpt_fixture" } } : {}) }, fixedResponse("resp_owned", []));
+    if (spill) await flushPendingResponseSpillsForTests();
     expect(responseStateMetrics().spillStubCount).toBe(spill ? 1 : 0);
     await flushResponseState(); clearResponseStateMemoryForTests();
     if (legacy) {
@@ -188,6 +191,7 @@ describe("Responses snapshot spill stub retention", () => {
     setResponseStateByteCapForTests(1_024);
     rememberLarge("resp_spill_oldest", "a".repeat(2_048));
     rememberLarge("resp_spill_second", "b".repeat(2_048));
+    await flushPendingResponseSpillsForTests();
     expect(responseStateMetrics().spillStubCount).toBe(2);
     const spillDir = responseSpillDirectory();
     const stubFileNames = readdirSync(spillDir).filter(name => name.endsWith(".spill.json"));

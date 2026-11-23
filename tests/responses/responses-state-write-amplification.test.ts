@@ -18,6 +18,7 @@ import {
   enforceResponseContinuationByteCap,
   evictOldestResponseContinuationForBudget,
   expandPreviousResponseInput,
+  flushPendingResponseSpillsForTests,
   flushResponseState,
   MAX_STORED_RESPONSE_BYTES,
   pendingResponseSpillMetricsForTests,
@@ -250,6 +251,7 @@ describe("responses-state snapshot write amplification (#2460)", () => {
     // Lowering the budget at runtime demotes excess resident continuations immediately.
     configureAppOwnedMemoryBudget(256 * 1024 * 1024);
     enforceResponseContinuationByteCap();
+    await flushPendingResponseSpillsForTests();
     const afterLower = responseStateMetrics();
     expect(afterLower.totalBytes).toBeLessThanOrEqual(MAX_STORED_RESPONSE_BYTES);
     expect(afterLower.spillStubCount).toBeGreaterThan(0);

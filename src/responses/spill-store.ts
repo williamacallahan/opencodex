@@ -15,6 +15,15 @@ import {
   writeSync,
   type Stats,
 } from "node:fs";
+import {
+  chmod as chmodPromise,
+  copyFile as copyFilePromise,
+  link as linkPromise,
+  mkdir as mkdirPromise,
+  open as openPromise,
+  unlink as unlinkPromise,
+  type FileHandle,
+} from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { getConfigDir } from "../config";
@@ -198,11 +207,11 @@ function record(event: "write" | "fsync" | "close" | "harden" | "publish" | "dir
   spillIoForTest?.record?.(event);
 }
 
-function fsyncDirectoryBestEffort(dir: string): void {
+const activeDirFsyncs = new Map<string, Promise<void>>();
+const nextDirFsyncs = new Map<string, Promise<void>>();
+
+function performSyncDirFsync(dir: string): void {
   let fd: number | null = null;
-  // Record the durability attempt before opening the directory: Windows cannot
-  // open/fsync directory handles this way, but callers still cross this seam.
-  record("dir-fsync");
   try {
     fd = spillIoForTest?.openDir ? spillIoForTest.openDir(dir) : openSync(dir, "r");
     try {
@@ -222,6 +231,56 @@ function fsyncDirectoryBestEffort(dir: string): void {
       } catch { /* best effort */ }
     }
   }
+}
+
+function fsyncDirectoryBestEffort(dir: string): void {
+  // Record the durability attempt before opening the directory: Windows cannot
+  // open/fsync directory handles this way, but callers still cross this seam.
+  record("dir-fsync");
+  performSyncDirFsync(dir);
+}
+
+function runDirFsyncOnceAsync(dir: string): Promise<void> {
+  const task = (async () => {
+    let handle: FileHandle | null = null;
+    try {
+      handle = await openPromise(dir, "r");
+      await handle.sync();
+    } catch {
+      // Windows and some filesystems do not support fsync on directory handles.
+    } finally {
+      if (handle) {
+        try { await handle.close(); } catch { /* best effort */ }
+      }
+    }
+  })();
+  activeDirFsyncs.set(dir, task);
+  void task.finally(() => {
+    if (activeDirFsyncs.get(dir) === task) activeDirFsyncs.delete(dir);
+  });
+  return task;
+}
+
+async function fsyncDirectoryBestEffortAsync(dir: string): Promise<void> {
+  record("dir-fsync");
+  if (spillIoForTest?.openDir || spillIoForTest?.fsyncDir || spillIoForTest?.closeDir || spillIoForTest?.fsync) {
+    performSyncDirFsync(dir);
+    return;
+  }
+  const active = activeDirFsyncs.get(dir);
+  if (!active) {
+    await runDirFsyncOnceAsync(dir);
+    return;
+  }
+  let followUp = nextDirFsyncs.get(dir);
+  if (!followUp) {
+    followUp = active.then(() => {
+      if (nextDirFsyncs.get(dir) === followUp) nextDirFsyncs.delete(dir);
+      return runDirFsyncOnceAsync(dir);
+    });
+    nextDirFsyncs.set(dir, followUp);
+  }
+  await followUp;
 }
 
 export function noteStubSwapForTest(): void {
@@ -300,7 +359,7 @@ async function hardenAsync(
   retryTimedOutOnce = false,
 ): Promise<void> {
   try {
-    chmodSync(path, mode);
+    await chmodPromise(path, mode);
   } catch {
     if (!windowsSecretAclApplies()) throw new Error("Response spill permission hardening failed");
   }
@@ -358,6 +417,45 @@ function unlink(path: string, ephemeral = false): void {
 
 function unlinkEphemeral(path: string): void {
   unlink(path, true);
+}
+
+async function writeAllAsync(handle: FileHandle, bytes: Uint8Array): Promise<void> {
+  if (spillIoForTest?.write) spillIoForTest.write(handle.fd, bytes);
+  else {
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const { bytesWritten } = await handle.write(bytes, offset, bytes.byteLength - offset);
+      if (bytesWritten === 0) throw new Error("Short response spill write");
+      offset += bytesWritten;
+    }
+  }
+  record("write");
+}
+
+async function fsyncFileAsync(handle: FileHandle): Promise<void> {
+  if (spillIoForTest?.fsync) spillIoForTest.fsync(handle.fd);
+  else await handle.sync();
+  record("fsync");
+}
+
+async function closeFileAsync(handle: FileHandle): Promise<void> {
+  await handle.close();
+  record("close");
+}
+
+async function unlinkAsync(path: string, ephemeral = false): Promise<void> {
+  try {
+    if (spillIoForTest?.unlink) spillIoForTest.unlink(path);
+    else await unlinkPromise(path);
+    if (ephemeral) forgetEphemeralSecretPath(path);
+    else forgetHardenedSecretPath(path);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) {
+      if (ephemeral) forgetEphemeralSecretPath(path);
+      else forgetHardenedSecretPath(path);
+    }
+    throw error;
+  }
 }
 
 function supersededPublicationError(): NodeJS.ErrnoException {
@@ -451,27 +549,27 @@ async function publishNoReplaceAsync(
   throwIfPublicationSuperseded(publicationControl);
   try {
     if (spillIoForTest?.link) spillIoForTest.link(tempPath, destinationPath);
-    else linkSync(tempPath, destinationPath);
+    else await linkPromise(tempPath, destinationPath);
   } catch (error) {
     if (isErrno(error, "EEXIST")) throw error;
     if (!canUseExclusiveCopyFallback(error)) throw error;
     let copied = false;
     try {
       if (spillIoForTest?.copyFileExcl) spillIoForTest.copyFileExcl(tempPath, destinationPath);
-      else copyFileSync(tempPath, destinationPath, constants.COPYFILE_EXCL);
+      else await copyFilePromise(tempPath, destinationPath, constants.COPYFILE_EXCL);
       copied = true;
       await hardenAsync(destinationPath, 0o600, budget, retryTimedOutOnce);
       throwIfPublicationSuperseded(publicationControl);
-      const copyFd = openSync(destinationPath, "r+");
+      const copyHandle = await openPromise(destinationPath, "r+");
       try {
-        if (spillIoForTest?.fsync) spillIoForTest.fsync(copyFd);
-        else fsyncSync(copyFd);
+        if (spillIoForTest?.fsync) spillIoForTest.fsync(copyHandle.fd);
+        else await copyHandle.sync();
       } finally {
-        closeSync(copyFd);
+        await copyHandle.close();
       }
     } catch (copyError) {
       if (copied) {
-        try { unlink(destinationPath); } catch { /* startup GC reclaims an incomplete publication */ }
+        try { await unlinkAsync(destinationPath); } catch { /* startup GC reclaims an incomplete publication */ }
       }
       throw copyError;
     }
@@ -651,7 +749,7 @@ export async function writeResponseSpillDurablyAsync(
   const aclBudget = spillAclBudget(options.aclBudgetMs);
   if (!aclBudget) throw new Error("Response spill async ACL budget is required");
   let tempPath: string | null = null;
-  let fd: number | null = null;
+  let handle: FileHandle | null = null;
   try {
     throwIfPublicationSuperseded(publicationControl);
     const { bytes, digest, idDigest, contentDigest } = serializedSpill(responseId, state);
@@ -659,17 +757,17 @@ export async function writeResponseSpillDurablyAsync(
       throw Object.assign(new Error("Response spill payload exceeds replay ceiling"), { code: "EFBIG" });
     }
     const dir = responseSpillDirectory();
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    await mkdirPromise(dir, { recursive: true, mode: 0o700 });
     await hardenAsync(dir, 0o700, aclBudget, options.retryTimedOutOnce === true);
     throwIfPublicationSuperseded(publicationControl);
 
     tempPath = join(dir, `.response-spill.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
-    fd = openSync(tempPath, "wx", 0o600);
+    handle = await openPromise(tempPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
     if (publicationControl) publicationControl.tempPath = tempPath;
-    writeAll(fd, bytes);
-    fsyncFile(fd);
-    closeFile(fd);
-    fd = null;
+    await writeAllAsync(handle, bytes);
+    await fsyncFileAsync(handle);
+    await closeFileAsync(handle);
+    handle = null;
     await hardenAsync(tempPath, 0o600, aclBudget, options.retryTimedOutOnce === true);
     throwIfPublicationSuperseded(publicationControl);
     record("harden");
@@ -692,8 +790,8 @@ export async function writeResponseSpillDurablyAsync(
           publicationControl,
         );
         throwIfPublicationSuperseded(publicationControl);
-        fsyncDirectoryBestEffort(dir);
-        unlinkEphemeral(publishTempPath);
+        await fsyncDirectoryBestEffortAsync(dir);
+        await unlinkAsync(publishTempPath, true);
         tempPath = null;
         if (publicationControl) {
           publicationControl.tempPath = null;
@@ -709,12 +807,12 @@ export async function writeResponseSpillDurablyAsync(
     }
     throw new Error("Response spill publication retries exhausted");
   } catch (cause) {
-    if (fd !== null) {
-      try { closeSync(fd); } catch { /* best effort */ }
+    if (handle !== null) {
+      try { await handle.close(); } catch { /* best effort */ }
     }
     if (tempPath) {
       try {
-        unlinkEphemeral(tempPath);
+        await unlinkAsync(tempPath, true);
         if (publicationControl?.tempPath === tempPath) publicationControl.tempPath = null;
       } catch (error) {
         if (isErrno(error, "ENOENT") && publicationControl?.tempPath === tempPath) {
@@ -726,7 +824,7 @@ export async function writeResponseSpillDurablyAsync(
       const destinationPath = publicationControl.destinationPath;
       if (destinationPath) {
         try {
-          unlink(destinationPath);
+          await unlinkAsync(destinationPath);
           publicationControl.destinationPath = null;
         } catch (error) {
           if (isErrno(error, "ENOENT")) publicationControl.destinationPath = null;
@@ -774,7 +872,11 @@ export function deleteResponseSpill(ref: ResponseSpillRef): void {
   const path = join(dir, ref.fileName);
   try {
     unlink(path);
-    fsyncDirectoryBestEffort(dir);
+    if (spillIoForTest?.openDir || spillIoForTest?.fsyncDir || spillIoForTest?.closeDir || spillIoForTest?.fsync) {
+      fsyncDirectoryBestEffort(dir);
+    } else {
+      void fsyncDirectoryBestEffortAsync(dir);
+    }
   } catch (error) {
     // Still best effort, but no longer invisible: a file a failed unlink left behind occupies
     // the volume, so the accounting owner keeps pricing it until the path is gone (#6747).

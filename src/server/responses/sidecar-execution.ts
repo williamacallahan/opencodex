@@ -630,15 +630,17 @@ export async function executeResponsesSidecars(
           && noteKiroServedSuccess(served.accountId, served.generation)) persistKiroAccountState();
         commitReasoningReplayServingRoute();
         rememberKiroDeliveredFinalAnswer(transportState.adapter.name, response);
-        rememberResponseState(
-          parsed._rawBody,
-          response,
-          continuationStateForResponse(providerState),
-          {
-            ...responseStateOptions(adapterNeedsForcedContinuation(transportState.adapter.name)),
-            retainForToolContinuation: adapterNeedsToolCallContinuation(transportState.adapter.name),
-          },
-        );
+        if (inboundWire === "responses") {
+          rememberResponseState(
+            parsed._rawBody,
+            response,
+            continuationStateForResponse(providerState),
+            {
+              ...responseStateOptions(adapterNeedsForcedContinuation(transportState.adapter.name)),
+              retainForToolContinuation: adapterNeedsToolCallContinuation(transportState.adapter.name),
+            },
+          );
+        }
         notifyResponseComplete(response);
       },
     });

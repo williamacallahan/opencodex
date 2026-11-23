@@ -422,15 +422,22 @@ are consumed incrementally and at most 512 stale files are attempted per process
 
 > Decision record: [ADR-0014](decisions/ADR-0014-codex-home.md)
 
-Windows runtime response spills never wait on `icacls` through `Bun.spawnSync`. Linux and macOS
-retain the immediate synchronous publication path. On Windows, the resident continuation enters one
-serialized publication queue and remains replayable while `hardenSecretDirAsync` and
-`hardenSecretPathAsync` run. Publication installs a spill stub only when the map still contains the
+Runtime response spills across Windows and POSIX never block the event loop on synchronous disk or ACL
+work (`spill-queue.ts` and `writeResponseSpillDurablyAsync` in `src/responses/spill-store.ts`). On
+Windows, `Bun.spawnSync(icacls)` is avoided via async ACL hardening; on Linux and macOS, `node:fs/promises`
+file creation, permission hardening, flush, atomic no-replace publication, and a 2-slot coalesced async
+directory fsync (`fsyncDirectoryBestEffortAsync`) run without stalling request handlers, while Windows-only
+ACL timeout retries stay gated by `windowsSecretAclApplies()`. The resident continuation enters one
+serialized publication queue and remains replayable while publication runs; `src/responses/state.ts` also
+maintains O(1) live counters for spilled bytes, queued unlink bytes, and oldest entry timestamps, checks
+file metadata before reading snapshots, and gates continuation retention to native Responses turns
+(`inboundWire === "responses"`). Publication installs a spill stub only when the map still contains the
 same resident object; a superseded job deletes its newly published file instead of overwriting newer
 state. Pending payloads are pinned and capped at 256 MiB, so an ACL outage cannot grow an unbounded
 queue or be misreported as evictable memory. One caller-owned retry is allowed after a real
 `ETIMEDOUT`; the first timeout does not install a `spill-failed` tombstone. Required ACL failures
-remain fail-closed after that bounded recovery. Optional config-directory hardening uses a separate
+remain fail-closed after that bounded recovery. `tests/responses/responses-spill-async-posix.test.ts`
+covers POSIX event-loop yielding, O(1) TTL/byte tracking, and coalesced directory fsyncs. Optional config-directory hardening uses a separate
 per-directory async single-flight, while required config mutation writers retain their existing
 awaited or synchronous fail-closed boundary. Snapshot persistence serializes the entire background pass, including its follow-up timer decision. Shutdown awaits that gate before consuming a pending pass; a stable bounded rewrite cancels the mutation timer whose bytes it incorporated. `tests/responses/responses-state-flush-race.test.ts` covers overlap with a background rewrite and leaves no redundant persistence timer after flush.
 

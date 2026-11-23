@@ -221,7 +221,7 @@ export async function deliverAdapterResponse(
       // Compaction turns must NOT enter the continuation cache: _rawBody still holds the full
       // PRE-compaction history, and a later previous_response_id expansion would rehydrate the
       // giant stale chain Codex just replaced.
-      if (!routedCompaction) {
+      if (!routedCompaction && (options.inboundWire ?? "responses") === "responses") {
         rememberResponseState(
           parsed._rawBody,
           response,
@@ -402,12 +402,14 @@ export async function deliverAdapterResponse(
     // See the streaming branch: compaction turns skip the continuation cache.
     if (!routedCompaction) {
       rememberKiroDeliveredFinalAnswer(transportState.activeAdapter.name, json);
-      rememberResponseState(
-        parsed._rawBody,
-        json,
-        continuationStateForResponse(providerState),
-        responseStateOptions(transportState.activeAdapter.name === "kiro"),
-      );
+      if ((options.inboundWire ?? "responses") === "responses") {
+        rememberResponseState(
+          parsed._rawBody,
+          json,
+          continuationStateForResponse(providerState),
+          responseStateOptions(transportState.activeAdapter.name === "kiro"),
+        );
+      }
     }
     // #1926 gap 2: same buffered-path durability bound as the primary branch.
     await awaitThoughtSignatureDurability();

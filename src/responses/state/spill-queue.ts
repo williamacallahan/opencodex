@@ -15,7 +15,7 @@ import {
   writeResponseSpillDurably,
   writeResponseSpillDurablyAsync,
 } from "../spill-store";
-import { enforceAppOwnedMemoryBudget } from "../../lib/app-owned-memory";
+import { enforceAppOwnedMemoryBudgetIfNeeded } from "../../lib/app-owned-memory";
 import {
   admissionCounters,
   noteSpillCapacityRefusal,
@@ -26,6 +26,7 @@ import {
   type ResponseSpillWriteFailureCode,
   type ResponseSpillWriteFailureOrigin,
 } from "./spill-failure";
+import { windowsSecretAclApplies } from "../../lib/windows-secret-acl";
 import type { ResidentResponseState, StoredResponseState } from "../state";
 
 const RESPONSE_SPILL_SHUTDOWN_BUDGET_MS = 5_000;
@@ -217,7 +218,7 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
         publicationControl: job.publicationControl,
       });
     } catch (error) {
-      if (!isAclTimeout(error)) throw error;
+      if (!windowsSecretAclApplies() || !isAclTimeout(error)) throw error;
       // The ACL helper permits exactly one caller-owned recovery budget. The resident generation
       // remains replayable during both attempts, so a transient timeout never becomes a tombstone.
       try {
@@ -265,7 +266,7 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
     if (!cancelled) {
       requireStore().schedulePersist();
       requireStore().pruneResponses();
-      enforceAppOwnedMemoryBudget();
+      enforceAppOwnedMemoryBudgetIfNeeded();
     }
   }
 }
@@ -535,7 +536,7 @@ function stopAtShutdownTerminalizationPassLimit(
   }
   requireStore().recomputeOldestResident();
   requireStore().pruneResponses();
-  enforceAppOwnedMemoryBudget();
+  enforceAppOwnedMemoryBudgetIfNeeded();
 }
 
 function terminalizeExhaustedShutdownFallback(
@@ -560,7 +561,7 @@ function terminalizeExhaustedShutdownFallback(
     }
     requireStore().recomputeOldestResident();
     requireStore().pruneResponses();
-    enforceAppOwnedMemoryBudget();
+    enforceAppOwnedMemoryBudgetIfNeeded();
     pending = pendingShutdownFallbackCandidates();
   }
 }
@@ -599,7 +600,7 @@ function fallbackPendingResponseSpills(reserveMs: number): Error[] {
     }
     requireStore().recomputeOldestResident();
     requireStore().pruneResponses();
-    enforceAppOwnedMemoryBudget();
+    enforceAppOwnedMemoryBudgetIfNeeded();
     if (reserveExhausted || responseSpillNow() >= deadline) {
       terminalizeExhaustedShutdownFallback(pendingShutdownFallbackCandidates(), failures);
       return failures;

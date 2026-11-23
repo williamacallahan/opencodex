@@ -322,7 +322,8 @@ export async function preparePassthroughExchange(
     // expand: its input is a delta, and storing it would replay a truncated conversation.
     // Compaction turns are excluded: _rawBody still carries the full pre-compaction history and
     // recording it would let a later expansion rehydrate the chain Codex just replaced.
-    const passthroughRecordEligible = parsed._compactionRequest !== true
+    const passthroughRecordEligible = inboundWire === "responses"
+      && parsed._compactionRequest !== true
       && (!parsed.previousResponseId || parsed._previousResponseInputExpanded === true);
     const rememberPassthroughResponse = passthroughRecordEligible
       ? (response: { id?: unknown; output?: unknown; status?: unknown }) =>
