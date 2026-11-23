@@ -1428,22 +1428,16 @@ async function handleClaudeMessagesWithBudget(
     ?? metadataGoLane
     ?? getOrAllocateRequestSessionLane(req);
   let internalReq: Request;
+  let preParsedBodyBytes: number;
   try {
-    // The UTF-16 JSON string and the Request's UTF-8 body coexist until dispatch.
-    if (nativeReasoningReplay) nativeReasoningReplay = fitNativeReasoningReplayToBudget(internalBody, nativeReasoningReplay, translatorBudget, 3);
-    const bodyBytes = jsonUtf8Bytes(internalBody);
-    const reservation = translatorBudget.reserveTransient(3 * bodyBytes, { kind: "request_copies" });
-    try {
-      internalReq = new Request("http://localhost/v1/responses", {
-        method: "POST",
-        headers,
-        body: JSON.stringify(internalBody),
-      });
-      linkRequestSessionLane(req, internalReq);
-    } finally {
-      reservation.release();
-    }
-    translatorBudget.chargeRetained(bodyBytes, { kind: "request_copies" });
+    // Only the outbound upstream serialization remains once Messages hands the body in-memory.
+    if (nativeReasoningReplay) nativeReasoningReplay = fitNativeReasoningReplayToBudget(internalBody, nativeReasoningReplay, translatorBudget, 1);
+    preParsedBodyBytes = jsonUtf8Bytes(internalBody);
+    internalReq = new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers,
+    });
+    linkRequestSessionLane(req, internalReq);
   } catch (err) {
     if (!isTranslatorBudgetExceededError(err)) throw err;
     if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 413, { closeReason: "non_stream" });
@@ -1503,6 +1497,9 @@ async function handleClaudeMessagesWithBudget(
     // Without this the replay would look native and a Responses-scoped wire default
     // would fire, disagreeing with the pre-flight decision above.
     inboundWire: "anthropic",
+    preParsedBody: internalBody,
+    preParsedBodyBytes,
+    preParsedBodyCharged: true,
     // An explicit empty `tools` array is a deny-all declaration the translation drops with
     // the rest of the catalog; carried separately so the undeclared-tool guard can still
     // enforce it while partial and absent catalogs stay deferred.

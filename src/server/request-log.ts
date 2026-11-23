@@ -79,7 +79,7 @@ import {
 } from "../usage/debug";
 import { MAX_LOG_SIZE } from "./request-log-filter";
 export { filterRequestLogs, filteredRequestLogCount, queryRequestLogs } from "./request-log-filter";
-import { enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
+import { enforceAppOwnedMemoryBudgetIfNeeded, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
 import {
   aggregateAttemptUsage,
   contextWindowForModel,
@@ -433,7 +433,7 @@ function retainRequestLogEntry(entry: RequestLogEntry): void {
   requestLogEntryBytes.set(entry, bytes);
   requestLogBytes += bytes;
   while (requestLog.length > MAX_LOG_SIZE) removeOldestRequestLogEntry();
-  enforceAppOwnedMemoryBudget();
+  enforceAppOwnedMemoryBudgetIfNeeded();
 }
 
 export function requestLogRetainedStoreSnapshot(): RetainedStoreSnapshot {

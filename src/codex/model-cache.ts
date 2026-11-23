@@ -9,7 +9,7 @@
  */
 import type { CatalogModel } from "./catalog";
 import type { GenerationContext } from "../lib/state-store-sweeper";
-import { enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
+import { enforceAppOwnedMemoryBudgetIfNeeded, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
 import { clearLiveCursorRosterState } from "../adapters/cursor/catalog";
 
 /** Default freshness window. Matches Codex's own 5-min models cache so the two stay in step. */
@@ -274,7 +274,7 @@ export function setCached(
     oldestCachedProvider = provider;
     oldestCachedAt = now;
   }
-  enforceAppOwnedMemoryBudget();
+  enforceAppOwnedMemoryBudgetIfNeeded();
   // Published and accepted, so anything derived from this provider's rows is now out of date.
   bumpProviderCacheRevision(provider);
   return true;

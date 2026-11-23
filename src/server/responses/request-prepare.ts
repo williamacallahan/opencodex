@@ -18,7 +18,9 @@ import {
   restoreCachedEncryptedAgentTasks,
   recoverEncryptedAgentTaskWithResult,
 } from "./agent-task-recovery";
-import { readJsonRequestBody, resolveInboundBodyLimitBytes } from "../request-decompress";
+import { DecompressedBodyTooLargeError, readJsonRequestBody, resolveInboundBodyLimitBytes } from "../request-decompress";
+import { updateInboundBodyReservation } from "../inbound-body-budget";
+import { serializedJsonByteLength } from "../json-serialized-bytes";
 import {
   clientCancelledResponse,
   decodeRequestErrorResponse,
@@ -258,7 +260,20 @@ export async function prepareResponsesRequest(
   const agentTaskRecovery = agentTaskRecoveryConfig(config);
   let body: unknown;
   try {
-    body = await readJsonRequestBody(req, translatorBudget, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));
+    const maxInboundBytes = resolveInboundBodyLimitBytes(config.maxInboundBodyBytes);
+    if (options.preParsedBody !== undefined) {
+      const bodyBytes = options.preParsedBodyBytes ?? serializedJsonByteLength(options.preParsedBody);
+      if (bodyBytes > maxInboundBytes) {
+        throw new DecompressedBodyTooLargeError(bodyBytes, maxInboundBytes, "decoded_exact");
+      }
+      if (translatorBudget && !options.preParsedBodyCharged) {
+        translatorBudget.observeAcceptedRequestCopy(bodyBytes);
+      }
+      updateInboundBodyReservation(req, bodyBytes);
+      body = options.preParsedBody;
+    } else {
+      body = await readJsonRequestBody(req, translatorBudget, maxInboundBytes);
+    }
   } catch (err) {
     if (options.abortSignal?.aborted || req.signal.aborted) {
       return clientCancelledResponse();

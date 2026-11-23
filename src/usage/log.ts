@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { getConfigDir } from "../config";
 import type { CodexAffinityMove, CodexAffinityReason } from "../codex/routing";
 import { CODEX_AFFINITY_REASONS } from "../codex/routing/thread-affinity";
-import { enforceAppOwnedMemoryBudget } from "../lib/app-owned-memory";
+import { enforceAppOwnedMemoryBudgetIfNeeded } from "../lib/app-owned-memory";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
 import { redactSecretString, sanitizeLogMetadataString } from "../lib/redact";
 import { upstreamDiagnosticLogFields, upstreamDiagnosticLogProjection, type UpstreamErrorDiagnostics } from "../server/request-log-terminal-status";
@@ -1861,7 +1861,7 @@ export async function readUsageSnapshotForManagement(maxReadBytes = MANAGEMENT_U
       retainedAt: Date.now(),
       approxBytes: retainedUsageSnapshotBytes(snapshot.entries),
     };
-    enforceAppOwnedMemoryBudget();
+    enforceAppOwnedMemoryBudgetIfNeeded();
     return { ...snapshot, entries: snapshot.entries.slice() };
   } finally {
     if (managementUsageReadInflight?.promise === promise) managementUsageReadInflight = null;

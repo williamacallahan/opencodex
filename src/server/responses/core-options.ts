@@ -230,6 +230,12 @@ export interface HandleResponsesOptions {
    * it. Omitted means a genuine Responses inbound.
    */
   inboundWire?: InboundWire;
+  /** Already-constructed Responses body passed in-memory by a sibling surface or combo child. */
+  preParsedBody?: unknown;
+  /** Exact UTF-8 JSON byte size of {@link preParsedBody}, when already measured. */
+  preParsedBodyBytes?: number;
+  /** True when {@link translatorBudget} already accounts for {@link preParsedBodyBytes} as a retained or observed request copy. */
+  preParsedBodyCharged?: boolean;
   /**
    * Set by a translating ingress (Chat / Anthropic) when the client sent an explicit empty
    * tool catalog. Those wires may defer tool delivery, so their translated body carries no

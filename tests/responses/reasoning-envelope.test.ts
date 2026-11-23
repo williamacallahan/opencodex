@@ -714,7 +714,7 @@ describe("reasoning allocation admission", () => {
     const { handleClaudeMessages } = await import("../../src/server/claude-messages");
     const request = new Request("http://localhost/v1/messages", {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "fixture/model", messages: [{ role: "user", content: "x".repeat(200) }] }),
+      body: JSON.stringify({ model: "fixture/model", messages: [{ role: "user", content: "x".repeat(520) }] }),
     });
     const beforeBytes = budgets.translatorObservedBufferSnapshot().currentBytes;
     const beforeCount = budgets.translatorLiveBudgetCountForTests();
@@ -729,7 +729,7 @@ describe("reasoning allocation admission", () => {
       expect(response.status).toBe(413);
       expect(await response.json()).toMatchObject({ type: "error", error: { type: "request_too_large", code: "translation_buffer_limit" } });
       expect(charge.mock.calls.filter(([, scope]) => scope.kind === "request_copies")).toHaveLength(1);
-      expect(reserve.mock.calls.filter(([, scope]) => scope.kind === "request_copies")).toHaveLength(1);
+      expect(reserve.mock.calls.filter(([, scope]) => scope.kind === "request_copies")).toHaveLength(0);
       expect(stringify.mock.calls.some(([value]) => value && typeof value === "object" && "input" in value)).toBe(false);
       expect(upstream).not.toHaveBeenCalled();
       expect(budgets.translatorObservedBufferSnapshot().currentBytes).toBe(beforeBytes);
@@ -740,7 +740,7 @@ describe("reasoning allocation admission", () => {
     }
   });
 
-  test("successful Request construction retains only its UTF-8 body after releasing temporary copies", async () => {
+  test("in-memory preParsedBody handoff retains translated request_copies once without stringifying an internal Request body", async () => {
     const { handleClaudeMessages } = await import("../../src/server/claude-messages");
     const request = new Request("http://localhost/v1/messages", {
       method: "POST", headers: { "content-type": "application/json" },
@@ -759,15 +759,13 @@ describe("reasoning allocation admission", () => {
     const stringify = spyOn(JSON, "stringify");
     try {
       const response = await handleClaudeMessages(request, { port: 0, providers: {} }, { model: "", provider: "" });
-      expect(response.status).toBe(404); // Serialization succeeded; the synthetic model is deliberately absent.
+      expect(response.status).toBe(404); // Routing ran without an intermediate stringified internal Request body; the synthetic model is absent.
       await response.text();
-      const serialized = stringify.mock.calls.find(([value]) => value && typeof value === "object" && "input" in value)?.[0];
-      expect(serialized).toBeDefined();
-      const expected = Buffer.byteLength(JSON.stringify(serialized));
-      expect(copies).toHaveLength(2);
-      expect(copies[1]!.bytes).toBe(expected);
-      expect(copies[1]!.before).toBe(copies[0]!.after);
-      expect(reserve.mock.calls.filter(([, scope]) => scope.kind === "request_copies").map(([bytes]) => bytes)).toEqual([3 * expected]);
+      expect(stringify.mock.calls.some(([value]) => value && typeof value === "object" && "input" in value)).toBe(false);
+      expect(copies).toHaveLength(1);
+      expect(copies[0]!.bytes).toBeGreaterThan(0);
+      expect(copies[0]!.after).toBe(copies[0]!.before + copies[0]!.bytes);
+      expect(reserve.mock.calls.filter(([, scope]) => scope.kind === "request_copies")).toHaveLength(0);
       expect(budget.snapshot().currentBytes).toBe(0);
     } finally { stringify.mockRestore(); factory.mockRestore(); reserve.mockRestore(); charge.mockRestore(); budget.dispose(); }
   });

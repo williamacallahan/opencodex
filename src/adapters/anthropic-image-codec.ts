@@ -1,5 +1,5 @@
 import { sniffImageDimensions } from "./anthropic-image-guard";
-import { enforceAppOwnedMemoryBudget } from "../lib/app-owned-memory";
+import { enforceAppOwnedMemoryBudgetIfNeeded } from "../lib/app-owned-memory";
 
 /** One ladder position: dimension cap, JPEG quality attempts, per-image base64 cap. */
 export interface TierSpec {
@@ -189,7 +189,7 @@ export function recordEmittedPosition(b64: string, mediaType: string, pos: numbe
   const sizeBytes = cacheEncoder.encode(key).byteLength + 16;
   emittedPositions.set(key, { position: pos, sizeBytes, storedAt: Date.now() });
   positionBytes += sizeBytes;
-  enforceAppOwnedMemoryBudget();
+  enforceAppOwnedMemoryBudgetIfNeeded();
 }
 
 function cacheEntry(key: string, value: CacheValue): CacheEntry {
@@ -232,7 +232,7 @@ function cachePut(key: string, value: CacheValue): boolean {
   cacheBytes += next.sizeBytes;
   cacheMetadataBytes += next.metadataBytes;
   if (typeof value === "string") cacheSentinelEntries++;
-  enforceAppOwnedMemoryBudget();
+  enforceAppOwnedMemoryBudgetIfNeeded();
   return true;
 }
 

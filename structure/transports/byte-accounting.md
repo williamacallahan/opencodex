@@ -80,6 +80,18 @@ The Google tool-schema loss report retains fixed categories, bounded counts, and
 only. It copies no request content and adds no bytes to the upstream wire; see the
 [Google provider contract](../providers/google.md#google-tool-schema-loss-reporting).
 
+`src/server/claude-messages.ts`, `src/server/chat-completions.ts`, and combo dispatch in
+`src/server/responses/core-combo.ts` pass already-constructed Responses bodies in-memory via
+`preParsedBody`, `preParsedBodyBytes`, and `preParsedBodyCharged` on `HandleResponsesOptions` rather
+than stringifying and re-parsing an internal `Request` body. `prepareResponsesRequest` validates
+`maxInboundBodyBytes` (`DecompressedBodyTooLargeError`), updates inbound reservations, and uses
+`observeAcceptedRequestCopy` when `!preParsedBodyCharged` (matching `readJsonRequestBody` without
+double-charging `request_copies` across combo children). Write hot paths invoke
+`enforceAppOwnedMemoryBudgetIfNeeded()` in `src/lib/app-owned-memory.ts` to skip snapshot-map
+allocation and `enforcement.runs` increments whenever `totalRetainedBytes()` is within budget.
+`tests/claude-integration/claude-messages-preparsed-budget.test.ts` covers single-charge handoff and
+combo headroom preservation.
+
 `src/server/request-decompress.ts` observes the UTF-8 sizes of decoded text and reserialized JSON
 without allocating encoded byte arrays solely to count them. Parsed-body accounting still uses
 the byte length of `JSON.stringify(parsed)`: numeric normalization can make it larger than the input

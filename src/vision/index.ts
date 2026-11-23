@@ -5,7 +5,7 @@ import { describeImageAnthropic } from "./anthropic-describe";
 import { describeImageRouted } from "./routed-describe";
 import type { CodexAuthContext } from "../codex/auth-context";
 import type { SidecarOutcomeRecorder } from "../web-search/executor";
-import { enforceAppOwnedMemoryBudget } from "../lib/app-owned-memory";
+import { enforceAppOwnedMemoryBudgetIfNeeded } from "../lib/app-owned-memory";
 import type { TranslatorBudget } from "../lib/translator-budget";
 import type { VisionPlan } from "./plan";
 import { carriesImages, descriptionEncoder, syncRawBodyImageDescriptions } from "./image-rewrite";
@@ -354,7 +354,7 @@ export async function describeImagesInPlace(
       const successfulText = outcome.error ? "" : clamp(outcome.text.trim(), DESC_MAX_CHARS);
       if (identity.persistent && successfulText) {
         descriptionCache.set(identity.key, successfulText);
-        enforceAppOwnedMemoryBudget();
+        enforceAppOwnedMemoryBudgetIfNeeded();
       }
       const resolvedOutcome = outcome.error ? outcome : { ...outcome, text: successfulText };
       resolveOutcome(resolvedOutcome);

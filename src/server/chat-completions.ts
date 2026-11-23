@@ -65,6 +65,7 @@ import {
 } from "./request-log-conversation";
 import type { OcxConfig } from "../types";
 import { DecompressedBodyTooLargeError, UnsupportedContentEncodingError, readJsonRequestBody, resolveInboundBodyLimitBytes } from "./request-decompress";
+import { jsonUtf8Bytes } from "../lib/json-byte-size";
 import {
   addFinalRequestLog,
   cacheDiagnosticsObserving,
@@ -555,13 +556,10 @@ async function handleChatCompletionsWithBudget(
     }
   }
 
-  let internalBodyJson: string;
+  let internalBodyBytes: number;
   try {
-    internalBodyJson = JSON.stringify(internalBody);
-    translatorBudget.chargeRetained(
-      Buffer.byteLength(internalBodyJson, "utf8"),
-      { kind: "request_copies" },
-    );
+    internalBodyBytes = jsonUtf8Bytes(internalBody);
+    translatorBudget.chargeRetained(internalBodyBytes, { kind: "request_copies" });
   } catch (err) {
     const overflow = isTranslatorBudgetExceededError(err);
     const status = overflow ? 413 : 500;
@@ -576,7 +574,6 @@ async function handleChatCompletionsWithBudget(
   const internalReq = new Request("http://localhost/v1/responses", {
     method: "POST",
     headers,
-    body: internalBodyJson,
   });
   linkRequestSessionLane(req, internalReq);
 
@@ -598,6 +595,9 @@ async function handleChatCompletionsWithBudget(
     abortSignal: req.signal,
     // Body is Responses-shaped by now, but the client spoke Chat Completions.
     inboundWire: "chat",
+    preParsedBody: internalBody,
+    preParsedBodyBytes: internalBodyBytes,
+    preParsedBodyCharged: true,
     chatInstructionImage: chatHasInstructionImage(chatBody),
     chatRawReasoningVisible: rawReasoningVisible,
     // A Chat caller may send an explicit empty `tools` array — a deny-all declaration the

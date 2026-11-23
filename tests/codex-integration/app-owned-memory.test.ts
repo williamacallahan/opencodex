@@ -5,6 +5,7 @@ import {
   APP_OWNED_WORST_CASE_PINNED_BYTES,
   configureAppOwnedMemoryBudget,
   enforceAppOwnedMemoryBudget,
+  enforceAppOwnedMemoryBudgetIfNeeded,
   registerObservedBuffer,
   registerRetainedStore,
   resetAppOwnedMemoryForTests,
@@ -475,5 +476,23 @@ describe("app-owned retained memory", () => {
     expect(modelCacheRetainedStoreSnapshot()).toMatchObject({ count: 1, bytes: replacementBytes, oldestAt: 20 });
     expect(evictOldestModelCacheForBudget()).toBe(replacementBytes);
     expect(modelCacheRetainedStoreSnapshot()).toMatchObject({ count: 0, bytes: 0 });
+  });
+
+  test("enforceAppOwnedMemoryBudgetIfNeeded skips map allocation and runs bump when under budget, and evicts once over budget", () => {
+    const order: string[] = [];
+    registerRows("logs", "logs", [{ bytes: 4, at: 1 }, { bytes: 5, at: 2 }], order);
+    configureAppOwnedMemoryBudget(10);
+
+    enforceAppOwnedMemoryBudgetIfNeeded();
+    expect(order).toEqual([]);
+    expect(appOwnedBytesSnapshot().enforcement.runs).toBe(0);
+    expect(appOwnedBytesSnapshot().retainedBytes).toBe(9);
+
+    configureAppOwnedMemoryBudget(6);
+    enforceAppOwnedMemoryBudgetIfNeeded();
+    expect(order).toEqual(["logs"]);
+    const after = appOwnedBytesSnapshot();
+    expect(after.retainedBytes).toBe(5);
+    expect(after.enforcement).toMatchObject({ runs: 1, entriesDemoted: 1, bytesReleased: 4 });
   });
 });

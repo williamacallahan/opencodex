@@ -58,7 +58,7 @@ import {
 import { startUserCostOverlayReconciler } from "../usage/user-cost-overlay-reconciler";
 import {
   configureAppOwnedMemoryBudget,
-  enforceAppOwnedMemoryBudget,
+  enforceAppOwnedMemoryBudgetIfNeeded,
   resolveAppOwnedMemoryBudgetBytes,
 } from "../lib/app-owned-memory";
 import {
@@ -305,7 +305,7 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
   registerDefaultAppOwnedObservedBuffers();
   registerAppOwnedMemorySweepFallback();
   configureAppOwnedMemoryBudget(resolveAppOwnedMemoryBudgetBytes(config.appOwnedMemoryBudgetMb));
-  enforceAppOwnedMemoryBudget();
+  enforceAppOwnedMemoryBudgetIfNeeded();
   // Observe-only mode still journals physical sends, so every server owns before configuring.
   spendLedgerLifecycle.configure(config.spend, config.spendPoolAliases, Object.keys(config.providers));
   // After ownership: a second server on the same home is refused above, so the process running

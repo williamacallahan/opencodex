@@ -52,7 +52,7 @@ import { isDefaultShadowSourceModels, shadowSourceModelOptions, shadowSourceMode
 import {
   configureAppOwnedMemoryBudget,
   configuredAppOwnedMemoryBudgetBytes,
-  enforceAppOwnedMemoryBudget,
+  enforceAppOwnedMemoryBudgetIfNeeded,
   MAX_APP_OWNED_MEMORY_BUDGET_MB,
   MIN_APP_OWNED_MEMORY_BUDGET_MB,
   resolveAppOwnedMemoryBudgetBytes,
@@ -901,7 +901,7 @@ async function handleConfigRoutesImpl(ctx: ManagementContext): Promise<Response 
     if (typeof body.appOwnedMemoryBudgetMb === "number" || configuredAppOwnedMemoryBudgetBytes() !== targetBudgetBytes) {
       configureAppOwnedMemoryBudget(targetBudgetBytes);
       enforceResponseContinuationByteCap();
-      enforceAppOwnedMemoryBudget();
+      enforceAppOwnedMemoryBudgetIfNeeded();
     }
     if (body.usageLedgerMaxBytes !== undefined || configuredUsageLedgerMaxBytes() !== config.usageLedgerMaxBytes) {
       setUsageLedgerRetention(config.usageLedgerMaxBytes);

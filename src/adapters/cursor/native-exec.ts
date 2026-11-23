@@ -1,6 +1,6 @@
 import type { CursorForegroundShellOwner } from "./native-foreground-shell";
 import { createHash } from "node:crypto";
-import { enforceAppOwnedMemoryBudget } from "../../lib/app-owned-memory";
+import { enforceAppOwnedMemoryBudgetIfNeeded } from "../../lib/app-owned-memory";
 import { create } from "@bufbuild/protobuf";
 import {
   DiagnosticsErrorSchema,
@@ -262,7 +262,7 @@ function recomputeBlobClassAccounting(): void {
 
 function reconcileBlobClassAccountingAndEnforce(): void {
   recomputeBlobClassAccounting();
-  enforceAppOwnedMemoryBudget();
+  enforceAppOwnedMemoryBudgetIfNeeded();
 }
 
 function scheduleBlobExpiryAccounting(now: number): void {
@@ -445,7 +445,7 @@ function setBlob(
     reconcileBlobClassAccountingAndEnforce();
   } else {
     accountAdmittedBlob(k, entry, now);
-    enforceAppOwnedMemoryBudget();
+    enforceAppOwnedMemoryBudgetIfNeeded();
   }
   return { admitted: true, replaced: existing !== undefined };
 }

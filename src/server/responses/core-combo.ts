@@ -1339,7 +1339,6 @@ export async function executeComboResponses(
     const childRequest = new Request(req.url, {
       method: req.method,
       headers: childHeaders,
-      body: JSON.stringify(childBody),
     });
     linkRequestSessionLane(req, childRequest);
     let resolvedAuth: CodexAuthContext | undefined;
@@ -1483,6 +1482,7 @@ export async function executeComboResponses(
         },
       }) : withComboTurnStateOwner(handleOwner, () => requestDispatchers.handleResponses(childRequest, config, childLog, {
         ...options,
+        preParsedBody: childBody, preParsedBodyBytes: undefined, preParsedBodyCharged: false,
         replayPrincipal,
         // A bridge child is a concrete route; the native source belongs to this loop only.
         ...(options.protocolSource ? { protocolSource: undefined } : {}),

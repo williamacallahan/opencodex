@@ -5,7 +5,7 @@ import { ConfigUninstallInProgressError, recordOwnedConfigPath } from "./config-
 import { redactSecretString, redactUrlForLog } from "./redact";
 import { sidecarBreadcrumb, activityBreadcrumb } from "./sidecar-tracker";
 import { retainedUtf8Bytes, truncateRetainedUtf8 } from "./admission";
-import { enforceAppOwnedMemoryBudget } from "./app-owned-memory";
+import { enforceAppOwnedMemoryBudgetIfNeeded } from "./app-owned-memory";
 
 /**
  * Process-level safety net for the long-running proxy daemon.
@@ -305,7 +305,7 @@ function instrumentFetch(): void {
     } catch { /* best-effort */ }
     const origin = (new Error().stack ?? "").split("\n").slice(2, 5).map(l => l.trim()).join(" <- ");
     const trace = appendFetchTrace(url, origin);
-    enforceAppOwnedMemoryBudget();
+    enforceAppOwnedMemoryBudgetIfNeeded();
     let p: ReturnType<typeof fetch>;
     try {
       p = original.apply(this, args);

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { atomicWriteFileAsync, getConfigDir, type AtomicWriteAsyncTestSeam } from "../config";
-import { enforceAppOwnedMemoryBudget } from "../lib/app-owned-memory";
+import { enforceAppOwnedMemoryBudgetIfNeeded } from "../lib/app-owned-memory";
 
 /**
  * Google-family thoughtSignature reasoning-replay cache.
@@ -208,7 +208,7 @@ function ensureReplaySnapshotLoaded(): void {
   // Persist the cleaned state once: expired/over-limit sessions must not stay
   // on disk and be re-parsed (and re-dropped) after every restart.
   if (replaySnapshotLoadDiscarded) markReplayDirty();
-  enforceAppOwnedMemoryBudget();
+  enforceAppOwnedMemoryBudgetIfNeeded();
 }
 
 function markReplayDirty(): void {
@@ -809,7 +809,7 @@ export function observeAntigravityReplay(
   replayCache.set(key, entry);
   refreshReplaySessionCandidate(key, entry);
   evictIfNeeded();
-  enforceAppOwnedMemoryBudget();
+  enforceAppOwnedMemoryBudgetIfNeeded();
   markReplayDirty();
   return pendingThoughtSig;
 }

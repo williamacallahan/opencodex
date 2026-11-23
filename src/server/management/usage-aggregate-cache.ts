@@ -1,4 +1,4 @@
-import { enforceAppOwnedMemoryBudget } from "../../lib/app-owned-memory";
+import { enforceAppOwnedMemoryBudgetIfNeeded } from "../../lib/app-owned-memory";
 import {
   currentUsageLogRevision,
   usageLogIdentityKey,
@@ -148,7 +148,7 @@ function publishRetainedAggregate(state: RetainedUsageAggregate): UsageAggregate
   retainedAggregate = state;
   // The budget may evict the state immediately. The request that built it still
   // owns the returned accumulator and can finish this response safely.
-  enforceAppOwnedMemoryBudget();
+  enforceAppOwnedMemoryBudgetIfNeeded();
   return resultFrom(state, "rebuild");
 }
 
@@ -271,7 +271,7 @@ async function appendAggregate(
         retainedAt: Date.now(),
       };
       retainedAggregate = next;
-      enforceAppOwnedMemoryBudget();
+      enforceAppOwnedMemoryBudgetIfNeeded();
       return resultFrom(next, "append");
     }
   } catch (error) {
@@ -550,7 +550,7 @@ function publishFilteredAggregate(
 ): UsageAggregateResult {
   retainedFilteredAggregates.set(key, state);
   trimRetainedFilteredAggregates();
-  enforceAppOwnedMemoryBudget();
+  enforceAppOwnedMemoryBudgetIfNeeded();
   return read
     ? { ...resultFrom(state, update), filterIndex: filterStats(read, update) }
     : resultFrom(state, update);
@@ -744,7 +744,7 @@ function publishJevStatsAggregate(
 ): JevStatsAggregateResult {
   retainedJevStatsAggregates.set(key, state);
   trimRetainedJevStatsAggregates();
-  enforceAppOwnedMemoryBudget();
+  enforceAppOwnedMemoryBudgetIfNeeded();
   return jevStatsResultFrom(state, update);
 }
 

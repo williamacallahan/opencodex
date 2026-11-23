@@ -265,6 +265,24 @@ export function enforceAppOwnedMemoryBudget(reservedPinnedBytes = 0): AppOwnedBy
   }
 }
 
+function totalRetainedBytes(): number {
+  let total = 0;
+  for (const registration of retainedStores.values()) {
+    total += retainedSnapshot(registration).bytes;
+  }
+  return total;
+}
+
+/**
+ * Hot-path fire-and-forget memory budget enforcement: checks total retained bytes
+ * without allocating snapshot maps or bumping `enforcement.runs` when under budget.
+ */
+export function enforceAppOwnedMemoryBudgetIfNeeded(): void {
+  if (isEnforcing) return;
+  if (totalRetainedBytes() <= budgetBytes) return;
+  enforceAppOwnedMemoryBudget();
+}
+
 /**
  * Admission for a pinned allocation the owner cannot demote later. The proposal is
  * counted against the shared target BEFORE the normal eviction pass runs, so

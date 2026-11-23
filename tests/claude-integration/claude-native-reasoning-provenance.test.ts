@@ -389,10 +389,10 @@ describe("Claude native reasoning replay through the Messages bridge", () => {
     .filter(item => typeof item.encrypted_content === "string").map(item => (item.encrypted_content as string).slice(0, 8));
 
   test("history whose ciphertext would push the reserved request copies over budget is trimmed oldest first and admitted", async () => {
-    // 5.6 MiB of history and 1.8 MiB of ciphertext under the signature cap: one charged body copy,
-    // three reserved copies and twice the ciphertext come to about 33 MiB of the 32 MiB turn budget.
+    // 13.5 MiB of history and 1.8 MiB of ciphertext under the signature cap: one charged body copy,
+    // one remaining outbound copy and twice the ciphertext come to about 34.2 MiB of the 32 MiB turn budget.
     const blobs = Array.from({ length: 18 }, (_, i) => blob(`blob${String(i).padStart(4, "0")}`, 100 * 1024));
-    const messages: Record<string, unknown>[] = [{ role: "user", content: `Read this. ${"y".repeat(5.6 * 1024 * 1024)}` }];
+    const messages: Record<string, unknown>[] = [{ role: "user", content: `Read this. ${"y".repeat(13.5 * 1024 * 1024)}` }];
     for (const enc of blobs) messages.push(native(enc), { role: "user", content: "Continue." });
     const { wires } = await send(config(), { model: MODEL, max_tokens: 128, thinking: { type: "adaptive" }, messages });
     const kept = replayed(wires[0]!);

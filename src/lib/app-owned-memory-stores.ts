@@ -1,5 +1,5 @@
 import {
-  enforceAppOwnedMemoryBudget,
+  enforceAppOwnedMemoryBudgetIfNeeded,
   registerRetainedStore,
   registerObservedBuffer,
   type RetainedStoreRegistration,
@@ -220,6 +220,6 @@ export function registerDefaultAppOwnedObservedBuffers(): void {
 export function registerAppOwnedMemorySweepFallback(): void {
   registerStateSweepAfterTick({
     name: "app-owned-memory-budget",
-    afterTick: enforceAppOwnedMemoryBudget,
+    afterTick: enforceAppOwnedMemoryBudgetIfNeeded,
   });
 }

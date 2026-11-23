@@ -1,4 +1,4 @@
-import { enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../../lib/app-owned-memory";
+import { enforceAppOwnedMemoryBudgetIfNeeded, type RetainedStoreSnapshot } from "../../lib/app-owned-memory";
 import type { UsageSummary } from "../../usage/summary";
 
 export type CachedUsageSummary = UsageSummary & {
@@ -75,7 +75,7 @@ export function setUsageSummaryCacheEntry(
     oldestUsageSummaryKey = key;
     oldestUsageSummaryAt = entry.revisionReadAt;
   }
-  enforceAppOwnedMemoryBudget();
+  enforceAppOwnedMemoryBudgetIfNeeded();
 }
 
 export function usageSummaryRetainedStoreSnapshot(): RetainedStoreSnapshot {
