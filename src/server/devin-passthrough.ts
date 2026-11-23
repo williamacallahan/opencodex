@@ -11,7 +11,7 @@ import { isDraining, tryAdmitTurn } from "./lifecycle";
 import { messagesEndToEndHeaders } from "./messages-native-integrity";
 import { disableResponsesRequestTimeout } from "./responses/fetch-helpers";
 import { addFinalRequestLog, nextRequestLogId, type RequestLogContext } from "./request-log";
-import { sendExactly, type ExactResponse } from "./agy-passthrough-send";
+import { AgyUpstreamSendError, describeUpstreamTransportError, sendExactly, type ExactResponse } from "./agy-passthrough-send";
 import { getAccountCredential, listAccounts } from "../oauth/store";
 import { forceRefreshOAuthAccessSnapshot, getValidAccessSnapshotForAccount } from "../oauth";
 import { eligibleFailoverAccounts, genericFailoverRetryAfterSeconds, rotateGenericOAuthAccountOn429 } from "../oauth/generic-account-failover";
@@ -311,7 +311,7 @@ async function observeConnectStreamTrailers(copy: ReadableStream<Uint8Array>, co
 
 function settledBody(
   source: ReadableStream<Uint8Array>, settle: (status: number | "complete") => void,
-  abort: () => void, cancelled: () => boolean,
+  abort: () => void, cancelled: () => boolean, onError?: (error: unknown) => void,
 ): ReadableStream<Uint8Array> {
   const reader = source.getReader();
   return new ReadableStream<Uint8Array>({
@@ -320,7 +320,7 @@ function settledBody(
         const { done, value } = await reader.read();
         if (done) { settle("complete"); controller.close(); return; }
         controller.enqueue(value);
-      } catch (error) { settle(cancelled() ? 499 : 502); controller.error(error); }
+      } catch (error) { onError?.(error); settle(cancelled() ? 499 : 502); controller.error(error); }
     },
     async cancel(reason) { settle(499); abort(); await reader.cancel(reason).catch(() => {}); },
   });
@@ -402,22 +402,31 @@ export async function handleDevinPassthrough(req: Request, ctx: DevinPassthrough
     addFinalRequestLog(requestId, start, logCtx, status === "complete" ? upstreamStatus : status);
   };
 
+  const logUpstreamFailure = (defaultPhase: "unknown" | "body", error: unknown, reusedSocket?: boolean) => {
+    const cancelled = req.signal.aborted || controller.signal.aborted;
+    const upstreamErr = error instanceof AgyUpstreamSendError ? error : undefined;
+    const detail = describeUpstreamTransportError(error);
+    console.warn("[devin-passthrough] upstream failure", {
+      rpcPath: parts.rpcPath,
+      account: logCtx.accountLogLabel,
+      phase: upstreamErr?.phase ?? (cancelled ? "aborted" : defaultPhase),
+      code: upstreamErr?.code ?? detail.code,
+      syscall: upstreamErr?.syscall ?? detail.syscall,
+      message: detail.message,
+      elapsedMs: upstreamErr?.elapsedMs ?? Math.max(0, Date.now() - start),
+      reusedSocket: upstreamErr?.reusedSocket ?? reusedSocket ?? null,
+      cancelled,
+      draining: isDraining(),
+    });
+  };
+
   let upstream: ExactResponse;
   try {
     const targetUrl = new URL(resolveDevinPassthroughBaseUrl(config, choice.apiBaseUrl) + parts.rpcPath + url.search);
     upstream = await sendExactly(targetUrl, headers, outgoingBody, controller.signal);
   } catch (error) {
     const cancelled = req.signal.aborted || controller.signal.aborted;
-    const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : undefined;
-    const phase = error && typeof error === "object" && "phase" in error ? String((error as { phase?: unknown }).phase) : undefined;
-    console.warn("[devin-passthrough] upstream failure", {
-      rpcPath: parts.rpcPath,
-      account: logCtx.accountLogLabel,
-      phase: phase ?? (cancelled ? "aborted" : "unknown"),
-      code: code ?? null,
-      cancelled,
-      draining: isDraining(),
-    });
+    logUpstreamFailure("unknown", error);
     settle(cancelled ? 499 : 502);
     if (isDraining()) return refuse(503, "hub is restarting");
     return cancelled ? refuse(499, "request cancelled") : refuse(503, "could not reach Devin upstream");
@@ -445,9 +454,11 @@ export async function handleDevinPassthrough(req: Request, ctx: DevinPassthrough
       clientBody = forClient;
       void observeConnectStreamTrailers(forObserver, config, choice.accountId);
     }
-    return new Response(settledBody(clientBody, settle, () => controller.abort(), () => req.signal.aborted), {
-      status: upstream.status, statusText: upstream.statusText, headers: respHeaders,
-    });
+    return new Response(
+      settledBody(clientBody, settle, () => controller.abort(), () => req.signal.aborted,
+        error => logUpstreamFailure("body", error, upstream.reusedSocket)),
+      { status: upstream.status, statusText: upstream.statusText, headers: respHeaders },
+    );
   } catch {
     settle(502);
     void upstream.body.cancel().catch(() => {});

@@ -111,8 +111,9 @@ identity headers. The strict Claude lane and the `/agy` lane share it.
 no redirect, reuses a bounded LIFO HTTP/HTTPS agent pool (`AGENT_OPTIONS`), enforces a 30-second
 response-header deadline (`AgyUpstreamSendError`), and decodes nothing. Compressed ingress payloads
 for project lookup (`extractTopLevelJsonStringField`, zero-AST UTF-8 byte scan) and relayed quota
-answers decode asynchronously via promisified `node:zlib` helpers. Caught transport errors emit a
-token-redacted `[agy-passthrough] upstream failure` warning and return HTTP 503. Cooled-down project
+answers decode asynchronously via promisified `node:zlib` helpers. Caught transport errors on send and mid-stream body reads emit a token/query-redacted
+`[agy-passthrough] upstream failure` warning (recording `phase`, `code`, `syscall`, sanitized
+`message`, `reusedSocket`, and `elapsedMs`); pre-header send failures return HTTP 503. Cooled-down project
 owners rotate onto another healthy owner of the same project in `src/server/agy-passthrough-accounts.ts`.
 The response streams back through a wrapper that writes the request
 log and releases the active-turn lease when the body ends or the client cancels, so a hub drain waits

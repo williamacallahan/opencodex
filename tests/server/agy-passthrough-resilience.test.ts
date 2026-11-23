@@ -11,7 +11,7 @@ import { clearPoolRotationState } from "../../src/oauth/pool-kernel";
 import { getAccountSet, saveCredential } from "../../src/oauth/store";
 import { extractTopLevelJsonStringField, handleAgyPassthrough } from "../../src/server/agy-passthrough";
 import { chooseAgyAccount, resetAgyAccountState } from "../../src/server/agy-passthrough-accounts";
-import { AgyUpstreamSendError, sendExactly } from "../../src/server/agy-passthrough-send";
+import { AgyUpstreamSendError, describeUpstreamTransportError, sendExactly } from "../../src/server/agy-passthrough-send";
 import { readBoundedRequestBytes } from "../../src/server/index/bounded-request";
 import { clearAccountQuotaCache } from "../../src/providers/quota";
 import type { OcxConfig } from "../../src/types";
@@ -157,6 +157,19 @@ describe("agy passthrough resilience and zero-AST parsing", () => {
       expect(res.status).toBe(503);
       const failureWarn = warnSpy.mock.calls.find(call => String(call[0]).includes("upstream failure"));
       expect(failureWarn).toBeDefined();
+      const detail = failureWarn![1] as {
+        code?: unknown;
+        syscall?: unknown;
+        message?: unknown;
+        elapsedMs?: unknown;
+        reusedSocket?: unknown;
+      };
+      expect(detail.code).toBe("ECONNREFUSED");
+      expect(detail.syscall).toBe("connect");
+      expect(typeof detail.message).toBe("string");
+      expect((detail.message as string).length).toBeGreaterThan(0);
+      expect(typeof detail.elapsedMs).toBe("number");
+      expect("reusedSocket" in detail).toBe(true);
       const serialized = JSON.stringify(failureWarn);
       expect(serialized).not.toContain("synthetic-a-access");
       expect(serialized).not.toContain("synthetic-b-access");
@@ -233,5 +246,96 @@ describe("agy passthrough resilience and zero-AST parsing", () => {
     });
     const read = await readBoundedRequestBytes(singleReq, 1024);
     expect(read).toEqual(payload);
+  });
+
+  test("describeUpstreamTransportError redacts tokens and query strings, caps length, and preserves cause codes", () => {
+    const cause = Object.assign(new Error("socket failed"), { code: "ECONNRESET", syscall: "read" });
+    const wrapped = new Error(
+      "POST https://cloudcode-pa.googleapis.com/v1internal:stream?alt=sse&key=secret-qp   failed with\n\tBearer synthetic-bearer-tok and Basic synthetic-basic-tok",
+      { cause },
+    );
+    const described = describeUpstreamTransportError(wrapped);
+    expect(described.code).toBe("ECONNRESET");
+    expect(described.syscall).toBe("read");
+    expect(described.message).toContain("https://cloudcode-pa.googleapis.com/v1internal:stream");
+    expect(described.message).not.toContain("secret-qp");
+    expect(described.message).not.toContain("synthetic-bearer-tok");
+    expect(described.message).not.toContain("synthetic-basic-tok");
+    expect(described.message).toContain("[REDACTED]");
+    expect(described.message).not.toMatch(/\s{2,}/);
+
+    const longDesc = describeUpstreamTransportError(new Error("x".repeat(320)));
+    expect(longDesc.message).toHaveLength(200);
+  });
+
+  test("handleAgyPassthrough logs body-phase upstream failure when stream closes prematurely mid-response", async () => {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream", "transfer-encoding": "chunked" });
+      res.write('data: {"partial":true}\n\n');
+      setTimeout(() => res.socket?.destroy(), 15);
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+
+    const config: OcxConfig = {
+      port: 0,
+      defaultProvider: "google-antigravity",
+      apiKeys: [{ id: "k1", key: hubKey }],
+      nativeHarnessOnly: true,
+      providers: {
+        "google-antigravity": { adapter: "google", authMode: "oauth", baseUrl: `http://127.0.0.1:${port}` },
+      },
+    };
+    saveConfig(config);
+    bindNativeHarnessConfig(config);
+
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const req = new Request(`http://localhost/agy/${hubKey}/v1internal:streamGenerateContent`, {
+        method: "POST",
+        headers: {
+          "user-agent": agyAgent,
+          authorization: "Bearer client-body-fail-secret",
+          "content-type": "application/json",
+        },
+        body: '{"project":"proj-shared"}',
+      });
+      const res = await handleAgyPassthrough(req, { config, draining: false });
+      expect(res.status).toBe(200);
+      await expect(res.text()).rejects.toThrow();
+
+      const bodyWarn = warnSpy.mock.calls.find(call => {
+        if (!String(call[0]).includes("upstream failure")) return false;
+        const fields = call[1] as { phase?: string } | undefined;
+        return fields?.phase === "body";
+      });
+      expect(bodyWarn).toBeDefined();
+      const fields = bodyWarn![1] as {
+        phase?: unknown;
+        code?: unknown;
+        syscall?: unknown;
+        message?: unknown;
+        elapsedMs?: unknown;
+        reusedSocket?: unknown;
+        cancelled?: unknown;
+        draining?: unknown;
+      };
+      expect(fields.phase).toBe("body");
+      expect("code" in fields).toBe(true);
+      expect("syscall" in fields).toBe(true);
+      expect(typeof fields.message).toBe("string");
+      expect((fields.message as string).length).toBeGreaterThan(0);
+      expect(typeof fields.elapsedMs).toBe("number");
+      expect("reusedSocket" in fields).toBe(true);
+      expect(fields.cancelled).toBe(false);
+      expect(fields.draining).toBe(false);
+      const serialized = JSON.stringify(bodyWarn);
+      expect(serialized).not.toContain("synthetic-a-access");
+      expect(serialized).not.toContain("client-body-fail-secret");
+    } finally {
+      warnSpy.mockRestore();
+      server.closeAllConnections?.();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
   });
 });

@@ -25,6 +25,7 @@ export const DEFAULT_AGY_HEADER_TIMEOUT_MS = 30_000;
 export class AgyUpstreamSendError extends Error {
   readonly phase: "connect" | "headers" | "aborted";
   readonly code?: string;
+  readonly syscall?: string;
   readonly elapsedMs: number;
   readonly host: string;
   readonly reusedSocket?: boolean;
@@ -34,6 +35,7 @@ export class AgyUpstreamSendError extends Error {
     detail: {
       phase: "connect" | "headers" | "aborted";
       code?: string;
+      syscall?: string;
       elapsedMs: number;
       host: string;
       reusedSocket?: boolean;
@@ -44,10 +46,44 @@ export class AgyUpstreamSendError extends Error {
     this.name = "AgyUpstreamSendError";
     this.phase = detail.phase;
     this.code = detail.code;
+    this.syscall = detail.syscall;
     this.elapsedMs = detail.elapsedMs;
     this.host = detail.host;
     this.reusedSocket = detail.reusedSocket;
   }
+}
+
+type TransportErrorShape = { code?: unknown; syscall?: unknown; cause?: unknown };
+
+function pickTransportErrorField(error: unknown, field: "code" | "syscall"): string | null {
+  const cause = error && typeof error === "object" ? (error as TransportErrorShape).cause : undefined;
+  for (const candidate of [error, cause]) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const raw = (candidate as TransportErrorShape)[field];
+    if (typeof raw === "string" && raw.length > 0) return raw;
+    if (typeof raw === "number") return String(raw);
+  }
+  return null;
+}
+
+/** Extract `code`, `syscall`, and a token/query-redacted single-line summary for safe upstream warning logs. */
+export function describeUpstreamTransportError(error: unknown): {
+  code: string | null;
+  syscall: string | null;
+  message: string;
+} {
+  const raw = error instanceof Error ? error.message : String(error);
+  const message = raw
+    .replace(/(?:Bearer|Basic)\s+\S+/gi, "[REDACTED]")
+    .replace(/(?<=\S)\?[^\s"']+/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
+  return {
+    code: pickTransportErrorField(error, "code"),
+    syscall: pickTransportErrorField(error, "syscall"),
+    message,
+  };
 }
 
 export interface ExactResponse {
@@ -55,6 +91,7 @@ export interface ExactResponse {
   readonly statusText: string;
   readonly headers: Headers;
   readonly body: ReadableStream<Uint8Array>;
+  readonly reusedSocket?: boolean;
 }
 
 function responseHeaders(message: IncomingMessage): Headers {
@@ -124,6 +161,7 @@ export function sendExactly(
         statusText: message.statusMessage ?? "",
         headers: responseHeaders(message),
         body: webBody(message),
+        reusedSocket: (req as { reusedSocket?: boolean }).reusedSocket,
       });
     });
 
@@ -166,9 +204,14 @@ export function sendExactly(
       const code = error && typeof error === "object" && "code" in error
         ? String((error as { code?: unknown }).code)
         : undefined;
+      const syscall = error && typeof error === "object" && "syscall" in error
+        && typeof (error as { syscall?: unknown }).syscall === "string"
+        ? (error as { syscall: string }).syscall
+        : undefined;
       reject(new AgyUpstreamSendError(error instanceof Error ? error.message : String(error), {
         phase: signal.aborted ? "aborted" : phase,
         code,
+        syscall,
         elapsedMs: Math.max(0, Date.now() - startedAt),
         host: url.host,
         reusedSocket: (req as { reusedSocket?: boolean }).reusedSocket,
