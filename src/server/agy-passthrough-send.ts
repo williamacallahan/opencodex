@@ -8,6 +8,7 @@
  */
 import { Agent as HttpAgent, request as httpRequest, type IncomingMessage } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
+import { redactSecretString, sanitizeLogMetadataString } from "../lib/redact";
 
 const AGENT_OPTIONS = {
   keepAlive: true,
@@ -56,34 +57,125 @@ export class AgyUpstreamSendError extends Error {
 type TransportErrorShape = { code?: unknown; syscall?: unknown; cause?: unknown };
 
 function pickTransportErrorField(error: unknown, field: "code" | "syscall"): string | null {
-  const cause = error && typeof error === "object" ? (error as TransportErrorShape).cause : undefined;
-  for (const candidate of [error, cause]) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const raw = (candidate as TransportErrorShape)[field];
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const raw = (current as TransportErrorShape)[field];
     if (typeof raw === "string" && raw.length > 0) return raw;
     if (typeof raw === "number") return String(raw);
+    current = (current as TransportErrorShape).cause;
   }
   return null;
 }
 
-/** Extract `code`, `syscall`, and a token/query-redacted single-line summary for safe upstream warning logs. */
+function readErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  try {
+    return String(error);
+  } catch {
+    return "[unprintable error]";
+  }
+}
+
+/** Extract `code`, `syscall`, and a single-line redacted summary through the shared redactor SSOT. */
 export function describeUpstreamTransportError(error: unknown): {
   code: string | null;
   syscall: string | null;
   message: string;
 } {
-  const raw = error instanceof Error ? error.message : String(error);
-  const message = raw
-    .replace(/(?:Bearer|Basic)\s+\S+/gi, "[REDACTED]")
-    .replace(/(?<=\S)\?[^\s"']+/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 200);
+  const scrubbedUrl = readErrorMessage(error).replace(/(\bhttps?:\/\/[^\s?#"'<>]+)[?#]\S*/gi, "$1");
+  const redacted = redactSecretString(scrubbedUrl)
+    .replace(/\b(Basic)(?:[^\S\r\n]+|%20|:)[^\s"',;]+/gi, "$1 [REDACTED]")
+    .replace(/\b(Bearer)(?:%20|:)[^\s"',;]+/gi, "$1 [REDACTED]")
+    .replace(/\s+/g, " ");
   return {
     code: pickTransportErrorField(error, "code"),
     syscall: pickTransportErrorField(error, "syscall"),
-    message,
+    message: sanitizeLogMetadataString(redacted, 200) ?? "",
   };
+}
+
+export interface SettledPassthroughBodyOptions {
+  readonly source: ReadableStream<Uint8Array>;
+  readonly settle: (status: number | "complete") => void;
+  readonly abort: () => void;
+  readonly isAborted: () => boolean;
+  readonly onError?: (error: unknown) => void;
+}
+
+/** Stream an upstream body with WHATWG pull/cancel serialization and guaranteed single settlement. */
+export function createSettledPassthroughBody(options: SettledPassthroughBodyOptions): ReadableStream<Uint8Array> {
+  const { source, settle, abort, isAborted, onError } = options;
+  const reader = source.getReader();
+  let cancelled = false;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (cancelled) return;
+        if (done) {
+          settle("complete");
+          controller.close();
+          return;
+        }
+        controller.enqueue(value);
+      } catch (error) {
+        if (cancelled) return;
+        const aborted = isAborted();
+        settle(aborted ? 499 : 502);
+        if (!aborted) {
+          try {
+            onError?.(error);
+          } catch {
+            // Diagnostics must never prevent upstream stream teardown.
+          }
+        }
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      cancelled = true;
+      settle(499);
+      abort();
+      await reader.cancel(reason).catch(() => {});
+    },
+  });
+}
+
+export interface UpstreamFailureLogContext {
+  readonly prefix: string;
+  readonly targetKey: "method" | "rpcPath";
+  readonly target: string;
+  readonly account: string | undefined;
+  readonly defaultPhase: "unknown" | "body";
+  readonly startedAt: number;
+  readonly cancelled: boolean;
+  readonly draining: boolean;
+  readonly reusedSocket?: boolean;
+}
+
+/** Emit one single-line redacted warning for genuine upstream/hub transport failures. */
+export function logPassthroughUpstreamFailure(ctx: UpstreamFailureLogContext, error: unknown): void {
+  if (ctx.cancelled && !ctx.draining) return;
+  const upstreamErr = error instanceof AgyUpstreamSendError ? error : undefined;
+  const detail = describeUpstreamTransportError(error);
+  const common = {
+    account: ctx.account ?? null,
+    phase: upstreamErr?.phase ?? (ctx.cancelled ? "aborted" : ctx.defaultPhase),
+    code: upstreamErr?.code ?? detail.code,
+    syscall: upstreamErr?.syscall ?? detail.syscall,
+    message: detail.message,
+    elapsedMs: upstreamErr?.elapsedMs ?? Math.max(0, Date.now() - ctx.startedAt),
+    reusedSocket: upstreamErr?.reusedSocket ?? ctx.reusedSocket ?? null,
+    cancelled: ctx.cancelled,
+    draining: ctx.draining,
+  };
+  const fields = ctx.targetKey === "method"
+    ? { method: ctx.target, ...common }
+    : { rpcPath: ctx.target, ...common };
+  console.warn(`${ctx.prefix} upstream failure ${JSON.stringify(fields)}`);
 }
 
 export interface ExactResponse {
@@ -201,17 +293,10 @@ export function sendExactly(
         reject(error);
         return;
       }
-      const code = error && typeof error === "object" && "code" in error
-        ? String((error as { code?: unknown }).code)
-        : undefined;
-      const syscall = error && typeof error === "object" && "syscall" in error
-        && typeof (error as { syscall?: unknown }).syscall === "string"
-        ? (error as { syscall: string }).syscall
-        : undefined;
-      reject(new AgyUpstreamSendError(error instanceof Error ? error.message : String(error), {
+      reject(new AgyUpstreamSendError(readErrorMessage(error), {
         phase: signal.aborted ? "aborted" : phase,
-        code,
-        syscall,
+        code: pickTransportErrorField(error, "code") ?? undefined,
+        syscall: pickTransportErrorField(error, "syscall") ?? undefined,
         elapsedMs: Math.max(0, Date.now() - startedAt),
         host: url.host,
         reusedSocket: (req as { reusedSocket?: boolean }).reusedSocket,
