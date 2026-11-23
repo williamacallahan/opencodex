@@ -1,4 +1,28 @@
-import type { ApiTargets } from "./api-targets";
+import type { ApiTarget, ApiTargets } from "./api-targets";
+
+function sameApiTarget(a: ApiTarget, b: ApiTarget): boolean {
+  return a === b || (
+    a.id === b.id
+    && a.baseUrl === b.baseUrl
+    && a.serverOrigin === b.serverOrigin
+    && a.bootstrapPath === b.bootstrapPath
+    && a.transport === b.transport
+  );
+}
+
+export function sameApiTargets(a: ApiTargets | null | undefined, b: ApiTargets | null | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.connected === b.connected
+    && a.usageTopology === b.usageTopology
+    && a.apiKeyId === b.apiKeyId
+    && a.relayTargetCheck === b.relayTargetCheck
+    && a.catalogSyncedAt === b.catalogSyncedAt
+    && a.link?.linkId === b.link?.linkId
+    && a.link?.home === b.link?.home
+    && sameApiTarget(a.machine, b.machine)
+    && sameApiTarget(a.shared, b.shared);
+}
 
 export interface TargetDiscoveryDeps {
   initialBase: string;

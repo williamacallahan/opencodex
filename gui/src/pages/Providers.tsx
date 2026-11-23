@@ -90,14 +90,19 @@ export function useQuotaRefreshCoordinator(apiBase: string) {
 /** One authenticated SSE connection, with bounded reconnect backoff and scheduler recovery. */
 function useAccountSelectionEvents(
   apiBase: string,
+  targetKey: string,
   enabled: boolean,
   refresh: (target?: AccountSelectionTarget) => Promise<boolean>,
-) {
+): { recover: () => void; isHealthy: () => boolean } {
   const refreshRef = useRef(refresh);
   useLayoutEffect(() => { refreshRef.current = refresh; });
   const recoverRef = useRef<() => void>(() => {});
+  const isHealthyRef = useRef<() => boolean>(() => false);
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) {
+      isHealthyRef.current = () => false;
+      return;
+    }
     let stopped = false;
     let retryTimer: ReturnType<typeof window.setTimeout> | null = null;
     let retryDelay = 250;
@@ -129,6 +134,7 @@ function useAccountSelectionEvents(
           const reader = response.body.getReader();
           current.reader = reader;
           current.openedAt = Date.now();
+          current.lastActivity = current.openedAt;
           const decoder = new TextDecoder();
           const revisions = new Map<string, number>();
           const pending = new Map<string, AccountSelectionTarget>();
@@ -201,21 +207,29 @@ function useAccountSelectionEvents(
         }
       })();
     };
+    const isHealthy = () => connection !== null
+      && connection.openedAt !== undefined
+      && !connection.controller.signal.aborted
+      && Date.now() - connection.lastActivity <= 60_000;
     const recover = () => {
       // Also retire a hung handshake or a silent connection that lost its heartbeat.
       if (connection && Date.now() - connection.lastActivity > 60_000) { close(connection); connection = null; }
       connect();
     };
+    isHealthyRef.current = isHealthy;
     recoverRef.current = recover;
     connect();
     return () => {
       stopped = true;
+      isHealthyRef.current = () => false;
       recoverRef.current = () => {};
       clearRetry();
       if (connection) close(connection);
     };
-  }, [apiBase, enabled]);
-  return useCallback(() => recoverRef.current(), []);
+  }, [apiBase, targetKey, enabled]);
+  const recover = useCallback(() => recoverRef.current(), []);
+  const isHealthy = useCallback(() => isHealthyRef.current(), []);
+  return useMemo(() => ({ recover, isHealthy }), [recover, isHealthy]);
 }
 
 export default function Providers({ apiBase, targetKey, targetLabel }: { apiBase: string; targetKey?: string; targetLabel?: string }) {
@@ -429,7 +443,7 @@ export default function Providers({ apiBase, targetKey, targetLabel }: { apiBase
     if (target && !(target.kind === "oauth" ? oauthCardProviders : keyCardProviders).includes(target.provider)) return Promise.resolve(true);
     return refreshAccountRosters(target);
   }, [refreshAccountRosters, oauthCardProviders, keyCardProviders]);
-  const recoverSelectionStream = useAccountSelectionEvents(apiBase, config !== null, refreshSelection);
+  const selectionStream = useAccountSelectionEvents(apiBase, draftTargetKey, config !== null, refreshSelection);
   const selectedProvider = workspaceSelected ? config?.providers[workspaceSelected] : undefined;
   const selectedAccount = workspaceSelected ? accountSets[workspaceSelected]?.accounts.find(row => row.active) : undefined;
   const unmeasuredAccount = selectedAccount?.quotaMode === "probe" && selectedAccount.quota === undefined
@@ -446,7 +460,8 @@ export default function Providers({ apiBase, targetKey, targetLabel }: { apiBase
   useKeyedClientResource(`provider-rosters:${rosterKey}`, [rosterKey], async signal => {
     // Existing bootstrap effects own the first enriched reads. This resource is recovery only.
     if (rosterRecoveryKeyRef.current !== rosterKey) { rosterRecoveryKeyRef.current = rosterKey; return true; }
-    recoverSelectionStream();
+    if (selectionStream.isHealthy()) return true;
+    selectionStream.recover();
     return refreshAccountRosters(undefined, signal);
   }, { enabled: config !== null, pollMs: 30_000 });
   const jsonEditor = useJsonConfigEditor({

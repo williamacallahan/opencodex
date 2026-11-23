@@ -3,6 +3,7 @@ import type { Locale, TFn } from "../i18n/shared";
 import { useI18n } from "../i18n/shared";
 import { IconAlert } from "../icons";
 import { type AccountQuota, normalizeQuotaForPlan } from "../codex-quota-utils";
+import { isAntigravityClaudeWindow, isAntigravityGeminiWindow } from "../../../src/providers/antigravity-window-family";
 
 /* Helpers are co-located with QuotaBars for overview sorting / stacked layout. */
 /* eslint-disable react-refresh/only-export-components */
@@ -174,12 +175,18 @@ export function buildQuotaRows(quota: AccountQuota | null, plan: string | null |
 }
 
 /** Max utilisation across known windows (for sorting providers by urgency). */
-export function maxQuotaUtilisation(quota: AccountQuota | null): number {
+export function maxQuotaUtilisation(quota: AccountQuota | null, options?: { provider?: string }): number {
   if (!quota) return -1;
+  const antigravity = options?.provider === "google-antigravity";
   const vals = [quota.fiveHourPercent, quota.weeklyPercent, quota.monthlyPercent]
     .filter((n): n is number => typeof n === "number");
   for (const w of quota.customWindows ?? []) {
-    if (w.modelId !== undefined) continue;
+    if (antigravity) {
+      if (isAntigravityClaudeWindow(w)) continue;
+      if (w.modelId !== undefined && !isAntigravityGeminiWindow(w)) continue;
+    } else if (w.modelId !== undefined) {
+      continue;
+    }
     if (typeof w.percent === "number") vals.push(w.percent);
   }
   const hasSubscriptionCreditsCustom = quota.customWindows?.some(

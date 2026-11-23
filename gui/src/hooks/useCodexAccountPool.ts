@@ -430,7 +430,7 @@ export function useCodexAccountPool(apiBase: string, enabled = true, targetKey?:
           if (loadIsCurrent()) {
             // Selection order is required downstream (badge, select). Normalizing here keeps
             // a payload without it from rendering a NaN order on every card.
-            nextAccounts = ((payload.accounts ?? []) as CodexAccountEntry[]).map(account => {
+            const resolvedAccounts = ((payload.accounts ?? []) as CodexAccountEntry[]).map(account => {
               const logLabel = account.isMain ? "main" : account.logLabel;
               const available = quotaAutoRefreshAvailability(account.quota);
               return {
@@ -447,7 +447,8 @@ export function useCodexAccountPool(apiBase: string, enabled = true, targetKey?:
                 },
               };
             });
-            setAccounts(nextAccounts);
+            nextAccounts = resolvedAccounts;
+            setAccounts(prev => JSON.stringify(prev) === JSON.stringify(resolvedAccounts) ? prev : resolvedAccounts);
             hasAccountsRef.current = nextAccounts.length > 0;
             hasLoadedRef.current = true;
             // Progressive: paint account/quota boxes as soon as /accounts returns.

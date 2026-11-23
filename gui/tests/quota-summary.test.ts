@@ -247,4 +247,51 @@ describe("quota summary", () => {
     expect(rows[1]!.windows.some(window => window.labelKey === "quotaSummary.credits")).toBe(false);
     expect(rows[2]!.windows.some(window => window.labelKey === "quotaSummary.credits")).toBe(false);
   });
+
+  test("google-antigravity ignores Claude windows and headlines the highest Gemini or Argon model", () => {
+    const reports = freshQuotaReportsFromResponse([
+      {
+        provider: "google-antigravity",
+        source: "google-antigravity:agy-observation",
+        updatedAt: now,
+        observed: true,
+        quota: {
+          updatedAt: now,
+          customWindows: [
+            { label: "Gem", percent: 21.84 },
+            { label: "Gem (Weekly)", percent: 36.67 },
+            { label: "Cla", percent: 8.55 },
+            { label: "Cla (Weekly)", percent: 51.12 },
+          ],
+        },
+      },
+    ], now);
+    const [gemOnly] = buildQuotaSummary(reports, name, now);
+    expect([gemOnly!.headline.label, gemOnly!.headline.percent]).toEqual(["Gem (Weekly)", 36.67]);
+    expect(gemOnly!.windows.some(window => (window.label ?? "").startsWith("Cla"))).toBe(false);
+
+    const argonAndModelReports = freshQuotaReportsFromResponse([
+      {
+        provider: "google-antigravity",
+        source: "google-antigravity:agy-observation",
+        updatedAt: now,
+        observed: true,
+        quota: {
+          updatedAt: now,
+          customWindows: [
+            { label: "Gem", percent: 20 },
+            { label: "Argon (Weekly)", modelId: "gemini-4-argon", percent: 75 },
+            { label: "gemini-3.8-flash-high", modelId: "gemini-3.8-flash-high", percent: 82 },
+            { label: "claude-sonnet-4-6", modelId: "claude-sonnet-4-6", percent: 99 },
+            { label: "aux", modelId: "aux", percent: 100 },
+          ],
+        },
+      },
+    ], now);
+    const [highestGemini] = buildQuotaSummary(argonAndModelReports, name, now);
+    expect([highestGemini!.headline.label, highestGemini!.headline.percent, highestGemini!.severity]).toEqual([
+      "gemini-3.8-flash-high", 82, "warn",
+    ]);
+    expect(highestGemini!.windows.some(window => window.label === "claude-sonnet-4-6")).toBe(false);
+  });
 });

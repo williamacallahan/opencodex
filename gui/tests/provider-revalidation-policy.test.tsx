@@ -419,3 +419,74 @@ for (const kind of ["oauth", "api-key"] as const) {
     expect(retries.size).toBe(0);
   });
 }
+
+test("healthy SSE skips the 30-second roster poll while unhealthy SSE still recovers, and background refreshes never flash loading", async () => {
+  let stream!: ReadableStreamDefaultController<Uint8Array>;
+  const scheduledPolls: Array<() => void> = [];
+  const origSetInterval = globalThis.setInterval;
+  Object.defineProperty(globalThis, "setInterval", {
+    configurable: true,
+    value: (fn: (...args: unknown[]) => void, delay?: number, ...rest: unknown[]) => {
+      if (typeof delay === "number" && delay >= 25_000) {
+        scheduledPolls.push(() => fn(...rest));
+        return origSetInterval(() => {}, 60_000);
+      }
+      return origSetInterval(fn, delay, ...rest);
+    },
+  });
+  try {
+    const reads: string[] = [];
+    const encoder = new TextEncoder();
+    const send = (event: string, data: unknown) => {
+      stream.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+    };
+    Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      reads.push(url.pathname + url.search);
+      if (url.pathname === "/api/accounts/events") {
+        return new Response(new ReadableStream<Uint8Array>({ start(controller) { stream = controller; } }), {
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      if (url.pathname === "/api/config") return Response.json({ port: 10100, defaultProvider: "cursor", providers: {
+        cursor: { adapter: "openai-chat", authMode: "oauth", baseUrl: "https://fixture.test/v1" },
+      } });
+      if (url.pathname === "/api/oauth/providers") return Response.json({ providers: ["cursor"] });
+      if (url.pathname === "/api/oauth/status") return Response.json({ loggedIn: true });
+      if (url.pathname === "/api/oauth/accounts") {
+        return Response.json({ activeAccountId: "a", accounts: [{ id: "a", alias: "Acct A", active: true, quotaMode: "probe" }] });
+      }
+      if (url.pathname === "/api/codex-auth/accounts") return Response.json({ accounts: [] });
+      if (url.pathname === "/api/codex-auth/active") return Response.json({ activeCodexAccountId: null });
+      if (url.pathname === "/api/provider-quotas") return Response.json({ reports: [] });
+      if (url.pathname === "/api/selected-models") return Response.json({ models: {} });
+      if (url.pathname === "/api/usage") return Response.json({ providers: [], models: [] });
+      return Response.json({});
+    } });
+    await act(async () => { root = createRoot(container); root.render(<LanguageProvider><Providers apiBase="" /></LanguageProvider>); });
+    await act(async () => { container.querySelector<HTMLButtonElement>(".providers-workspace-rail-row")!.click(); });
+    const accountsTab = Array.from(container.querySelectorAll<HTMLButtonElement>("[role=tab]"))
+      .find(button => /Accounts|Keys/.test(button.textContent ?? ""));
+    await act(async () => { accountsTab!.click(); });
+    expect(container.textContent).toContain("Acct A");
+    expect(scheduledPolls.length).toBeGreaterThan(0);
+
+    // Background ready refresh never flashes the Loading skeleton over the rendered row.
+    await act(async () => { send("ready", { revision: 0 }); });
+    expect(container.textContent).toContain("Acct A");
+
+    // 30s recovery poll skips /api/oauth/accounts while SSE is connected and active.
+    const beforeHealthyPoll = reads.filter(r => r.startsWith("/api/oauth/accounts")).length;
+    await act(async () => { for (const fn of scheduledPolls) fn(); });
+    const afterHealthyPoll = reads.filter(r => r.startsWith("/api/oauth/accounts")).length;
+    expect(afterHealthyPoll).toBe(beforeHealthyPoll);
+
+    // Once SSE closes and the reader loop settles connection = null, the recovery poll runs again.
+    await act(async () => { stream.close(); await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { for (const fn of scheduledPolls) fn(); });
+    const afterClosedPoll = reads.filter(r => r.startsWith("/api/oauth/accounts")).length;
+    expect(afterClosedPoll).toBeGreaterThan(afterHealthyPoll);
+  } finally {
+    Object.defineProperty(globalThis, "setInterval", { configurable: true, value: origSetInterval });
+  }
+});

@@ -10,6 +10,7 @@ import type { TKey } from "./i18n/en";
 import { quotaWindows, resetTimestamp } from "./pages/tray-data";
 import { accountQuotaFromReport, type ProviderQuotaReportView } from "./provider-workspace/report";
 import { pinnedProviderRank } from "./provider-workspace/catalog";
+import { isAntigravityClaudeWindow, isAntigravityGeminiWindow } from "../../src/providers/antigravity-window-family";
 
 export const QUOTA_SUMMARY_WARN_PERCENT = 70;
 export const QUOTA_SUMMARY_CRITICAL_PERCENT = 90;
@@ -79,12 +80,16 @@ function roundedUnavailablePercent(total: number, remaining: number): number {
 const HEADLINE_ORDER: TKey[] = ["quota.weeklyLimit", "quota.monthlyLimit", "quota.fiveHourLimit"];
 
 /** Build reported quota windows with distinct IDs, including measured prepaid credits. */
-function summaryWindows(quota: AccountQuota): QuotaSummaryWindow[] {
-  const windows: QuotaSummaryWindow[] = quotaWindows(quota).map(window => {
+function summaryWindows(quota: AccountQuota, antigravity = false): QuotaSummaryWindow[] {
+  const rawWindows = antigravity
+    ? quotaWindows(quota).filter(window => !("label" in window && isAntigravityClaudeWindow(window)))
+    : quotaWindows(quota);
+  const windows: QuotaSummaryWindow[] = rawWindows.map(window => {
     const percent = finite(window.percent) ? window.percent : undefined;
     const resetMs = resetTimestamp(window.reset);
     const modelId = "modelId" in window ? window.modelId : undefined;
-    const modelScoped = modelId !== undefined || ("scope" in window && window.scope === "model");
+    const geminiHeadline = antigravity && "label" in window && isAntigravityGeminiWindow(window);
+    const modelScoped = !geminiHeadline && (modelId !== undefined || ("scope" in window && window.scope === "model"));
     return {
       id: window.id,
       ...(modelId !== undefined ? { modelId } : {}),
@@ -148,8 +153,13 @@ function headlinePreference(window: QuotaSummaryWindow): number {
  * Model-family windows never headline, and a window whose reset has passed yields to a current one,
  * because its reading predates the reset.
  */
-function pickHeadline(windows: QuotaSummaryWindow[], now: number): QuotaSummaryWindow | undefined {
-  const measured = windows.filter(window => window.modelId === undefined && window.scope === undefined && window.percent !== undefined);
+function pickHeadline(windows: QuotaSummaryWindow[], now: number, antigravity = false): QuotaSummaryWindow | undefined {
+  const measured = windows.filter(window =>
+    window.percent !== undefined
+    && (antigravity
+      ? !isAntigravityClaudeWindow(window)
+        && ((window.modelId === undefined && window.scope === undefined) || isAntigravityGeminiWindow(window))
+      : window.modelId === undefined && window.scope === undefined));
   const current = measured.filter(window => window.resetAt === undefined || window.resetAt > now);
   const pool = current.length > 0 ? current : measured;
   const credits = pool.find(window => window.labelKey === "quotaSummary.credits");
@@ -174,8 +184,9 @@ export function buildQuotaSummary(
   for (const [provider, report] of Object.entries(reports)) {
     const quota = accountQuotaFromReport(report);
     if (!quota) continue;
-    const windows = summaryWindows(quota);
-    const headline = pickHeadline(windows, now);
+    const antigravity = provider === "google-antigravity" || report.source?.startsWith("google-antigravity:") === true;
+    const windows = summaryWindows(quota, antigravity);
+    const headline = pickHeadline(windows, now, antigravity);
     if (!headline) continue;
     rows.push({
       provider,

@@ -30,7 +30,7 @@ import { useI18n, useT, LOCALES, localeDisplayName, type Locale, type TKey } fro
 import { Notice, Select, ToastNotice, type NoticeTone } from "./ui";
 import { bootstrapApiSession, configureApiTargets, DEVICE_PROOF_CHANGED_EVENT, hasApiSession, hasRememberedDashboardDevice, installApiAuthFetch, logoutApiSession, SESSION_CHANGED_EVENT, SESSION_UNAVAILABLE_EVENT, TARGET_CHANGED_EVENT } from "./api";
 import { apiBaseForPlane, apiTargetIdentity, ClientStateChangedError, discoverApiTargets, isConnectedRuntime, runtimeRoleFromDocument, standaloneApiTargets, type ApiTargets } from "./api-targets";
-import { createTargetDiscovery } from "./api-target-lifecycle";
+import { createTargetDiscovery, sameApiTargets } from "./api-target-lifecycle";
 import { ConnectPairingForm } from "./connect-pairing";
 import { validateRemoteLinkSession } from "./connect-pairing-transport";
 import { type Page } from "./app-routing";
@@ -196,7 +196,7 @@ export default function App() {
       configure: configureApiTargets,
       bootstrap: bootstrapApiSession,
       hasSession: hasApiSession,
-      onTargets: setTargets,
+      onTargets: next => setTargets(prev => sameApiTargets(prev, next) ? prev : next),
       onSessionReady: setSharedSessionReady,
       onError: setTargetError,
       onSettled: setTargetsSettled,

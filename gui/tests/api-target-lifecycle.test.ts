@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { Window } from "happy-dom";
-import { createTargetDiscovery } from "../src/api-target-lifecycle";
+import { createTargetDiscovery, sameApiTargets } from "../src/api-target-lifecycle";
 import { standaloneApiTargets, type ApiTargets } from "../src/api-targets";
 
 let win: Window;
@@ -88,4 +88,12 @@ test("standalone discovery starts no machine poll and no bootstrap", async () =>
   expect(counts().bootstrapCalls).toBe(0);
   expect(interval).not.toHaveBeenCalled();
   interval.mockRestore();
+});
+
+test("sameApiTargets preserves identity across structurally equal clones", () => {
+  const a = connectedTargets();
+  const b = connectedTargets();
+  expect(sameApiTargets(a, b)).toBe(true);
+  expect(sameApiTargets(a, { ...b, shared: { ...b.shared, baseUrl: "/api/machine/other" } })).toBe(false);
+  expect(sameApiTargets(a, { ...b, connected: false })).toBe(false);
 });

@@ -107,7 +107,7 @@ export default function ProviderOverviewDashboard({
       const quota = report ? accountQuotaFromReport(report) : null;
       const aggregation = report ? capacityAggregationFromReport(report) : null;
       if (report && (quota || aggregation?.presentation === "coverage-only")) {
-        result.push({ item, report, urgency: quota ? maxQuotaUtilisation(quota) : -1 });
+        result.push({ item, report, urgency: quota ? maxQuotaUtilisation(quota, { provider: item.name }) : -1 });
       }
     }
     return result.sort((a, b) => b.urgency - a.urgency || a.item.name.localeCompare(b.item.name));

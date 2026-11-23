@@ -4,7 +4,7 @@
  * empty state, and a render-prop `detail` slot. Detail/Overview panel bodies
  * arrive in WP090/091; until then the slot renders a real placeholder message.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useKeyedClientResource } from "../../client-resource";
 import { createBoundedFetch } from "../../bounded-fetch";
 import { readUsageMetadata, readUsageResponseJson, usageSummary30dResourceKey, type UsageReadMetadata } from "../../usage-summary-resource";
@@ -161,6 +161,8 @@ export default function ProviderWorkspaceShell({
     revision: string; rows: ModelRow[]; selection: ReturnType<typeof parseModelSelection>;
     discovery?: Record<string, ProviderDiscoverySummary>;
   } | null>(null);
+  const modelSnapshotRef = useRef(modelSnapshot);
+  useLayoutEffect(() => { modelSnapshotRef.current = modelSnapshot; }, [modelSnapshot]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsLoadFailed, setModelsLoadFailed] = useState(false);
   const cacheTarget = targetKey ?? apiBase;
@@ -211,7 +213,7 @@ export default function ProviderWorkspaceShell({
     let cancelled = false;
     const bounded = createBoundedFetch(60_000);
     const timeout = window.setTimeout(() => {
-      setModelsLoading(true);
+      if (modelSnapshotRef.current === null) setModelsLoading(true);
       void (async () => {
         let succeeded = false;
         try {

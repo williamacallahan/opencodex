@@ -1,5 +1,5 @@
 import { parseQuotaFailureCode } from "../../../src/providers/quota-types";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type MutableRefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import type { AccountLoadState, AccountQuotaReading } from "../components/provider-workspace/types";
 import { createBoundedFetch } from "../bounded-fetch";
 import { isApiTargetCaptureCurrent, targetFetch, type ApiTargetCapture } from "../api";
@@ -81,6 +81,21 @@ function mergeLateQuotaRows<T extends QuotaRow>(rows: T[], enriched: T[]): T[] {
 type QuotaRow = AccountQuotaReading & { id: string };
 const earlyQuotaKey = (serverIdentity: string, provider: string) => `${serverIdentity}\u0000${provider}`;
 const supportsQuotaRead = (row: AccountQuotaReading) => row.quotaMode === "probe" || row.quotaMode === "passive";
+const sameJsonValue = <T,>(a: T, b: T): boolean => a === b || JSON.stringify(a) === JSON.stringify(b);
+
+function setAccountLoadStateIfChanged(
+  setAccountLoadStates: Dispatch<SetStateAction<Record<string, AccountLoadState>>>,
+  provider: string,
+  state: AccountLoadState,
+  guard: () => boolean,
+  skipIfReady = false,
+): void {
+  setAccountLoadStates(current => {
+    if (!guard()) return current;
+    if (skipIfReady && current[provider] === "ready") return current;
+    return current[provider] === state ? current : { ...current, [provider]: state };
+  });
+}
 
 function mergeQuotaRows<T extends QuotaRow>(rows: T[], previous: T[], enriched: boolean): T[] {
   const prior = new Map(previous.map(row => [row.id, row]));
@@ -278,9 +293,13 @@ export function useProviderAccountPools(deps: {
     if (!aliveRef.current || !mountedRef.current || serverRef.current !== serverIdentity || !captureIsCurrent(renderCapture)) return false;
     const uniqueProviders = [...new Set(providers)];
     setAccountLoadStates(current => {
-      const next = { ...current };
-      for (const provider of uniqueProviders) next[provider] = "loading";
-      return next;
+      let next: Record<string, AccountLoadState> | null = null;
+      for (const provider of uniqueProviders) {
+        if (current[provider] === "ready" || current[provider] === "loading") continue;
+        next ??= { ...current };
+        next[provider] = "loading";
+      }
+      return next ?? current;
     });
     const results = await Promise.all(uniqueProviders.map(async provider => {
       const key = `oauth:${provider}`;
@@ -299,12 +318,20 @@ export function useProviderAccountPools(deps: {
         if (!Array.isArray(data.accounts)) throw new Error("Invalid account roster");
         if (!currentRequest()) return false;
         const rows = selectionRows(data.accounts, data.activeAccountId);
-        setAccountSets(current => currentRoster() ? { ...current, [provider]: {
-          activeAccountId: data.activeAccountId ?? null,
-          accounts: mergeQuotaRows(rows, current[provider]?.accounts ?? earlyAccountQuotaRef.current[earlyQuotaKey(serverIdentity, provider)] ?? [], false),
-        } } : current);
-        setAccountLoadStates(current => currentRoster() ? { ...current,
-          [provider]: selectionMutationsRef.current.has(key) ? "loading" : "ready" } : current);
+        setAccountSets(current => {
+          if (!currentRoster()) return current;
+          const nextEntry = {
+            activeAccountId: data.activeAccountId ?? null,
+            accounts: mergeQuotaRows(rows, current[provider]?.accounts ?? earlyAccountQuotaRef.current[earlyQuotaKey(serverIdentity, provider)] ?? [], false),
+          };
+          return sameJsonValue(current[provider], nextEntry) ? current : { ...current, [provider]: nextEntry };
+        });
+        setAccountLoadStateIfChanged(
+          setAccountLoadStates,
+          provider,
+          selectionMutationsRef.current.has(key) ? "loading" : "ready",
+          currentRoster,
+        );
         if (!rows.some(supportsQuotaRead)) return true;
 
         const enrich = async (): Promise<boolean> => {
@@ -319,14 +346,20 @@ export function useProviderAccountPools(deps: {
             if (!currentQuota()) return false;
             const enriched = selectionRows(quotaData.accounts, quotaData.activeAccountId);
             if (!currentRoster()) earlyAccountQuotaRef.current[earlyQuotaKey(serverIdentity, provider)] = mergeQuotaRows(enriched, [], true);
-            setAccountSets(current => !currentQuota() ? current : !currentRoster() ? current[provider] === undefined ? current : {
-              ...current, [provider]: { ...current[provider], accounts: mergeLateQuotaRows(current[provider].accounts, enriched) },
-            } : {
-              ...current,
-              [provider]: {
+            setAccountSets(current => {
+              if (!currentQuota()) return current;
+              if (!currentRoster()) {
+                if (current[provider] === undefined) return current;
+                const nextAccounts = mergeLateQuotaRows(current[provider].accounts, enriched);
+                return sameJsonValue(current[provider].accounts, nextAccounts)
+                  ? current
+                  : { ...current, [provider]: { ...current[provider], accounts: nextAccounts } };
+              }
+              const nextEntry = {
                 activeAccountId: quotaData.activeAccountId === undefined ? data.activeAccountId ?? null : quotaData.activeAccountId,
                 accounts: mergeQuotaRows(enriched, current[provider]?.accounts ?? [], true),
-              },
+              };
+              return sameJsonValue(current[provider], nextEntry) ? current : { ...current, [provider]: nextEntry };
             });
             // Paused accounts are intentionally skipped; keep their row state without
             // failing refreshes that successfully probed another quota-capable account.
@@ -352,7 +385,7 @@ export function useProviderAccountPools(deps: {
         return true;
       } catch {
         if (!currentRoster()) return false;
-        setAccountLoadStates(current => currentRoster() ? { ...current, [provider]: "error" } : current);
+        setAccountLoadStateIfChanged(setAccountLoadStates, provider, "error", currentRoster, true);
         setAccountSets(current => currentRoster() && current[provider] ? {
           ...current, [provider]: { ...current[provider], accounts: unavailableQuotaRows(current[provider].accounts) },
         } : current);
@@ -384,8 +417,11 @@ export function useProviderAccountPools(deps: {
         if (!Array.isArray(data.keys)) throw new Error("Invalid key roster");
         if (!currentRequest()) return false;
         const rows = selectionRows(data.keys, data.activeId);
-        setKeyPools(current => currentRoster()
-          ? { ...current, [name]: mergeQuotaRows(rows, current[name] ?? earlyKeyQuotaRef.current[earlyQuotaKey(serverIdentity, name)] ?? [], false) } : current);
+        setKeyPools(current => {
+          if (!currentRoster()) return current;
+          const nextRows = mergeQuotaRows(rows, current[name] ?? earlyKeyQuotaRef.current[earlyQuotaKey(serverIdentity, name)] ?? [], false);
+          return sameJsonValue(current[name], nextRows) ? current : { ...current, [name]: nextRows };
+        });
         if (!rows.some(supportsQuotaRead)) return true;
         const enrich = async (): Promise<boolean> => {
           const quotaGeneration = (quotaGenerationRef.current[key] ?? 0) + 1;
@@ -398,9 +434,16 @@ export function useProviderAccountPools(deps: {
             if (!currentQuota()) return false;
             const enriched = selectionRows(data.keys, data.activeId);
             if (!currentRoster()) earlyKeyQuotaRef.current[earlyQuotaKey(serverIdentity, name)] = mergeQuotaRows(enriched, [], true);
-            setKeyPools(current => !currentQuota() ? current : currentRoster()
-              ? { ...current, [name]: mergeQuotaRows(enriched, current[name] ?? [], true) }
-              : current[name] === undefined ? current : { ...current, [name]: mergeLateQuotaRows(current[name], enriched) });
+            setKeyPools(current => {
+              if (!currentQuota()) return current;
+              if (!currentRoster()) {
+                if (current[name] === undefined) return current;
+                const nextRows = mergeLateQuotaRows(current[name], enriched);
+                return sameJsonValue(current[name], nextRows) ? current : { ...current, [name]: nextRows };
+              }
+              const nextRows = mergeQuotaRows(enriched, current[name] ?? [], true);
+              return sameJsonValue(current[name], nextRows) ? current : { ...current, [name]: nextRows };
+            });
             const refreshable = enriched.filter(row => row.disabled !== true && supportsQuotaRead(row));
             return !refreshable.some(row => row.quotaUnavailable === true);
           } catch {
@@ -432,7 +475,7 @@ export function useProviderAccountPools(deps: {
       const ownsRoster = () => aliveRef.current && mountedRef.current && serverRef.current === serverIdentity
         && captureIsCurrent(renderCapture) && rosterGenerationRef.current[key] === generation && !selectionMutationsRef.current.has(key);
       const currentRequest = () => ownsRoster() && !signal?.aborted;
-      if (kind === "oauth") setAccountLoadStates(current => currentRequest() ? { ...current, [provider]: "loading" } : current);
+      setAccountLoadStateIfChanged(setAccountLoadStates, provider, "loading", () => kind === "oauth" && currentRequest(), true);
       try {
         if (kind === "oauth") {
           const data = await readRoster<{ activeAccountId?: string | null; accounts?: OAuthAccount[] }>(
@@ -440,23 +483,30 @@ export function useProviderAccountPools(deps: {
           if (!Array.isArray(data.accounts)) throw new Error("Invalid account roster");
           if (!currentRequest()) return false;
           const rows = selectionRows(data.accounts, data.activeAccountId);
-          setAccountSets(current => currentRequest() ? { ...current, [provider]: {
-            activeAccountId: data.activeAccountId === undefined ? rows.find(row => row.active)?.id ?? null : data.activeAccountId,
-            accounts: mergeRosterRows(rows, current[provider]?.accounts ?? earlyAccountQuotaRef.current[earlyQuotaKey(serverIdentity, provider)] ?? []),
-          } } : current);
-          setAccountLoadStates(current => currentRequest() ? { ...current, [provider]: "ready" } : current);
+          setAccountSets(current => {
+            if (!currentRequest()) return current;
+            const nextEntry = {
+              activeAccountId: data.activeAccountId === undefined ? rows.find(row => row.active)?.id ?? null : data.activeAccountId,
+              accounts: mergeRosterRows(rows, current[provider]?.accounts ?? earlyAccountQuotaRef.current[earlyQuotaKey(serverIdentity, provider)] ?? []),
+            };
+            return sameJsonValue(current[provider], nextEntry) ? current : { ...current, [provider]: nextEntry };
+          });
+          setAccountLoadStateIfChanged(setAccountLoadStates, provider, "ready", currentRequest);
         } else {
           const data = await readRoster<{ activeId?: string | null; keys?: ApiKeyEntry[] }>(
             `${apiBase}/api/providers/keys?name=${encodeURIComponent(provider)}`, signal);
           if (!Array.isArray(data.keys) || !currentRequest()) return false;
           const rows = selectionRows(data.keys, data.activeId);
-          setKeyPools(current => currentRequest()
-            ? { ...current, [provider]: mergeRosterRows(rows, current[provider] ?? earlyKeyQuotaRef.current[earlyQuotaKey(serverIdentity, provider)] ?? []) } : current);
+          setKeyPools(current => {
+            if (!currentRequest()) return current;
+            const nextRows = mergeRosterRows(rows, current[provider] ?? earlyKeyQuotaRef.current[earlyQuotaKey(serverIdentity, provider)] ?? []);
+            return sameJsonValue(current[provider], nextRows) ? current : { ...current, [provider]: nextRows };
+          });
         }
         return true;
       } catch {
         // A missed invalidation read does not change quota health; recovery retries it.
-        if (kind === "oauth") setAccountLoadStates(current => ownsRoster() ? { ...current, [provider]: "error" } : current);
+        setAccountLoadStateIfChanged(setAccountLoadStates, provider, "error", () => kind === "oauth" && ownsRoster(), true);
         return false;
       }
     }));
