@@ -163,7 +163,7 @@ export async function resolveNativeOAuthBindingForInstance(
     if (candidate.provider !== instance) throw new NativeOAuthSelectionChangedError();
     if (!routeIsCurrent(instance, config, model, routeDecision)) continue;
     // An already-bound conversation can use its own seat without changing the default for new sessions.
-    const retainsAffinity = !recoveryAccountId && proposed.reason === "affinity" && proposed.accountId === accountId;
+    const retainsAffinity = proposed.reason === "affinity" && proposed.accountId === accountId;
     const committed = retainsAffinity ? selection : await commitOAuthAccountSelection(instance, candidate.accountId, {
       expectedSelection: selection,
       expectedCredentialGeneration: candidate.generation,

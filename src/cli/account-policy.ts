@@ -18,6 +18,7 @@ const USAGE = "Usage: ocx account pool <provider> [--enabled on|off] [--threshol
   + "       ocx account anthropic-reset-grants [ID] [--provider anthropic|anthropic2] [--json]";
 const READ_ERRORS = { no_account: "No matching Anthropic OAuth account.", auth_failed: "Sign in to this Anthropic account again.",
   account_paused: "This account is paused; resume it to read or use its resets.",
+  rate_limited: "Anthropic rate-limited the reset-grant read. Try again later.",
   upstream_unavailable: "Anthropic did not return the reset-grant status.", ledger_unavailable: "The reset journal is unavailable.",
   ledger_busy: "The reset journal is busy. No grant was consumed." };
 function usage(): never { throw new CliUsageError("Invalid account policy arguments.", USAGE); }

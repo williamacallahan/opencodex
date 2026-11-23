@@ -268,8 +268,8 @@ describe("GET /api/anthropic/reset-grants", () => {
     expect((await call("GET", "/api/anthropic/reset-grants?accountId=nope", deps(up))).json.error.code).toBe("no_account");
     const noToken = await call("GET", "/api/anthropic/reset-grants", deps(up, { accessTokenFor: async () => { throw new Error(`refresh failed for ${EMAIL} with ${TOKEN}`); } }));
     expect(noToken).toMatchObject({ status: 401, json: { error: { code: "auth_failed" } } });
-    up.status = () => new Response(`upstream said ${EMAIL}`, { status: 429, headers: { "Retry-After": "120" } });
-    expect(await call("GET", "/api/anthropic/reset-grants", deps(up))).toMatchObject({ status: 429, retryAfter: "120", json: { error: { code: "rate_limited" } } });
+    up.status = () => new Response(`upstream said ${EMAIL}`, { status: 429, headers: { "Retry-After": "120.5" } });
+    expect(await call("GET", "/api/anthropic/reset-grants", deps(up))).toMatchObject({ status: 429, retryAfter: "121", json: { error: { code: "rate_limited" } } });
     up.status = () => new Response(`upstream said ${EMAIL}`, { status: 500 });
     expect(await call("GET", "/api/anthropic/reset-grants", deps(up))).toMatchObject({ status: 502, json: { error: { code: "upstream_unavailable" } } });
     up.status = () => Response.json({ cedar_ember: { eligible: "maybe" } });

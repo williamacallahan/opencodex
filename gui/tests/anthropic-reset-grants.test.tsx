@@ -157,6 +157,22 @@ async function click(container: HTMLElement, selector: string): Promise<void> {
   await tick();
 }
 
+test("opening the grant dialog does not repeat a rate-limited read before Retry-After", async () => {
+  let reads = 0;
+  globalThis.fetch = Object.assign(async () => {
+    reads += 1;
+    return reads === 1 ? new Response(null, { status: 429, headers: { "Retry-After": "120" } }) : Response.json(SNAPSHOT);
+  }, { preconnect: originalFetch.preconnect });
+  const { container, root } = await mount();
+  try {
+    await click(container, "[data-anthropic-grant-badge]");
+    expect(container.querySelector("[data-anthropic-grant-use]")).toBeNull();
+    expect(container.textContent).toContain("Rate limited");
+  } finally {
+    await act(async () => { root.unmount(); });
+  }
+});
+
 test("the badge counts unspent resets and the dialog retries an unknown outcome with the same id", async () => {
   const posts: Array<Record<string, unknown>> = [];
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {

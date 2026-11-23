@@ -60,6 +60,7 @@ const REFUSED_KEYS: Record<string, TKey> = {
   ledger_unavailable: "anthropicGrant.journalBusy",
   ledger_capacity: "anthropicGrant.journalBusy",
   auth_failed: "anthropicGrant.resultAuthError",
+  rate_limited: "anthropicGrant.resultRateLimited",
   account_paused: "pws.accountPausedHint",
 };
 
@@ -346,7 +347,7 @@ export function AnthropicResetGrantModal({ accountId, accountLabel, entry, contr
     setBusy(false);
     setConfirming(null);
     setOutcome(result.kind === "unknown" ? null : outcomeOf(result));
-    if (result.kind === "refused") void controller.refresh(accountId);
+    if (result.kind === "refused" && result.code !== "rate_limited") void controller.refresh(accountId);
   };
 
   const recheck = async () => {
@@ -445,7 +446,8 @@ export function AnthropicResetGrantModal({ accountId, accountLabel, entry, contr
               ) : entry.status === "error" ? (
                 <>
                   <p className="faint" role="alert">
-                    {t(entry.reason === "auth" ? "anthropicGrant.loadFailedAuth" : "anthropicGrant.loadFailed")}
+                    {t(entry.reason === "auth" ? "anthropicGrant.loadFailedAuth"
+                      : entry.reason === "rate_limited" ? "pws.healthLabel.rateLimited" : "anthropicGrant.loadFailed")}
                   </p>
                   <button type="button" className="btn btn-ghost" style={{ marginTop: 12 }}
                     onClick={() => { void controller.refresh(accountId); }}>

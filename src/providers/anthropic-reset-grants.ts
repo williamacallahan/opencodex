@@ -14,7 +14,8 @@
  * because the dashboard spends from what this module returns. Nothing here logs,
  * and no upstream body, token, or organization id leaves through an error message.
  */
-import { resolveClientRetryAfter } from "../lib/retry-after";
+import { formatClientRetryAfter } from "../lib/client-retry-after";
+import { DEFAULT_RETRYABLE_429_RETRY_AFTER_SEC } from "../lib/retry-after";
 import { CLAUDE_CLI_USER_AGENT } from "./claude-cli-identity";
 
 export const ANTHROPIC_API_ORIGIN = "https://api.anthropic.com";
@@ -243,9 +244,8 @@ async function getAccountJson(path: string, options: AnthropicAccountRequestOpti
   }
   if (response.status === 401 || response.status === 403) throw new AnthropicResetGrantError("auth");
   if (response.status === 429) {
-    throw new AnthropicResetGrantError("rate_limited", resolveClientRetryAfter({
-      status: response.status, upstreamRetryAfter: response.headers.get("retry-after"),
-    }));
+    throw new AnthropicResetGrantError("rate_limited", formatClientRetryAfter(response.headers.get("retry-after"))
+      ?? DEFAULT_RETRYABLE_429_RETRY_AFTER_SEC);
   }
   if (!response.ok) throw new AnthropicResetGrantError("upstream");
   try {

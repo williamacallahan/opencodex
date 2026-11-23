@@ -36,7 +36,7 @@ import { captureAnthropicPhysicalSendOwnership, anthropicPhysicalSendOwnershipIs
 import { anthropicModelQuotaFor } from "../oauth/anthropic-model-quota";
 import { captureConfigGeneration } from "../lib/state-store-sweeper";
 import { recordAnthropicAccountQuotaFromHeadersForInstance } from "../providers/quota";
-import { credentialGeneration, getAccountCredentialWithStatus } from "../oauth/store";
+import { captureOAuthAccountSelection, credentialGeneration, getAccountCredentialWithStatus } from "../oauth/store";
 import { ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST } from "../oauth/anthropic-routing";
 import { enforceAnthropicImageLimits } from "../adapters/anthropic-image-guard";
 import { normalizeAnthropicImages } from "../adapters/anthropic-image-normalize";
@@ -1022,6 +1022,10 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
         canRetry: transientSendAvailable() && oauthFailovers < ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST,
       });
       if (!nextAccountId) break;
+      if (sendingBinding.manualSelectionGeneration !== anthropicRoutingFor(sendingBinding.instance).captureAnthropicManualSelectionGeneration()) {
+        const selected = captureOAuthAccountSelection(sendingBinding.instance);
+        if (selected?.accountId === expectedRecoverySelection.accountId && selected?.revision === expectedRecoverySelection.revision) break;
+      }
       const recovery = response.status === 401 ? "oauth-401" : response.status === 403 ? "oauth-account-403" : "rate-limit-429";
       discard(response);
       oauthBinding = await resolveNativeOAuthBindingForInstance(nativeInstance!, config, { routeTarget,
