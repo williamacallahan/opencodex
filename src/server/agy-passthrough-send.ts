@@ -8,6 +8,7 @@
  */
 import { Agent as HttpAgent, request as httpRequest, type IncomingMessage } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
+import type { Socket } from "node:net";
 import { redactSecretString, sanitizeLogMetadataString } from "../lib/redact";
 
 const AGENT_OPTIONS = {
@@ -16,12 +17,35 @@ const AGENT_OPTIONS = {
   maxSockets: 256,
   maxFreeSockets: 32,
   scheduling: "lifo" as const,
-  timeout: 30_000,
 };
+export const DEFAULT_AGY_CONNECT_TIMEOUT_MS = 15_000;
+export const DEFAULT_AGY_HEADER_TIMEOUT_MS = 200_000;
+const DEFAULT_AGY_IDLE_SOCKET_TIMEOUT_MS = 20_000;
+let idleSocketTimeoutMs = DEFAULT_AGY_IDLE_SOCKET_TIMEOUT_MS;
+
+function destroyIdleSocket(this: Socket): void {
+  this.destroy();
+}
+
+function attachIdleSocketEviction(agent: HttpAgent | HttpsAgent): void {
+  agent.on("free", (socket: Socket) => {
+    socket.removeListener("timeout", destroyIdleSocket);
+    if (socket.destroyed) return;
+    socket.once("timeout", destroyIdleSocket);
+    socket.setTimeout(idleSocketTimeoutMs);
+  });
+}
+
 const httpsAgent = new HttpsAgent(AGENT_OPTIONS);
 const httpAgent = new HttpAgent(AGENT_OPTIONS);
+attachIdleSocketEviction(httpsAgent);
+attachIdleSocketEviction(httpAgent);
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "trailer", "te"]);
-export const DEFAULT_AGY_HEADER_TIMEOUT_MS = 30_000;
+
+/** Test-only: shorten or restore the idle keep-alive socket eviction window. */
+export function setAgyIdleSocketTimeoutMsForTests(ms: number | undefined): void {
+  idleSocketTimeoutMs = ms ?? DEFAULT_AGY_IDLE_SOCKET_TIMEOUT_MS;
+}
 
 export class AgyUpstreamSendError extends Error {
   readonly phase: "connect" | "headers" | "aborted";
@@ -220,15 +244,25 @@ export function sendExactly(
   body: Uint8Array,
   signal: AbortSignal,
   headerTimeoutMs = DEFAULT_AGY_HEADER_TIMEOUT_MS,
+  connectTimeoutMs = DEFAULT_AGY_CONNECT_TIMEOUT_MS,
 ): Promise<ExactResponse> {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
     let phase: "connect" | "headers" | "aborted" = "connect";
     let settled = false;
     let detachSocketListener: (() => void) | undefined;
+    let connectTimer: ReturnType<typeof setTimeout> | undefined;
     let headerTimer: ReturnType<typeof setTimeout> | undefined;
 
+    const clearConnectTimer = () => {
+      if (connectTimer !== undefined) {
+        clearTimeout(connectTimer);
+        connectTimer = undefined;
+      }
+    };
+
     const finish = () => {
+      clearConnectTimer();
       if (headerTimer !== undefined) {
         clearTimeout(headerTimer);
         headerTimer = undefined;
@@ -257,14 +291,43 @@ export function sendExactly(
       });
     });
 
-    const onSocket = (socket: { connecting?: boolean; pending?: boolean; on(ev: "connect", fn: () => void): void; removeListener(ev: "connect", fn: () => void): void }) => {
+    const onSocket = (socket: Socket) => {
+      // Clear any idle keep-alive timer before headers wait so slow LLM streams never abort on idle timeout.
+      socket.removeListener("timeout", destroyIdleSocket);
+      socket.setTimeout(0);
       if (!socket.connecting && !socket.pending) {
         phase = "headers";
+        clearConnectTimer();
         return;
       }
-      const onConnect = () => { phase = "headers"; };
-      socket.on("connect", onConnect);
-      detachSocketListener = () => socket.removeListener("connect", onConnect);
+      const connectEvent = secure ? "secureConnect" : "connect";
+      const onConnect = () => {
+        phase = "headers";
+        clearConnectTimer();
+        detachSocketListener = undefined;
+      };
+      socket.once(connectEvent, onConnect);
+      detachSocketListener = () => socket.removeListener(connectEvent, onConnect);
+      const effectiveConnectTimeoutMs = headerTimeoutMs > 0
+        ? Math.min(connectTimeoutMs, headerTimeoutMs)
+        : connectTimeoutMs;
+      if (connectTimeoutMs > 0 && effectiveConnectTimeoutMs > 0 && !settled) {
+        clearConnectTimer();
+        connectTimer = setTimeout(() => {
+          if (settled || phase !== "connect") return;
+          settled = true;
+          finish();
+          const err = new AgyUpstreamSendError(`Upstream connect timeout after ${effectiveConnectTimeoutMs}ms`, {
+            phase: signal.aborted ? "aborted" : "connect",
+            code: "ETIMEDOUT",
+            elapsedMs: Math.max(0, Date.now() - startedAt),
+            host: url.host,
+            reusedSocket: (req as { reusedSocket?: boolean }).reusedSocket,
+          });
+          req.destroy(err);
+          reject(err);
+        }, effectiveConnectTimeoutMs);
+      }
     };
     req.on("socket", onSocket);
 

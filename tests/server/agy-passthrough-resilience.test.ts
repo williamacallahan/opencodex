@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { createServer } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import { gzipSync, brotliCompressSync, deflateSync } from "node:zlib";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,8 +15,11 @@ import { chooseAgyAccount, resetAgyAccountState } from "../../src/server/agy-pas
 import {
   AgyUpstreamSendError,
   createSettledPassthroughBody,
+  DEFAULT_AGY_CONNECT_TIMEOUT_MS,
+  DEFAULT_AGY_HEADER_TIMEOUT_MS,
   describeUpstreamTransportError,
   sendExactly,
+  setAgyIdleSocketTimeoutMsForTests,
 } from "../../src/server/agy-passthrough-send";
 
 type UpstreamFailureLogFields = {
@@ -79,6 +83,7 @@ describe("agy passthrough resilience and zero-AST parsing", () => {
   });
 
   afterEach(() => {
+    setAgyIdleSocketTimeoutMsForTests(undefined);
     bindNativeHarnessConfig(null);
     clearGenericFailoverHealth();
     clearPoolRotationState();
@@ -460,6 +465,79 @@ describe("agy passthrough resilience and zero-AST parsing", () => {
       warnSpy.mockRestore();
       server.closeAllConnections?.();
       await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+
+  test("sendExactly separates connect/header timeouts from idle keep-alive socket eviction", async () => {
+    expect(DEFAULT_AGY_CONNECT_TIMEOUT_MS).toBe(15_000);
+    expect(DEFAULT_AGY_HEADER_TIMEOUT_MS).toBe(200_000);
+
+    // 1. Stalled TLS handshake triggers connect-phase timeout without waiting for the header deadline.
+    const stalledTls = createNetServer(_socket => {
+      // Accept TCP and hold without speaking TLS so handshake stalls in connect phase.
+    });
+    await new Promise<void>(resolve => stalledTls.listen(0, "127.0.0.1", resolve));
+    const tlsPort = (stalledTls.address() as { port: number }).port;
+    try {
+      await expect(sendExactly(
+        new URL(`https://127.0.0.1:${tlsPort}/v1internal:streamGenerateContent`),
+        new Headers(),
+        new Uint8Array(2),
+        new AbortController().signal,
+        2_000,
+        40,
+      )).rejects.toMatchObject({ name: "AgyUpstreamSendError", phase: "connect", code: "ETIMEDOUT" });
+    } finally {
+      stalledTls.close();
+    }
+
+    // 2. Slow active header responses survive beyond idle eviction, reused sockets do not accumulate
+    //    timeout listeners, and idle pooled sockets expire cleanly once idle past the window.
+    const seenDelayHeaders: number[] = [];
+    const srv = createServer((req, res) => {
+      const delay = Number(req.headers["x-delay"] ?? 0);
+      seenDelayHeaders.push(delay);
+      setTimeout(() => {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("ok");
+      }, delay);
+    });
+    await new Promise<void>(resolve => srv.listen(0, "127.0.0.1", resolve));
+    const port = (srv.address() as { port: number }).port;
+    setAgyIdleSocketTimeoutMsForTests(50);
+    try {
+      const target = new URL(`http://127.0.0.1:${port}/v1internal:generateContent`);
+      // Warm keep-alive socket.
+      const warm = await sendExactly(target, new Headers({ "x-delay": "0" }), new Uint8Array(2), new AbortController().signal, 2_000, 1_000);
+      expect(warm.status).toBe(200);
+      await new Response(warm.body).text();
+
+      // Immediate reuse with header delay 150ms > 50ms idle window must succeed repeatedly without accumulating listeners.
+      for (let i = 0; i < 4; i += 1) {
+        const res = await sendExactly(
+          target,
+          new Headers({ "x-delay": i === 0 ? "150" : "5" }),
+          new Uint8Array(2),
+          new AbortController().signal,
+          2_000,
+          1_000,
+        );
+        expect(res.status).toBe(200);
+        expect(res.reusedSocket).toBe(true);
+        await new Response(res.body).text();
+      }
+
+      // Leaving the pooled socket idle longer than 50ms evicts it before the next request.
+      await new Promise(resolve => setTimeout(resolve, 140));
+      const afterIdle = await sendExactly(target, new Headers({ "x-delay": "5" }), new Uint8Array(2), new AbortController().signal, 2_000, 1_000);
+      expect(afterIdle.status).toBe(200);
+      expect(afterIdle.reusedSocket).toBe(false);
+      await new Response(afterIdle.body).text();
+      expect(seenDelayHeaders).toHaveLength(6);
+    } finally {
+      setAgyIdleSocketTimeoutMsForTests(undefined);
+      srv.closeAllConnections?.();
+      await new Promise<void>(resolve => srv.close(() => resolve()));
     }
   });
 });
