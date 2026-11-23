@@ -137,3 +137,15 @@ test("latest-start selection ignores malformed timestamps and other final provid
   expect(reports["meta-muse"]?.observed).toBe(true);
   expect(reports["meta-muse"]?.updatedAt).toBe(refusal.timestamp);
 });
+
+test("skips oauth account and log requests when meta-muse is not configured", async () => {
+  const urls: string[] = [];
+  const reports = await withMuseLimitObservation({}, "", new AbortController().signal, (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    urls.push(url);
+    if (url === "/api/providers") return Response.json([{ name: "anthropic", authMode: "oauth" }]);
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch);
+  expect(reports).toEqual({});
+  expect(urls).toEqual(["/api/providers"]);
+});

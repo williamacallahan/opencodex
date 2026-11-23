@@ -86,6 +86,63 @@ test("an enabled Anthropic account pool reports the pool-wide capacity estimate 
   expect(result?.aggregation?.fiveHour?.nextRecoveryPercent).toBeCloseTo(100 / 3, 5);
 });
 
+test("stale-while-revalidate returns cached report immediately while deduplicating one background refresh", async () => {
+  const realDateNow = Date.now;
+  let nowOffset = 0;
+  let releaseRefresh: ((response: Response) => void) | undefined;
+  Date.now = () => realDateNow() + nowOffset;
+  try {
+    let calls = 0;
+    let refreshPending = new Promise<Response>(resolve => { releaseRefresh = resolve; });
+    const resetAt = new Date(Date.now() + 86_400_000).toISOString();
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return Response.json({ five_hour: { utilization: 25, resets_at: resetAt } });
+      }
+      return await refreshPending;
+    }) as typeof fetch;
+
+    const cfg = config(false);
+    const initial = await fetchProviderQuotaReports(cfg, false, { staleWhileRevalidate: true });
+    expect(calls).toBe(1);
+    expect(initial.reports.find(r => r.provider === "anthropic")?.quota.fiveHourPercent).toBe(25);
+
+    // Advance past CACHE_TTL_MS (60s) and ACCOUNT_QUOTA_TTL_MS (10m) while staying inside LAST_GOOD_MAX_AGE_MS (30m).
+    nowOffset = 11 * 60_000;
+    const swrFirst = await fetchProviderQuotaReports(cfg, false, { staleWhileRevalidate: true });
+    const swrSecond = await fetchProviderQuotaReports(cfg, false, { staleWhileRevalidate: true });
+    expect(swrFirst.reports.find(r => r.provider === "anthropic")?.quota.fiveHourPercent).toBe(25);
+    expect(swrSecond.reports.find(r => r.provider === "anthropic")?.quota.fiveHourPercent).toBe(25);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    // Only one singleflight background probe starts even across repeated stale reads.
+    expect(calls).toBe(2);
+
+    releaseRefresh?.(Response.json({ five_hour: { utilization: 65, resets_at: resetAt } }));
+    releaseRefresh = undefined;
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    const updated = await fetchProviderQuotaReports(cfg, false, { staleWhileRevalidate: true });
+    expect(updated.reports.find(r => r.provider === "anthropic")?.quota.fiveHourPercent).toBe(65);
+    expect(calls).toBe(2);
+
+    // `?refresh=1` (`forceRefresh: true`) still waits for the live probe instead of serving stale.
+    nowOffset = 11 * 60_000 + 5_000;
+    refreshPending = new Promise<Response>(resolve => { releaseRefresh = resolve; });
+    const forcedPromise = fetchProviderQuotaReports(cfg, true, { staleWhileRevalidate: false });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(calls).toBe(3);
+    releaseRefresh?.(Response.json({ five_hour: { utilization: 80, resets_at: resetAt } }));
+    releaseRefresh = undefined;
+    const forced = await forcedPromise;
+    expect(forced.reports.find(r => r.provider === "anthropic")?.quota.fiveHourPercent).toBe(80);
+  } finally {
+    releaseRefresh?.(Response.json({}));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    Date.now = realDateNow;
+  }
+});
+
 test("a cold pool waits for its inactive accounts instead of publishing an active-only estimate", async () => {
   const utilization = new Map(getAccountSet("anthropic")!.accounts.map((row, index) => [
     `Bearer ${row.credential.access}`, [90, 0, 30][index],

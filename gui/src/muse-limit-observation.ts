@@ -52,14 +52,13 @@ export async function withMuseLimitObservation(
 ): Promise<Record<string, ProviderQuotaReportView>> {
   if (reports[PROVIDER]) return reports;
   try {
-    const [providerResponse, accountResponse] = await Promise.all([
-      fetchImpl(`${apiBase}/api/providers`, { signal }),
-      fetchImpl(`${apiBase}/api/oauth/accounts?provider=${PROVIDER}`, { signal }),
-    ]);
-    if (!providerResponse.ok || !accountResponse.ok) return reports;
+    const providerResponse = await fetchImpl(`${apiBase}/api/providers`, { signal });
+    if (!providerResponse.ok) return reports;
     const providers: unknown = await providerResponse.json();
     if (!Array.isArray(providers) || !providers.some(row => row?.name === PROVIDER
       && row.disabled !== true && row.authMode === "oauth" && row.baseUrl === "https://api.meta.ai/v1")) return reports;
+    const accountResponse = await fetchImpl(`${apiBase}/api/oauth/accounts?provider=${PROVIDER}`, { signal });
+    if (!accountResponse.ok) return reports;
     const accounts = await accountResponse.json() as { activeAccountId?: unknown; accounts?: Array<{ id?: unknown; paused?: boolean; needsReauth?: boolean }> };
     if (typeof accounts.activeAccountId !== "string" || !Array.isArray(accounts.accounts)) return reports;
     const active = accounts.accounts.find(row => row.id === accounts.activeAccountId);

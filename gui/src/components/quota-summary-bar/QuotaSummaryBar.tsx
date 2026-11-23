@@ -365,8 +365,11 @@ export default function QuotaSummaryBar({ apiBase }: { apiBase: string }) {
   const load = useCallback(async (signal: AbortSignal): Promise<QuotaSummaryData> => {
     const response = await fetch(`${apiBase}/api/provider-quotas`, { signal });
     if (!response.ok) throw new Error("quota summary load failed");
-    const body = await response.json() as { reports?: unknown } | null;
-    const reports = await withMuseLimitObservation(freshQuotaReportsFromResponse(body?.reports), apiBase, signal);
+    const body = await response.json() as { reports?: unknown; museOAuthConfigured?: unknown } | null;
+    const parsed = freshQuotaReportsFromResponse(body?.reports);
+    const reports = body?.museOAuthConfigured === false
+      ? parsed
+      : await withMuseLimitObservation(parsed, apiBase, signal);
     return { fetchedAt: Date.now(), reports };
   }, [apiBase]);
   const resource = useDataSurface<QuotaSummaryData>(
