@@ -14,7 +14,7 @@ import { hasHumanDashboardSession } from "./consent-session";
  */
 import { jsonResponse } from "../auth-cors";
 import type { ManagementContext } from "./context";
-import { getValidAccessSnapshotForAccount } from "../../oauth";
+import { getValidAccessSnapshotForAccount, OAuthLoginRequiredError } from "../../oauth";
 import { configuredAnthropicInstance, isAnthropicInstanceId, type AnthropicInstanceId } from "../../providers/anthropic-instance";
 import { captureAnthropicPhysicalSendOwnership, anthropicPhysicalSendOwnershipIsCurrent } from "../../oauth/anthropic-send-ownership";
 import { anthropicCooldownRecoveryFor } from "../../providers/quota/anthropic-cooldown-recovery";
@@ -52,6 +52,9 @@ const MESSAGES = {
   invalid_operation_id: "operationId must be a UUIDv4.",
   no_account: "No matching Anthropic OAuth account.",
   auth_failed: "Sign in to this Anthropic account again.",
+  upstream_auth_rejected: "Anthropic rejected this account's reset-grant request.",
+  account_changed: "The Anthropic account changed. Refresh its reset-grant status.",
+  credential_unavailable: "OpenCodex could not resolve this Anthropic account's credential.",
   account_paused: "This account is paused; resume it to read or use its resets.",
   upstream_unavailable: "Anthropic did not return the reset-grant status.",
   rate_limited: "Anthropic rate-limited the reset-grant status read.",
@@ -67,6 +70,7 @@ const MESSAGES = {
   ledger_capacity: "The reset journal is full. Nothing was used.",
 } as const;
 type ErrorCode = keyof typeof MESSAGES;
+class GrantAccountChangedError extends Error {}
 
 export interface AnthropicResetGrantRouteDeps {
   provider?: AnthropicInstanceId;
@@ -113,9 +117,9 @@ function defaultDepsFor(ctx: ManagementContext, provider: AnthropicInstanceId): 
       const snapshot = await getValidAccessSnapshotForAccount(provider, accountId, { requireUsableAccount: true });
       const current = getAccountSet(provider)?.accounts.find(row => row.id === accountId);
       if (!initial || !current || initial.loginId !== current.loginId || initial.addedAt !== current.addedAt
-        || recovery.anthropicAccountIncarnation(accountId) !== incarnation || captureProviderAccountQuotaEpoch(provider) !== epoch) throw new Error("reset account replaced");
+        || recovery.anthropicAccountIncarnation(accountId) !== incarnation || captureProviderAccountQuotaEpoch(provider) !== epoch) throw new GrantAccountChangedError();
       owner = captureAnthropicPhysicalSendOwnership(snapshot);
-      if (!targetCurrent() || !owner) throw new Error("reset owner changed");
+      if (!targetCurrent() || !owner) throw new GrantAccountChangedError();
       return snapshot.accessToken;
     },
     admitReset: (accountId, evidence) => admitAnthropicAccountAfterReset(provider, accountId, evidence),
@@ -143,10 +147,13 @@ function ledgerFailure(ctx: ManagementContext, error: unknown, extra: Record<str
 
 function readFailure(ctx: ManagementContext, error: unknown, extra: Record<string, unknown> = {}): Response {
   if (error instanceof AnthropicResetGrantError) {
-    if (error.code === "auth") return fail(ctx, 401, "auth_failed", extra);
+    if (error.code === "auth") return fail(ctx, 424, "upstream_auth_rejected", extra);
     if (error.code === "rate_limited") {
       const response = fail(ctx, 429, "rate_limited", extra);
-      if (error.retryAfter !== undefined) response.headers.set("Retry-After", error.retryAfter);
+      if (error.retryAfter !== undefined) {
+        response.headers.set("Retry-After", error.retryAfter);
+        response.headers.set("Access-Control-Expose-Headers", "Retry-After");
+      }
       return response;
     }
   }
@@ -163,16 +170,19 @@ function resolveAccountId(deps: AnthropicResetGrantRouteDeps, requested: unknown
   return active && usable.includes(active) ? active : usable[0] ?? (active && ids.includes(active) ? active : ids[0] ?? null);
 }
 
-/** A pause that lands while the token or upstream read is in flight is still a pause, not a sign-in failure. */
-function refusedAccount(deps: AnthropicResetGrantRouteDeps, accountId: string): "account_paused" | "auth_failed" {
-  return deps.isPaused?.(accountId) ? "account_paused" : "auth_failed";
+function accountRefusal(ctx: ManagementContext, deps: AnthropicResetGrantRouteDeps, accountId: string): Response {
+  return fail(ctx, 409, deps.isPaused?.(accountId) ? "account_paused" : "account_changed", { provider: deps.provider });
 }
 
-async function tokenFor(deps: AnthropicResetGrantRouteDeps, accountId: string): Promise<string | null> {
+async function tokenFor(ctx: ManagementContext, deps: AnthropicResetGrantRouteDeps, accountId: string): Promise<string | Response> {
   try {
-    return await deps.accessTokenFor(accountId);
-  } catch {
-    return null;
+    const token = await deps.accessTokenFor(accountId);
+    return deps.isPaused?.(accountId) || deps.isCurrent?.() === false ? accountRefusal(ctx, deps, accountId) : token;
+  } catch (error) {
+    if (deps.isPaused?.(accountId) || error instanceof GrantAccountChangedError) return accountRefusal(ctx, deps, accountId);
+    return error instanceof OAuthLoginRequiredError
+      ? fail(ctx, 409, "auth_failed", { provider: deps.provider })
+      : fail(ctx, 503, "credential_unavailable", { provider: deps.provider });
   }
 }
 
@@ -181,10 +191,9 @@ async function handleRead(ctx: ManagementContext, deps: AnthropicResetGrantRoute
   const accountId = resolveAccountId(deps, ctx.url.searchParams.get("accountId") ?? undefined);
   if (!accountId) return fail(ctx, 400, "no_account", receipt);
   if (deps.isPaused?.(accountId)) return fail(ctx, 409, "account_paused", receipt);
-  const refuse = () => refusedAccount(deps, accountId) === "account_paused"
-    ? fail(ctx, 409, "account_paused", receipt) : fail(ctx, 401, "auth_failed", receipt);
-  const accessToken = await tokenFor(deps, accountId);
-  if (!accessToken || deps.isPaused?.(accountId) || deps.isCurrent?.() === false) return refuse();
+  const refuse = () => accountRefusal(ctx, deps, accountId);
+  const accessToken = await tokenFor(ctx, deps, accountId);
+  if (typeof accessToken !== "string") return accessToken;
   let status;
   try {
     status = await fetchAnthropicResetGrantStatus({ accessToken, fetchFn: deps.fetchFn });
@@ -224,11 +233,10 @@ async function handleConsume(ctx: ManagementContext, injected?: AnthropicResetGr
   const accountId = resolveAccountId(deps, body.accountId);
   if (!accountId) return scopedFail(400, "no_account");
   if (deps.isPaused?.(accountId)) return scopedFail(409, "account_paused");
-  const scopedRefuse = () => refusedAccount(deps, accountId) === "account_paused"
-    ? scopedFail(409, "account_paused") : scopedFail(401, "auth_failed");
+  const scopedRefuse = () => accountRefusal(ctx, deps, accountId);
 
-  const accessToken = await tokenFor(deps, accountId);
-  if (!accessToken || deps.isPaused?.(accountId) || deps.isCurrent?.() === false) return scopedRefuse();
+  const accessToken = await tokenFor(ctx, deps, accountId);
+  if (typeof accessToken !== "string") return accessToken;
   let organizationUuid: string;
   try {
     organizationUuid = await fetchAnthropicOrganizationUuid({ accessToken, fetchFn: deps.fetchFn });

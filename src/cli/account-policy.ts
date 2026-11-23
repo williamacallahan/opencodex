@@ -17,6 +17,9 @@ const USAGE = "Usage: ocx account pool <provider> [--enabled on|off] [--threshol
   + "       ocx account quota-activation openai ID --window <fiveHour|weekly> <on|off> [--json]\n"
   + "       ocx account anthropic-reset-grants [ID] [--provider anthropic|anthropic2] [--json]";
 const READ_ERRORS = { no_account: "No matching Anthropic OAuth account.", auth_failed: "Sign in to this Anthropic account again.",
+  upstream_auth_rejected: "Anthropic rejected this account's reset-grant request.",
+  account_changed: "The Anthropic account changed. Refresh its reset-grant status.",
+  credential_unavailable: "OpenCodex could not resolve this Anthropic account's credential.",
   account_paused: "This account is paused; resume it to read or use its resets.",
   rate_limited: "Anthropic rate-limited the reset-grant read. Try again later.",
   upstream_unavailable: "Anthropic did not return the reset-grant status.", ledger_unavailable: "The reset journal is unavailable.",

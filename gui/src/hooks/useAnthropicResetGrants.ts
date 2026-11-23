@@ -192,9 +192,13 @@ export function spendableGrant(snapshot: AnthropicResetGrantSnapshot): Anthropic
   return best;
 }
 
-function grantRetryDeadline(response: Response): number {
+const grantReadDeadlines = new Map<string, number>();
+function recordGrantReadDeadline(key: string, response: Response): void {
+  const now = Date.now();
   const seconds = Number(response.headers.get("retry-after"));
-  return Date.now() + (Number.isSafeInteger(seconds) && seconds > 0 ? seconds : 0) * 1000;
+  if (!Number.isSafeInteger(seconds) || seconds <= 0) return;
+  for (const [scope, deadline] of grantReadDeadlines) if (deadline <= now) grantReadDeadlines.delete(scope);
+  grantReadDeadlines.set(key, Math.max(grantReadDeadlines.get(key) ?? 0, now + seconds * 1000));
 }
 
 function errorCode(value: unknown): string {
@@ -222,13 +226,11 @@ export function useAnthropicResetGrants({ apiBase, provider = "anthropic", accou
   );
   const epoch = useRef(0);
   const tokens = useRef(new Map<string, number>());
-  const retryDeadlines = useRef(new Map<string, number>());
   const gate = useRef<{ active: number; waiting: Array<() => void> }>({ active: 0, waiting: [] });
   const identity = accountIds.join("\u0000");
   useLayoutEffect(() => {
     epoch.current += 1;
     tokens.current.clear();
-    retryDeadlines.current.clear();
     // A stalled read from the previous pool must not occupy this pool's read slots. Reads
     // already running settle against the queue they captured; queued ones are released and
     // return at their epoch check without sending.
@@ -258,27 +260,28 @@ export function useAnthropicResetGrants({ apiBase, provider = "anthropic", accou
     const bounded = createBoundedFetch(READ_TIMEOUT_MS);
     try {
       if (!current()) return;
-      if ((retryDeadlines.current.get(accountId) ?? 0) > Date.now()) {
+      const key = `${namespace}\0${accountId}`;
+      if ((grantReadDeadlines.get(key) ?? 0) > Date.now()) {
         setEntry(accountId, { status: "error", reason: "rate_limited" });
         return;
       }
-      retryDeadlines.current.delete(accountId);
+      grantReadDeadlines.delete(key);
       const response = await fetch(
         `${apiBase}/api/anthropic/reset-grants?accountId=${encodeURIComponent(accountId)}${provider === "anthropic" ? "" : `&provider=${encodeURIComponent(provider)}`}`,
         { signal: bounded.signal },
       );
-      const raw = response.ok ? await response.json().catch(() => null) : null;
+      if (response.status === 429) recordGrantReadDeadline(key, response);
+      const raw = response.ok || response.status === 409 || response.status === 424 ? await response.json().catch(() => null) : null;
       const ownsResponse = isRecord(raw) && (raw.provider === provider || (provider === "anthropic" && raw.provider === undefined));
       const snapshot = ownsResponse ? parseAnthropicGrantSnapshot(raw) : null;
       if (!current()) return;
       if (response.status === 429) {
-        retryDeadlines.current.set(accountId, grantRetryDeadline(response));
         setEntry(accountId, { status: "error", reason: "rate_limited" });
         return;
       }
       setEntry(accountId, snapshot
         ? { status: "ready", snapshot }
-        : { status: "error", reason: response.status === 401 ? "auth" : "upstream" });
+        : { status: "error", reason: response.status === 401 || errorCode(raw) === "auth_failed" ? "auth" : "upstream" });
     } catch {
       if (!current()) return;
       setEntry(accountId, { status: "error", reason: "upstream" });
@@ -326,10 +329,8 @@ export function useAnthropicResetGrants({ apiBase, provider = "anthropic", accou
         const code = errorCode(await response.json().catch(() => null));
         if (response.status === 429 && code === "rate_limited") {
           if (!prior) updateHold(key, request.operationId, null);
-          if (spendEpoch === epoch.current) {
-            retryDeadlines.current.set(accountId, grantRetryDeadline(response));
-            setEntry(accountId, { status: "error", reason: "rate_limited" });
-          }
+          recordGrantReadDeadline(key, response);
+          if (spendEpoch === epoch.current) setEntry(accountId, { status: "error", reason: "rate_limited" });
         }
         if (RELEASES_HELD.has(code)) updateHold(key, request.operationId, null);
         return UNKNOWN_CODES.has(code) ? { kind: "unknown", code } : { kind: "refused", code };

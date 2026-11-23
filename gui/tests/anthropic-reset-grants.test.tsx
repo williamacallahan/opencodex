@@ -157,19 +157,31 @@ async function click(container: HTMLElement, selector: string): Promise<void> {
   await tick();
 }
 
-test("opening the grant dialog does not repeat a rate-limited read before Retry-After", async () => {
+test("reopening the providers panel preserves the grant read's Retry-After", async () => {
+  const now = Date.now;
+  let instant = now();
   let reads = 0;
+  Date.now = () => instant;
   globalThis.fetch = Object.assign(async () => {
     reads += 1;
     return reads === 1 ? new Response(null, { status: 429, headers: { "Retry-After": "120" } }) : Response.json(SNAPSHOT);
   }, { preconnect: originalFetch.preconnect });
-  const { container, root } = await mount();
   try {
-    await click(container, "[data-anthropic-grant-badge]");
-    expect(container.querySelector("[data-anthropic-grant-use]")).toBeNull();
-    expect(container.textContent).toContain("Rate limited");
+    const first = await mount();
+    await act(async () => { first.root.unmount(); });
+    const reopened = await mount();
+    try {
+      await click(reopened.container, "[data-anthropic-grant-badge]");
+      expect(reopened.container.querySelector("[data-anthropic-grant-use]")).toBeNull();
+      expect(reopened.container.textContent).toContain("Rate limited");
+      instant += 120_000;
+      await act(async () => { await harnessController!.refresh("acct-1"); });
+      expect(harnessController!.entries["acct-1"]?.status).toBe("ready");
+    } finally {
+      await act(async () => { reopened.root.unmount(); });
+    }
   } finally {
-    await act(async () => { root.unmount(); });
+    Date.now = now;
   }
 });
 

@@ -185,7 +185,7 @@ for (const provider of ["anthropic", "anthropic2"] as const) {
       const result = stage === "get-status"
         ? await call("GET", `/api/anthropic/reset-grants?provider=${provider}`, routeDeps)
         : await consume(routeDeps, { provider, accountId: "acct-1", grantId: GRANT, operationId: OP });
-      expect(result).toMatchObject({ status: 401, json: { error: { code: "auth_failed", provider } } });
+      expect(result).toMatchObject({ status: 409, json: { error: { code: "account_changed", provider } } });
       expect(up.claims).toEqual([]);
       const { anthropicResetOperationExists } = await import("../../src/providers/anthropic-reset-grant-ledger");
       expect(anthropicResetOperationExists(OP, { journalPath: path })).toBe(false);
@@ -267,7 +267,9 @@ describe("GET /api/anthropic/reset-grants", () => {
     const up = upstream();
     expect((await call("GET", "/api/anthropic/reset-grants?accountId=nope", deps(up))).json.error.code).toBe("no_account");
     const noToken = await call("GET", "/api/anthropic/reset-grants", deps(up, { accessTokenFor: async () => { throw new Error(`refresh failed for ${EMAIL} with ${TOKEN}`); } }));
-    expect(noToken).toMatchObject({ status: 401, json: { error: { code: "auth_failed" } } });
+    expect(noToken).toMatchObject({ status: 503, json: { error: { code: "credential_unavailable" } } });
+    up.status = () => new Response(`upstream said ${EMAIL}`, { status: 401 });
+    expect(await call("GET", "/api/anthropic/reset-grants", deps(up))).toMatchObject({ status: 424, json: { error: { code: "upstream_auth_rejected" } } });
     up.status = () => new Response(`upstream said ${EMAIL}`, { status: 429, headers: { "Retry-After": "120.5" } });
     expect(await call("GET", "/api/anthropic/reset-grants", deps(up))).toMatchObject({ status: 429, retryAfter: "121", json: { error: { code: "rate_limited" } } });
     up.status = () => new Response(`upstream said ${EMAIL}`, { status: 500 });
@@ -431,7 +433,7 @@ describe("POST /api/anthropic/reset-grants/consume", () => {
     const up = upstream();
     let current = true;
     up.status = () => { current = false; return Response.json({ cedar_ember: grantBlock() }); };
-    expect(await consume(deps(up, { isCurrent: () => current }))).toMatchObject({ status: 401 });
+    expect(await consume(deps(up, { isCurrent: () => current }))).toMatchObject({ status: 409, json: { error: { code: "account_changed" } } });
     expect(up.claims).toHaveLength(0);
     expect((await call("GET", "/api/anthropic/reset-grants", deps(up))).json.pendingOperation).toBeNull();
   });
@@ -516,7 +518,7 @@ describe("default dependencies (no injected route deps)", () => {
 
       // Currency still binds to that same live object: B disabled during the read is refused.
       up.status = () => { (live.providers.anthropic2 as { disabled?: boolean }).disabled = true; return Response.json({ cedar_ember: grantBlock() }); };
-      expect(await read(live, "anthropic2")).toMatchObject({ status: 401, json: { error: { code: "auth_failed", provider: "anthropic2" } } });
+      expect(await read(live, "anthropic2")).toMatchObject({ status: 409, json: { error: { code: "account_changed", provider: "anthropic2" } } });
       expect(await read(live, "anthropic2")).toMatchObject({ status: 400, json: { error: { code: "invalid_provider" } } });
     } finally {
       globalThis.fetch = originalFetch;
