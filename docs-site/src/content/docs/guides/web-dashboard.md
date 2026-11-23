@@ -155,10 +155,10 @@ is visible) and never forces an upstream refresh.
 - Anthropic (both Claude account pools), Google Antigravity and OpenAI (Codex login) come first, in
   that order; the other providers follow in the order the hub reports them. The Providers rail lists
   the same providers first in every sort mode, and its sort choice orders everything after them.
-- Each chip shows the provider's most constrained window: the most severe one, so a spent 30-day or
-  budget window is never hidden behind an idle weekly window. Among windows of equal severity it
-  prefers weekly, then monthly, then 5-hour, then a provider-named window, then prepaid credits;
-  among critical windows the fullest one wins, and prepaid credits yield to a critical plan window.
+- Each chip shows the provider's most constrained window: the highest percentage among its 5-hour,
+  weekly, monthly and provider-named windows, so a fuller window is never hidden behind an emptier
+  one. Equally full windows prefer weekly, then monthly, then 5-hour, then a provider-named window.
+  Prepaid credits take the chip only when they reach 90% while no plan window has.
 - Model-family limits (for example Claude Opus) and windows whose reset time has already passed
   never take the headline; they stay in the details.
 - A chip turns amber at 70% used and red at 90% used.

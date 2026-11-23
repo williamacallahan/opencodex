@@ -75,7 +75,7 @@ function roundedUnavailablePercent(total: number, remaining: number): number {
   return Number((2n * numerator + denominator) / (2n * denominator));
 }
 
-/** Among equally severe windows, long windows headline first: weekly, then monthly, then 5h. */
+/** Among equally full windows, long windows headline first: weekly, then monthly, then 5h. */
 const HEADLINE_ORDER: TKey[] = ["quota.weeklyLimit", "quota.monthlyLimit", "quota.fiveHourLimit"];
 
 /** Build reported quota windows with distinct IDs, including measured prepaid credits. */
@@ -134,14 +134,6 @@ function summaryWindows(quota: AccountQuota): QuotaSummaryWindow[] {
   });
 }
 
-function severityRank(severity: QuotaSummarySeverity): number {
-  switch (severity) {
-    case "critical": return 2;
-    case "warn": return 1;
-    case "normal": return 0;
-  }
-}
-
 /** Weekly, monthly, 5h, then provider windows in report order, then credits. */
 function headlinePreference(window: QuotaSummaryWindow): number {
   if (window.labelKey === "quotaSummary.credits") return HEADLINE_ORDER.length + 1;
@@ -150,23 +142,22 @@ function headlinePreference(window: QuotaSummaryWindow): number {
 }
 
 /**
- * The headline is the binding window: the most severe one, so a spent 30-day or budget window is
- * never hidden behind a 0% weekly window. Among critical windows the fullest wins, except that
- * credits yield to a critical plan window; equal severity otherwise follows `headlinePreference`.
+ * The headline is the binding window: the fullest of the 5-hour, weekly, monthly and provider
+ * windows, so a spent window is never hidden behind an emptier one. Equally full windows follow
+ * `headlinePreference`. Prepaid credits headline only when critical while no plan window is.
  * Model-family windows never headline, and a window whose reset has passed yields to a current one,
  * because its reading predates the reset.
  */
 function pickHeadline(windows: QuotaSummaryWindow[], now: number): QuotaSummaryWindow | undefined {
   const measured = windows.filter(window => window.modelId === undefined && window.scope === undefined && window.percent !== undefined);
   const current = measured.filter(window => window.resetAt === undefined || window.resetAt > now);
-  const ranked = (current.length > 0 ? current : measured)
-    .map((window, order) => ({ window, order }))
-    .sort((a, b) => severityRank(b.window.severity) - severityRank(a.window.severity)
-      || Number(a.window.labelKey === "quotaSummary.credits") - Number(b.window.labelKey === "quotaSummary.credits")
-      || (a.window.severity === "critical" ? (b.window.percent ?? 0) - (a.window.percent ?? 0) : 0)
-      || headlinePreference(a.window) - headlinePreference(b.window)
-      || a.order - b.order);
-  return ranked[0]?.window ?? windows.find(window => window.unknownBudget);
+  const pool = current.length > 0 ? current : measured;
+  const credits = pool.find(window => window.labelKey === "quotaSummary.credits");
+  // Array.prototype.sort is stable, so equally full windows of equal preference keep report order.
+  const fullest = pool.filter(window => window !== credits)
+    .sort((a, b) => (b.percent ?? 0) - (a.percent ?? 0) || headlinePreference(a) - headlinePreference(b))[0];
+  const headline = credits && (!fullest || credits.severity === "critical" && fullest.severity !== "critical") ? credits : fullest;
+  return headline ?? windows.find(window => window.unknownBudget);
 }
 
 /**

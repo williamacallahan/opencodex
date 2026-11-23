@@ -22,7 +22,7 @@ describe("quota summary", () => {
     expect(formatQuotaPercent(undefined)).toBe("-");
   });
 
-  test("equally severe windows headline weekly, then monthly, then 5h, then provider windows", () => {
+  test("the fullest window headlines, whichever of 5-hour, weekly, monthly or provider windows it is", () => {
     const reports = freshQuotaReportsFromResponse([
       { provider: "openai", label: "OpenAI", updatedAt: now, quota: { fiveHourPercent: 40, weeklyPercent: 31, weeklyResetAt: now + 3_600_000, updatedAt: now } },
       { provider: "claude", label: "Claude", updatedAt: now, quota: { fiveHourPercent: 12, monthlyPercent: 22, updatedAt: now } },
@@ -31,12 +31,16 @@ describe("quota summary", () => {
     ], now);
     const rows = buildQuotaSummary(reports, name, now);
     expect(rows.map(row => [row.label, row.headline.id, row.headline.percent, row.severity])).toEqual([
-      ["OpenAI", "quota.weeklyLimit", 31, "normal"],
+      ["OpenAI", "quota.fiveHourLimit", 40, "normal"],
       ["Claude", "quota.monthlyLimit", 22, "normal"],
       ["xai", "quota.fiveHourLimit", 40, "normal"],
-      ["Google", "Daily", 8, "normal"],
+      ["Google", "Hourly", 30, "normal"],
     ]);
-    expect(rows[0]!.headline.resetAt).toBe(now + 3_600_000);
+    // Antigravity's own labels: the weekly Gem window is the fullest, not the first reported.
+    const [antigravity] = buildQuotaSummary(freshQuotaReportsFromResponse([{ provider: "google-antigravity", updatedAt: now, quota: {
+      customWindows: [{ label: "Gem", percent: 9 }, { label: "Gem (Weekly)", percent: 39 }, { label: "Cla", percent: 18 }, { label: "Cla (Weekly)", percent: 10 }],
+      updatedAt: now } }], now), name, now);
+    expect([antigravity!.headline.label, antigravity!.headline.percent]).toEqual(["Gem (Weekly)", 39]);
   });
 
   test("the most severe window headlines, so a spent window is never hidden behind a 0% weekly one", () => {
@@ -52,7 +56,7 @@ describe("quota summary", () => {
       ["opencode-go", "quota.monthlyLimit", 100, "critical"],
       ["mistral", "Vibe budget", 100, "critical"],
       ["burst", "quota.fiveHourLimit", 95, "critical"],
-      ["warn", "quota.monthlyLimit", 72, "warn"],
+      ["warn", "quota.fiveHourLimit", 75, "warn"],
       ["fullest", "quota.monthlyLimit", 100, "critical"],
     ]);
     expect(rows[0]!.headline.resetAt).toBe(now + 3_600_000);
@@ -167,7 +171,7 @@ describe("quota summary", () => {
   });
 
   test("a custom window named like credits remains distinct, with or without actual credits", () => {
-    const customWindows = [{ label: "quotaSummary.credits", percent: 30 }];
+    const customWindows = [{ label: "quotaSummary.credits", percent: 7 }];
     const reports = freshQuotaReportsFromResponse([
       { provider: "custom-only", updatedAt: now, quota: { weeklyPercent: 7, customWindows, updatedAt: now } },
       { provider: "with-credits", updatedAt: now, quota: { weeklyPercent: 7, customWindows, creditsUsd: { used: 90, limit: 100, remaining: 10, percent: 90 }, updatedAt: now } },
@@ -176,19 +180,19 @@ describe("quota summary", () => {
     const [customOnly, withCredits, customFallback] = buildQuotaSummary(reports, name);
     expect([customOnly!.headline.labelKey, customOnly!.headline.percent]).toEqual(["quota.weeklyLimit", 7]);
     expect([withCredits!.headline.labelKey, withCredits!.headline.percent]).toEqual(["quotaSummary.credits", 90]);
-    expect([customFallback!.headline.label, customFallback!.headline.percent]).toEqual(["quotaSummary.credits", 30]);
+    expect([customFallback!.headline.label, customFallback!.headline.percent]).toEqual(["quotaSummary.credits", 7]);
     for (const row of [customOnly!, withCredits!, customFallback!]) {
       expect(new Set(row.windows.map(window => window.id)).size).toBe(row.windows.length);
     }
   });
 
   test("provider labels that match fixed ids do not take fixed-window precedence", () => {
-    // Every window is equally severe, so only label precedence can decide the headline.
+    // Every window is equally full, so only label precedence can decide the headline.
     const reports = freshQuotaReportsFromResponse([
-      { provider: "weekly", updatedAt: now, quota: { monthlyPercent: 7, customWindows: [{ label: "quota.weeklyLimit", percent: 30 }] } },
-      { provider: "monthly", updatedAt: now, quota: { fiveHourPercent: 7, customWindows: [{ label: "quota.monthlyLimit", percent: 30 }] } },
-      { provider: "five-hour", updatedAt: now, quota: { customWindows: [{ label: "Daily", percent: 7 }, { label: "quota.fiveHourLimit", percent: 30 }] } },
-      { provider: "custom-only", updatedAt: now, quota: { customWindows: [{ label: "Daily", percent: 7 }, { label: "quota.weeklyLimit", percent: 30 }] } },
+      { provider: "weekly", updatedAt: now, quota: { monthlyPercent: 7, customWindows: [{ label: "quota.weeklyLimit", percent: 7 }] } },
+      { provider: "monthly", updatedAt: now, quota: { fiveHourPercent: 7, customWindows: [{ label: "quota.monthlyLimit", percent: 7 }] } },
+      { provider: "five-hour", updatedAt: now, quota: { customWindows: [{ label: "Daily", percent: 7 }, { label: "quota.fiveHourLimit", percent: 7 }] } },
+      { provider: "custom-only", updatedAt: now, quota: { customWindows: [{ label: "Daily", percent: 7 }, { label: "quota.weeklyLimit", percent: 7 }] } },
     ], now);
     const rows = buildQuotaSummary(reports, name, now);
     expect(rows.map(row => [row.provider, row.headline.labelKey, row.headline.label, row.headline.percent])).toEqual([
@@ -224,16 +228,16 @@ describe("quota summary", () => {
       { label: "quotaSummary.credits#1", percent: 29 },
     ];
     const reports = freshQuotaReportsFromResponse([
-      { provider: "real-credits", updatedAt: now, quota: { weeklyPercent: 7, customWindows, creditsUsd: { used: 100, limit: 100, remaining: 0, percent: 100 } } },
-      { provider: "unlimited", updatedAt: now, quota: { monthlyPercent: 7, customWindows, creditsUsd: { used: 100, limit: 100, remaining: 0, percent: 100, unlimited: true } } },
-      { provider: "malformed", updatedAt: now, quota: { monthlyPercent: 7, customWindows, creditsUsd: { percent: NaN } } },
+      { provider: "real-credits", updatedAt: now, quota: { weeklyPercent: 30, customWindows, creditsUsd: { used: 100, limit: 100, remaining: 0, percent: 100 } } },
+      { provider: "unlimited", updatedAt: now, quota: { monthlyPercent: 30, customWindows, creditsUsd: { used: 100, limit: 100, remaining: 0, percent: 100, unlimited: true } } },
+      { provider: "malformed", updatedAt: now, quota: { monthlyPercent: 30, customWindows, creditsUsd: { percent: NaN } } },
     ], now);
     expect(accountQuotaFromReport(reports.unlimited)?.creditsUsd).toEqual({ used: 100, limit: 100, remaining: 0, percent: 100, unlimited: true });
     const rows = buildQuotaSummary(reports, name, now);
     expect(rows.map(row => [row.provider, row.headline.labelKey, row.headline.percent])).toEqual([
       ["real-credits", "quotaSummary.credits", 100],
-      ["unlimited", "quota.monthlyLimit", 7],
-      ["malformed", "quota.monthlyLimit", 7],
+      ["unlimited", "quota.monthlyLimit", 30],
+      ["malformed", "quota.monthlyLimit", 30],
     ]);
     for (const row of rows) {
       expect(new Set(row.windows.map(window => window.id)).size).toBe(row.windows.length);
