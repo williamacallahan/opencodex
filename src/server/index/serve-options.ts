@@ -407,7 +407,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       }
       const url = requestUrl;
       const admissionOptions = { linkIngress: policy.linkIngress?.allowedKeyIds };
-      markActivity(`${req.method} ${url.pathname.replace(/^\/agy\/[^/]+/, "/agy/<key>")}`);
+      markActivity(`${req.method} ${url.pathname.replace(/^\/(agy|devin)\/[^/]+/, "/$1/<key>")}`);
 
       // Readiness is exact-GET on the literal /readyz path. Compare the DECODED
       // pathname so an encoded variant like /readyz%2F (which decodes to
@@ -842,7 +842,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         );
       }
 
-      if (ingress === "public" && url.pathname.startsWith("/agy/")) return (await import("../agy-passthrough")).handleAgyPassthrough(req, { config, draining: isDraining(), server: requestServer });
+      if (ingress === "public" && (url.pathname.startsWith("/agy/") || url.pathname.startsWith("/devin/"))) return url.pathname.startsWith("/agy/") ? (await import("../agy-passthrough")).handleAgyPassthrough(req, { config, draining: isDraining(), server: requestServer }) : (await import("../devin-passthrough")).handleDevinPassthrough(req, { config, draining: isDraining(), server: requestServer });
       if (url.pathname === "/v1/usage" && req.method === "GET") {
         const { handleHubUsage } = await import("../hub-usage");
         return handleHubUsage(req, config, policy);
