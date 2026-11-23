@@ -22,8 +22,8 @@ import { clearUpstreamHostHealth, getUpstreamHostHealth, upstreamHostHealthKey }
 import { handleClaudeMessages } from "../../src/server/claude-messages";
 import { clearComboRecallForTests } from "../../src/server/responses/combo-session-recall";
 import * as familyQuota from "../../src/oauth/anthropic-model-quota";
-import { anthropicSessionAffinitySizeForTests } from "../../src/oauth/anthropic-routing";
-import { nativeOAuthBindingIsCurrent, resolveNativeOAuthBinding } from "../../src/server/messages-native-oauth";
+import { anthropicSessionAffinitySizeForTests, resetAnthropicSessionAffinityConfirmed } from "../../src/oauth/anthropic-routing";
+import { NativeOAuthSelectionChangedError, nativeOAuthBindingIsCurrent, resolveNativeOAuthBinding } from "../../src/server/messages-native-oauth";
 import { getRequestLogEntries } from "../../src/server/request-log";
 import { providerRequestPacingStatus, resetProviderRequestPacingForTest, waitForProviderRequestSlot } from "../../src/providers/request-pacing";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
@@ -656,6 +656,21 @@ describe("overlapping native pool dispatch", () => {
   });
 });
 
+
+test("a reset during retry selection preserves the active account", async () => {
+  const ids = await seed(2);
+  const config = fixtureConfig();
+  config.anthropicAccountPool = { enabled: true };
+  const binding = await resolveNativeOAuthBinding(config, { sessionKey: "fixture-reset-retry" });
+  const pending = resolveNativeOAuthBinding(config, {
+    sessionKey: binding.sessionKey, candidateAccountId: ids.find(id => id !== binding.snapshot.accountId),
+    expectedRecoverySelection: binding.selection, expectedAffinityResetGeneration: binding.affinityResetGeneration,
+  });
+  const refusal = pending.then(() => null, (error: unknown) => error);
+  expect(await resetAnthropicSessionAffinityConfirmed()).toBe(true);
+  expect(await refusal).toBeInstanceOf(NativeOAuthSelectionChangedError);
+  expect(captureOAuthAccountSelection("anthropic")).toEqual(binding.selection);
+});
 
 test("manual selection before recovery resolution defeats a pre-wait candidate", async () => {
   const ids = await seed(2);

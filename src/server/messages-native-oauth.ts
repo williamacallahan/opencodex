@@ -58,6 +58,7 @@ export interface NativeOAuthBinding {
   readonly model?: string;
   readonly config: OcxConfig;
   readonly manualSelectionGeneration: number;
+  readonly affinityResetGeneration: number;
 }
 
 /** The selection moved or became ineligible while resolving. Maps to a 409 retry. */
@@ -115,6 +116,7 @@ export interface NativeOAuthBindingOptions {
   /** Selection captured before asynchronous refusal classification or throttle wait. */
   expectedRecoverySelection?: Selection | null;
   expectedRecoveryRouteDecision?: AnthropicRouteDecision | null;
+  expectedAffinityResetGeneration?: number;
 }
 
 /** Compatibility entrypoint: the original instance only. */
@@ -130,7 +132,12 @@ export async function resolveNativeOAuthBindingForInstance(
 ): Promise<NativeOAuthBinding> {
   const routeTarget = options.routeTarget ?? nativeOAuthRouteTarget(instance, config);
   const routing = anthropicRoutingFor(instance);
+  const affinityResetGeneration = options.expectedAffinityResetGeneration ?? routing.affinityResetGeneration();
+  const assertAffinityCurrent = () => {
+    if (routing.affinityResetGeneration() !== affinityResetGeneration) throw new NativeOAuthSelectionChangedError();
+  };
   const assertOwner = () => {
+    assertAffinityCurrent();
     if (nativeOAuthRouteTarget(instance, config) !== routeTarget) throw new NativeOAuthSelectionChangedError();
   };
   const sessionKey = options.sessionKey ?? null;
@@ -168,6 +175,7 @@ export async function resolveNativeOAuthBindingForInstance(
       expectedSelection: selection,
       expectedCredentialGeneration: candidate.generation,
       requireUsableAccount: true,
+      assertSelectionCurrent: assertAffinityCurrent,
     });
     assertOwner();
     if (committed) {
@@ -180,7 +188,7 @@ export async function resolveNativeOAuthBindingForInstance(
       })) continue;
       const row = getAccountCredentialWithStatus(instance, candidate.accountId);
       if (!row || row.credential.access !== candidate.accessToken || credentialGeneration(row.credential) !== candidate.generation) continue;
-      const binding: NativeOAuthBinding = { instance, routeTarget, selection: committed, snapshot: candidate, providerAccountUuid: row.credential.accountId, routeDecision, sessionKey, model, config, manualSelectionGeneration, ...(retainsAffinity ? { requiresAffinity: true } : {}) };
+      const binding: NativeOAuthBinding = { instance, routeTarget, selection: committed, snapshot: candidate, providerAccountUuid: row.credential.accountId, routeDecision, sessionKey, model, config, manualSelectionGeneration, affinityResetGeneration, ...(retainsAffinity ? { requiresAffinity: true } : {}) };
       if (nativeOAuthBindingIsCurrent(binding)) return binding;
     }
   }

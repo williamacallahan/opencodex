@@ -36,7 +36,7 @@ import { captureAnthropicPhysicalSendOwnership, anthropicPhysicalSendOwnershipIs
 import { anthropicModelQuotaFor } from "../oauth/anthropic-model-quota";
 import { captureConfigGeneration } from "../lib/state-store-sweeper";
 import { recordAnthropicAccountQuotaFromHeadersForInstance } from "../providers/quota";
-import { captureOAuthAccountSelection, credentialGeneration, getAccountCredentialWithStatus } from "../oauth/store";
+import { credentialGeneration, getAccountCredentialWithStatus } from "../oauth/store";
 import { ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST } from "../oauth/anthropic-routing";
 import { enforceAnthropicImageLimits } from "../adapters/anthropic-image-guard";
 import { normalizeAnthropicImages } from "../adapters/anthropic-image-normalize";
@@ -740,7 +740,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
               for (let attempt = 0; !nativeOAuthBindingIsCurrent(oauthBinding); attempt++) {
                 if (attempt >= 3) throw new NativeOAuthSelectionChangedError();
                 try {
-                  oauthBinding = await resolveNativeOAuthBindingForInstance(nativeInstance!, config, { routeTarget, sessionKey: options.sessionKey, model: route.modelId });
+                  oauthBinding = await resolveNativeOAuthBindingForInstance(nativeInstance!, config, { routeTarget, sessionKey: options.sessionKey, model: route.modelId, expectedAffinityResetGeneration: oauthBinding.affinityResetGeneration });
                 } catch (error) {
                   if (error instanceof OAuthAccountPausedError || error instanceof OAuthLoginRequiredError
                     || error instanceof AnthropicAccountCooldownError || error instanceof NativeOAuthModelRouteError) throw error;
@@ -1021,16 +1021,12 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
         signal: upstream.signal, requestKey: oauthRetryKey,
         canRetry: transientSendAvailable() && oauthFailovers < ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST,
       });
-      if (!nextAccountId) break;
-      if (sendingBinding.manualSelectionGeneration !== anthropicRoutingFor(sendingBinding.instance).captureAnthropicManualSelectionGeneration()) {
-        const selected = captureOAuthAccountSelection(sendingBinding.instance);
-        if (selected?.accountId === expectedRecoverySelection.accountId && selected?.revision === expectedRecoverySelection.revision) break;
-      }
+      if (!nextAccountId || sendingBinding.affinityResetGeneration !== anthropicRoutingFor(sendingBinding.instance).affinityResetGeneration()) break;
       const recovery = response.status === 401 ? "oauth-401" : response.status === 403 ? "oauth-account-403" : "rate-limit-429";
       discard(response);
       oauthBinding = await resolveNativeOAuthBindingForInstance(nativeInstance!, config, { routeTarget,
         sessionKey: options.sessionKey, model: route.modelId, candidateAccountId: nextAccountId,
-        expectedRecoverySelection, expectedRecoveryRouteDecision: sendingBinding.routeDecision,
+        expectedRecoverySelection, expectedRecoveryRouteDecision: sendingBinding.routeDecision, expectedAffinityResetGeneration: sendingBinding.affinityResetGeneration,
       });
       oauthFailovers++;
       rebuildFor(oauthProvider(oauthBinding));

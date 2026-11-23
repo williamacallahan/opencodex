@@ -1497,12 +1497,14 @@ export async function commitOAuthAccountSelection(
     expectedSelection?: OAuthAccountSelection;
     expectedCredentialGeneration?: string;
     requireUsableAccount?: boolean;
+    assertSelectionCurrent?: () => void;
   } = {},
 ): Promise<OAuthAccountSelection | null> {
   // Snapshot caller-owned options before waiting for the serialized writer.
   const expected = options.expectedSelection ? { ...options.expectedSelection } : undefined;
-  const { expectedCredentialGeneration, requireUsableAccount } = options;
+  const { expectedCredentialGeneration, requireUsableAccount, assertSelectionCurrent } = options;
   const valid = (set: ProviderAccountSet): boolean => {
+    assertSelectionCurrent?.();
     if (expected && (set.activeAccountId !== expected.accountId || set.selectionRevision !== expected.revision)) return false;
     const account = set.accounts.find(account => account.id === accountId);
     if (!account || account.paused === true || (requireUsableAccount && account.needsReauth === true)) return false;
@@ -1522,7 +1524,7 @@ export async function commitOAuthAccountSelection(
       set.selectionRevision = randomUUID();
     }
     return accountSelection(set);
-  }, [provider, accountId, expected, expectedCredentialGeneration]);
+  }, [provider, accountId, expected, expectedCredentialGeneration], { assertBeforePersist: assertSelectionCurrent });
 }
 
 export async function setActiveAccount(provider: string, accountId: string): Promise<boolean> {

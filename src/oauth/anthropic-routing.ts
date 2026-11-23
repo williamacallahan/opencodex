@@ -357,7 +357,7 @@ type RoutingFacadeSymbol =
   | "getAnthropicPoolAccessToken"
   | "getAnthropicPoolAccessSnapshot"
   | "canRefreshAnthropicPoolAccount";
-export type AnthropicRouting = Readonly<{ instance: AnthropicInstanceId } & Pick<typeof import("./anthropic-routing"), RoutingFacadeSymbol>>;
+export type AnthropicRouting = Readonly<{ instance: AnthropicInstanceId; affinityResetGeneration(): number } & Pick<typeof import("./anthropic-routing"), RoutingFacadeSymbol>>;
 type RoutingHandlers = { onPause(): void; onPolicy: Parameters<typeof subscribeOAuthAccountRoutingPolicyChanges>[0]; onSelection: Parameters<typeof subscribeAccountSelections>[0]; reconcile(context: GenerationContext, config?: OcxConfig): number };
 const instances = new Map<AnthropicInstanceId, AnthropicRouting>();
 const handlers = new Map<AnthropicInstanceId, RoutingHandlers>();
@@ -379,6 +379,7 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
   // The startup baseline comes from the authoritative store, never a second persisted pin.
   let manualPreference: OAuthAccountSelection | null | undefined;
   let manualSelectionGeneration = 0;
+  let affinityResetGeneration = 0;
   let manualResetPending = false;
   /** Automatic pointer moves preserve affinity; manual selection revokes older bindings. */
   function captureAnthropicManualSelectionGeneration(): number { return manualSelectionGeneration; }
@@ -1400,6 +1401,7 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
 
   /** Complete a reset without selecting, resuming or requiring an account. */
   async function resetAnthropicSessionAffinityConfirmed(): Promise<boolean> {
+    affinityResetGeneration++;
     requestAnthropicSessionAffinityReset();
     return flushAnthropicManualSelectionReset();
   }
@@ -1515,7 +1517,7 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
   }
   handlers.set(instance, { onPause, onPolicy, onSelection, reconcile });
   return Object.freeze({
-    instance, captureAnthropicManualSelectionGeneration, anthropicAccountPoolConfig,
+    instance, affinityResetGeneration: () => affinityResetGeneration, captureAnthropicManualSelectionGeneration, anthropicAccountPoolConfig,
     isAnthropicAccountPoolEnabled, anthropicAutoSwitchThreshold, anthropicAccountAutoSwitchThreshold,
     captureAnthropicCooldownRecovery, settleAnthropicCooldownRecovery, getAnthropicAccountHealthSnapshot,
     clearAnthropicAccountCooldown, clearAnthropicAccountCooldownForReset, sweepExpiredAnthropicRoutingHealth, clearAnthropicAccountPoolState,
