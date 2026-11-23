@@ -137,20 +137,25 @@ describe("account listing without a native Codex home", () => {
     }
   }
 
-  test("GET /api/codex-auth/accounts embeds active selection state matching GET /api/codex-auth/active", async () => {
+  test("GET /api/codex-auth/accounts and POST /api/codex-auth/accounts/refresh embed active selection state matching GET /api/codex-auth/active", async () => {
     savePool();
     const cfg = config(false);
     const accountsUrl = new URL("http://localhost/api/codex-auth/accounts");
+    const refreshUrl = new URL("http://localhost/api/codex-auth/accounts/refresh?force=1");
     const activeUrl = new URL("http://localhost/api/codex-auth/active");
-    const [accountsRes, activeRes] = await Promise.all([
+    const [accountsRes, refreshRes, activeRes] = await Promise.all([
       handleCodexAuthAPI(new Request(accountsUrl), accountsUrl, cfg),
+      handleCodexAuthAPI(new Request(refreshUrl, { method: "POST" }), refreshUrl, cfg),
       handleCodexAuthAPI(new Request(activeUrl), activeUrl, cfg),
     ]);
     expect(accountsRes?.status).toBe(200);
+    expect(refreshRes?.status).toBe(200);
     expect(activeRes?.status).toBe(200);
     const accountsBody = await accountsRes!.json() as { accounts: CodexAuthAccountDto[]; active?: unknown };
+    const refreshBody = await refreshRes!.json() as { accounts: CodexAuthAccountDto[]; active?: unknown };
     const activeBody = await activeRes!.json();
     expect(accountsBody.active).toEqual(activeBody);
+    expect(refreshBody.active).toEqual(activeBody);
   });
 
   test("an explicit non-directory CODEX_HOME still refuses account listing", async () => {

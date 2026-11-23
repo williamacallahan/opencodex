@@ -80,13 +80,16 @@ export async function handleCodexAuthAPI(
     const bodyForce = typeof body === "object" && body !== null && (body as { force?: unknown }).force === true;
     const forceParam = url.searchParams.get("force");
     const forceHeld = principal === "gui-session" || forceParam === "1" || forceParam === "true" || bodyForce;
-    return jsonResponse({ accounts: await listCodexAuthAccounts(config, true, {
-      validatePending: principal === "gui-session"
-        || (principal === "admin-token" && getRuntimeConfig(config).codexPendingValidationByAdminRefresh === true),
-      paceValidationRetries: principal !== "gui-session",
-      explicitRefresh: true,
-      holdExhausted: !forceHeld,
-    }) });
+    return jsonResponse({
+      accounts: await listCodexAuthAccounts(config, true, {
+        validatePending: principal === "gui-session"
+          || (principal === "admin-token" && getRuntimeConfig(config).codexPendingValidationByAdminRefresh === true),
+        paceValidationRetries: principal !== "gui-session",
+        explicitRefresh: true,
+        holdExhausted: !forceHeld,
+      }),
+      active: buildCodexActiveSelectionPayload(config),
+    });
   }
 
   if (url.pathname === "/api/codex-auth/accounts" && req.method === "POST") {

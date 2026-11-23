@@ -33,6 +33,16 @@ export function refreshCollectedAccountReport(report: ProviderQuotaReport): Prov
   const latest = projection && !projection.isFresh() ? projection.project() : report;
   return latest ? [latest] : [];
 }
+
+export function refreshCollectedAccountReports(reports: ProviderQuotaReport[]): ProviderQuotaReport[] {
+  let changed = false;
+  const next = reports.flatMap(report => {
+    const updated = refreshCollectedAccountReport(report);
+    if (updated.length !== 1 || updated[0] !== report) changed = true;
+    return updated;
+  });
+  return changed ? next : reports;
+}
 /** The measured quota a reset detector should observe when the shown quota is an estimate (pooled rows). */
 export const observedQuotaFor = new WeakMap<ProviderQuotaReport, ProviderQuota>();
 export const routingEvidence = new WeakMap<ProviderQuotaReport, ProviderQuotaRoutingEvidence>();

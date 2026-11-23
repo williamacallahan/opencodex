@@ -22,7 +22,7 @@ import type { OcxConfig, OcxProviderConfig } from "../types";
 import { isPassiveRead } from "../lib/passive-read";
 import { CODEX_LB_USAGE_SOURCE, type ProviderQuota, type QuotaFailureCode } from "./quota-types";
 import {
-  accountReportCurrent, observedQuotaFor, refreshCollectedAccountReport,
+  accountReportCurrent, observedQuotaFor, refreshCollectedAccountReport, refreshCollectedAccountReports,
   AUTHORITATIVE_EMPTY_QUOTA,
   bumpProviderQuotaInvalidationEpoch,
   captureProviderReportEpochs, providerReportEpochChanged,
@@ -260,6 +260,8 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
   const key = typeof keyCandidate === "string" ? keyCandidate : await keyCandidate;
   const writerGeneration = captureConfigGeneration();
   const providerEpochs = captureProviderReportEpochs();
+  const claudeSignIn = forceRefresh ? undefined : refreshClaudeCliSignIn(config);
+  if (claudeSignIn) await claudeSignIn;
   const now = Date.now();
   // A passive observation keeps its original time and does not trigger another upstream probe.
   const currentCache = getProviderQuotaReportCache();
@@ -267,7 +269,7 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
     (item.observed === true || now - item.updatedAt < LAST_GOOD_MAX_AGE_MS)
     && (config.providers[item.provider]?.adapter === "claude-cli" || isProviderQuotaReportCurrent(item)) && keyReportCredentialCurrent(item, config.providers[item.provider])));
   const projectHeld = (response: ProviderQuotaResponse) => {
-    const reports = refreshHeldClaudeCliReports(config, response.reports.flatMap(refreshCollectedAccountReport));
+    const reports = refreshHeldClaudeCliReports(config, refreshCollectedAccountReports(response.reports));
     return reports === response.reports ? response : { ...response, reports };
   };
   if (!forceRefresh && cacheValidForKey && currentCache && now - currentCache.ts < CACHE_TTL_MS) {
@@ -281,8 +283,6 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
     let entry!: { epoch: number; promise: Promise<ProviderQuotaResponse> };
     const promise = (async (): Promise<ProviderQuotaResponse> => {
       try {
-        const claudeSignIn = forceRefresh ? undefined : refreshClaudeCliSignIn(config);
-        if (claudeSignIn) await claudeSignIn;
         const previousCache = getProviderQuotaReportCache();
         const previous = previousCache && previousCache.key === key ? previousCache.response.reports : [];
         const probeResults = await Promise.all(

@@ -494,49 +494,49 @@ export function useCodexAccountPool(
           if (!response.ok) throw new Error("account load failed");
           const payload = await response.json();
           const embeddedActive = isCodexActivePayload(payload.active) ? payload.active : null;
+          if (!loadIsCurrent()) return false;
           accountsCarriesActiveRef.current = embeddedActive !== null;
-          if (loadIsCurrent()) {
-            // Selection order is required downstream (badge, select). Normalizing here keeps
-            // a payload without it from rendering a NaN order on every card.
-            const resolvedAccounts = ((payload.accounts ?? []) as CodexAccountEntry[]).map(account => {
-              const logLabel = account.isMain ? "main" : account.logLabel;
-              const available = quotaAutoRefreshAvailability(account.quota);
-              return {
-                ...account,
-                ...(logLabel ? { logLabel } : {}),
-                priority: normalizeAccountPriority(account.priority),
-                autoSwitchThresholdOverride: normalizeAccountAutoSwitchThreshold(
-                  account.autoSwitchThresholdOverride,
-                ),
-                quotaAutoRefresh: account.quotaAutoRefresh ?? {
-                  ...available,
-                  fiveHourEnabled: false,
-                  weeklyEnabled: false,
-                },
-              };
-            });
-            nextAccounts = resolvedAccounts;
-            setAccounts(prev => JSON.stringify(prev) === JSON.stringify(resolvedAccounts) ? prev : resolvedAccounts);
-            hasAccountsRef.current = nextAccounts.length > 0;
-            hasLoadedRef.current = true;
-            // Progressive: paint account/quota boxes as soon as /accounts returns.
-            setLoadState("ready");
-            // Cleared here rather than at the settle below, because the rows it qualifies are
-            // painted here. Waiting for /active to finish would leave the just-replaced rows
-            // labelled as pre-refresh ones for as long as that read's budget allows.
-            setRefreshFailed(false);
-            if (skipSeparateActive && embeddedActive !== null) {
-              applyActivePayload(embeddedActive as unknown as Record<string, unknown>);
-            }
-          }
-          if (skipSeparateActive && embeddedActive === null) {
+          // Selection order is required downstream (badge, select). Normalizing here keeps
+          // a payload without it from rendering a NaN order on every card.
+          const resolvedAccounts = ((payload.accounts ?? []) as CodexAccountEntry[]).map(account => {
+            const logLabel = account.isMain ? "main" : account.logLabel;
+            const available = quotaAutoRefreshAvailability(account.quota);
+            return {
+              ...account,
+              ...(logLabel ? { logLabel } : {}),
+              priority: normalizeAccountPriority(account.priority),
+              autoSwitchThresholdOverride: normalizeAccountAutoSwitchThreshold(
+                account.autoSwitchThresholdOverride,
+              ),
+              quotaAutoRefresh: account.quotaAutoRefresh ?? {
+                ...available,
+                fiveHourEnabled: false,
+                weeklyEnabled: false,
+              },
+            };
+          });
+          nextAccounts = resolvedAccounts;
+          setAccounts(prev => JSON.stringify(prev) === JSON.stringify(resolvedAccounts) ? prev : resolvedAccounts);
+          hasAccountsRef.current = nextAccounts.length > 0;
+          hasLoadedRef.current = true;
+          // Progressive: paint account/quota boxes as soon as /accounts returns.
+          setLoadState("ready");
+          // Cleared here rather than at the settle below, because the rows it qualifies are
+          // painted here. Waiting for /active to finish would leave the just-replaced rows
+          // labelled as pre-refresh ones for as long as that read's budget allows.
+          setRefreshFailed(false);
+          if (skipSeparateActive && embeddedActive !== null) {
+            applyActivePayload(embeddedActive as unknown as Record<string, unknown>);
+          } else if (skipSeparateActive) {
             fallbackActiveOk = await fetchAndApplyActive();
           }
           return true;
         } catch {
-          accountsCarriesActiveRef.current = false;
-          if (skipSeparateActive && loadIsCurrent()) {
-            for (const observer of observers) observer.rejectActiveRead();
+          if (loadIsCurrent()) {
+            accountsCarriesActiveRef.current = false;
+            if (skipSeparateActive) {
+              for (const observer of observers) observer.rejectActiveRead();
+            }
           }
           return false;
         }

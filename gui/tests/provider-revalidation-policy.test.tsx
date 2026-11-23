@@ -239,6 +239,110 @@ test("subsequent Codex pool loads skip /api/codex-auth/active once /api/codex-au
   expect(activeCalls).toBe(initialActiveCalls);
 });
 
+test("superseded or target-stale Codex loads neither trigger fallback /api/codex-auth/active nor clear embedded active tracking", async () => {
+  let activeCalls = 0;
+  let resolveStaleWithoutActive: ((response: Response) => void) | undefined;
+  let rejectStaleRefresh: ((error: unknown) => void) | undefined;
+  let holdNextRefreshMode: "resolve-no-active" | "reject" | null = null;
+  const accountsList = [
+    { id: "main", email: "main@example.test", isMain: true, hasCredential: true, priority: 0, quota: null },
+    { id: "acc-1", email: "acc1@example.test", isMain: false, hasCredential: true, priority: 1, quota: null },
+  ];
+  const activePayload = {
+    activeCodexAccountId: "acc-1",
+    pinned: false,
+    pinnedAccountId: null,
+    autoSwitchThreshold: 80,
+    upstreamFailoverThreshold: 3,
+    accountPoolStrategy: "round-robin",
+    accountPoolStickyLimit: 1,
+  };
+  const fallback = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/config") {
+        return Response.json({
+          port: 10100, defaultProvider: "openai",
+          providers: { openai: { adapter: "openai-responses", authMode: "forward", codexAccountMode: "pool", baseUrl: "https://chatgpt.com/backend-api/codex" } },
+        });
+      }
+      if (url.pathname === "/api/oauth/providers") return Response.json({ providers: [] });
+      if (url.pathname === "/api/oauth/status") return Response.json({ loggedIn: true });
+      if (url.pathname === "/api/codex-auth/accounts") {
+        return Response.json({ accounts: accountsList, active: activePayload });
+      }
+      if (url.pathname === "/api/codex-auth/accounts/refresh") {
+        if (holdNextRefreshMode === "resolve-no-active") {
+          holdNextRefreshMode = null;
+          return new Promise<Response>(resolve => { resolveStaleWithoutActive = resolve; });
+        }
+        if (holdNextRefreshMode === "reject") {
+          holdNextRefreshMode = null;
+          return new Promise<Response>((_, reject) => { rejectStaleRefresh = reject; });
+        }
+        return Response.json({ accounts: accountsList, active: activePayload });
+      }
+      if (url.pathname === "/api/codex-auth/active") {
+        activeCalls += 1;
+        return Response.json(activePayload);
+      }
+      return fallback(input as never, init as never);
+    },
+  });
+
+  await act(async () => {
+    root = createRoot(container);
+    root.render(<LanguageProvider><Providers apiBase="http://peer-a.test" /></LanguageProvider>);
+  });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 120)); });
+  await act(async () => { container.querySelector<HTMLButtonElement>(".providers-workspace-rail-row")!.click(); });
+
+  holdNextRefreshMode = "resolve-no-active";
+  const refreshA = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+    .find(button => button.textContent?.includes("Refresh quotas"));
+  expect(refreshA).toBeDefined();
+  await act(async () => { refreshA!.click(); });
+  expect(resolveStaleWithoutActive).toBeDefined();
+
+  await act(async () => {
+    root!.render(<LanguageProvider><Providers apiBase="http://peer-b.test" /></LanguageProvider>);
+    await new Promise(resolve => setTimeout(resolve, 120));
+  });
+  const activeCallsAfterPeerBBoot = activeCalls;
+
+  await act(async () => {
+    resolveStaleWithoutActive!(Response.json({ accounts: accountsList }));
+    await new Promise(resolve => setTimeout(resolve, 40));
+  });
+  expect(activeCalls).toBe(activeCallsAfterPeerBBoot);
+
+  holdNextRefreshMode = "reject";
+  const refreshB = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+    .find(button => button.textContent?.includes("Refresh quotas"));
+  expect(refreshB).toBeDefined();
+  await act(async () => { refreshB!.click(); });
+  expect(activeCalls).toBe(activeCallsAfterPeerBBoot);
+  expect(rejectStaleRefresh).toBeDefined();
+
+  await act(async () => {
+    root!.render(<LanguageProvider><Providers apiBase="http://peer-c.test" /></LanguageProvider>);
+    await new Promise(resolve => setTimeout(resolve, 120));
+  });
+  const activeCallsAfterPeerCBoot = activeCalls;
+
+  await act(async () => {
+    rejectStaleRefresh!(new Error("stale aborted refresh"));
+    await new Promise(resolve => setTimeout(resolve, 40));
+  });
+  const refreshC = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+    .find(button => button.textContent?.includes("Refresh quotas"));
+  expect(refreshC).toBeDefined();
+  await act(async () => { refreshC!.click(); await new Promise(resolve => setTimeout(resolve, 40)); });
+  expect(activeCalls).toBe(activeCallsAfterPeerCBoot);
+});
+
 test("30s Codex background poll is skipped while healthy SSE is open on another provider, and switching to OpenAI refreshes", async () => {
   const capturedIntervals: Array<{ cb: () => void; ms?: number }> = [];
   const origSetInterval = testWindow.setInterval.bind(testWindow);
