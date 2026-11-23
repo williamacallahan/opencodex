@@ -494,6 +494,7 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/server/ollama-inbound.ts` | [`data-planes/ollama-inbound.md`](data-planes/ollama-inbound.md) |
 | `src/server/ollama-native-paths.ts` | [`data-planes/ollama-inbound.md`](data-planes/ollama-inbound.md) |
 | `src/server/ollama-route-policy.ts` | [`data-planes/ollama-inbound.md`](data-planes/ollama-inbound.md) |
+| `src/server/request-log-attempt-usage.ts` | [`usage-client-attribution.md`](usage-client-attribution.md) |
 | `src/server/request-log-failure-detail.ts` | [`data-planes/error-detail.md`](data-planes/error-detail.md) |
 | `src/server/request-log.ts` | [`usage-client-attribution.md`](usage-client-attribution.md) |
 | `src/server/responses/` | [`data-planes/claude-tool-loading.md`](data-planes/claude-tool-loading.md) |
