@@ -38,8 +38,8 @@ account choice and bound to that slot's sign-in (`antigravityLoginIdentity`, whi
 refresh keeps and another login in the slot changes). The sign-in is rechecked before the write and
 rides beside the row on disk (the cache entry's `identity`), and `observedAntigravityAccountQuota`
 returns a row only while it matches the slot's current sign-in, so a probe-era row or another login's
-row is never shown as an observation. A models answer does not replace a summary the account kept less
-than 30 minutes ago. `hasPassiveAccountQuota` treats `google-antigravity` as observed while the switch
+row is never shown as an observation. A models answer never replaces a kept reading that has family
+windows, however old, because only the summary reports the 5-hour and weekly buckets that balancing ranks by. `hasPassiveAccountQuota` treats `google-antigravity` as observed while the switch
 is on: the Accounts tab shows each account's last observation (or "not observed yet"), and the quota
 bar's provider row (`fetchObservedAntigravityQuota`) is the freshest observation with family windows,
 since agy rotates across the pool; reset detection skips that display row. An observation is persisted with its sign-in and kept on disk for 8 days rather than the account cache's 6 hours (`src/providers/account-quota-disk.ts`), because an account agy is not using gets no newer reading. That retention is for display: `getCachedProviderAccountQuota`, which routing ranking and the quota pool read, ignores an agy observation older than 6 hours, so a days-old reading never ranks accounts or reports an account as exhausted. The Accounts tab shows its age, and its note (`pws.agyAccountPolicy`) explains the account policy below. The hub's own probe
@@ -54,14 +54,15 @@ fallback. `tests/server/agy-passthrough.test.ts` and
 - A body naming `project` goes to an account that owns that project: the stored
   `credential.projectId`, or the project Google returned on a `loadCodeAssist` this lane relayed for
   that account. Google can hand several accounts the same project (two pooled sign-ins shared one on
-  2026-11-22), so among owners the caller's own account wins; a caller with no account yet (a restart, or agy refreshing its own token about hourly) takes the next owner in rotation that is not cooling down, then the first usable owner. An
+  2026-11-22), so among owners the caller's own account wins; a caller with no account yet (a restart, or agy refreshing its own token about hourly) takes the least-used owner that is not cooling down, then the first usable owner. An
   unowned project is a local 400; a project whose owners are all paused or reauth-marked is a local 503.
-- Accounts are balanced by usage: `bindingUsage` is an account's most-used current Gem or Cla window from agy's readings of the last 6 hours (an unread account counts as 0). A new caller starts on the least-used eligible account (ties take turns), and at `loadCodeAssist` a caller moves when another eligible account is at least `BALANCE_MARGIN_PERCENT` (10) points less used.
+- Accounts are balanced by usage: `bindingUsage` is an account's most-used current Gem or Cla window from agy's readings of the last 6 hours (an unread account counts as 0). A new caller starts on the least-used eligible account (ties take turns), and at `loadCodeAssist` a caller moves when another eligible account that owns the caller's current project is at least `BALANCE_MARGIN_PERCENT` (10) points less used. Only a same-project move keeps agy's cached project and open trajectories valid on the new token; accounts with different projects never trade callers mid-session.
 - A project-less call (`loadCodeAssist`, `writeTrajectoryAcls`) stays on the account this caller last
   used, keyed by a SHA-256 of the caller's own bearer, unless that account is cooling down; otherwise it
-  takes the next eligible account in rotation. agy calls `loadCodeAssist` at least once per turn, so a
+  takes the least-used eligible account. agy calls `loadCodeAssist` at least once per turn, so a
   cooled account loses new turns at that boundary and the project agy caches then matches.
-- Learned projects are written back to the stored credential. The caller map is process-local and
+- A learned project is bound to the sign-in it was returned to: another login in the slot voids it,
+  and it is written back to the stored credential only while that sign-in still holds the slot. The caller map is process-local and
   bounded; a restart, or agy refreshing its own token (about hourly), starts a new caller, whose next
   `loadCodeAssist` may land on another account.
 - The catalog gather leaves a Cloud Code row out while the switch is on (`captureGatherFlight`), so an
@@ -109,5 +110,5 @@ for open streams. A 401 from Google forces a token refresh for the next request.
 
 Coverage: `tests/server/agy-passthrough.test.ts` drives the real public listener against a loopback
 Cloud Code capture with synthetic accounts: byte, path, query and header preservation; caller
-affinity and project learning; 429 pass-through and cooldown; refusals before any upstream call; and
+affinity and project learning; usage balancing, same-project moves and sign-in-bound learned projects; 429 pass-through and cooldown; refusals before any upstream call; and
 a translated Responses turn refused with the switch on.

@@ -45,11 +45,6 @@ const MAX_OBSERVED_ANSWER_BYTES = 4 * 1024 * 1024;
 const QUOTA_METHODS = new Set(["retrieveUserQuotaSummary", "fetchAvailableModels"] as const);
 type QuotaMethod = typeof QUOTA_METHODS extends Set<infer M> ? M : never;
 const isQuotaMethod = (method: string): method is QuotaMethod => QUOTA_METHODS.has(method as QuotaMethod);
-/**
- * A per-model reading (agy sends one each session) does not replace an account's summary younger
- * than this, because only the summary reports the 5-hour and weekly family buckets.
- */
-const SUMMARY_PRECEDENCE_MS = 30 * 60_000;
 
 /** The sign-in a pooled slot holds now; undefined when the slot is gone or has no credential. */
 function agyLogin(accountId: string): string | undefined {
@@ -191,7 +186,7 @@ async function observeRelayedAnswer(copy: ReadableStream<Uint8Array>, contentEnc
   if (!body) return;
   if (method === "loadCodeAssist") {
     const project = extractProjectId(body);
-    if (project) learnAgyAccountProject(accountId, project);
+    if (project) learnAgyAccountProject(accountId, project, login);
     return;
   }
   if (!isQuotaMethod(method) || !login) return;
@@ -199,8 +194,9 @@ async function observeRelayedAnswer(copy: ReadableStream<Uint8Array>, contentEnc
   // The answer belongs to the sign-in whose token was sent; a slot now holding another login gets nothing.
   if (!quota || agyLogin(accountId) !== login) return;
   const kept = observedAntigravityAccountQuota(accountId);
-  if (method === "fetchAvailableModels" && kept?.customWindows?.some(window => window.modelId === undefined)
-    && Date.now() - kept.updatedAt < SUMMARY_PRECEDENCE_MS) return;
+  // A models answer carries per-model rows only; it never replaces a kept family reading, which is
+  // what usage balancing ranks by (a summary within the routing horizon replaces it instead).
+  if (method === "fetchAvailableModels" && kept?.customWindows?.some(window => window.modelId === undefined)) return;
   recordPassiveAccountQuota(ANTIGRAVITY_OAUTH_STORE_KEY, accountId, quota, writerGeneration, login);
 }
 

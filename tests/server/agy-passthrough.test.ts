@@ -300,26 +300,89 @@ describe("agy pass-through public HTTP lane", () => {
     expect(new Set(served).size).toBe(1);
   });
 
-  test("at a turn boundary a caller moves to a clearly less-used account, and stays put when usage is close", async () => {
+  test("at a turn boundary a caller moves to a clearly less-used account of its project, and every follow-up lands there", async () => {
+    await launch();
+    const { mergeAccountCredential } = await import("../../src/oauth/store");
+    const { recordPassiveAccountQuota } = await import("../../src/providers/quota/account-cache");
+    const { antigravityLoginIdentity } = await import("../../src/providers/antigravity-quota-identity");
+    for (const row of getAccountSet("google-antigravity")!.accounts) {
+      await mergeAccountCredential("google-antigravity", row.id, { ...row.credential, projectId: "shared-project" });
+    }
+    const rows = getAccountSet("google-antigravity")!.accounts;
+    const bearer = (index: number) => `Bearer ${rows[index]!.credential.access}`;
+    const usage = (percents: number[]) => rows.forEach((row, index) => recordPassiveAccountQuota("google-antigravity", row.id,
+      { customWindows: [{ label: "Gem (Weekly)", percent: percents[index]! }], updatedAt: Date.now() }, Number.MAX_SAFE_INTEGER,
+      antigravityLoginIdentity(row.id, row.credential)));
+    reply = () => Response.json({ cloudaicompanionProject: "shared-project" });
+    // Each request must succeed and reach Google itself; the account is read from that request.
+    const send = async (method: string, body: string) => {
+      const before = calls.length;
+      expect((await post(method, body, { authorization: "Bearer one-signin" })).status).toBe(200);
+      expect(calls).toHaveLength(before + 1);
+      return calls.at(-1)!.headers.get("authorization");
+    };
+    const turn = () => send("loadCodeAssist", "{}");
+    // A new caller starts on the least-used account.
+    usage([60, 5, 40]);
+    expect(await turn()).toBe(bearer(1));
+    // Its account fills up; at the next turn it moves to the clearly emptier one.
+    usage([60, 70, 40]);
+    expect(await turn()).toBe(bearer(2));
+    // agy keeps its cached project and open trajectory; both follow the caller to the new account.
+    reply = () => new Response(sse, { headers: { "content-type": "text/event-stream" } });
+    expect(await send("streamGenerateContent?alt=sse", '{"project":"shared-project"}')).toBe(bearer(2));
+    reply = () => Response.json({});
+    expect(await send("writeTrajectoryAcls", '{"trajectoryId":"t"}')).toBe(bearer(2));
+    // Within the margin it stays, so two close accounts do not trade it every turn.
+    usage([36, 70, 40]);
+    expect(await turn()).toBe(bearer(2));
+  });
+
+  test("a turn never moves a caller to an emptier account that does not own its project", async () => {
     await launch();
     const { recordPassiveAccountQuota } = await import("../../src/providers/quota/account-cache");
     const { antigravityLoginIdentity } = await import("../../src/providers/antigravity-quota-identity");
     const rows = getAccountSet("google-antigravity")!.accounts;
-    const usage = (percent: (index: number) => number) => rows.forEach((row, index) => recordPassiveAccountQuota("google-antigravity", row.id,
-      { customWindows: [{ label: "Gem (Weekly)", percent: percent(index) }], updatedAt: Date.now() }, Number.MAX_SAFE_INTEGER,
+    const usage = (percents: number[]) => rows.forEach((row, index) => recordPassiveAccountQuota("google-antigravity", row.id,
+      { customWindows: [{ label: "Gem (Weekly)", percent: percents[index]! }], updatedAt: Date.now() }, Number.MAX_SAFE_INTEGER,
       antigravityLoginIdentity(row.id, row.credential)));
-    let served = "";
-    reply = captured => { served = captured.headers.get("authorization")!; return Response.json({}); };
-    const turn = async () => { await post("loadCodeAssist", "{}", { authorization: "Bearer one-signin" }); return served; };
-    // A new caller starts on the least-used account.
-    usage(index => [60, 5, 40][index]!);
-    expect(await turn()).toBe(`Bearer ${rows[1]!.credential.access}`);
-    // Its account fills up; at the next turn it moves to the clearly emptier one.
-    usage(index => [60, 70, 40][index]!);
-    expect(await turn()).toBe(`Bearer ${rows[2]!.credential.access}`);
-    // Within the margin it stays, so two close accounts do not trade it every turn.
-    usage(index => [36, 70, 40][index]!);
-    expect(await turn()).toBe(`Bearer ${rows[2]!.credential.access}`);
+    reply = () => Response.json({});
+    usage([60, 5, 40]);
+    expect((await post("loadCodeAssist", "{}", { authorization: "Bearer one-signin" })).status).toBe(200);
+    expect(calls.at(-1)!.headers.get("authorization")).toBe(tokens["synthetic-project-two"]);
+    // Every account owns a different project, so moving would leave agy's cached project on the wrong token.
+    usage([0, 90, 0]);
+    expect((await post("loadCodeAssist", "{}", { authorization: "Bearer one-signin" })).status).toBe(200);
+    expect(calls.at(-1)!.headers.get("authorization")).toBe(tokens["synthetic-project-two"]);
+  });
+
+  test("a project Google returned to one sign-in is forgotten when another sign-in replaces that slot", async () => {
+    await launch();
+    const { mergeAccountCredential } = await import("../../src/oauth/store");
+    reply = () => Response.json({ cloudaicompanionProject: "learned-project" });
+    expect((await post("loadCodeAssist", "{}")).status).toBe(200);
+    const served = calls.at(-1)!.headers.get("authorization");
+    const slot = () => getAccountSet("google-antigravity")!.accounts.find(row => `Bearer ${row.credential.access}` === served)!;
+    for (let attempt = 0; attempt < 50 && slot().credential.projectId !== "learned-project"; attempt++) await Bun.sleep(10);
+    // A different Google sign-in now holds the slot, with its own project.
+    await mergeAccountCredential("google-antigravity", slot().id, { ...slot().credential, refresh: "synthetic-refresh-other",
+      accountId: "synthetic-other", projectId: "other-signin-project" });
+    const before = calls.length;
+    expect((await post("streamGenerateContent", '{"project":"learned-project"}', { authorization: "Bearer someone-new" })).status).toBe(400);
+    expect(calls).toHaveLength(before);
+  });
+
+  test("a model-list reply never replaces an account's family reading, however old", async () => {
+    await launch();
+    const { observedAntigravityAccountQuota, recordPassiveAccountQuota } = await import("../../src/providers/quota/account-cache");
+    const { antigravityLoginIdentity } = await import("../../src/providers/antigravity-quota-identity");
+    const two = getAccountSet("google-antigravity")!.accounts.find(row => row.credential.projectId === "synthetic-project-two")!;
+    recordPassiveAccountQuota("google-antigravity", two.id, { customWindows: [{ label: "Gem (Weekly)", percent: 40 }],
+      updatedAt: Date.now() - 2 * 60 * 60_000 }, Number.MAX_SAFE_INTEGER, antigravityLoginIdentity(two.id, two.credential));
+    reply = () => Response.json({ models: { "gemini-3.8-flash": { quotaInfo: { remainingFraction: 0.1 } } } });
+    expect((await post("fetchAvailableModels", '{"project":"synthetic-project-two"}')).status).toBe(200);
+    await Bun.sleep(50);
+    expect(observedAntigravityAccountQuota(two.id)?.customWindows).toEqual([{ label: "Gem (Weekly)", percent: 40 }]);
   });
 
   test("a 429 passes through unchanged; only loadCodeAssist moves the caller, trajectory writes stay put", async () => {
