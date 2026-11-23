@@ -241,6 +241,7 @@ describe("fetchProviderQuotaReports", () => {
   });
 
   test("Anthropic report exposes the canonical Fable window from direct and limits payloads", async () => {
+    setSystemTime(new Date("2026-07-05T10:00:00Z"));
     await saveCredential("anthropic", { access: "claude-access-secret", refresh: "claude-refresh-secret", expires: Date.now() + 3600_000 });
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       expect(String(input)).toBe("https://api.anthropic.com/api/oauth/usage");
@@ -275,6 +276,7 @@ describe("fetchProviderQuotaReports", () => {
   });
 
   test("returns active provider quota rows without leaking credentials or raw upstream payloads", async () => {
+    setSystemTime(new Date("2026-07-05T10:00:00Z"));
     await saveCredential("xai", { access: "xai-access-secret", refresh: "xai-refresh-secret", expires: Date.now() + 3600_000 });
     await saveCredential("anthropic", { access: "claude-access-secret", refresh: "claude-refresh-secret", expires: Date.now() + 3600_000 });
     await saveCredential("cursor", { access: "cursor-access-secret", refresh: "cursor-refresh-secret", expires: Date.now() + 3600_000 });
