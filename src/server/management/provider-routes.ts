@@ -886,10 +886,12 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
 
   if (url.pathname === "/api/provider-quotas" && req.method === "GET") {
     const forceRefresh = url.searchParams.get("refresh") === "1" || url.searchParams.get("refresh") === "true";
-    const snapshot = await fetchProviderQuotaReports(config, forceRefresh);
+    const snapshot = await fetchProviderQuotaReports(config, forceRefresh, { staleWhileRevalidate: !forceRefresh });
     const now = Date.now();
+    const muse = config.providers["meta-muse"];
     return jsonResponse({
       ...snapshot,
+      museOAuthConfigured: Boolean(muse && muse.disabled !== true && muse.authMode === "oauth" && publicProviderBaseUrl(muse.baseUrl) === "https://api.meta.ai/v1"),
       reports: snapshot.reports.map(({ quota: { codexCredits, ...quota }, ...report }) => {
         const credits = shownCodexCredits(config, codexCredits);
         return {

@@ -1048,6 +1048,7 @@
         "src/usage/source-filter.ts",
         "src/usage/summary.ts",
         "src/server/request-log.ts",
+        "src/server/request-log-attempt-usage.ts",
         "src/server/index/",
         "src/server/management/logs-usage-routes.ts",
         "src/server/management/usage-aggregate-cache.ts",

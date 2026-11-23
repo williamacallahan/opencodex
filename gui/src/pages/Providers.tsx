@@ -398,10 +398,21 @@ export default function Providers({ apiBase, targetKey, targetLabel }: { apiBase
     openModelsNotice(provider, false);
   }, [revealProviderAccounts, openModelsNotice]);
 
+  const workspaceSelectedRef = useRef(workspaceSelected);
+  const selectionStreamRef = useRef<{ isHealthy: () => boolean }>({ isHealthy: () => false });
+  const skippedCodexPollRef = useRef(false);
+  useLayoutEffect(() => { workspaceSelectedRef.current = workspaceSelected; }, [workspaceSelected]);
+
   // WP3: one Codex account controller for the whole Providers page, shared by the
   // Overview tab and the Accounts tab so a mutation on either is instantly visible on
   // both. Mounting CodexAccountPool twice used to fork this state.
-  const codexPool = useCodexAccountPool(apiBase, true, draftTargetKey);
+  const codexPool = useCodexAccountPool(apiBase, true, draftTargetKey, {
+    shouldSkipBackgroundPoll: () => {
+      const skip = workspaceSelectedRef.current !== "openai" && selectionStreamRef.current.isHealthy();
+      if (skip) skippedCodexPollRef.current = true;
+      return skip;
+    },
+  });
   // Single source for Codex reauth health: the controller derives it from the same
   // accounts/active pair this page used to poll on its own 30s timer.
   const codexActiveNeedsReauth = codexPool.activeNeedsReauth;
@@ -444,6 +455,19 @@ export default function Providers({ apiBase, targetKey, targetLabel }: { apiBase
     return refreshAccountRosters(target);
   }, [refreshAccountRosters, oauthCardProviders, keyCardProviders]);
   const selectionStream = useAccountSelectionEvents(apiBase, draftTargetKey, config !== null, refreshSelection);
+  useLayoutEffect(() => { selectionStreamRef.current = selectionStream; }, [selectionStream]);
+  const refreshCodexPool = codexPool.load;
+  const previousWorkspaceSelectedRef = useRef<string | null>(null);
+  useEffect(() => {
+    const previous = previousWorkspaceSelectedRef.current;
+    previousWorkspaceSelectedRef.current = workspaceSelected;
+    if (workspaceSelected === "openai" && ((previous !== null && previous !== "openai") || skippedCodexPollRef.current)) {
+      skippedCodexPollRef.current = false;
+      void refreshCodexPool();
+      return;
+    }
+    if (workspaceSelected === "openai") skippedCodexPollRef.current = false;
+  }, [refreshCodexPool, workspaceSelected]);
   const selectedProvider = workspaceSelected ? config?.providers[workspaceSelected] : undefined;
   const selectedAccount = workspaceSelected ? accountSets[workspaceSelected]?.accounts.find(row => row.active) : undefined;
   const unmeasuredAccount = selectedAccount?.quotaMode === "probe" && selectedAccount.quota === undefined

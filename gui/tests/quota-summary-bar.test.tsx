@@ -332,3 +332,57 @@ test("a clicked chip keeps its detail closed under the resting pointer until the
   expect(tooltip()?.textContent).toContain("xAI Grok");
   await view.unmount();
 });
+
+test("skips meta-muse lookup requests when /api/provider-quotas reports museOAuthConfigured is false", async () => {
+  const prevFetch = Object.getOwnPropertyDescriptor(globalThis, "fetch");
+  const prevLocalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const prevSessionStorage = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
+  const { createRoot } = await import("react-dom/client");
+  const { default: QuotaSummaryBar } = await import("../src/components/quota-summary-bar/QuotaSummaryBar");
+  const { LanguageProvider } = await import("../src/i18n/provider");
+  const { clearClientResourceStoresForTests } = await import("../src/client-resource");
+  clearClientResourceStoresForTests();
+  const urls: string[] = [];
+  Object.defineProperties(globalThis, {
+    localStorage: { configurable: true, value: testWindow.localStorage },
+    sessionStorage: { configurable: true, value: testWindow.sessionStorage },
+  });
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      urls.push(input);
+      if (input.endsWith("/api/provider-quotas")) {
+        return new Response(JSON.stringify({ reports: rawReportsForMock(), museOAuthConfigured: false }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected fallback request: ${input}`);
+    },
+  });
+  const container = testWindow.document.createElement("div") as unknown as HTMLElement;
+  testWindow.document.body.appendChild(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => { root.render(<LanguageProvider><QuotaSummaryBar apiBase="" /></LanguageProvider>); });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 25)); });
+    expect(urls).toEqual(["/api/provider-quotas"]);
+    expect(container.textContent).toContain("xAI Grok");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    clearClientResourceStoresForTests();
+    for (const [k, d] of [["fetch", prevFetch], ["localStorage", prevLocalStorage], ["sessionStorage", prevSessionStorage]] as const) {
+      if (d) Object.defineProperty(globalThis, k, d);
+      else Reflect.deleteProperty(globalThis, k);
+    }
+  }
+});
+
+function rawReportsForMock() {
+  return [
+    { provider: "openai", label: "OpenAI (Codex login)", updatedAt: now, quota: { weeklyPercent: 69, updatedAt: now } },
+    { provider: "xai", label: "xAI Grok", updatedAt: now, quota: { weeklyPercent: 74, updatedAt: now } },
+    { provider: "kimi", label: "Kimi", updatedAt: now, quota: { weeklyPercent: 31, updatedAt: now } },
+  ];
+}

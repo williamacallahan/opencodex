@@ -22,7 +22,7 @@ import type { OcxConfig, OcxProviderConfig } from "../types";
 import { isPassiveRead } from "../lib/passive-read";
 import { CODEX_LB_USAGE_SOURCE, type ProviderQuota, type QuotaFailureCode } from "./quota-types";
 import {
-  accountReportCurrent, observedQuotaFor, refreshCollectedAccountReport,
+  accountReportCurrent, observedQuotaFor, refreshCollectedAccountReport, refreshCollectedAccountReports,
   AUTHORITATIVE_EMPTY_QUOTA,
   bumpProviderQuotaInvalidationEpoch,
   captureProviderReportEpochs, providerReportEpochChanged,
@@ -250,14 +250,12 @@ export function flushProviderQuotaObservationsForTests(): Promise<void> {
 }
 
 /** Collect provider quota reports, using the cache unless refresh is forced, and publish the secret-free decision evidence from the collected reports. */
-export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh = false, { resetPoll = false } = {}): Promise<ProviderQuotaResponse> {
+export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh = false, { resetPoll = false, staleWhileRevalidate = false } = {}): Promise<ProviderQuotaResponse> {
   // A passive read (a Remote Link Child's, #6959) shows the held reports and starts nothing.
   if (isPassiveRead()) { const held = heldProviderQuotaReports(config); return { ...held, reports: refreshHeldClaudeCliReports(config, held.reports) }; }
   // A Pool report's cache signature and provider fetch must share one account snapshot.
   // Preserve force semantics when deciding whether that snapshot refreshes upstream data.
-  const prefetchedCodexSnapshot = hasCodexPoolProvider(config)
-    ? listCodexAuthAccountsSnapshot(config, forceRefresh)
-    : undefined;
+  const prefetchedCodexSnapshot = hasCodexPoolProvider(config) ? listCodexAuthAccountsSnapshot(config, forceRefresh) : undefined;
   const keyCandidate = cacheKeyWithAggregationState(config, prefetchedCodexSnapshot);
   const key = typeof keyCandidate === "string" ? keyCandidate : await keyCandidate;
   const writerGeneration = captureConfigGeneration();
@@ -267,94 +265,93 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
   const now = Date.now();
   // A passive observation keeps its original time and does not trigger another upstream probe.
   const currentCache = getProviderQuotaReportCache();
-  const cacheFresh = currentCache && currentCache.key === key && now - currentCache.ts < CACHE_TTL_MS
-    && currentCache.response.reports.every(item =>
-      (item.observed === true || now - item.updatedAt < LAST_GOOD_MAX_AGE_MS)
-      && (config.providers[item.provider]?.adapter === "claude-cli" || isProviderQuotaReportCurrent(item)) && keyReportCredentialCurrent(item, config.providers[item.provider]));
-  if (!forceRefresh && cacheFresh) {
-    const response = currentCache!.response, reports = refreshHeldClaudeCliReports(config, response.reports.flatMap(refreshCollectedAccountReport));
+  const cacheValidForKey = Boolean(currentCache && currentCache.key === key && currentCache.response.reports.every(item =>
+    (item.observed === true || now - item.updatedAt < LAST_GOOD_MAX_AGE_MS)
+    && (config.providers[item.provider]?.adapter === "claude-cli" || isProviderQuotaReportCurrent(item)) && keyReportCredentialCurrent(item, config.providers[item.provider])));
+  const projectHeld = (response: ProviderQuotaResponse) => {
+    const reports = refreshHeldClaudeCliReports(config, refreshCollectedAccountReports(response.reports));
     return reports === response.reports ? response : { ...response, reports };
+  };
+  if (!forceRefresh && cacheValidForKey && currentCache && now - currentCache.ts < CACHE_TTL_MS) {
+    return projectHeld(currentCache.response);
   }
-  const joinable = inflight.get(key);
-  if (!forceRefresh && joinable && joinable.epoch === invalidationEpoch) return validateJoinedReports(await joinable.promise, config);
-  // A forced probe takes commit authority: older in-flight probes must not overwrite its result.
-  if (forceRefresh) bumpProviderQuotaInvalidationEpoch();
-  const epoch = invalidationEpoch;
 
-  const promise = (async (): Promise<ProviderQuotaResponse> => {
-    const previousCache = getProviderQuotaReportCache();
-    const previous = previousCache && previousCache.key === key ? previousCache.response.reports : [];
-    const probeResults = await Promise.all(
-      Object.entries(config.providers).map(([name, provider]) => (
-        maybeFetchProviderQuota(name, provider, config, forceRefresh, prefetchedCodexSnapshot, resetPoll)
-      )),
-    );
-    await providerQuotaBeforePublishForTests?.();
-    let commitKey: string | null = null;
-    if (epoch === invalidationEpoch) {
-      const commitKeyCandidate = cacheKeyWithAggregationState(config);
-      commitKey = typeof commitKeyCandidate === "string" ? commitKeyCandidate : await commitKeyCandidate;
-    }
-    // Reconcile both rows and empty results after all awaits against the last recorded sign-in.
-    Object.entries(config.providers).forEach(([name, provider], index) => {
-      if (provider.adapter === "claude-cli" && provider.disabled !== true) probeResults[index] = heldClaudeCliObservedQuota(name);
-    });
-    const fresh = probeResults.filter((item): item is ProviderQuotaReport => (
-      item !== null && item !== TERMINAL_QUOTA_FAILURE && item !== AUTHORITATIVE_EMPTY_QUOTA
-    )).flatMap(refreshCollectedAccountReport);
-    // Both sentinels suppress the previous row; null alone keeps the last-good row.
-    const terminalFailures = new Set(Object.keys(config.providers).filter((_, index) => (
-      probeResults[index] === TERMINAL_QUOTA_FAILURE || probeResults[index] === AUTHORITATIVE_EMPTY_QUOTA
-    )));
-    // Keep bounded last-good rows when a probe fails transiently; terminal-invalid responses
-    // suppress their old row. Never re-stamp preserved timestamps. The cache key encodes the
-    // provider set, so previous rows always belong to currently configured, enabled providers.
-    const cutoff = Date.now() - LAST_GOOD_MAX_AGE_MS;
-    const byProvider = new Map<string, ProviderQuotaReport>();
-    const generationMismatchedProviders = new Set<string>();
-    for (const item of previous.flatMap(refreshCollectedAccountReport)) {
-      if (item.observed !== true && item.updatedAt < cutoff) continue;
-      if (isProviderQuotaReportCurrent(item) && keyReportCredentialCurrent(item, config.providers[item.provider])) byProvider.set(item.provider, item);
-      else generationMismatchedProviders.add(item.provider);
-    }
-    for (const item of fresh) {
-      if (isProviderQuotaReportCurrent(item) && keyReportCredentialCurrent(item, config.providers[item.provider])) {
-        byProvider.set(item.provider, item);
-        generationMismatchedProviders.delete(item.provider);
-      } else {
-        byProvider.delete(item.provider);
-        generationMismatchedProviders.add(item.provider);
+  const startProbe = (): Promise<ProviderQuotaResponse> => {
+    // A forced probe takes commit authority: older in-flight probes must not overwrite its result.
+    if (forceRefresh) bumpProviderQuotaInvalidationEpoch();
+    const epoch = invalidationEpoch;
+    let entry!: { epoch: number; promise: Promise<ProviderQuotaResponse> };
+    const promise = (async (): Promise<ProviderQuotaResponse> => {
+      try {
+        const previousCache = getProviderQuotaReportCache();
+        const previous = previousCache && previousCache.key === key ? previousCache.response.reports : [];
+        const probeResults = await Promise.all(
+          Object.entries(config.providers).map(([name, provider]) => maybeFetchProviderQuota(name, provider, config, forceRefresh, prefetchedCodexSnapshot, resetPoll)),
+        );
+        await providerQuotaBeforePublishForTests?.();
+        let commitKey: string | null = null;
+        if (epoch === invalidationEpoch) {
+          const commitKeyCandidate = cacheKeyWithAggregationState(config);
+          commitKey = typeof commitKeyCandidate === "string" ? commitKeyCandidate : await commitKeyCandidate;
+        }
+        // Reconcile both rows and empty results after all awaits against the last recorded sign-in.
+        Object.entries(config.providers).forEach(([name, provider], index) => {
+          if (provider.adapter === "claude-cli" && provider.disabled !== true) probeResults[index] = heldClaudeCliObservedQuota(name);
+        });
+        const fresh = probeResults.filter((item): item is ProviderQuotaReport => (
+          item !== null && item !== TERMINAL_QUOTA_FAILURE && item !== AUTHORITATIVE_EMPTY_QUOTA
+        )).flatMap(refreshCollectedAccountReport);
+        // Both sentinels suppress the previous row; null alone keeps the last-good row.
+        const terminalFailures = new Set(Object.keys(config.providers).filter((_, index) => (
+          probeResults[index] === TERMINAL_QUOTA_FAILURE || probeResults[index] === AUTHORITATIVE_EMPTY_QUOTA
+        )));
+        // Keep bounded last-good rows when a probe fails transiently; terminal-invalid responses
+        // suppress their old row. Never re-stamp preserved timestamps. The cache key encodes the
+        // provider set, so previous rows always belong to currently configured, enabled providers.
+        const cutoff = Date.now() - LAST_GOOD_MAX_AGE_MS;
+        const byProvider = new Map<string, ProviderQuotaReport>();
+        const generationMismatchedProviders = new Set<string>();
+        for (const item of previous.flatMap(refreshCollectedAccountReport)) {
+          if (item.observed !== true && item.updatedAt < cutoff) continue;
+          if (isProviderQuotaReportCurrent(item) && keyReportCredentialCurrent(item, config.providers[item.provider])) byProvider.set(item.provider, item);
+          else generationMismatchedProviders.add(item.provider);
+        }
+        for (const item of fresh) {
+          if (isProviderQuotaReportCurrent(item) && keyReportCredentialCurrent(item, config.providers[item.provider])) {
+            byProvider.set(item.provider, item); generationMismatchedProviders.delete(item.provider);
+          } else {
+            byProvider.delete(item.provider); generationMismatchedProviders.add(item.provider);
+          }
+        }
+        for (const provider of terminalFailures) { byProvider.delete(provider); generationMismatchedProviders.delete(provider); }
+        // A provider-scoped clear during this probe retires only that provider's row.
+        for (const provider of [...byProvider.keys()]) if (providerReportEpochChanged(providerEpochs, provider)) byProvider.delete(provider);
+
+        const response = { generatedAt: Date.now(), reports: [...byProvider.values()] };
+        // Commit only when this probe still holds authority (no clear/force superseded it).
+        if (epoch === invalidationEpoch && commitKey === key && generationMismatchedProviders.size === 0) {
+          const reports = response.reports.filter(item => mayCommitProviderQuotaKey(item.provider, writerGeneration));
+          setProviderQuotaReportCache({ key, ts: Date.now(), response: { ...response, reports } });
+          replaceCachedProviderQuotas(reports, routingEvidence); publishCollectedDecisionQuota(reports, config);
+          notifyProviderQuotaSnapshot(reports, config);
+        }
+        return response;
+      } finally {
+        if (inflight.get(key) === entry) inflight.delete(key);
       }
-    }
-    for (const provider of terminalFailures) {
-      byProvider.delete(provider);
-      generationMismatchedProviders.delete(provider);
-    }
-    // A provider-scoped clear during this probe retires only that provider's row.
-    for (const provider of [...byProvider.keys()]) if (providerReportEpochChanged(providerEpochs, provider)) byProvider.delete(provider);
+    })();
+    entry = { epoch, promise };
+    inflight.set(key, entry);
+    return promise;
+  };
 
-    const response = { generatedAt: Date.now(), reports: [...byProvider.values()] };
-    // Commit only when this probe still holds authority (no clear/force superseded it).
-    if (
-      epoch === invalidationEpoch
-      && commitKey === key
-      && generationMismatchedProviders.size === 0
-    ) {
-      const reports = response.reports.filter(item => mayCommitProviderQuotaKey(item.provider, writerGeneration));
-      setProviderQuotaReportCache({ key, ts: Date.now(), response: { ...response, reports } });
-      replaceCachedProviderQuotas(reports, routingEvidence); publishCollectedDecisionQuota(reports, config);
-      notifyProviderQuotaSnapshot(reports, config);
-    }
-    return response;
-  })();
-
-  const entry = { epoch, promise };
-  inflight.set(key, entry);
-  try {
-    return await promise;
-  } finally {
-    if (inflight.get(key) === entry) inflight.delete(key);
+  const joinable = inflight.get(key);
+  if (!forceRefresh && cacheValidForKey && staleWhileRevalidate && currentCache) {
+    if (!joinable || joinable.epoch !== invalidationEpoch) void startProbe().catch(() => {});
+    return projectHeld(currentCache.response);
   }
+  if (!forceRefresh && joinable && joinable.epoch === invalidationEpoch) return validateJoinedReports(await joinable.promise, config);
+  return await startProbe();
 }
 async function readExplicitAccountQuota(provider: string, accountId: string, configured?: OcxProviderConfig): Promise<{
   result: ProviderQuotaProbeResult;
