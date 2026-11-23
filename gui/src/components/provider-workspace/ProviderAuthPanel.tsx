@@ -266,9 +266,9 @@ export default function ProviderAuthPanel({
     () => (claudeGrantsEnabled ? accounts.filter(account => !accountShowsReauth(account) && !account.paused).map(account => account.id) : []),
     [claudeGrantsEnabled, accounts],
   );
-  const claudeGrants = useAnthropicResetGrants({ apiBase, provider: isAnthropicInstanceId(item.name) ? item.name : "anthropic", accountIds: claudeAccountIds, enabled: claudeGrantsEnabled });
+  const claudeGrants = useAnthropicResetGrants({ apiBase, targetKey, provider: isAnthropicInstanceId(item.name) ? item.name : "anthropic", accountIds: claudeAccountIds, enabled: claudeGrantsEnabled });
   // Switching server or pool hides the selection; observing its paused row closes it for good.
-  const grantScope = `${apiBase}\0${item.name}`;
+  const grantScope = JSON.stringify([apiBase, targetKey, item.name]);
   const [grantSelection, setGrantSelection] = useState<{ scope: string; accountId: string } | null>(null);
   const selectedGrantRow = grantSelection?.scope === grantScope
     ? accounts.find(row => row.id === grantSelection.accountId) : undefined;

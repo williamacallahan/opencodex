@@ -271,6 +271,10 @@ browser-readable `Retry-After`. It does not report an empty grant list or author
 An already-authorized grant request reports Anthropic credential rejection as `424 upstream_auth_rejected`,
 a superseded account as `409 account_changed`, and a temporary credential-resolution failure as
 `503 credential_unavailable`. These outcomes do not invalidate the dashboard session.
+The dashboard scopes grant reads, retry deadlines, and pending spends to the connected hub, pool,
+and account. A definitive pre-claim refusal releases a new spend; it does not settle an earlier
+pending spend. If an account is superseded while resolving its credential, the route reports the
+account change even when the credential lookup rejects.
 
 ## Pool-bound management surfaces
 
@@ -519,7 +523,9 @@ committed credential and provider UUID. Physical sends acquire family admission 
 accounting, release the lease on every exit and attribute quota only to the actual sending generation.
 Bounded pre-output refusal recovery uses `src/oauth/anthropic-account-refusal.ts`; optional tried-account
 exclusions apply only to alternate selection, preserving the permitted same-account throttle retry.
-Rejected bodies are disposed before rebinding; output consumption never re-enters account recovery.
+The original refusal body is released before awaiting the replacement account. If an explicit
+affinity reset vetoes the retry before a replacement sends, the client or combo still receives the
+original refusal status and retry advice. Output consumption never re-enters account recovery.
 Account changes may start a cold cache. The proxy does not share caches across accounts. The [strict variant](../transports/strict-messages.md) keeps this account authority, replaces authentication only, returns the first response without replay, and settles refusals for subsequent requests only (`canRetry: false`).
 
 ## Native request preference

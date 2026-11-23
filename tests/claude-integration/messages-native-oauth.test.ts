@@ -22,7 +22,7 @@ import { clearUpstreamHostHealth, getUpstreamHostHealth, upstreamHostHealthKey }
 import { handleClaudeMessages } from "../../src/server/claude-messages";
 import { clearComboRecallForTests } from "../../src/server/responses/combo-session-recall";
 import * as familyQuota from "../../src/oauth/anthropic-model-quota";
-import { anthropicSessionAffinitySizeForTests, resetAnthropicSessionAffinityConfirmed } from "../../src/oauth/anthropic-routing";
+import { anthropicRoutingFor, anthropicSessionAffinitySizeForTests, resetAnthropicSessionAffinityConfirmed } from "../../src/oauth/anthropic-routing";
 import { NativeOAuthSelectionChangedError, nativeOAuthBindingIsCurrent, resolveNativeOAuthBinding } from "../../src/server/messages-native-oauth";
 import { getRequestLogEntries } from "../../src/server/request-log";
 import { providerRequestPacingStatus, resetProviderRequestPacingForTest, waitForProviderRequestSlot } from "../../src/providers/request-pacing";
@@ -670,6 +670,33 @@ test("a reset during retry selection preserves the active account", async () => 
   expect(await resetAnthropicSessionAffinityConfirmed()).toBe(true);
   expect(await refusal).toBeInstanceOf(NativeOAuthSelectionChangedError);
   expect(captureOAuthAccountSelection("anthropic")).toEqual(binding.selection);
+});
+
+test("a reset during replacement lookup returns the original native Messages refusal", async () => {
+  const ids = await seed(2);
+  const config = fixtureConfig();
+  config.anthropicAccountPool = { enabled: true };
+  let sends = 0;
+  Object.assign(config.providers.anthropic!, { fetch: async () => {
+    sends++;
+    return Response.json({ type: "error", error: { type: "rate_limit_error", message: "Try again later" } }, {
+      status: 429, headers: { "retry-after": "45", "request-id": "fixture-original-refusal" },
+    });
+  } });
+  const routing = anthropicRoutingFor("anthropic");
+  const lookup = routing.getAnthropicPoolAccessSnapshot;
+  let reset = false;
+  const spy = spyOn(routing, "getAnthropicPoolAccessSnapshot").mockImplementation(async id => {
+    if (id === ids[1] && sends === 1) reset = await resetAnthropicSessionAffinityConfirmed();
+    return lookup(id);
+  });
+  try {
+    const result = await send(config, { ...BODY, stream: false }, { session_id: "fixture-reset-retry" });
+    expect(reset).toBe(true);
+    expect(result.response.status).toBe(429);
+    expect(result.response.headers.get("retry-after")).toBe("45");
+    expect(sends).toBe(1);
+  } finally { spy.mockRestore(); }
 });
 
 test("manual selection before recovery resolution defeats a pre-wait candidate", async () => {

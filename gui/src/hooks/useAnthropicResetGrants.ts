@@ -74,6 +74,7 @@ const NO_ENTRIES: Record<string, AnthropicGrantEntry> = {};
 const WINDOWS: readonly AnthropicResetWindow[] = ["five_hour", "seven_day", "seven_day_overage_included"];
 const UNKNOWN_CODES = new Set(["unknown_outcome", "journal_write_failed", "in_flight"]);
 const RELEASES_HELD = new Set(["unknown_outcome_expired", "operation_identity_mismatch", "unresolved_prior_operation"]);
+const PRE_CLAIM_REFUSALS = new Set(["account_changed", "credential_unavailable", "upstream_auth_rejected", "rate_limited"]);
 // Like Grok's controller-owned holds, these survive every modal and panel remount.
 // Anthropic permits an explicit same-ID retry; a GET never proves settlement.
 let grantHolds: ReadonlyMap<string, AnthropicGrantAttempt> = new Map();
@@ -208,13 +209,14 @@ function errorCode(value: unknown): string {
   return "failed";
 }
 
-export function useAnthropicResetGrants({ apiBase, provider = "anthropic", accountIds, enabled }: {
+export function useAnthropicResetGrants({ apiBase, targetKey, provider = "anthropic", accountIds, enabled }: {
   apiBase: string;
+  targetKey?: string;
   provider?: AnthropicInstanceId;
   accountIds: string[];
   enabled: boolean;
 }): AnthropicResetGrantController {
-  const namespace = `${apiBase}\0${provider}`;
+  const namespace = JSON.stringify([apiBase, targetKey, provider]);
   const holds = useSyncExternalStore(subscribeHolds, holdSnapshot, holdSnapshot);
   const prefix = `${namespace}\0`;
   const held = Object.fromEntries([...holds].filter(([key]) => key.startsWith(prefix))
@@ -290,7 +292,7 @@ export function useAnthropicResetGrants({ apiBase, provider = "anthropic", accou
       queue.active -= 1;
       queue.waiting.shift()?.();
     }
-  }, [apiBase, provider, setEntry]);
+  }, [apiBase, namespace, provider, setEntry]);
 
   useEffect(() => {
     if (!enabled || identity === "") return;
@@ -312,8 +314,12 @@ export function useAnthropicResetGrants({ apiBase, provider = "anthropic", accou
   ): Promise<AnthropicSpendOutcome> => {
     const key = `${namespace}\0${accountId}`;
     const prior = grantHolds.get(key);
-    if (prior && (prior.inFlight || prior.operationId !== request.operationId || prior.grantId !== request.grantId))
+    const entry = store.namespace === namespace ? store.entries[accountId] : undefined;
+    const pending = entry?.status === "ready" ? entry.snapshot.pendingOperation : null;
+    if ((prior && (prior.inFlight || prior.operationId !== request.operationId || prior.grantId !== request.grantId))
+      || (pending && (pending.operationId !== request.operationId || pending.grantId !== request.grantId))) {
       return { kind: "unknown", code: "in_flight" };
+    }
     // Publish before fetch: closing or pausing during the request cannot lose its identity.
     updateHold(key, request.operationId, { ...request, inFlight: true });
     const spendEpoch = epoch.current;
@@ -328,11 +334,12 @@ export function useAnthropicResetGrants({ apiBase, provider = "anthropic", accou
       if (!response.ok) {
         const code = errorCode(await response.json().catch(() => null));
         if (response.status === 429 && code === "rate_limited") {
-          if (!prior) updateHold(key, request.operationId, null);
           recordGrantReadDeadline(key, response);
           if (spendEpoch === epoch.current) setEntry(accountId, { status: "error", reason: "rate_limited" });
         }
-        if (RELEASES_HELD.has(code)) updateHold(key, request.operationId, null);
+        if (RELEASES_HELD.has(code) || (!prior && !pending && PRE_CLAIM_REFUSALS.has(code))) {
+          updateHold(key, request.operationId, null);
+        }
         return UNKNOWN_CODES.has(code) ? { kind: "unknown", code } : { kind: "refused", code };
       }
       const data = await response.json().catch(() => null) as unknown;
@@ -357,7 +364,7 @@ export function useAnthropicResetGrants({ apiBase, provider = "anthropic", accou
       if (grantHolds.get(key)?.operationId === request.operationId)
         updateHold(key, request.operationId, { ...request, inFlight: false });
     }
-  }, [apiBase, provider, namespace, read]);
+  }, [apiBase, provider, namespace, read, store]);
 
   return { entries: store.namespace === namespace ? store.entries : NO_ENTRIES, held, refresh, spend };
 }

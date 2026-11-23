@@ -5,6 +5,8 @@ import { join } from "node:path";
 import type { ManagementContext } from "../../src/server/management/context";
 import type { OcxConfig } from "../../src/types";
 import { createTempHome } from "../helpers/temp-home";
+import * as oauth from "../../src/oauth";
+import { removeAccount } from "../../src/oauth/store";
 import {
   handleAnthropicResetGrantRoutes,
   type AnthropicResetGrantRouteDeps,
@@ -494,6 +496,25 @@ describe("default dependencies (no injected route deps)", () => {
     responses.push(text);
     return { status: response.status, json: JSON.parse(text) as Record<string, any> };
   }
+
+  test("an account removed while resolving its grant credential is reported as changed", async () => {
+    const home = createTempHome("ocx-reset-removed-account-");
+    const resolveToken = oauth.getValidAccessSnapshotForAccount;
+    const spy = spyOn(oauth, "getValidAccessSnapshotForAccount").mockImplementationOnce(async (provider, accountId, options) => {
+      await removeAccount(provider, accountId);
+      return resolveToken(provider, accountId, options);
+    });
+    try {
+      writeFileSync(home.path("auth.json"), JSON.stringify({ anthropic: {
+        activeAccountId: "removed",
+        accounts: [{ id: "removed", credential: { access: access("anthropic"), refresh: "synthetic-fixture-refresh", expires: Date.now() + 3_600_000 } }],
+      } }), { mode: 0o600 });
+      expect(await read({ providers: {} } as OcxConfig)).toMatchObject({ status: 409, json: { error: { code: "account_changed" } } });
+    } finally {
+      spy.mockRestore();
+      home.remove();
+    }
+  });
 
   test("A without a providers row and B read from the live config even when the file drifts", async () => {
     const home = createTempHome("ocx-reset-default-deps-");

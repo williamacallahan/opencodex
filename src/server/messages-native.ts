@@ -1023,15 +1023,33 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
       });
       if (!nextAccountId || sendingBinding.affinityResetGeneration !== anthropicRoutingFor(sendingBinding.instance).affinityResetGeneration()) break;
       const recovery = response.status === 401 ? "oauth-401" : response.status === 403 ? "oauth-account-403" : "rate-limit-429";
-      discard(response);
-      oauthBinding = await resolveNativeOAuthBindingForInstance(nativeInstance!, config, { routeTarget,
-        sessionKey: options.sessionKey, model: route.modelId, candidateAccountId: nextAccountId,
-        expectedRecoverySelection, expectedRecoveryRouteDecision: sendingBinding.routeDecision, expectedAffinityResetGeneration: sendingBinding.affinityResetGeneration,
-      });
-      oauthFailovers++;
-      rebuildFor(oauthProvider(oauthBinding));
-      logCtx.provider = formatAnthropicProviderForLog(route.providerName, oauthBinding.snapshot.accountId, config);
-      response = await send(recovery);
+      const refusedHeaders = activeRequest.headers;
+      const refusedProvider = activeProvider;
+      const refusedLogProvider = logCtx.provider;
+      const sendsBeforeRetry = physicalSendsUsed;
+      discard(response); // Release the old transport before awaiting a replacement credential.
+      try {
+        oauthBinding = await resolveNativeOAuthBindingForInstance(nativeInstance!, config, { routeTarget,
+          sessionKey: options.sessionKey, model: route.modelId, candidateAccountId: nextAccountId,
+          expectedRecoverySelection, expectedRecoveryRouteDecision: sendingBinding.routeDecision, expectedAffinityResetGeneration: sendingBinding.affinityResetGeneration,
+        });
+        oauthFailovers++;
+        rebuildFor(oauthProvider(oauthBinding));
+        logCtx.provider = formatAnthropicProviderForLog(route.providerName, oauthBinding.snapshot.accountId, config);
+        response = await send(recovery);
+      } catch (error) {
+        const cause = error instanceof UpstreamRetryEvidenceError ? error.cause : error;
+        if (!upstream.signal.aborted && cause instanceof NativeOAuthSelectionChangedError && physicalSendsUsed === sendsBeforeRetry
+          && sendingBinding.affinityResetGeneration !== anthropicRoutingFor(sendingBinding.instance).affinityResetGeneration()) {
+          oauthBinding = sendingBinding;
+          activeProvider = refusedProvider;
+          logCtx.provider = refusedLogProvider;
+          response = new Response(null, { status: response.status, headers: response.headers });
+          dispatchMask = responseCredentialMask(response, refusedHeaders);
+          break;
+        }
+        throw error;
+      }
     }
     }
   } catch (error) {
@@ -1074,7 +1092,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
   }
   releaseRetainedRequest();
 
-  dispatchMask = responseCredentialMask(response, activeRequest.headers);
+  dispatchMask ??= responseCredentialMask(response, activeRequest.headers);
   if (options.integrity) {
     settleDistributedFailure();
     response = await publicStrictMessagesResponse(response, dispatchMask, upstream.signal);
