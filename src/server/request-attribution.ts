@@ -91,6 +91,23 @@ export function resolveWorkload(headers: Headers, client: UsageClient, harnessSe
 }
 
 /**
+ * The attribution of a harness that names its session only in the request body (agy): the session and
+ * agent ids pass the same validation as a header-borne id, and an undeclared workload becomes
+ * `<product>:<session>`, keeping the product half of the hub's own label. Fields that fail are dropped.
+ */
+export function withBodyHarnessSession(attribution: RequestAttribution, session: string | undefined, agent: string | undefined): RequestAttribution {
+  const harnessSessionId = session === undefined ? undefined : safeCallerSessionId(session);
+  if (!harnessSessionId) return attribution;
+  const harnessAgentId = agent === undefined ? undefined : safeCallerSessionId(agent);
+  const product = attribution.workloadSource === "hub" ? attribution.workload?.split(":", 1)[0] : undefined;
+  const workload = product === undefined ? undefined : `${product}:${harnessSessionId}`;
+  return {
+    ...attribution, harnessSessionId, ...(harnessAgentId ? { harnessAgentId } : {}),
+    ...(workload !== undefined && isDeclaredGatewayIdentity(workload) ? { workload, workloadSource: "harness" as const } : {}),
+  };
+}
+
+/**
  * The workload an internal hop carries for its caller: the admitted attribution's, else the same rule
  * applied to the caller's own request. The hop's rebuilt headers lose the caller's User-Agent and
  * native session, so neither may be derived from them.

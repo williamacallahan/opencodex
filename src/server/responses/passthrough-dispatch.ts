@@ -1266,7 +1266,7 @@ export async function preparePassthroughExchange(
       try {
         request = await replayAdapter.buildRequest(parsed, {
           headers: requestState.selectedForwardHeaders,
-          providerName: route.providerName,
+          providerName: route.providerName, attribution: options.admission?.attribution,
           translatorBudget,
         });
         refreshRequestToolAliases(request);
@@ -1410,7 +1410,7 @@ export async function preparePassthroughExchange(
       try {
         request = await refreshedAdapter.buildRequest(parsed, {
           headers: requestState.selectedForwardHeaders,
-          providerName: route.providerName,
+          providerName: route.providerName, attribution: options.admission?.attribution,
           translatorBudget,
         });
         refreshRequestToolAliases(request);

@@ -37,6 +37,8 @@ let proxy: ReturnType<typeof startServer> | undefined;
 let upstream: ReturnType<typeof Bun.serve> | undefined;
 let configuredFetch: ReturnType<typeof spyOn> | undefined;
 let sent: Sent[];
+/** Per upstream request, in order: the status to answer with, or "empty" for a completion with no output. */
+let scripted: Array<number | "empty">;
 
 beforeEach(() => {
   previousHome = process.env.OPENCODEX_HOME;
@@ -44,9 +46,16 @@ beforeEach(() => {
   process.env.OPENCODEX_HOME = home;
   codex = installIsolatedCodexHome("ocx-gateway-attribution-codex-");
   sent = [];
+  scripted = [];
   upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
     const path = new URL(req.url).pathname;
     sent.push({ path, headers: new Headers(req.headers), body: await req.text() });
+    const step = scripted.shift();
+    if (typeof step === "number") return Response.json({ error: { type: "fixture", message: `scripted ${step}` } }, { status: step });
+    if (step === "empty") {
+      return new Response(`data: ${JSON.stringify({ id: "chatcmpl-empty", model: "m", choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 0, total_tokens: 1 } })}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } });
+    }
     if (path.endsWith("/messages")) {
       const events = [
         { type: "message_start", message: { id: "msg-fixture", type: "message", role: "assistant", model: "m", content: [], usage: { input_tokens: 1, output_tokens: 0 } } },
@@ -58,6 +67,13 @@ beforeEach(() => {
       ];
       return new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
         { headers: { "content-type": "text/event-stream" } });
+    }
+    if (path.endsWith("/chat/completions") && (JSON.parse(sent.at(-1)!.body) as { stream?: boolean }).stream === true) {
+      const frames = [
+        { id: "chatcmpl-fixture", model: "m", choices: [{ index: 0, delta: { role: "assistant", content: "OK" } }] },
+        { id: "chatcmpl-fixture", model: "m", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+      ];
+      return new Response(`${frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join("")}data: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } });
     }
     if (path.endsWith("/chat/completions")) {
       return Response.json({ id: "chatcmpl-fixture", object: "chat.completion", created: 1, model: "m",
@@ -80,7 +96,7 @@ beforeEach(() => {
     allowPrivateNetwork: true, liveModels: false, models: ["m"],
     ...(gateway ? { forwardClientHeaders: ["x-user-id", "x-lgw-cache-key"] } : {}),
   });
-  saveConfig({ port: 0, hostname: "127.0.0.1", codexAutoStart: false, clientIntegrations: { codex: false },
+  saveConfig({ port: 0, hostname: "127.0.0.1", codexAutoStart: false, clientIntegrations: { codex: false }, emptyCompletionRetry: true,
     apiKeys: [{ id: "gateway-fixture", name: "gateway fixture", key: "local-admission-fixture", createdAt: "2026-11-08T00:00:00.000Z" }],
     defaultProvider: "gateway-responses",
     providers: {
@@ -88,6 +104,8 @@ beforeEach(() => {
       "vendor-responses": row("openai-responses", false), "vendor-chat": row("openai-chat", false),
       "metadata-responses": { ...row("openai-responses", false), forwardClientHeaders: ["user-agent", "originator"] },
       "metadata-chat": { ...row("openai-chat", false), forwardClientHeaders: ["user-agent", "originator"] },
+      "ua-gateway": { ...row("openai-chat", true), forwardClientHeaders: ["user-agent", "x-lgw-cache-key", "x-user-id"] },
+      "gateway-pool": { ...row("openai-chat", true), apiKey: "pool-key-first", apiKeyPool: [{ id: "first", key: "pool-key-first" }, { id: "second", key: "pool-key-second" }] },
       "gateway-anthropic": row("anthropic", true), "vendor-anthropic": row("anthropic", false),
       "metadata-anthropic": { ...row("anthropic", false), forwardClientHeaders: ["user-agent", "originator"] },
     },
@@ -179,4 +197,51 @@ describe("caller attribution on LLM gateway provider rows", () => {
       expect(attributed.body.includes("caller-cache-key")).toBe(lane.cacheKeyOnWire);
     });
   }
+
+  const identity = {
+    "x-user-id": `claude-code:${SESSION}`, "x-lgw-client-host": "laptop-1", "x-lgw-client-address": "127.0.0.1",
+  };
+  async function sendPool(): Promise<void> {
+    const response = await originalFetch(new URL("/v1/responses", proxy!.url), {
+      method: "POST", proxy: false, headers: { ...admissionHeaders, ...undeclaredClaudeCode },
+      body: JSON.stringify({ model: "gateway-pool/m", input: "attribution fixture", stream: true }),
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+  }
+
+  test("a send retried with the next pool key after a 401 still names the caller's machine and address", async () => {
+    scripted = [401];
+    await sendPool();
+    expect(sent.map(request => request.headers.get("authorization"))).toEqual(["Bearer pool-key-first", "Bearer pool-key-second"]);
+    for (const request of sent) expect(gatewayHeaders(request)).toEqual(identity);
+  });
+
+  test("a continuation rebuilt for the next key after an empty completion still names the caller's machine and address", async () => {
+    scripted = ["empty", 429];
+    await sendPool();
+    // The empty completion is replayed once on the same key; its 429 rebuilds the continuation for the next key.
+    expect(sent.map(request => request.headers.get("authorization"))).toEqual(["Bearer pool-key-first", "Bearer pool-key-first", "Bearer pool-key-second"]);
+    expect(sent.at(-1)!.headers.get("authorization")).toBe("Bearer pool-key-second");
+    for (const request of sent) expect(gatewayHeaders(request)).toEqual(identity);
+  });
+
+  test("a Messages request translated to Chat keeps the caller's User-Agent only for a row that opts in to it", async () => {
+    const userAgent = "claude-cli/9.9.9 (test)";
+    const agents: Record<string, string | null> = {};
+    for (const providerRow of ["ua-gateway", "gateway-chat", "vendor-chat"]) {
+      const response = await originalFetch(new URL("/v1/messages", proxy!.url), {
+        method: "POST", proxy: false, headers: { ...admissionHeaders, "user-agent": userAgent, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({ model: `${providerRow}/m`, max_tokens: 16, messages: [{ role: "user", content: "attribution fixture" }] }),
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(sent.at(-1)!.path).toBe("/v1/chat/completions");
+      agents[providerRow] = sent.at(-1)!.headers.get("user-agent");
+    }
+    expect(agents["ua-gateway"]).toBe(userAgent);
+    // Without the opt-in the row keeps today's behavior: the runtime's own default, the same as a vendor row's.
+    expect(agents["gateway-chat"]).not.toBe(userAgent);
+    expect(agents["gateway-chat"]).toBe(agents["vendor-chat"]);
+  });
 });

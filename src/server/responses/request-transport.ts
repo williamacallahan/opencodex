@@ -1056,7 +1056,7 @@ export async function prepareResponsesTransport(
           adapterName: nextAdapter.name, oauthCredentialSnapshot: replayOAuthCredentialSnapshot });
         const rebuilt = await nextAdapter.buildRequest(requestParsed, {
           completedToolBlocks: requestState.completedToolBlocks,
-          headers: requestState.selectedForwardHeaders, providerName: route.providerName, translatorBudget,
+          headers: requestState.selectedForwardHeaders, providerName: route.providerName, attribution: options.admission?.attribution, translatorBudget,
           abortSignal: dispatchInit.signal ?? options.abortSignal ?? req.signal,
           dispatchPacingHeld: true,
           ...(imageTierBias > 0 ? { imageTierBias } : {}),

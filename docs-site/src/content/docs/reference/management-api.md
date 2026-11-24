@@ -449,7 +449,8 @@ records identify usage; provider quota percentages remain separate upstream obse
 `workload`, `clientHost`, `clientAddress`, `harness` (a recorded client such as `claude_code`,
 `codex_cli`, `pi`, `amp`, or `antigravity_cli`; an unrecognized value matches `unknown` rows),
 `harnessSession` (the session id the harness itself sent, such as Claude Code's
-`X-Claude-Code-Session-Id` or Amp's `X-Amp-Thread-Id`), and `undeclared=true` (requests whose
+`X-Claude-Code-Session-Id` or Amp's `X-Amp-Thread-Id`; the Antigravity CLI sends none, so its
+session is read from its request body: `request.labels.trajectory_id`, else `request.sessionId`), and `undeclared=true` (requests whose
 caller sent no `X-User-ID`, so the workload came from the harness session or the hub's
 `<product>:via-opencodex` label). Each usage summary's `attribution` object counts requests by
 `byHarness` (the recorded client), `byWorkloadSource` (`declared`, `harness`, or `hub`),

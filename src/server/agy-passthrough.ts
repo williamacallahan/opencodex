@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { brotliDecompress, gunzip, inflate, zstdDecompress } from "node:zlib";
 import { admissionFields, resolveDataPlaneAdmissionSecret, withRequestAttribution, type DataPlaneAdmission } from "./auth-cors";
+import { withBodyHarnessSession } from "./request-attribution";
 import { readBoundedRequestBytes } from "./index/bounded-request";
 import { isDraining, tryAdmitTurn } from "./lifecycle";
 import { messagesEndToEndHeaders } from "./messages-native-integrity";
@@ -114,76 +115,75 @@ const brotliDecompressAsync = promisify(brotliDecompress);
 const zstdDecompressAsync = promisify(zstdDecompress);
 const utf8Decoder = new TextDecoder();
 
-/**
- * Extract one top-level string field from raw UTF-8 JSON bytes without constructing
- * an AST or decoding the whole request buffer into UTF-16.
- */
-export function extractTopLevelJsonStringField(bytes: Uint8Array, field: string): string | undefined {
-  const skipWs = (pos: number): number => {
-    while (pos < bytes.length) {
-      const b = bytes[pos]!;
-      if (b !== 0x20 && b !== 0x09 && b !== 0x0A && b !== 0x0D) break;
-      pos += 1;
+function skipWs(bytes: Uint8Array, pos: number): number {
+  while (pos < bytes.length) {
+    const b = bytes[pos]!;
+    if (b !== 0x20 && b !== 0x09 && b !== 0x0A && b !== 0x0D) break;
+    pos += 1;
+  }
+  return pos;
+}
+
+function scanStr(bytes: Uint8Array, start: number): { end: number; escaped: boolean } | null {
+  if (bytes[start] !== 0x22) return null;
+  let escaped = false;
+  let pos = start + 1;
+  while (pos < bytes.length) {
+    const b = bytes[pos]!;
+    if (b === 0x5C) {
+      escaped = true;
+      pos += 2;
+      continue;
     }
-    return pos;
-  };
-  const scanStr = (start: number): { end: number; escaped: boolean } | null => {
-    if (bytes[start] !== 0x22) return null;
-    let escaped = false;
+    if (b === 0x22) return { end: pos, escaped };
+    pos += 1;
+  }
+  return null;
+}
+
+function skipVal(bytes: Uint8Array, start: number): number {
+  const b = bytes[start];
+  if (b === undefined) return -1;
+  if (b === 0x22) {
+    const str = scanStr(bytes, start);
+    return str ? str.end + 1 : -1;
+  }
+  if (b === 0x7B || b === 0x5B) {
+    let depth = 1;
     let pos = start + 1;
-    while (pos < bytes.length) {
-      const b = bytes[pos]!;
-      if (b === 0x5C) {
-        escaped = true;
-        pos += 2;
+    while (pos < bytes.length && depth > 0) {
+      const ch = bytes[pos]!;
+      if (ch === 0x22) {
+        const str = scanStr(bytes, pos);
+        if (!str) return -1;
+        pos = str.end + 1;
         continue;
       }
-      if (b === 0x22) return { end: pos, escaped };
+      if (ch === 0x7B || ch === 0x5B) depth += 1;
+      else if (ch === 0x7D || ch === 0x5D) depth -= 1;
       pos += 1;
     }
-    return null;
-  };
-  const skipVal = (start: number): number => {
-    const b = bytes[start];
-    if (b === undefined) return -1;
-    if (b === 0x22) {
-      const str = scanStr(start);
-      return str ? str.end + 1 : -1;
-    }
-    if (b === 0x7B || b === 0x5B) {
-      let depth = 1;
-      let pos = start + 1;
-      while (pos < bytes.length && depth > 0) {
-        const ch = bytes[pos]!;
-        if (ch === 0x22) {
-          const str = scanStr(pos);
-          if (!str) return -1;
-          pos = str.end + 1;
-          continue;
-        }
-        if (ch === 0x7B || ch === 0x5B) depth += 1;
-        else if (ch === 0x7D || ch === 0x5D) depth -= 1;
-        pos += 1;
-      }
-      return depth === 0 ? pos : -1;
-    }
-    let pos = start;
-    while (pos < bytes.length) {
-      const ch = bytes[pos]!;
-      if (ch === 0x20 || ch === 0x09 || ch === 0x0A || ch === 0x0D || ch === 0x2C || ch === 0x7D || ch === 0x5D) break;
-      pos += 1;
-    }
-    return pos > start ? pos : -1;
-  };
+    return depth === 0 ? pos : -1;
+  }
+  let pos = start;
+  while (pos < bytes.length) {
+    const ch = bytes[pos]!;
+    if (ch === 0x20 || ch === 0x09 || ch === 0x0A || ch === 0x0D || ch === 0x2C || ch === 0x7D || ch === 0x5D) break;
+    pos += 1;
+  }
+  return pos > start ? pos : -1;
+}
 
-  let pos = skipWs(0);
+/** The byte range `[start, end)` of one top-level member's value in a JSON object, without building an AST. */
+function topLevelJsonValue(bytes: Uint8Array, field: string): { start: number; end: number } | undefined {
+  let pos = skipWs(bytes, 0);
   if (bytes[pos] !== 0x7B) return undefined;
   pos += 1;
   const fieldBytes = Buffer.from(field, "utf8");
   while (pos < bytes.length) {
-    pos = skipWs(pos);
+    pos = skipWs(bytes, pos);
     if (bytes[pos] === 0x7D) return undefined;
-    const keyToken = scanStr(pos);
+    const keyToken = scanStr(bytes, pos);
     if (!keyToken) return undefined;
     let matched = false;
     if (!keyToken.escaped) {
@@ -204,36 +204,68 @@ export function extractTopLevelJsonStringField(bytes: Uint8Array, field: string)
         return undefined;
       }
     }
-    pos = skipWs(keyToken.end + 1);
+    pos = skipWs(bytes, keyToken.end + 1);
     if (bytes[pos] !== 0x3A) return undefined;
-    pos = skipWs(pos + 1);
+    pos = skipWs(bytes, pos + 1);
     if (pos >= bytes.length) return undefined;
-    if (matched) {
-      if (bytes[pos] !== 0x22) return undefined;
-      const valToken = scanStr(pos);
-      if (!valToken) return undefined;
-      if (!valToken.escaped) {
-        if (valToken.end === pos + 1) return undefined;
-        return utf8Decoder.decode(bytes.subarray(pos + 1, valToken.end));
-      }
-      try {
-        const value: unknown = JSON.parse(utf8Decoder.decode(bytes.subarray(pos, valToken.end + 1)));
-        return typeof value === "string" && value.length > 0 ? value : undefined;
-      } catch {
-        return undefined;
-      }
-    }
-    pos = skipVal(pos);
-    if (pos < 0) return undefined;
-    pos = skipWs(pos);
+    const valueEnd = skipVal(bytes, pos);
+    if (valueEnd < 0) return undefined;
+    if (matched) return { start: pos, end: valueEnd };
+    pos = skipWs(bytes, valueEnd);
     if (bytes[pos] === 0x2C) {
       pos += 1;
       continue;
     }
-    if (bytes[pos] === 0x7D) return undefined;
     return undefined;
   }
   return undefined;
+}
+
+/**
+ * Extract one top-level string field from raw UTF-8 JSON bytes without constructing
+ * an AST or decoding the whole request buffer into UTF-16.
+ */
+export function extractTopLevelJsonStringField(bytes: Uint8Array, field: string): string | undefined {
+  const range = topLevelJsonValue(bytes, field);
+  if (!range || bytes[range.start] !== 0x22) return undefined;
+  const valToken = scanStr(bytes, range.start);
+  if (!valToken) return undefined;
+  if (!valToken.escaped) {
+    if (valToken.end === range.start + 1) return undefined;
+    return utf8Decoder.decode(bytes.subarray(range.start + 1, valToken.end));
+  }
+  try {
+    const value: unknown = JSON.parse(utf8Decoder.decode(bytes.subarray(range.start, valToken.end + 1)));
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One top-level member's object value as its own bytes, for a nested lookup; undefined when it is not an object. */
+function topLevelJsonObject(bytes: Uint8Array, field: string): Uint8Array | undefined {
+  const range = topLevelJsonValue(bytes, field);
+  return range && bytes[range.start] === 0x7B ? bytes.subarray(range.start, range.end) : undefined;
+}
+
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DECIMAL_SESSION = /^[0-9]{1,32}$/;
+const matching = (pattern: RegExp, raw: string | undefined): string | undefined => raw !== undefined && pattern.test(raw) ? raw : undefined;
+
+/**
+ * The agy session agy itself names in its body, since it sends no identifying header: the trajectory id,
+ * else the decimal `request.sessionId`, else a `writeTrajectoryAcls` call's `trajectoryId`; and the
+ * cascade id as the agent when it is not the root cascade. Per-request ids and `project` are never read.
+ */
+function agyBodySession(plain: Uint8Array, method: string): { session?: string; agent?: string } {
+  const request = topLevelJsonObject(plain, "request");
+  const labels = request && topLevelJsonObject(request, "labels");
+  const session = (labels && matching(CANONICAL_UUID, extractTopLevelJsonStringField(labels, "trajectory_id")))
+    ?? (request && matching(DECIMAL_SESSION, extractTopLevelJsonStringField(request, "sessionId")))
+    ?? (method === "/v1internal:writeTrajectoryAcls" ? matching(CANONICAL_UUID, extractTopLevelJsonStringField(plain, "trajectoryId")) : undefined);
+  const cascade = labels && matching(CANONICAL_UUID, extractTopLevelJsonStringField(labels, "cascade_id"));
+  const root = labels && extractTopLevelJsonStringField(labels, "root_cascade_id");
+  return { ...(session ? { session } : {}), ...(cascade && cascade !== root ? { agent: cascade } : {}) };
 }
 
 /** Decode a copy for reading only; null when the coding is one this lane does not read. */
@@ -253,12 +285,16 @@ export async function decodeBoundedPayload(bytes: Uint8Array, contentEncoding: s
   return null;
 }
 
-/** Read-only routing view of the body: the `project` it names. The forwarded bytes stay the originals. */
-async function projectNamedBy(bytes: Uint8Array, contentEncoding: string | null): Promise<string | undefined | null> {
+/**
+ * Read-only view of the body, decoded once: the `project` it names for account routing, and the agy
+ * session for the hub's own log row. The forwarded bytes stay the originals; null for an unread coding.
+ */
+async function agyBodyView(bytes: Uint8Array, contentEncoding: string | null, method: string): Promise<{ project?: string; session?: string; agent?: string } | null> {
   const plain = await decodeBoundedPayload(bytes, contentEncoding);
   if (plain === null) return null;
-  if (plain.byteLength === 0) return undefined;
-  return extractTopLevelJsonStringField(plain, "project");
+  if (plain.byteLength === 0) return {};
+  const project = extractTopLevelJsonStringField(plain, "project");
+  return { ...(project !== undefined ? { project } : {}), ...agyBodySession(plain, method) };
 }
 
 /**
@@ -383,8 +419,9 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
   disableResponsesRequestTimeout(req, ctx.server);
   const bytes = await readBoundedRequestBytes(req, MAX_AGY_REQUEST_BYTES);
   if (bytes === null) return refuse(413, "request body exceeds the pass-through limit");
-  const project = await projectNamedBy(bytes, req.headers.get("content-encoding"));
-  if (project === null) return refuse(415, "unsupported request content-encoding");
+  const body = await agyBodyView(bytes, req.headers.get("content-encoding"), parts.method);
+  if (body === null) return refuse(415, "unsupported request content-encoding");
+  const project = body.project;
   if (project === undefined && PROJECT_REQUIRED.test(parts.method)) return refuse(400, "a generation call must name its Cloud Code project");
 
   const choice = chooseAgyAccount({
@@ -417,6 +454,7 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
     provider: ANTIGRAVITY_OAUTH_STORE_KEY,
     accountLogLabel: oauthAccountLogLabel(choice.accountId, ANTIGRAVITY_OAUTH_STORE_KEY),
     ...admissionFields(admission),
+    ...(admission.attribution ? withBodyHarnessSession(admission.attribution, body.session, body.agent) : {}),
   };
   const controller = new AbortController();
   const onClientAbort = () => controller.abort(req.signal.reason);

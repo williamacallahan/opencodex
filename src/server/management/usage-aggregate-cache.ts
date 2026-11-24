@@ -329,7 +329,7 @@ export async function getFilteredUsageAggregate(filter: UsageSummaryFilterInput,
     provider: normalizeFilterValue(filter.provider),
     model: normalizeFilterValue(filter.model),
     apiKeyId: normalizeExactFilterValue(filter.apiKeyId),
-    ...(filter.sourceFilter ? { sourceFilter: { client: filter.sourceFilter.client, device: { ...filter.sourceFilter.device } } } : {}),
+    ...(filter.sourceFilter ? { sourceFilter: { ...filter.sourceFilter, device: { ...filter.sourceFilter.device } } } : {}),
     ...(filter.attribution ? { attribution: { ...filter.attribution } } : {}),
     ...(filter.configuredApiKeyIds ? { configuredApiKeyIds: snapshotConfiguredKeyIds(filter.configuredApiKeyIds) } : {}),
   };

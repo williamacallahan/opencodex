@@ -211,8 +211,11 @@ Claude Code's `X-Claude-Code-Session-Id`), else `<client product>:via-opencodex`
 the gateway never labels the workload with the hub key's name. A provider that lists either of the two also
 receives `x-lgw-client-host`, the caller's own machine name when it is a valid host label, and
 `x-lgw-client-address`, the caller address the hub observed; no other provider receives any of these
-four, and that includes a key-auth relay on the Codex backend path, which gets the caller's identity only
-when it lists one of the two); arbitrary names and wildcard prefixes are rejected on load/write and
+four, a key-auth relay on the Codex backend path included unless it lists one of the two. The caller's
+`User-Agent` still reaches every Responses provider whether or not it opts in, as it always has. A provider
+that lists `user-agent` receives the caller's recorded `User-Agent` even when the request reached it through
+an internal hop, such as a Messages request translated to Chat, whose rebuilt headers lost the original);
+arbitrary names and wildcard prefixes are rejected on load/write and
 ignored at runtime.
 
 For a custom gateway that requires original Codex client metadata (for example, a sub2api

@@ -5,7 +5,7 @@
  * `Accept` header unless told to, so header preservation is observable end to end.
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { getRequestLogEntries } from "../../src/server/request-log";
+import { clearRequestLogsForTests, getRequestLogEntries } from "../../src/server/request-log";
 import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
@@ -144,6 +144,64 @@ describe("agy pass-through public HTTP lane", () => {
     // The launcher's attribution is recorded on the hub's row and never sent to Google.
     const row = getRequestLogEntries().find(entry => entry.workload === "claude-oc:session-1");
     expect(row?.clientHost).toBe("laptop-1");
+  });
+
+  describe("agy's own session from the request body", () => {
+    const trajectory = "3f0b6c1e-8d2a-4b7e-9c51-2a6d8e4f1b07";
+    const cascade = "9a7c2e4b-1f3d-4c8a-b6e2-5d0f7a1c3e94";
+    const root = "c4e81a2f-6b9d-4e07-a3c5-8f2b1d6e9a40";
+    const generation = (request: Record<string, unknown>) => JSON.stringify({
+      project: "synthetic-project-two", requestId: "per-request-1", model: "gemini-3.8-flash-low",
+      request: { contents: [{ role: "user", parts: [{ text: "hi" }] }], ...request },
+    });
+    async function recorded(method: string, body: string) {
+      clearRequestLogsForTests();
+      const response = await post(method, body);
+      expect(response.status).toBe(200);
+      const sent = calls.at(-1)!;
+      // A pass-through stays one: Google receives agy's exact bytes and headers.
+      expect(sent.bytes).toEqual(new TextEncoder().encode(body));
+      expect([...sent.headers.keys()].sort()).toEqual(
+        ["accept-encoding", "authorization", "connection", "content-length", "content-type", "host", "user-agent", "x-future-client"]);
+      // The row is finalized when the relayed stream ends, which can trail the response by a moment.
+      for (let waited = 0; waited < 2_000 && getRequestLogEntries().length === 0; waited += 10) await Bun.sleep(10);
+      const [row] = getRequestLogEntries();
+      if (!row) throw new Error("no row recorded");
+      return row;
+    }
+
+    test("the trajectory names the session and a non-root cascade names the agent", async () => {
+      await launch();
+      const labels = { trajectory_id: trajectory, cascade_id: cascade, root_cascade_id: root, request_id: "per-request-2" };
+      const row = await recorded("streamGenerateContent?alt=sse", generation({ labels, sessionId: "1234567890123456789" }));
+      expect(row).toMatchObject({ client: "antigravity_cli", harnessSessionId: trajectory, harnessAgentId: cascade,
+        workload: `antigravity:${trajectory}`, workloadSource: "harness" });
+      // The routing project and per-request ids are never recorded.
+      for (const secret of ["synthetic-project-two", "per-request-1", "per-request-2"]) expect(JSON.stringify(row)).not.toContain(secret);
+    });
+
+    test("the root cascade itself is no agent", async () => {
+      await launch();
+      const row = await recorded("streamGenerateContent?alt=sse", generation({ labels: { trajectory_id: trajectory, cascade_id: root, root_cascade_id: root } }));
+      expect(row.harnessSessionId).toBe(trajectory);
+      expect(row).not.toHaveProperty("harnessAgentId");
+    });
+
+    test("without labels the decimal sessionId names the session", async () => {
+      await launch();
+      const row = await recorded("streamGenerateContent?alt=sse", generation({ sessionId: "1234567890123456789" }));
+      expect(row).toMatchObject({ harnessSessionId: "1234567890123456789", workload: "antigravity:1234567890123456789", workloadSource: "harness" });
+    });
+
+    test("a malformed, label-less or non-JSON body keeps the hub's label", async () => {
+      await launch();
+      const malformed = await recorded("streamGenerateContent?alt=sse", generation({ labels: { trajectory_id: "not-a-uuid" }, sessionId: "12ab" }));
+      expect(malformed).toMatchObject({ workload: "antigravity:via-opencodex", workloadSource: "hub" });
+      expect(malformed).not.toHaveProperty("harnessSessionId");
+      const nonJson = await recorded("loadCodeAssist", "not json at all");
+      expect(nonJson).toMatchObject({ client: "antigravity_cli", workload: "antigravity:via-opencodex", workloadSource: "hub" });
+      expect(nonJson).not.toHaveProperty("harnessSessionId");
+    });
   });
 
   test("keeps project-less calls on the caller's account and learns and stores the project Google returns", async () => {

@@ -12,7 +12,17 @@ export type UsageSourceClient = (typeof USAGE_SOURCE_CLIENTS)[number];
  */
 export const USAGE_CODEX_CLIENT_LABELS = ["codex_cli", "codex_desktop", "codex_ide"] as const;
 export type UsageDeviceFilter = { kind: "all" | "no-key" | "unconfigured" } | { kind: "key"; id: string };
-export interface UsageSourceFilter { client: UsageSourceClient; device: UsageDeviceFilter }
+/**
+ * Clients newer than the roster linked clients know. The usage report a linked client reads shows their
+ * rows as `unknown`, so on that report `client=unknown` must select them too.
+ */
+export const LINKED_CLIENT_FOLDED_CLIENTS = ["pi", "amp", "antigravity_cli"] as const satisfies readonly UsageSourceClient[];
+export interface UsageSourceFilter {
+  client: UsageSourceClient;
+  device: UsageDeviceFilter;
+  /** The linked-client usage report: `unknown` also matches {@link LINKED_CLIENT_FOLDED_CLIENTS}. */
+  linkedClientRoster?: true;
+}
 
 /** Reject excessive snapshots instead of truncating identity or retaining unbounded keys. */
 export const MAX_USAGE_CONFIGURED_KEYS = 1024;
@@ -44,7 +54,10 @@ export function matchesUsageSource(entry: PersistedUsageEntry, filter: UsageSour
       || (entry.client !== undefined
         && (USAGE_CODEX_CLIENT_LABELS as readonly string[]).includes(entry.client));
   }
-  if (filter.client === "unknown") return entry.client === "unknown" || (entry.client === undefined && !isLegacyCodexUsage(entry));
+  if (filter.client === "unknown") {
+    return entry.client === "unknown" || (entry.client === undefined && !isLegacyCodexUsage(entry))
+      || (filter.linkedClientRoster === true && (LINKED_CLIENT_FOLDED_CLIENTS as readonly string[]).includes(entry.client ?? ""));
+  }
   return entry.client === filter.client;
 }
 

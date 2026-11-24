@@ -90,6 +90,26 @@ test("absent, environment, admin and unknown credentials cannot obtain usage on 
   }
 });
 
+test("a linked client's client=unknown includes the newer clients its report shows as unknown", async () => {
+  const row = (requestId: string, client: string) => JSON.stringify({ timestamp: Date.now(), requestId, provider: "fixture", model: "m",
+    client, apiKeyId: "client-0", admissionKind: "configured", status: 200, durationMs: 1, usageStatus: "reported",
+    usage: { inputTokens: 2, outputTokens: 1 }, totalTokens: 3 });
+  writeFileSync(join(home, "usage.jsonl"), ["unknown", "pi", "amp", "antigravity_cli", "claude_code"].map(client => row(`r-${client}`, client)).join("\n") + "\n");
+  server = startServer(0);
+  const read = async (client: string) => {
+    const response = await fetch(new URL(`/v1/usage?range=all&surface=all&client=${client}`, server!.url), { headers: { "x-opencodex-api-key": KEYS[0]! } });
+    expect(response.status).toBe(200);
+    return await response.json() as { summary: { requests: number }; apps?: Array<{ client: string; requests: number }> };
+  };
+  const unknown = await read("unknown");
+  expect(unknown.summary.requests).toBe(4);
+  expect(unknown.apps).toMatchObject([{ client: "unknown", requests: 4 }]);
+  expect((await read("claude_code")).summary.requests).toBe(1);
+  // The hub's own dashboard keeps the labels apart: its unknown filter is only true unknowns.
+  const own = await aggregates.getFilteredUsageAggregate({ sourceFilter: { client: "unknown", device: { kind: "all" } } });
+  expect(own.accumulator.summarize("all", Date.now(), "all").summary.requests).toBe(1);
+});
+
 test("client-filtered hub usage retains the authenticated key and safe echo", async () => {
   server = startServer(0);
   const response = await fetch(new URL("/v1/usage?range=all&surface=all&client=codex", server.url), {

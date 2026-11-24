@@ -73,7 +73,7 @@ import {
   UsageLedgerRebuildRequiredError,
   type UsageLedgerScanResult,
 } from "./ledger-scanner";
-import { USAGE_CODEX_CLIENT_LABELS, type UsageSourceFilter } from "./source-filter";
+import { LINKED_CLIENT_FOLDED_CLIENTS, USAGE_CODEX_CLIENT_LABELS, type UsageSourceFilter } from "./source-filter";
 import { usageAttributions } from "./summary";
 import type { UsageTimeWindow } from "./time-range";
 
@@ -1268,6 +1268,9 @@ function candidateBranches(
     clientAlternatives.push({ clauses: ["r.client = ?"], values: ["unknown"] });
     // Mirrors matchesUsageSource: attributed-but-unclassified rows are unknown too.
     clientAlternatives.push({ clauses: ["r.client IS NULL AND r.surface IS NOT NULL"], values: [] });
+    if (query.sourceFilter?.linkedClientRoster) {
+      for (const label of LINKED_CLIENT_FOLDED_CLIENTS) clientAlternatives.push({ clauses: ["r.client = ?"], values: [label] });
+    }
   } else if (client !== undefined && client !== "all") {
     clientAlternatives.push({ clauses: ["r.client = ?"], values: [client] });
   } else {

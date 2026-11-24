@@ -1365,7 +1365,7 @@ class StreamingUsageSummaryAccumulator implements UsageSummaryAccumulator {
     const model = normalizeFilterValue(options?.filter?.model);
     const apiKeyId = normalizeExactFilterValue(options?.filter?.apiKeyId);
     const inputSource = options?.filter?.sourceFilter;
-    const sourceFilter = inputSource ? { client: inputSource.client, device: { ...inputSource.device } } : undefined;
+    const sourceFilter = inputSource ? { ...inputSource, device: { ...inputSource.device } } : undefined;
     const configuredApiKeyIds = options?.filter?.configuredApiKeyIds
       ? snapshotConfiguredKeyIds(options.filter.configuredApiKeyIds) : undefined;
     if (sourceFilter?.device.kind === "unconfigured" && !configuredApiKeyIds) {

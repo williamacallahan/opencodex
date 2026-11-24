@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { USAGE_SOURCE_CLIENTS } from "../usage/source-filter";
+import { LINKED_CLIENT_FOLDED_CLIENTS, USAGE_SOURCE_CLIENTS } from "../usage/source-filter";
 import { USAGE_APPS, type UsageApp } from "../usage/app-breakdown";
 
 export const MAX_HUB_USAGE_BYTES = 1024 * 1024;
@@ -13,10 +13,9 @@ const appCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
  * value it does not know. Labels added after that roster went out are reported as `unknown`, and a
  * reader maps any label it does not know the same way, merging the rows instead of failing.
  */
-const REMOTE_FOLDED_APPS = ["pi", "amp", "antigravity_cli"] as const satisfies readonly UsageApp[];
-type RemoteUsageApp = Exclude<UsageApp, typeof REMOTE_FOLDED_APPS[number]>;
+type RemoteUsageApp = Exclude<UsageApp, typeof LINKED_CLIENT_FOLDED_CLIENTS[number]>;
 const REMOTE_USAGE_APPS: readonly RemoteUsageApp[] = USAGE_APPS.filter((app): app is RemoteUsageApp =>
-  !(REMOTE_FOLDED_APPS as readonly string[]).includes(app));
+  !(LINKED_CLIENT_FOLDED_CLIENTS as readonly string[]).includes(app));
 const remoteApp = (client: string): RemoteUsageApp => REMOTE_USAGE_APPS.find(app => app === client) ?? "unknown";
 const appRow = z.object({ client: z.string().max(64), requests: appCount, measuredRequests: appCount,
   totalTokens: count, ...split, estimatedCostUsd: count.optional(), pricedRequests: appCount, unpricedRequests: appCount,

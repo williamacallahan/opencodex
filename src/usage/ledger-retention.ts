@@ -23,7 +23,7 @@
  * writer and detected up to the last possible moment for anything else.
  */
 import { closeSync, fstatSync, openSync, readdirSync, readSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { getConfigDir } from "../config";
 import { atomicWriteFileStreamed } from "../config/atomic-write";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
@@ -153,12 +153,35 @@ function removeUnpublishedSegments(directory: string, sourceFd: number, sourceIn
     const path = join(directory, entry.name);
     const stat = statSync(path);
     if (stat.size > sourceSize || now - stat.mtimeMs < UNPUBLISHED_SEGMENT_MIN_AGE_MS) continue;
-    if (isLedgerPrefix(path, stat.size, sourceFd)) unlinkSync(path);
+    if (isPrefixOf(path, stat.size, sourceFd)) unlinkSync(path);
   }
 }
 
-/** Whether the file's `size` bytes equal the ledger's first `size` bytes, compared one chunk at a time. */
-function isLedgerPrefix(path: string, size: number, ledgerFd: number): boolean {
+/**
+ * After a publish, delete every other segment named with the replaced ledger's inode whose bytes are a
+ * prefix of the segment just written: it is the leftover of an earlier trim of that same file that never
+ * published, and every row it holds is now in the new segment. A young leftover goes too: once this trim
+ * replaced the file, no trim of the old file can publish any more.
+ */
+function removeSupersededSegments(archivePath: string, sourceIno: string): void {
+  const directory = dirname(archivePath);
+  const marker = `_${sourceIno}-`;
+  const archiveFd = openSync(archivePath, "r");
+  try {
+    const archiveSize = Number(fstatSync(archiveFd).size);
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (!entry.isFile() || !entry.name.includes(marker) || path === archivePath) continue;
+      const size = statSync(path).size;
+      if (size <= archiveSize && isPrefixOf(path, size, archiveFd)) unlinkSync(path);
+    }
+  } finally {
+    closeSync(archiveFd);
+  }
+}
+
+/** Whether the file's `size` bytes equal the first `size` bytes of the file open on `fd`, compared one chunk at a time. */
+function isPrefixOf(path: string, size: number, ledgerFd: number): boolean {
   const segmentFd = openSync(path, "r");
   try {
     const segment = Buffer.allocUnsafe(COPY_CHUNK_BYTES);
@@ -303,6 +326,7 @@ export function enforceUsageLedgerSizeLimit(
       if (currentUsageLogRevision()?.ino === captured.ino) rmSync(archivePath, { force: true });
       throw error;
     }
+    removeSupersededSegments(archivePath, captured.ino);
     return { kind: "replaced", currentBytes: captured.size - start, removedBytes: start };
   } catch (error) {
     if (error instanceof UsageLedgerRevisionChangedError) {

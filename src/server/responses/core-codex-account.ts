@@ -1016,7 +1016,7 @@ async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal
   try {
     request = await retryAdapter.buildRequest(parsed, {
       headers: retryHeaders,
-      providerName: route.providerName,
+      providerName: route.providerName, attribution: options.admission?.attribution,
       translatorBudget: options.translatorBudget,
     });
   } catch (error) {

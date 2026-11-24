@@ -25,7 +25,13 @@ session id from the first native header present (`X-Claude-Code-Session-Id`, `X-
 `X-Opencode-Session`, `session_id`, `session-id`) as `harnessSessionId`, read from the original
 headers before any session rewriting, and its agent or thread id as `harnessAgentId`
 (`X-Claude-Code-Agent-Id`, else a Codex `thread-id` that differs from the session). Both must pass
-`safeCallerSessionId`; a failing value is dropped, never shortened. `metadata.user_id`,
+`safeCallerSessionId`; a failing value is dropped, never shortened. agy sends no identifying header, so
+the `/agy` pass-through reads its session in the same single pass over the decoded body that finds the
+routing `project` (`agyBodyView` in `src/server/agy-passthrough.ts`): `request.labels.trajectory_id` when a
+canonical UUID, else a decimal `request.sessionId`, else a `writeTrajectoryAcls` call's `trajectoryId`, with
+`request.labels.cascade_id` as the agent when it differs from `root_cascade_id`. `withBodyHarnessSession`
+records them on the hub's own row only (workload `antigravity:<session>`); the forwarded bytes are agy's,
+and `project` and the per-request ids are never recorded. `metadata.user_id`,
 `x-codex-installation-id` and the agy body's `project` are never read for this. The row's
 `workload` is the declared `X-User-ID` (`workloadSource: "declared"`), else
 `<client with hyphens>:<harnessSessionId>` (`harness`), else the hub's `<product>:via-opencodex`
@@ -33,14 +39,19 @@ headers before any session rewriting, and its agent or thread id as `harnessAgen
 A provider row whose `forwardClientHeaders` lists `x-user-id` or `x-lgw-cache-key` is an LLM gateway row:
 `forwardableClientHeaders` in `src/lib/provider-client-headers.ts` sends it that admitted attribution's
 `workload`, its declared `conversationKey`, its validated `clientHost` and the `clientAddress` the hub
-observed. The attribution reaches every send through `IncomingMeta.attribution` (Responses dispatch, tool
+observed. A row listing `user-agent` gets the incoming header, else the attribution's recorded (sanitized)
+`userAgent`, which an internal hop's rebuilt headers no longer carry. The attribution reaches every send through `IncomingMeta.attribution` (Responses dispatch, tool
 loops, compaction), `restoreResponsesClientMetadata`, the native Chat builder and the strict Messages lane,
 and the Chat and Messages internal hops carry the same workload through `requestWorkload`, so no send derives
 it again from rebuilt headers. The hub never invents an `X-LGW-Cache-Key` for a gateway row, because a
 gateway may route prompt caching on that header. `tests/responses/gateway-row-attribution-live.test.ts`
-proves each lane, the vendor rows' absence of every gateway header, and byte-identical bodies.
+proves each lane, the absence of workload, cache key, machine name and caller address on rows without the
+opt-in (which still receive the caller's `User-Agent` on Responses, as before), and byte-identical bodies.
 
-`src/usage/source-filter.ts` defines app and device filters. A Codex filter includes recognized
+`src/usage/source-filter.ts` defines app and device filters. The usage report a linked client reads
+(`src/remote/hub-usage.ts`) shows `LINKED_CLIENT_FOLDED_CLIENTS` (clients newer than its roster) as
+`unknown`, so `src/server/hub-usage.ts` sets `linkedClientRoster` and that report's `client=unknown` selects
+them too, in `matchesUsageSource` and the filter index alike; the hub's own dashboard keeps them apart. A Codex filter includes recognized
 Codex clients and legacy Codex-surface rows; it reports the latter as a separate unclassified
 count, without assigning a client subtype. A no-key filter means the stored key ID is absent,
 including pre-attribution and environment-admitted rows; it does not prove physical origin.

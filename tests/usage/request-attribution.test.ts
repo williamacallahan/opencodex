@@ -99,8 +99,8 @@ describe("request attribution on log rows", () => {
     expect(forged.live).not.toHaveProperty("conversationKey");
   });
 
-  test("a caller that is not the configured proxy cannot name its own address, from loopback or a LAN alike", () => {
-    for (const peer of ["127.0.0.1", "192.168.1.20", "100.64.0.9"]) {
+  test("a caller that is not the configured proxy cannot name its own address, from loopback, a LAN or anywhere else", () => {
+    for (const peer of ["127.0.0.1", "192.168.1.20", "192.0.2.20"]) {
       clearRequestLogsForTests();
       resetUsageReadCacheForTests();
       const { persisted } = admittedRow({ "x-forwarded-for": "198.51.100.4", "x-real-ip": "203.0.113.9" }, peer, {});

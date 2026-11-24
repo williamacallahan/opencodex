@@ -137,7 +137,8 @@ export function deriveClientWorkloadLabel(incoming: Headers | undefined): string
  * The provider's opted-in caller metadata that passes the name allowlist and the value gate, in configured order.
  * An opted-in `x-user-id` is never absent. With the admitted request's attribution it is that attribution's
  * workload (declared, else the harness session, else the hub label) and `x-lgw-cache-key` is only the caller's
- * declared one; without it (a hub-originated call) the incoming value or the derived label is used. A row opted in
+ * declared one; without it (a hub-originated call) the incoming value or the derived label is used. An
+ * opted-in `user-agent` absent from the incoming headers (an internal hop) is the attribution's recorded one. A row opted in
  * to either gateway identity header is an LLM gateway row, so it also gets the caller's validated machine name and
  * the address the hub observed. No other row receives any of these.
  */
@@ -150,7 +151,9 @@ export function forwardableClientHeaders(
     const name = normalizeForwardedClientHeaderName(rawName);
     if (name === null) continue;
     const identity = attribution && GATEWAY_IDENTITY_HEADERS.has(name);
-    const value = identity ? (name === USER_ID_HEADER ? attribution.workload : attribution.conversationKey) : incoming?.get(name);
+    // An internal hop's rebuilt headers lose the caller's User-Agent; the admitted request recorded it, sanitized.
+    const value = identity ? (name === USER_ID_HEADER ? attribution.workload : attribution.conversationKey)
+      : name === "user-agent" ? incoming?.get(name) ?? attribution?.userAgent : incoming?.get(name);
     if (value && forwardedClientHeaderValueAllowed(name, value)) forwardable.push([name, value]);
     else if (name === USER_ID_HEADER) forwardable.push([name, deriveClientWorkloadLabel(incoming)]);
   }

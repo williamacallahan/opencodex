@@ -232,16 +232,35 @@ describe("usage ledger archive", () => {
     const altered = Buffer.from(before.subarray(0, headEnd));
     altered[headEnd - 3] = 0x79;
     const notPrefix = archived(`2026-10-02T00-00-00.000Z_${ino}-${headEnd}.jsonl`, altered, 10 * 60_000);
-    // A prefix written a moment ago may be another process's trim that has not renamed yet.
+    // A prefix written a moment ago survives the check before the trim, but this trim's publish supersedes it.
     const young = archived(`2026-10-03T00-00-00.000Z_${ino}-${headEnd}.jsonl`, before.subarray(0, headEnd), 0);
     expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
     const files = archiveFiles();
     expect(files).not.toContain(leftover);
     expect(files).toContain(notPrefix);
-    expect(files).toContain(young);
+    expect(files).not.toContain(young);
     const covering = files.filter(name => name.startsWith("2026-11-01"));
     expect(covering).toHaveLength(1);
     expect(Buffer.concat([readFileSync(join(archiveDirectory(), covering[0]!)), readFileSync(usageLogPath())]).equals(before)).toBe(true);
+  });
+
+  test("a leftover too young to delete before the trim is dropped once the trim publishes, so each row is archived once", () => {
+    writeRows(200, 16 * 1024);
+    const ino = statSync(usageLogPath(), { bigint: true }).ino.toString();
+    // A trim was killed after its segment and before its rename; the restarted hub appends within five minutes.
+    const head = readFileSync(usageLogPath());
+    const leftover = head.subarray(0, head.indexOf(0x0a) + 1);
+    writeFileSync(join(archiveDirectory(), `2026-11-01T08-30-15.250Z_${ino}-${leftover.byteLength}.jsonl`), leftover);
+    appendFileSync(usageLogPath(), `${JSON.stringify({ requestId: "after-restart", timestamp: FIRST_ROW_AT + 500_000 })}\n`);
+    const before = readFileSync(usageLogPath());
+    expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
+    const [segment, ...others] = archiveFiles();
+    expect(others).toEqual([]);
+    const archived = readFileSync(join(archiveDirectory(), segment!));
+    expect(Buffer.concat([archived, readFileSync(usageLogPath())]).equals(before)).toBe(true);
+    const rows = Buffer.concat([archived, readFileSync(usageLogPath())]).toString("utf8").trim().split("\n")
+      .map(line => (JSON.parse(line) as { requestId: string }).requestId);
+    expect(new Set(rows).size).toBe(rows.length);
   });
 
   test("a trim whose ledger was replaced by something else keeps its segment, which may be the only copy of those rows", () => {
@@ -261,13 +280,23 @@ describe("usage ledger archive", () => {
       .equals(readFileSync(join(archiveDirectory(), segment!)))).toBe(true);
   });
 
-  test("a trim aborted because the ledger changed leaves no archive segment", () => {
+  test("a trim aborted because the ledger changed leaves no archive segment and spares a young leftover", () => {
     writeRows(200, 16 * 1024);
+    const ino = statSync(usageLogPath(), { bigint: true }).ino.toString();
+    const head = readFileSync(usageLogPath());
+    const leftover = head.subarray(0, head.indexOf(0x0a) + 1);
+    // Young enough to be another process's trim that has not renamed yet; an older one is not.
+    const young = `2026-10-03T00-00-00.000Z_${ino}-${leftover.byteLength}.jsonl`;
+    const old = `2026-10-04T00-00-00.000Z_${ino}-${leftover.byteLength}.jsonl`;
+    writeFileSync(join(archiveDirectory(), young), leftover);
+    writeFileSync(join(archiveDirectory(), old), leftover);
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60_000);
+    utimesSync(join(archiveDirectory(), old), tenMinutesAgo, tenMinutesAgo);
     const result = enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES, {
       onSpanCopied: () => appendFileSync(usageLogPath(), `${JSON.stringify({ requestId: "raced", timestamp: 1 })}\n`),
     });
     expect(result).toMatchObject({ kind: "deferred", reason: "revision-changed" });
-    expect(archiveFiles()).toEqual([]);
+    expect(archiveFiles()).toEqual([young]);
   });
 
   const unusable: Array<[string, () => void]> = [

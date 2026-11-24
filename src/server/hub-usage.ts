@@ -46,7 +46,8 @@ export async function handleHubUsage(req: Request, config: OcxConfig, policy: Re
   try {
     const aggregate = await getFilteredUsageAggregate({
       apiKeyId: keyId, provider: query.get("provider"), model: query.get("model"),
-      ...(client !== null ? { sourceFilter: { client: client as UsageSourceClient, device: { kind: "key", id: keyId } } } : {}),
+      // The linked client reads newer client labels as `unknown`, so its `unknown` filter selects them too.
+      ...(client !== null ? { sourceFilter: { client: client as UsageSourceClient, device: { kind: "key", id: keyId }, linkedClientRoster: true } } : {}),
     }, window);
     const capacity = query.get("include") === "capacity"
       ? await (await import("../quota-pool/client")).readClientCapacity(config, admission) : undefined;
