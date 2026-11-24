@@ -383,6 +383,17 @@ describe("usage client attribution", () => {
     expect(claudeSelected.snapshot().legacyUnclassifiedRequests).toBe(1);
   });
 
+  test("every recorded harness has its own facet, so the app facets sum to the total", () => {
+    const now = Date.now();
+    const facets = createSourceFacetAccumulator({ client: "all", device: { kind: "all" } }, [], { since: now - 1000, until: now });
+    const base = { timestamp: now - 1, provider: "openai", model: "test", status: 200, durationMs: 1, usageStatus: "unreported" as const };
+    for (const client of ["pi", "amp", "antigravity_cli", "claude_code"] as const) facets.add({ ...base, requestId: client, client });
+    const { apps } = facets.snapshot();
+    expect([apps.pi, apps.amp, apps.antigravity_cli, apps.claude_code]).toEqual([1, 1, 1, 1]);
+    const { all, codex: _codex, ...perClient } = apps;
+    expect(Object.values(perClient).reduce((sum, value) => sum + value, 0)).toBe(all);
+  });
+
   test("an unselectable configured key does not hide other devices or become unconfigured", () => {
     const now = Date.now();
     const facets = createSourceFacetAccumulator({ client: "all", device: { kind: "all" } }, ["valid", "odd "], { since: now - 1, until: now });

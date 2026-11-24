@@ -24,7 +24,6 @@ import { DEVIN_DEFAULT_API_SERVER, validateDevinApiBaseUrl } from "../oauth/devi
 import { normalizeDevinSessionToken } from "../adapters/devin/cloud-direct/metadata";
 import { encodeMessage, encodeString } from "../adapters/devin/cloud-direct/wire";
 import { oauthAccountLogLabel } from "../codex/account-label";
-import { classifyUsageClient } from "../usage/client";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 
 const DEVIN_PROVIDER = "devin";
@@ -371,7 +370,6 @@ export async function handleDevinPassthrough(req: Request, ctx: DevinPassthrough
   const logCtx: RequestLogContext = {
     model: parts.rpcPath.slice(parts.rpcPath.lastIndexOf("/") + 1),
     provider: DEVIN_PROVIDER,
-    client: classifyUsageClient(req.headers),
     accountLogLabel: oauthAccountLogLabel(choice.accountId, DEVIN_PROVIDER),
     ...admissionFields(admission),
   };

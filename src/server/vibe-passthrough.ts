@@ -43,7 +43,6 @@ import {
 } from "./vibe-passthrough-keys";
 import { nativeHarnessOnly, VIBE_PROVIDER_ID } from "../lib/native-harness";
 import { sanitizeLogMetadataString } from "../lib/redact";
-import { classifyUsageClient } from "../usage/client";
 import type { OcxConfig, OcxUsage } from "../types";
 
 const MAX_VIBE_REQUEST_BYTES = 32 * 1024 * 1024;
@@ -286,7 +285,6 @@ export async function handleVibePassthrough(req: Request, ctx: VibePassthroughCo
   const logCtx: RequestLogContext = {
     model: inferredModel,
     provider: VIBE_PROVIDER_ID,
-    client: classifyUsageClient(req.headers),
     accountLogLabel: initialChoice.accountLogLabel,
     ...admissionFields(admission),
   };

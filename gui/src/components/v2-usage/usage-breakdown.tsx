@@ -215,7 +215,7 @@ export function UsageModelsTable({
 export function UsageAppsTable({ apps, locale, t }: { apps?: UsageApp[]; locale: Locale; t: TFn }) {
   const names: Record<UsageApp["client"], string> = {
     codex: "Codex", claude_code: "Claude Code", claude_desktop: "Claude Desktop", grok: "Grok", opencode: "OpenCode", aside: "Aside",
-    other: t("usageV2.other"), unknown: t("usageV2.unknown"), unclassified: t("usageV2.unclassified"),
+    pi: "Pi", amp: "Amp", antigravity_cli: "Antigravity CLI", other: t("usageV2.other"), unknown: t("usageV2.unknown"), unclassified: t("usageV2.unclassified"),
   };
   const disclaimerId = "usage-apps-list-price-disclaimer";
   return (

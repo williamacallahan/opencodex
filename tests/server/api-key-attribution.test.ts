@@ -129,7 +129,7 @@ describe("attribution reaches usage.jsonl", () => {
     }
   });
 
-  test("records only the classified inbound client on the request row", async () => {
+  test("records the classified inbound client on the request row", async () => {
     saveConfig(remoteConfig());
     const server = startServer(0);
     try {
@@ -139,8 +139,8 @@ describe("attribution reaches usage.jsonl", () => {
           originator: "codex_cli_rs", "user-agent": "private-client-marker" },
         body: JSON.stringify({ model: "test/gpt-test", messages: [{ role: "user", content: "hello" }] }),
       });
+      // The raw User-Agent is kept separately as request attribution (tests/usage/request-attribution.test.ts).
       expect(usageRows().at(-1)?.client).toBe("codex_cli");
-      expect(readFileSync(usageLogPath(), "utf8")).not.toContain("private-client-marker");
     } finally {
       await server.stop(true);
     }
@@ -158,7 +158,6 @@ describe("attribution reaches usage.jsonl", () => {
         });
       }
       expect(usageRows().slice(-3).map(row => row.client)).toEqual(["claude_code", "claude_desktop", "opencode"]);
-      expect(readFileSync(usageLogPath(), "utf8")).not.toContain("runtime/bun");
     } finally {
       await server.stop(true);
     }

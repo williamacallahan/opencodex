@@ -42,7 +42,6 @@ import { getAccountCredential, markAccountNeedsReauthIfGeneration } from "../oau
 import { classifyAntigravityRefusal } from "../adapters/antigravity-refusal";
 import { antigravityQuotaFromRelayedAnswer } from "../providers/quota/antigravity";
 import { captureConfigGeneration } from "../lib/state-store-sweeper";
-import { classifyUsageClient } from "../usage/client";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 
 const MAX_AGY_REQUEST_BYTES = 32 * 1024 * 1024;
@@ -416,7 +415,6 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
   const logCtx: RequestLogContext = {
     model: parts.method.slice("/v1internal:".length),
     provider: ANTIGRAVITY_OAUTH_STORE_KEY,
-    client: classifyUsageClient(req.headers),
     accountLogLabel: oauthAccountLogLabel(choice.accountId, ANTIGRAVITY_OAUTH_STORE_KEY),
     ...admissionFields(admission),
   };

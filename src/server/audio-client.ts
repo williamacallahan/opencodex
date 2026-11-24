@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { formatErrorResponse } from "../bridge";
 import type { OcxConfig } from "../types";
 import { captureExplicitOpenAiCallerAuth, selectOpenAiImagesProvider } from "../providers/openai-sidecar";
-import { isProxyAdmissionSecret, type DataPlaneAdmission, type DataPlaneAdmissionOptions } from "./auth-cors";
+import { isProxyAdmissionSecret, withRequestAttribution, type DataPlaneAdmission, type DataPlaneAdmissionOptions } from "./auth-cors";
 import { resolveAudioAdmission } from "./audio-upstream";
 import { authorizationCredential } from "../lib/authorization-scheme";
 
@@ -49,7 +49,8 @@ export function resolveAudioClient(
       }
     }
   }
-  const admission = resolveAudioAdmission(headers, config, options);
+  // The admission carries the request's attribution like every other route, so audio rows record their client.
+  const admission = withRequestAttribution(req, resolveAudioAdmission(headers, config, options));
   if (!admission) {
     const bearer = /^Bearer\s+([^\s,]+)$/i.exec(headers.get("authorization") ?? "")?.[1];
     const platformKey = selectOpenAiImagesProvider(config).keyed?.apiKey;

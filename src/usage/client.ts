@@ -1,7 +1,7 @@
 /** A bounded, observational client label. Header values themselves are never returned. */
 export const USAGE_CLIENTS = [
   "codex_cli", "codex_desktop", "codex_ide", "claude_code", "claude_desktop",
-  "grok", "opencode", "aside", "other", "unknown",
+  "grok", "opencode", "aside", "pi", "amp", "antigravity_cli", "other", "unknown",
 ] as const;
 
 export type UsageClient = (typeof USAGE_CLIENTS)[number];
@@ -19,7 +19,9 @@ export function normalizeRecordedClient(value: unknown): UsageClient | undefined
  * Classify only signatures established by existing client fixtures or upstream sources.
  * These headers can be supplied by callers and must never authorize an action.
  */
-export function classifyUsageClient(headers: Headers): UsageClient {
+export function classifyUsageClient(headers: Headers, pathname?: string): UsageClient {
+  // agy sends no identifying header; the hub's `/agy/` mount is the only Cloud Code ingress.
+  if (pathname?.startsWith("/agy/")) return "antigravity_cli";
   const originator = headers.get("originator") ?? "";
   const userAgent = headers.get("user-agent") ?? "";
   if (originator.length > MAX_HEADER_LENGTH || userAgent.length > MAX_HEADER_LENGTH) return "unknown";
@@ -37,6 +39,11 @@ export function classifyUsageClient(headers: Headers): UsageClient {
   else if (/^claude-code\/[A-Za-z0-9][A-Za-z0-9._+-]*(?:\s|$)/i.test(userAgent)) agentClient = "claude_code";
   else if (/^opencode\/[A-Za-z0-9][A-Za-z0-9._+-]*(?:\s|$)/i.test(userAgent)) agentClient = "opencode";
   else if (/^codex_cli_rs\/[A-Za-z0-9][A-Za-z0-9._+-]*(?:\s|$)/i.test(userAgent)) agentClient = "codex_cli";
+  else if (/^pi\/[0-9][A-Za-z0-9._+-]*(?:\s|$)/.test(userAgent)) agentClient = "pi";
+  // Amp's servers call through the OpenAI JS SDK; only its thread header separates it from any other SDK caller.
+  else if (/^OpenAI\/JS [0-9]/.test(userAgent) && headers.has("x-amp-thread-id")) agentClient = "amp";
+  else if (headers.has("x-claude-code-session-id")) agentClient = "claude_code";
+  else if (headers.has("x-opencode-session")) agentClient = "opencode";
   if (originClient && agentClient && originClient !== agentClient
     && !(originClient.startsWith("codex_") && agentClient.startsWith("codex_"))) return "unknown";
   return originClient ?? agentClient ?? "unknown";

@@ -71,15 +71,22 @@ export function inheritTrustedHubManagementRequest(source: Request, target: Requ
   if (trustedHubManagementRequests.has(source)) trustedHubManagementRequests.add(target);
   const peer = dashboardProxyPeers.get(source);
   if (peer !== undefined) dashboardProxyPeers.set(target, peer);
+  if (trustedForwardingPeers.has(source)) trustedForwardingPeers.add(target);
 }
 
 // #8338: the kernel-observed peer of a public-listener request, recorded by the serve layer the
 // same way as the hub mark above. No header can create or change it.
 const dashboardProxyPeers = new WeakMap<Request, string>();
+// Requests whose peer is one of `dashboardTrustedProxy.proxyAddresses`: only their forwarding
+// headers may name the caller's address. Anyone else connecting directly could set them.
+const trustedForwardingPeers = new WeakSet<Request>();
 
-export function markDashboardProxyPeer(req: Request, address: string | undefined): void {
+export function markDashboardProxyPeer(req: Request, address: string | undefined, config?: Pick<OcxConfig, "dashboardTrustedProxy">): void {
   const normalized = address ? normalizeProxyAddress(address) : null;
-  if (normalized) dashboardProxyPeers.set(req, normalized);
+  if (!normalized) return;
+  dashboardProxyPeers.set(req, normalized);
+  const settings = config?.dashboardTrustedProxy === undefined ? undefined : parseDashboardTrustedProxy(config.dashboardTrustedProxy);
+  if (settings !== undefined && typeof settings !== "string" && settings.addresses.has(normalized)) trustedForwardingPeers.add(req);
 }
 
 /** One forwarded value: undefined when absent, null when empty or a multi-hop list. */
@@ -505,7 +512,7 @@ export type DataPlaneAdmission = (
 
 /** The admission with this request's attribution attached; null stays null. */
 export function withRequestAttribution(req: Request, admission: DataPlaneAdmission | null): DataPlaneAdmission | null {
-  return admission && { ...admission, attribution: computeRequestAttribution(req, dashboardProxyPeers.get(req)) };
+  return admission && { ...admission, attribution: computeRequestAttribution(req, dashboardProxyPeers.get(req), trustedForwardingPeers.has(req)) };
 }
 
 /**

@@ -66,7 +66,12 @@ test("loopback hub reads only the explicitly authenticated key and strips accoun
     expect(parseHubUsage(old)).not.toBeNull();
     const nested = { ...body, apps: [{ ...body.apps[0], privateField: "private-marker" }] };
     expect(JSON.stringify(parseHubUsage(nested))).not.toContain("private-marker");
-    expect(parseHubUsage({ ...body, apps: [{ ...body.apps[0], client: "private-marker" }] })).toBeNull();
+    // Harness labels newer than the linked-client roster leave the hub as `unknown`, merged into one row.
+    expect(parseHubUsage({ ...body, apps: ["pi", "amp", "antigravity_cli"].map(client => ({ ...body.apps[0], client })) })?.apps)
+      .toMatchObject([{ client: "unknown", requests: 3, totalTokens: 9 }]);
+    // A label this reader does not know reads as `unknown`, merged with any `unknown` row, rather than refusing the report.
+    expect(parseHubUsage({ ...body, apps: [{ ...body.apps[0], client: "future-client" }, { ...body.apps[0], client: "unknown" }] })?.apps)
+      .toMatchObject([{ client: "unknown", requests: 2, totalTokens: 6 }]);
     expect(parseHubUsage({ ...body, apps: Array.from({ length: 10 }, () => body.apps[0]) })).toBeNull();
     expect(parseHubUsage({ ...body, apps: [body.apps[0], body.apps[0]] })).toBeNull();
     expect(JSON.stringify(body)).not.toContain("oabcdef");
