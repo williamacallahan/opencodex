@@ -13,6 +13,7 @@ import { saveConfig } from "../../src/config";
 import { bindNativeHarnessConfig, VIBE_PROVIDER_ID } from "../../src/lib/native-harness";
 import { clearKeyCooldowns } from "../../src/providers/api-key-cooldowns";
 import { clearRequestLogsForTests } from "../../src/server/request-log";
+import { createPassthroughPayloadObserver } from "../../src/server/agy-passthrough-send";
 import {
   chooseVibeKey,
   flushVibeKeyCooldownWritesForTests,
@@ -70,6 +71,22 @@ describe("vibe pass-through key pool resilience", () => {
       if (savedHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = savedHome;
       if (savedCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = savedCodexHome;
       removeTreeWithRetry(home);
+    }
+  });
+
+  test("inspects SSE lines through the exact size boundary at newline and EOF", () => {
+    for (const size of [65_535, 65_536]) {
+      for (const ending of ["\n", ""]) {
+        const prefix = 'data: {"usage":{"prompt_tokens":7},"padding":"';
+        const suffix = '"}';
+        const line = prefix + "x".repeat(size - prefix.length - suffix.length) + suffix;
+        const payloads: unknown[] = [];
+        const observer = createPassthroughPayloadObserver("text/event-stream", null, 512 * 1024, payload => payloads.push(payload));
+        observer.observe(new TextEncoder().encode(line + ending));
+        observer.finish();
+        expect(payloads).toHaveLength(1);
+        expect(payloads[0]).toMatchObject({ usage: { prompt_tokens: 7 } });
+      }
     }
   });
 
@@ -494,6 +511,7 @@ describe("vibe pass-through key pool resilience", () => {
     const oversizedOnly = await postVibe({ "x-stream-role": "oversized-only" });
     expect(oversizedOnly.text).toContain('"prompt_tokens":999');
     const oversizedLog = (await import("../../src/server/request-log")).getRequestLogEntries().find(entry => entry.requestId === oversizedOnly.requestId);
+    expect(oversizedLog).toBeDefined();
     expect(oversizedLog?.usage).toBeUndefined();
 
     // Raw TCP server that truncates a 402 body mid-stream -> must settle 502 without leaking ActiveTurnLease.
@@ -501,7 +519,9 @@ describe("vibe pass-through key pool resilience", () => {
     const dropServer = createNetServer(socket => {
       socket.once("data", bytes => {
         dropSends++;
-        if (bytes.toString().includes("x-stream-role: broken-success")) {
+        if (bytes.toString().includes("x-stream-role: no-headers")) {
+          socket.destroy();
+        } else if (bytes.toString().includes("x-stream-role: broken-success")) {
           socket.write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 500\r\n\r\ndata: {\"choices\":[]}\n\n");
           setTimeout(() => socket.end(), 50);
         } else {
@@ -537,19 +557,24 @@ describe("vibe pass-through key pool resilience", () => {
     const dropLog = (await import("../../src/server/request-log")).getRequestLogEntries().find(entry => entry.requestId === dropRes.requestId);
     expect(dropLog?.spend?.sends).toBe(1);
     expect((await import("../../src/server/lifecycle")).getActiveTurnCount()).toBe(0);
-    const brokenId = await new Promise<string | string[] | undefined>(resolve => {
+    await new Promise<void>(resolve => {
       const req = request({ host: "127.0.0.1", port: proxy!.port, path: "/vibe/v1/chat/completions", method: "POST",
         headers: { authorization: `Bearer ${hubKey}`, "user-agent": vibeUa, "x-stream-role": "broken-success" } }, message => {
         message.resume();
-        message.on("aborted", () => resolve(message.headers["x-opencodex-request-id"]));
-        message.on("error", () => resolve(message.headers["x-opencodex-request-id"]));
+        message.on("aborted", () => resolve());
+        message.on("error", () => resolve());
       });
-      req.on("error", () => resolve(undefined));
-      req.end('{"model":"devstral-latest","messages":[]}');
+      req.on("error", () => resolve());
+      req.end('{"model":"broken-stream-test","messages":[]}');
     });
     const brokenLogs = (await import("../../src/server/request-log")).getRequestLogEntries();
-    const brokenLog = brokenId ? brokenLogs.find(entry => entry.requestId === brokenId) : brokenLogs.at(-1);
+    const brokenLog = brokenLogs.find(entry => entry.model === "broken-stream-test");
+    expect(brokenLog?.status).toBe(502);
     expect(brokenLog?.attempts?.[0]?.streamAborted).toBe(true);
+    const ambiguous = await postVibe({ "x-opencodex-max-sends": "1", "x-stream-role": "no-headers" });
+    const ambiguousLog = (await import("../../src/server/request-log")).getRequestLogEntries().find(entry => entry.requestId === ambiguous.requestId);
+    expect(ambiguousLog?.spend?.sends).toBe(1);
+    expect(ambiguousLog?.failureCause).toBe("transport-ambiguous");
     await new Promise<void>(resolve => dropServer.close(() => resolve()));
 
     const connectionRes = await postVibe({ "x-opencodex-max-sends": "1" });

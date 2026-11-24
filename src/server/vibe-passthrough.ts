@@ -347,6 +347,7 @@ export async function handleVibePassthrough(req: Request, ctx: VibePassthroughCo
     inferenceAttempt?.seal(activeChoice.accountLogLabel);
     const retryAfterFailure = (error: unknown, phase: "unknown" | "body", reusedSocket?: boolean): Response | null => {
       const cancelled = req.signal.aborted || controller.signal.aborted;
+      if (phase === "unknown" && inferenceAttempt?.attempt.sendCount) inferenceAttempt.attempt.failureCause = "transport-ambiguous";
       failLog(phase, error, reusedSocket);
       if (!cancelled && !isDraining() && attempt + 1 < maxSends) {
         const sibling = chooseVibeKey(providerRow, null, triedKeyIds);
@@ -356,6 +357,10 @@ export async function handleVibePassthrough(req: Request, ctx: VibePassthroughCo
           upstream = undefined;
           return null;
         }
+      }
+      if (phase === "unknown" && inferenceAttempt?.attempt.sendCount) {
+        logCtx.causeHint = "transport-ambiguous";
+        logCtx.terminalSource = "synthetic";
       }
       settle(cancelled ? 499 : 502);
       return responseFor(isDraining() ? refuse(503, "hub is restarting") : cancelled

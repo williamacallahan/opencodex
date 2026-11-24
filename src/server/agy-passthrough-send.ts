@@ -29,18 +29,21 @@ export function createPassthroughPayloadObserver(
   const inspect = (text: string) => {
     try { onPayload(JSON.parse(text)); } catch { /* Invalid payloads are not usage. */ }
   };
+  const flush = () => {
+    if (!dropping) {
+      const payload = sseFieldValue(line.trimEnd(), "data");
+      if (payload) inspect(payload);
+    }
+    line = "";
+    dropping = false;
+  };
   const accept = (text: string) => {
     for (const part of text.split(/(?<=\n)/)) {
       const complete = part.endsWith("\n");
-      if (!dropping && line.length + part.length <= 64 * 1024) line += part;
+      const content = complete ? part.slice(0, -1) : part;
+      if (!dropping && line.length + content.length <= 64 * 1024) line += content;
       else { line = ""; dropping = true; }
-      if (!complete) continue;
-      if (!dropping) {
-        const payload = sseFieldValue(line.trimEnd(), "data");
-        if (payload) inspect(payload);
-      }
-      line = "";
-      dropping = false;
+      if (complete) flush();
     }
   };
   return {
@@ -52,7 +55,7 @@ export function createPassthroughPayloadObserver(
       else chunks.push(chunk);
     },
     finish() {
-      if (decoder) { accept(decoder.decode()); accept("\n"); }
+      if (decoder) { accept(decoder.decode()); flush(); }
       if (chunks && bytes > 0) inspect(new TextDecoder().decode(Buffer.concat(chunks)));
       chunks = null;
     },
