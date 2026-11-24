@@ -1,6 +1,6 @@
 import { normalizeProxyAddress } from "../config/dashboard-trusted-proxy";
 import { assessUrlDestination } from "../lib/destination-policy";
-import { deriveClientWorkloadLabel, forwardedClientHeaderValueAllowed, HUB_WORKLOAD_OPERATION } from "../lib/provider-client-headers";
+import { deriveClientWorkloadLabel, HUB_WORKLOAD_OPERATION, isDeclaredGatewayIdentity } from "../lib/provider-client-headers";
 import { sanitizeLogMetadataString } from "../lib/redact";
 
 /**
@@ -54,7 +54,7 @@ function forwardedForChain(header: string | null): string[] {
 
 function declaredGatewayIdentity(headers: Headers, name: "x-user-id" | "x-lgw-cache-key"): string | undefined {
   const value = headers.get(name)?.trim();
-  return value && forwardedClientHeaderValueAllowed(name, value) ? value : undefined;
+  return value && isDeclaredGatewayIdentity(value) ? value : undefined;
 }
 
 /**

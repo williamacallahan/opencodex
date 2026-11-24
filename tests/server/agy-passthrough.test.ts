@@ -5,6 +5,7 @@
  * `Accept` header unless told to, so header preservation is observable end to end.
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { getRequestLogEntries } from "../../src/server/request-log";
 import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
@@ -124,7 +125,7 @@ describe("agy pass-through public HTTP lane", () => {
 
   test("forwards agy's bytes, path, query and headers unchanged except the pooled bearer", async () => {
     await launch();
-    const response = await post("streamGenerateContent?alt=sse", generate);
+    const response = await post("streamGenerateContent?alt=sse", generate, { "x-user-id": "claude-oc:session-1", "x-lgw-cache-key": "claude-oc:conversation-1", "x-lgw-client-host": "laptop-1", "x-lgw-client-address": "192.0.2.66" });
     expect(response.status).toBe(200);
     expect(response.text).toBe(sse);
     expect(response.headers["x-google-fixture"]).toBe("kept");
@@ -140,6 +141,9 @@ describe("agy pass-through public HTTP lane", () => {
     // Exactly agy's end-to-end headers: nothing added (no Accept), and nothing the hub's proxies added.
     expect([...sent.headers.keys()].sort()).toEqual(
       ["accept-encoding", "authorization", "connection", "content-length", "content-type", "host", "user-agent", "x-future-client"]);
+    // The launcher's attribution is recorded on the hub's row and never sent to Google.
+    const row = getRequestLogEntries().find(entry => entry.workload === "claude-oc:session-1");
+    expect(row?.clientHost).toBe("laptop-1");
   });
 
   test("keeps project-less calls on the caller's account and learns and stores the project Google returns", async () => {

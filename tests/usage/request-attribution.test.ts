@@ -74,7 +74,7 @@ describe("request attribution on log rows", () => {
   test("an undeclared caller gets the hub-derived workload and invalid declarations are dropped", () => {
     const { persisted } = admittedRow({
       "user-agent": "codex_cli_rs/0.1.0",
-      "x-user-id": "someone-else:chosen",
+      "x-user-id": "Someone-Else:chosen",
       "x-lgw-client-host": "laptop.example",
       "x-forwarded-for": "not-an-address, 192.0.2.1:443",
     }, "::ffff:127.0.0.1");
@@ -84,6 +84,15 @@ describe("request attribution on log rows", () => {
     expect(persisted).not.toHaveProperty("forwardedFor");
     expect(persisted).not.toHaveProperty("clientHost");
     expect(persisted).not.toHaveProperty("conversationKey");
+  });
+
+  test("any launcher may declare its workload, but a declared hub operation counts as undeclared", () => {
+    expect(admittedRow({ "user-agent": "opencode/1.0", "x-user-id": "vibe-oc:session-7" }, "127.0.0.1").persisted?.workload).toBe("vibe-oc:session-7");
+    clearRequestLogsForTests();
+    resetUsageReadCacheForTests();
+    const forged = admittedRow({ "user-agent": "opencode/1.0", "x-user-id": "amp:session:via-opencodex", "x-lgw-cache-key": "amp:x:via-opencodex" }, "127.0.0.1");
+    expect(forged.live?.workload).toBe("opencode:via-opencodex");
+    expect(forged.live).not.toHaveProperty("conversationKey");
   });
 
   test("rows written before attribution read back unchanged, and hand-edited values are re-bounded", () => {
