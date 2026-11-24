@@ -1,4 +1,5 @@
 import { captureAnthropicRejectionPayloads, keepAnthropicReplayBlock } from "./anthropic-rejection-memo";
+import { copyForwardedClientHeaders } from "../lib/provider-client-headers";
 import { anthropicDeclaredTools } from "./anthropic-tool-catalog";
 import { anthropicReplayContent, createAnthropicReplayCapture } from "./anthropic-replay";
 import { withAnthropicProgressUpdates } from "./anthropic-progress";
@@ -1308,6 +1309,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
       if (isOAuth) applyAnthropicOAuthAuth(headers, provider.apiKey, resolveTranslatedAnthropicSessionKey(parsed, incoming));
       else applyAnthropicKeyAuth(headers, provider);
       if (provider.headers) Object.assign(headers, provider.headers);
+      copyForwardedClientHeaders(provider.forwardClientHeaders, headers, incoming?.headers, incoming?.attribution);
       mergeAnthropicBetaHeader(headers, [...(fastSpeed?.betas ?? []), ...(progressUpdates ? ["thinking-display-updates-2026-08-18"] : []), ...serverToolPlan.betas]);
 
       // Prompt caching: native Anthropic supports top-level automatic caching, which

@@ -416,6 +416,7 @@ export async function runNativeChatAttempt(
       undefined,
       translatorBudget,
       req.headers,
+      (execution.admission ?? logIds?.admission)?.attribution,
     );
     observeAdvisorNativeReasoning(req.headers, logCtx, request.body);
     return request;

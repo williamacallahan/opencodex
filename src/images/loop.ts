@@ -660,6 +660,7 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
           request = await requestAdapter.buildRequest(iterParsed, {
             headers: deps.forwardHeaders ? new Headers(deps.forwardHeaders) : new Headers(),
             ...(deps.incomingMeta.providerName ? { providerName: deps.incomingMeta.providerName } : {}),
+            attribution: deps.incomingMeta.attribution,
             abortSignal: headerDeadline.signal,
             translatorBudget,
           });

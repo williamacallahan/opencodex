@@ -971,7 +971,7 @@ async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal
     // headers were rebuilt from the caller's sanitized set, so restore the provider's permitted
     // client metadata the same way the first send did; the copier never overwrites a header the
     // rebuild or the provider already selected.
-    restoreResponsesClientMetadata(retryHeaders, callerAuthHeaders, retryProvider, options.compactionRecoveryKind);
+    restoreResponsesClientMetadata(retryHeaders, callerAuthHeaders, retryProvider, options);
   } catch (error) {
     if (!(error instanceof CodexPoolAccountCreditsOffError) && !(error instanceof CodexInstallationIdUnavailableError)) throw error;
     // Body/entitlement reads above can outlive credit consent. No alternate will send:

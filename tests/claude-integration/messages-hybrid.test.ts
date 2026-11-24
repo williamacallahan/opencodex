@@ -203,6 +203,42 @@ describe("hybrid Messages public HTTP transport", () => {
     expect(row?.conversationKey).toBe("claude-oc:conversation-1");
   });
 
+  test("an LLM gateway row that opted in still receives the caller's workload, conversation, machine and address on the native lane", async () => {
+    await launch(true, config => { config.providers.anthropic!.forwardClientHeaders = ["x-user-id", "x-lgw-cache-key"]; });
+    const response = await post("/strict/v1/messages", encode(raw), {
+      "x-user-id": "claude-oc:session-1", "x-lgw-cache-key": "claude-oc:conversation-1", "x-lgw-client-host": "laptop-1",
+      "x-lgw-client-address": "192.0.2.66",
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+    const [sent] = nativeCalls;
+    expect(sent!.bytes).toEqual(encode(raw));
+    expect(sent!.headers.get("x-user-id")).toBe("claude-oc:session-1");
+    expect(sent!.headers.get("x-lgw-cache-key")).toBe("claude-oc:conversation-1");
+    expect(sent!.headers.get("x-lgw-client-host")).toBe("laptop-1");
+    // The address is the one the hub observed, never the caller's own claim.
+    expect(sent!.headers.get("x-lgw-client-address")).toBe("127.0.0.1");
+  });
+
+  for (const optedIn of [true, false]) {
+    test(`the managed native lane sends ${optedIn ? "an opted-in gateway row" : "a vendor row"} ${optedIn ? "the caller's identity" : "none of the caller's identity"}`, async () => {
+      await launch(false, config => { if (optedIn) config.providers.anthropic!.forwardClientHeaders = ["x-user-id", "x-lgw-cache-key"]; });
+      const response = await post("/hybrid/v1/messages", encode(raw), {
+        "x-user-id": "claude-oc:session-1", "x-lgw-cache-key": "claude-oc:conversation-1", "x-lgw-client-host": "laptop-1",
+        "x-lgw-client-address": "192.0.2.66",
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+      const [sent] = nativeCalls;
+      const gateway = Object.fromEntries(["x-user-id", "x-lgw-cache-key", "x-lgw-client-host", "x-lgw-client-address"]
+        .filter(name => sent!.headers.has(name)).map(name => [name, sent!.headers.get(name)]));
+      expect(gateway).toEqual(optedIn ? {
+        "x-user-id": "claude-oc:session-1", "x-lgw-cache-key": "claude-oc:conversation-1",
+        "x-lgw-client-host": "laptop-1", "x-lgw-client-address": "127.0.0.1",
+      } : {});
+    });
+  }
+
   test("root path still serves a routed id", async () => {
     await launch();
     const bytes = encode(raw.replace(nativeModel, routedModel));

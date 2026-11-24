@@ -379,7 +379,7 @@ export async function preparePassthroughExchange(
     try {
       request = await transportState.adapter.buildRequest(parsed, {
         headers: requestState.selectedForwardHeaders,
-        providerName: route.providerName,
+        providerName: route.providerName, attribution: options.admission?.attribution,
         translatorBudget,
       });
     } catch (error) {
@@ -1109,7 +1109,7 @@ export async function preparePassthroughExchange(
         if (recovery !== "console-go-upload-retry") {
           request = await retryAdapter.buildRequest(parsed, {
             headers: requestState.selectedForwardHeaders,
-          providerName: route.providerName,
+          providerName: route.providerName, attribution: options.admission?.attribution,
             translatorBudget,
           });
         }

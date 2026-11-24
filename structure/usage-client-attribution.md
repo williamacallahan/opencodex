@@ -16,6 +16,30 @@ attempt-loss marker.
 `tests/usage/usage-client-attribution.test.ts` and
 `tests/usage/request-log-normalization.test.ts` cover those boundaries.
 
+The label is computed once per admitted request, by `computeRequestAttribution` in
+`src/server/request-attribution.ts`, and reaches every log context through `admissionFields`; no
+route classifies the headers a second time. Pi (`pi/<version>`), Amp (`OpenAI/JS` plus
+`X-Amp-Thread-Id`) and the Antigravity CLI (the hub's `/agy/` mount, since agy sends no identifying
+header) are recognized beside the existing signatures. The same pass records the harness's own
+session id from the first native header present (`X-Claude-Code-Session-Id`, `X-Amp-Thread-Id`,
+`X-Opencode-Session`, `session_id`, `session-id`) as `harnessSessionId`, read from the original
+headers before any session rewriting, and its agent or thread id as `harnessAgentId`
+(`X-Claude-Code-Agent-Id`, else a Codex `thread-id` that differs from the session). Both must pass
+`safeCallerSessionId`; a failing value is dropped, never shortened. `metadata.user_id`,
+`x-codex-installation-id` and the agy body's `project` are never read for this. The row's
+`workload` is the declared `X-User-ID` (`workloadSource: "declared"`), else
+`<client with hyphens>:<harnessSessionId>` (`harness`), else the hub's `<product>:via-opencodex`
+(`hub`). `tests/usage/request-attribution.test.ts` covers each harness's header set.
+A provider row whose `forwardClientHeaders` lists `x-user-id` or `x-lgw-cache-key` is an LLM gateway row:
+`forwardableClientHeaders` in `src/lib/provider-client-headers.ts` sends it that admitted attribution's
+`workload`, its declared `conversationKey`, its validated `clientHost` and the `clientAddress` the hub
+observed. The attribution reaches every send through `IncomingMeta.attribution` (Responses dispatch, tool
+loops, compaction), `restoreResponsesClientMetadata`, the native Chat builder and the strict Messages lane,
+and the Chat and Messages internal hops carry the same workload through `requestWorkload`, so no send derives
+it again from rebuilt headers. The hub never invents an `X-LGW-Cache-Key` for a gateway row, because a
+gateway may route prompt caching on that header. `tests/responses/gateway-row-attribution-live.test.ts`
+proves each lane, the vendor rows' absence of every gateway header, and byte-identical bodies.
+
 `src/usage/source-filter.ts` defines app and device filters. A Codex filter includes recognized
 Codex clients and legacy Codex-surface rows; it reports the latter as a separate unclassified
 count, without assigning a client subtype. A no-key filter means the stored key ID is absent,

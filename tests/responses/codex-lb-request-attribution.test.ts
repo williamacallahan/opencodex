@@ -17,10 +17,11 @@ const hubConfig: OcxConfig = {
   port: 0, hostname: "0.0.0.0", defaultProvider: "relay", providers: {},
   apiKeys: [{ id: "launcher-key", name: "launcher", key: "ocx_data_launchersecret", createdAt: "2026-11-24T00:00:00.000Z" }],
 };
-const codexLb: OcxProviderConfig = {
+const relayRow: OcxProviderConfig = {
   adapter: "openai-responses", baseUrl: "https://lb.example/backend-api/codex", apiKey: "relay-key",
   headers: { "x-lgw-client-address": "192.0.2.200" },
 };
+const codexLb: OcxProviderConfig = { ...relayRow, forwardClientHeaders: ["x-user-id", "x-lgw-cache-key"] };
 const chatgptPool: OcxProviderConfig = { adapter: "openai-responses", authMode: "forward", baseUrl: "https://chatgpt.com/backend-api/codex" };
 
 const callerHeaders = {
@@ -36,9 +37,9 @@ const callerHeaders = {
   "x-codex-parent-thread-id": "caller-parent",
 };
 
-function admitted(): { req: Request; admission: DataPlaneAdmission } {
-  const req = new Request("https://hub.example/v1/responses", { method: "POST", headers: callerHeaders });
-  markDashboardProxyPeer(req, "127.0.0.1");
+function admitted(headers: Record<string, string> = callerHeaders): { req: Request; admission: DataPlaneAdmission } {
+  const req = new Request("https://hub.example/v1/responses", { method: "POST", headers });
+  markDashboardProxyPeer(req, "127.0.0.1", { dashboardTrustedProxy: { origin: "https://hub.example", proxyAddresses: ["127.0.0.1"] } });
   const admission = resolveResponsesApiAuth(req, hubConfig);
   if (!admission?.attribution) throw new Error("expected an attributed admission");
   return { req, admission };
@@ -49,7 +50,8 @@ async function outbound(provider: OcxProviderConfig, admission: DataPlaneAdmissi
   bindSharedCodexWireIdentity(adapter, provider, req.headers, admission, "pool");
   const parsed = parseRequest({ model: "m", input: "hi", prompt_cache_key: "caller-cache-key" });
   const budget = createTestTranslatorBudget();
-  const request = await adapter.buildRequest(parsed, { headers: new Headers(req.headers), translatorBudget: budget });
+  // The dispatch passes the admitted attribution on every build, as here.
+  const request = await adapter.buildRequest(parsed, { headers: new Headers(req.headers), attribution: admission.attribution, translatorBudget: budget });
   try { return { headers: new Headers(request.headers), body: JSON.parse(request.body) as { prompt_cache_key?: string } }; }
   finally { request.releaseBodyObservation?.(); budget.dispose(); }
 }
@@ -80,9 +82,34 @@ describe("caller attribution on the codex-lb relay", () => {
     }
     expect(withAttribution.body.prompt_cache_key).toBeTruthy();
     expect(withAttribution.body.prompt_cache_key).toBe(without.body.prompt_cache_key);
-    // Without attribution the relay request carries only what the provider configures.
-    for (const name of ATTRIBUTION_HEADERS.slice(0, 3)) expect(without.headers.has(name)).toBe(false);
+    // Without attribution the opted-in row gets only the caller's own declared headers and its configured address.
+    expect(without.headers.has("x-lgw-client-host")).toBe(false);
     expect(without.headers.get("x-lgw-client-address")).toBe("192.0.2.200");
+  });
+
+  test("an undeclared Claude Code session reaches the relay as its workload and logged conversation, never as a session", async () => {
+    const session = "6f1c2a4e-0b3d-4c5e-8f70-1a2b3c4d5e6f";
+    const { req, admission } = admitted({
+      "x-opencodex-api-key": "ocx_data_launchersecret", "user-agent": "claude-cli/2.1.0 (external, cli)", "x-claude-code-session-id": session,
+    });
+    const { headers, body } = await outbound(codexLb, admission, req);
+    expect(headers.get("x-user-id")).toBe(`claude-code:${session}`);
+    expect(headers.get("x-lgw-cache-key")).toBe(`claude-code:${session}`);
+    for (const name of CONTINUITY_HEADERS) expect(headers.get(name) ?? "").not.toContain(session);
+    expect(body.prompt_cache_key).toBe((await outbound(codexLb, { ...admission, attribution: undefined }, req)).body.prompt_cache_key);
+    const pool = await outbound(chatgptPool, admission, req);
+    for (const name of ATTRIBUTION_HEADERS) expect(pool.headers.has(name)).toBe(false);
+  });
+
+  test("a relay-shaped row that did not opt in receives no caller identity", async () => {
+    const { req, admission } = admitted({ ...callerHeaders, "x-claude-code-session-id": "6f1c2a4e-0b3d-4c5e-8f70-1a2b3c4d5e6f" });
+    const attributed = await outbound(relayRow, admission, req);
+    const unattributed = await outbound(relayRow, { ...admission, attribution: undefined }, req);
+    for (const name of ATTRIBUTION_HEADERS.slice(0, 3)) expect(attributed.headers.has(name)).toBe(false);
+    // Only the row's own configured value, never the address the hub observed.
+    expect(attributed.headers.get("x-lgw-client-address")).toBe("192.0.2.200");
+    // Every Responses row forwards the caller's User-Agent; the relay gets nothing beyond that.
+    expect([...attributed.headers]).toEqual([...unattributed.headers]);
   });
 
   test("the hub's own ChatGPT pool receives none of the attribution headers", async () => {

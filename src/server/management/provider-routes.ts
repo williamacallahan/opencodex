@@ -912,7 +912,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       proxy: providerProxyForDisplay(p.proxy),
       hasApiKey: providerHasStoredApiKey(p),
       // Presence only (#959 review): header names and values never leave the process.
-      hasHeaders: !!p.headers && Object.keys(p.headers).length > 0,
+      hasHeaders: !!p.headers && Object.keys(p.headers).length > 0, forwardClientHeaders: p.forwardClientHeaders,
       allowPrivateNetwork: p.allowPrivateNetwork === true,
       preserveResponsesReasoningContent: p.preserveResponsesReasoningContent,
       promoteAdditionalTools: p.promoteAdditionalTools,

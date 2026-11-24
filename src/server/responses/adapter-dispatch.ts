@@ -338,7 +338,7 @@ export async function prepareAdapterExchange(
   try {
     initialRequest = await transportState.activeAdapter.buildRequest(parsed, {
       headers: requestState.selectedForwardHeaders, completedToolBlocks: requestState.completedToolBlocks,
-      providerName: route.providerName,
+      providerName: route.providerName, attribution: options.admission?.attribution,
       translatorBudget,
       abortSignal: upstream.signal,
     });
@@ -670,7 +670,7 @@ export async function prepareAdapterExchange(
         try {
           retryRequest = await transportState.activeAdapter.buildRequest(parsed, {
             headers: requestState.selectedForwardHeaders, completedToolBlocks: requestState.completedToolBlocks,
-            providerName: route.providerName,
+            providerName: route.providerName, attribution: options.admission?.attribution,
             translatorBudget,
             abortSignal: upstream.signal,
             ...(transportState.imageTierBias > 0 ? { imageTierBias: transportState.imageTierBias } : {}),

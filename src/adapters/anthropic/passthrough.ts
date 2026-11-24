@@ -17,6 +17,8 @@
  * Anthropic (`src/protocols/opaque-state.ts`). The source body is never mutated, so every build
  * for every destination decides from the full source again.
  */
+import { copyForwardedClientHeaders } from "../../lib/provider-client-headers";
+import type { RequestAttribution } from "../../server/request-attribution";
 import { mergeAnthropicBetaHeader } from "../../providers/anthropic-fast";
 import { applyClaudeToolPrefix, CLAUDE_CODE_SYSTEM_INSTRUCTION } from "../../oauth/anthropic";
 import { credentialDomainFor, opaqueStateForDestination } from "../../protocols/opaque-state";
@@ -94,6 +96,9 @@ export interface AnthropicMessagesPassthroughOptions {
   clientIdentity?: AnthropicClientIdentity;
   /** Optional conversation/session key for deterministic per-conversation X-Claude-Code-Session-Id. */
   sessionKey?: string | null;
+  /** The caller's headers and admitted attribution, read only for a row opted in to gateway headers. */
+  callerHeaders?: Headers;
+  attribution?: RequestAttribution;
 }
 
 /** The allowlisted copy of `body` with `model` set to the wire model. Shallow: nothing is cloned. */
@@ -318,6 +323,7 @@ export function buildAnthropicMessagesPassthroughRequest(
     for (const name of Object.keys(headers)) if (configured.has(name.toLowerCase())) delete headers[name];
     Object.assign(headers, provider.headers);
   }
+  copyForwardedClientHeaders(provider.forwardClientHeaders, headers, options.callerHeaders, options.attribution);
   if (oauth) {
     const wireHeaders = new Headers(headers);
     if (wireHeaders.get("authorization") !== `Bearer ${provider.apiKey}` || wireHeaders.has("x-api-key")) {

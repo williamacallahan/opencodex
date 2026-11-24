@@ -75,14 +75,14 @@ export function restoreResponsesClientMetadata(
   headers: Headers,
   incoming: Headers,
   provider: OcxProviderConfig,
-  compactionRecoveryKind?: HandleResponsesOptions["compactionRecoveryKind"],
+  { compactionRecoveryKind, admission }: Pick<HandleResponsesOptions, "compactionRecoveryKind" | "admission">,
 ): void {
   if (provider.adapter === "openai-responses" || compactionRecoveryKind === "compaction-v1") {
-    copyResponsesClientMetadata(headers, incoming, provider);
+    copyResponsesClientMetadata(headers, incoming, provider, admission?.attribution);
   } else {
     // Auth materialization also drops the gateway session identity an opted-in openai-chat
     // provider asked for, so every physical send into a chat provider restores it here.
-    copyConfiguredClientHeaders(headers, incoming, provider);
+    copyConfiguredClientHeaders(headers, incoming, provider, admission?.attribution);
   }
 }
 
@@ -390,7 +390,7 @@ export async function resolveResponsesCodexAuth(
     }
     // Auth materialization keeps only its credential allowlist. Responses turns and compact
     // handoffs also need the provider's permitted metadata, without replacing selected identity.
-    restoreResponsesClientMetadata(headers, authInputHeaders, route.provider, options.compactionRecoveryKind);
+    restoreResponsesClientMetadata(headers, authInputHeaders, route.provider, options);
     // dual_header: the assertion is first-party only and travels only beside the caller's own
     // unchanged Bearer, compared with the ORIGINAL request (injected credentials do not count).
     if (isCanonicalOpenAiForwardProvider(route.provider) && authCtx?.kind === "main" && !substituteMainCredential) {
@@ -562,7 +562,7 @@ export async function refreshPoolForwardAuth(args: {
     });
     // The replay is a second physical send of the same turn: it keeps the caller metadata the
     // first send carried instead of reverting to the credential-only allowlist.
-    restoreResponsesClientMetadata(headers, req.headers, provider, options.compactionRecoveryKind);
+    restoreResponsesClientMetadata(headers, req.headers, provider, options);
     return { ok: true, authCtx: refreshedAuthCtx, provider, headers };
   } catch (error) {
     if (isTerminalPoolRefreshFailure(error)) {
@@ -641,7 +641,7 @@ export async function refreshNativeMainForwardAuth(args: {
       nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
     });
     // Same rule as the stored Pool refresh: the replay keeps permitted caller metadata.
-    restoreResponsesClientMetadata(headers, req.headers, provider, options.compactionRecoveryKind);
+    restoreResponsesClientMetadata(headers, req.headers, provider, options);
     return { ok: true, authCtx: refreshedAuthCtx, provider, headers };
   } catch (error) {
     if (options.abortSignal?.aborted || req.signal.aborted) {

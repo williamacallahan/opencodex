@@ -14,7 +14,7 @@ import type { FailureVerdictSink } from "../chat/failure-verdict";
  * that need Responses-only behavior keep the Chat -> Responses -> Chat bridge.
  */
 import { FORWARD_HEADERS } from "../adapters/openai-responses";
-import { deriveClientWorkloadLabel, forwardedClientHeaderValueAllowed, GATEWAY_IDENTITY_HEADERS } from "../lib/provider-client-headers";
+import { forwardedClientHeaderValueAllowed, GATEWAY_IDENTITY_HEADERS } from "../lib/provider-client-headers";
 import {
   assertChatCompletionsRoutingBody,
   chatRawReasoningVisible,
@@ -118,6 +118,7 @@ import { parseSyntheticRowId } from "./fast-row";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
 import { CODEX_RESERVE_HELPER_UNSUPPORTED_MESSAGE, isCodexReserveHelperUnsupported } from "../codex/loopback-target";
 import { applyDroidReasoningDefault, droidReasoningDefault, DROID_DEFAULT_EFFORT_HEADER } from "./droid-reasoning-default";
+import { requestWorkload } from "./request-attribution";
 
 type Rec = Record<string, unknown>;
 
@@ -536,7 +537,7 @@ async function handleChatCompletionsWithBudget(
     const value = req.headers.get(name);
     if (value && forwardedClientHeaderValueAllowed(name, value)) headers.set(name, value);
   }
-  if (!headers.has("x-user-id")) headers.set("x-user-id", deriveClientWorkloadLabel(req.headers));
+  headers.set("x-user-id", requestWorkload(req, admission?.attribution));
   // Existing primary enrichment stays on non-caller-auth routes. Caller-auth routes defer
   // optional stored sidecar auth until the final helper plan actually needs it.
   if (!callerAuthorizationRoute) {

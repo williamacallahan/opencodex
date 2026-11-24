@@ -4,12 +4,15 @@ import type { RequestExecutionBudget } from "../lib/request-execution-budget";
 import type { AttemptRecoveryKind, AttemptRecoveryWithheld } from "../usage/log";
 import type { AdapterTierMetadata } from "../providers/fastwire";
 import type { ProviderRequestSlot } from "../providers/request-pacing";
+import type { RequestAttribution } from "../server/request-attribution";
 
 /** Metadata about the caller's incoming request, for auth-forwarding adapters. */
 export interface IncomingMeta {
   headers: Headers;
   /** Canonical routed provider identity for provider-specific wire fields. */
   providerName?: string;
+  /** The admitted caller's attribution, for a provider row opted in to gateway headers. */
+  attribution?: RequestAttribution | undefined;
   /** Trusted caller has durable structural replay ownership for earlier completed tools. */
   completedToolBlocks?: boolean;
   translatorBudget: TranslatorBudget;

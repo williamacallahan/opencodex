@@ -11,29 +11,29 @@ import {
   isolateCodexPoolAccountHeaders,
 } from "../../codex/forward-transport-headers";
 import { isCanonicalOpenAiForwardProvider, responsesTransportUrl } from "../../providers/openai-tiers-destination";
-import { copyForwardedClientHeaders, forwardableClientHeaders } from "../../lib/provider-client-headers";
+import { copyForwardedClientHeaders, forwardableClientHeaders, optsInToGatewayAttribution } from "../../lib/provider-client-headers";
 import { AGENT_ASSERTION_HEADER } from "../../lib/authorization-scheme";
 import { isCodexLbResponsesEndpoint } from "../../providers/quota/codex-lb-url";
 import { isThreadSpawnRequest } from "../../server/effort-policy";
 import { callerSessionAlias, claudeTranscriptQualifier, safeCallerSessionId, scopedWireHash } from "../../server/caller-session-identity";
 import { agentServingThreadKey } from "../../oauth/session-affinity-key";
-import { applyCodexLbAttributionHeaders } from "../../server/request-attribution";
+import { applyCodexLbAttributionHeaders, type RequestAttribution } from "../../server/request-attribution";
 
 export { responsesTransportUrl };
 export { FORWARD_HEADERS } from "../../codex/forward-transport-headers";
 
 /** Copy the provider's opted-in client metadata onto already-materialized auth headers, never credentials. */
-export function copyConfiguredClientHeaders(target: Headers, incoming: Headers, provider: OcxProviderConfig): void {
-  for (const [name, value] of forwardableClientHeaders(provider.forwardClientHeaders, incoming)) {
+export function copyConfiguredClientHeaders(target: Headers, incoming: Headers, provider: OcxProviderConfig, attribution?: RequestAttribution): void {
+  for (const [name, value] of forwardableClientHeaders(provider.forwardClientHeaders, incoming, attribution)) {
     if (!target.has(name)) target.set(name, value);
   }
 }
 
 /** Carry permitted client metadata across an internal compact handoff, never credentials. */
-export function copyResponsesClientMetadata(target: Headers, incoming: Headers, provider: OcxProviderConfig): void {
+export function copyResponsesClientMetadata(target: Headers, incoming: Headers, provider: OcxProviderConfig, attribution?: RequestAttribution): void {
   const userAgent = incoming.get("user-agent");
   if (userAgent && !target.has("user-agent")) target.set("user-agent", userAgent);
-  copyConfiguredClientHeaders(target, incoming, provider);
+  copyConfiguredClientHeaders(target, incoming, provider, attribution);
 }
 
 /** Normalize caller aliases only on native egress; preserve ingress and fallback identity. */
@@ -76,7 +76,8 @@ export function bindSharedCodexWireIdentity(
   admission: DataPlaneAdmission | undefined, accountKind: CodexAuthContext["kind"], claudeWire?: HandleResponsesOptions["claudeCodexWire"],
 ): void {
   const attribution = admission?.attribution;
-  if (attribution && isCodexRelaySend(provider)) {
+  // A relay-shaped row receives the caller's identity only when it opted in, like any gateway row.
+  if (attribution && isCodexRelaySend(provider) && optsInToGatewayAttribution(provider.forwardClientHeaders)) {
     const buildWithoutAttribution = adapter.buildRequest.bind(adapter);
     const attribute = (request: AdapterRequest): AdapterRequest => {
       applyCodexLbAttributionHeaders(request.headers, attribution);
@@ -178,7 +179,7 @@ export function applyCodexLbThreadHeaders(
 }
 
 /** Shared Responses URL/auth/header construction; capabilities never grant auth authority. */
-export function buildResponsesTransport(provider: OcxProviderConfig, incoming: Pick<IncomingMeta, "headers">): {
+export function buildResponsesTransport(provider: OcxProviderConfig, incoming: Pick<IncomingMeta, "headers" | "attribution">): {
   url: string; headers: Record<string, string>;
 } {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -229,7 +230,7 @@ export function buildResponsesTransport(provider: OcxProviderConfig, incoming: P
     if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
     if (provider.headers) Object.assign(headers, provider.headers);
   }
-  copyForwardedClientHeaders(provider.forwardClientHeaders, headers, incoming.headers);
+  copyForwardedClientHeaders(provider.forwardClientHeaders, headers, incoming.headers, incoming.attribution);
   if (!Object.keys(headers).some(name => name.toLowerCase() === "user-agent")) {
     const userAgent = incoming.headers.get("user-agent");
     if (userAgent) headers["User-Agent"] = userAgent;

@@ -9,7 +9,8 @@ import type { CredentialMask } from "../lib/outbound-credential-registry";
 import { BOUNDED_BODY_MAX_BYTES, BOUNDED_BODY_TIMEOUT_MS, readBoundedResponseBytes } from "../lib/bounded-body";
 import { decodeRequestBody } from "./request-decompress";
 import { nativeHarnessOnly } from "../lib/native-harness";
-import { isGatewayAttributionHeader } from "../lib/provider-client-headers";
+import { copyForwardedClientHeaders, isGatewayAttributionHeader } from "../lib/provider-client-headers";
+import type { RequestAttribution } from "./request-attribution";
 import { createGunzip, createInflate, type Zlib } from "node:zlib";
 import type { Transform } from "node:stream";
 import { BoundedSseFrameBuffer, MAX_CLIENT_SSE_FRAME_BYTES, joinSseFrameBytes, type BoundedSseFrame } from "./sse-frame-buffer";
@@ -241,14 +242,19 @@ export class NativeMessagesIntegrity {
   readonly countTokens: boolean;
   readonly #wire: Buffer;
   readonly #headers: Headers;
+  /** The caller's own headers and admitted attribution, read only for the provider's opted-in gateway metadata. */
+  readonly #callerHeaders: Headers;
+  readonly #attribution: RequestAttribution;
   readonly #query: string;
   readonly #model: unknown;
   readonly #stream: boolean;
 
-  constructor(req: Request, wire: Uint8Array, parsed: Record<string, unknown>) {
+  constructor(req: Request, wire: Uint8Array, parsed: Record<string, unknown>, attribution: RequestAttribution) {
     // The bounded reader hands ownership to this snapshot; only build() exposes a copy.
     this.#wire = Buffer.from(wire.buffer, wire.byteOffset, wire.byteLength);
     this.#headers = messagesEndToEndHeaders(req.headers, true);
+    this.#callerHeaders = new Headers(req.headers);
+    this.#attribution = attribution;
     // Authentication is the one application-level substitution this contract permits.
     for (const name of [...this.#headers.keys()]) {
       if (name === "authorization" || name === "x-api-key" || name === "cookie"
@@ -276,6 +282,9 @@ export class NativeMessagesIntegrity {
       throw new MessagesIntegrityError();
     }
     const headers = Object.fromEntries(this.#headers);
+    // Gateway attribution is stripped above so no vendor receives it; a provider that opted in to
+    // it (an LLM gateway row's forwardClientHeaders) gets it back through the one shared gate.
+    copyForwardedClientHeaders(provider.forwardClientHeaders, headers, this.#callerHeaders, this.#attribution);
     // The one end-to-end header strict mode narrows: a stream is screened before delivery, so only
     // codings the screen can decode incrementally may be advertised.
     if (this.#stream) {

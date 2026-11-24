@@ -45,6 +45,7 @@ import {
   anthropicMessagesNativeWireBody,
   buildAnthropicMessagesPassthroughRequest,
 } from "../adapters/anthropic/passthrough";
+import { requestAttributionLogFields } from "./request-attribution";
 import { isEventStream, MessagesIntegrityError, NativeMessagesIntegrity, publicStrictMessagesResponse, type NativeMessagesRequest } from "./messages-native-integrity";
 import { decodeRequestBody, readBoundedJsonRequestBody, resolveInboundBodyLimitBytes, DecompressedBodyTooLargeError } from "./request-decompress";
 import { effortFromOutputConfig, nativeAnthropicProjection, resolveInboundModel } from "../claude/inbound";
@@ -237,7 +238,8 @@ export async function handleStrictNativeMessages(
     if (route.modelId !== body.model || nativeMessagesDeclineReason(route, body, config, selector)) throw new MessagesIntegrityError();
     assertRouteAllowedByScope(options.modelScope, clientFacingModelLabel(body.model), route);
     assertClientNamedModelEnabled(config, clientFacingModelLabel(body.model), route, body.model);
-    const integrity = new NativeMessagesIntegrity(req, wire, body);
+    // The log context carries the attribution admission computed; the snapshot is re-bounded.
+    const integrity = new NativeMessagesIntegrity(req, wire, body, requestAttributionLogFields(options.logCtx));
     if (integrity.countTokens) {
       // Counting is a physical request, not generated-token usage.
       options.logCtx.spendInputEstimateTokens = 0;
@@ -641,6 +643,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
       providerAccountUuid: oauthBinding?.providerAccountUuid,
       clientIdentity: options.clientIdentity,
       sessionKey: oauthBinding?.sessionKey ?? options.sessionKey,
+      callerHeaders: req.headers, attribution: requestAttributionLogFields(logCtx),
     });
     if (built.strippedOpaqueState && rejectUnrepresentable) throw new NativeOpaqueStateRefusal();
     if (built.droppedBetas) {

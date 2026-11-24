@@ -988,7 +988,7 @@ export async function handleResponsesCompact(
     // Responses transport for custom paths, static auth and explicitly forwarded client metadata.
     const gatewayTransport = !isCanonicalOpenAiForwardProvider(compactProvider)
       && compactProvider.supportsNativeCompactEndpoint === true
-      ? buildResponsesTransport({ ...compactProvider, apiKey: compactProvider.apiKey ? resolveProviderApiKey(compactProvider.apiKey) : undefined }, { headers: req.headers })
+      ? buildResponsesTransport({ ...compactProvider, apiKey: compactProvider.apiKey ? resolveProviderApiKey(compactProvider.apiKey) : undefined }, { headers: req.headers, attribution: admission?.attribution })
       : undefined;
     if (gatewayTransport) {
       headers = new Headers(gatewayTransport.headers);
@@ -1255,7 +1255,7 @@ export async function handleResponsesCompact(
                 for (const [name, value] of Object.entries(current.headers ?? {})) rebuilt.set(name, value);
                 rebuilt.set("authorization", `Bearer ${resolveProviderApiKey(current.apiKey)}`);
                 const currentGateway = gatewayTransport
-                  ? buildResponsesTransport({ ...current, apiKey: resolveProviderApiKey(current.apiKey) }, { headers: req.headers })
+                  ? buildResponsesTransport({ ...current, apiKey: resolveProviderApiKey(current.apiKey) }, { headers: req.headers, attribution: admission?.attribution })
                   : undefined;
                 sendHeaders = wireHeaders = headers = currentGateway ? new Headers(currentGateway.headers) : rebuilt;
                 sendProvider = compactProvider = current;
@@ -1823,7 +1823,7 @@ export async function handleResponsesCompact(
       input: [...inputItems, { type: "compaction_trigger" }],
     };
     const internalHeaders = copyCodexForwardHeaders(req.headers, new Headers({ "content-type": "application/json" }));
-    copyResponsesClientMetadata(internalHeaders, req.headers, route.provider);
+    copyResponsesClientMetadata(internalHeaders, req.headers, route.provider, admission?.attribution);
     const internalReq = new Request("http://localhost/v1/responses", {
       method: "POST",
       headers: internalHeaders,

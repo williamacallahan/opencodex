@@ -1,3 +1,5 @@
+import type { RequestAttribution } from "../server/request-attribution";
+
 const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const BLOCKED_FORWARDED_CLIENT_HEADERS = new Set([
   "authorization",
@@ -88,6 +90,16 @@ export function isDeclaredGatewayIdentity(value: string): boolean {
   return GATEWAY_IDENTITY_VALUE.test(value) && !HUB_OPERATION_SUFFIXES.some(suffix => value.endsWith(suffix));
 }
 
+/**
+ * Whether a provider row opted in to gateway attribution: its `forwardClientHeaders` names `x-user-id` or
+ * `x-lgw-cache-key`. Only such a row (an LLM gateway or the codex-lb relay) receives the caller's workload,
+ * conversation, machine name or address; every other row receives none of them.
+ */
+export function optsInToGatewayAttribution(forwardClientHeaders: readonly string[] | undefined): boolean {
+  return Array.isArray(forwardClientHeaders) && forwardClientHeaders.slice(0, MAX_FORWARDED_CLIENT_HEADERS)
+    .some(raw => { const name = normalizeForwardedClientHeaderName(raw); return name !== null && GATEWAY_IDENTITY_HEADERS.has(name); });
+}
+
 /** Whether a caller's value may be forwarded under this header name: gateway identities need a launcher's form. */
 export function forwardedClientHeaderValueAllowed(name: string, value: string): boolean {
   if (!GATEWAY_IDENTITY_HEADERS.has(name)) return true;
@@ -123,29 +135,37 @@ export function deriveClientWorkloadLabel(incoming: Headers | undefined): string
 
 /**
  * The provider's opted-in caller metadata that passes the name allowlist and the value gate, in configured order.
- * An opted-in `x-user-id` is never absent: a caller that sent none (or a foreign one) gets its derived label, so
- * the gateway never falls back to the hub key's name for the workload.
+ * An opted-in `x-user-id` is never absent. With the admitted request's attribution it is that attribution's
+ * workload (declared, else the harness session, else the hub label) and `x-lgw-cache-key` is only the caller's
+ * declared one; without it (a hub-originated call) the incoming value or the derived label is used. A row opted in
+ * to either gateway identity header is an LLM gateway row, so it also gets the caller's validated machine name and
+ * the address the hub observed. No other row receives any of these.
  */
 export function forwardableClientHeaders(
-  forwardClientHeaders: readonly string[] | undefined, incoming: Headers | undefined,
+  forwardClientHeaders: readonly string[] | undefined, incoming: Headers | undefined, attribution?: RequestAttribution,
 ): Array<[name: string, value: string]> {
   if (!Array.isArray(forwardClientHeaders)) return [];
   const forwardable: Array<[string, string]> = [];
   for (const rawName of forwardClientHeaders.slice(0, MAX_FORWARDED_CLIENT_HEADERS)) {
     const name = normalizeForwardedClientHeaderName(rawName);
     if (name === null) continue;
-    const value = incoming?.get(name);
+    const identity = attribution && GATEWAY_IDENTITY_HEADERS.has(name);
+    const value = identity ? (name === USER_ID_HEADER ? attribution.workload : attribution.conversationKey) : incoming?.get(name);
     if (value && forwardedClientHeaderValueAllowed(name, value)) forwardable.push([name, value]);
     else if (name === USER_ID_HEADER) forwardable.push([name, deriveClientWorkloadLabel(incoming)]);
   }
+  const gatewayRow = optsInToGatewayAttribution(forwardClientHeaders);
+  if (gatewayRow && attribution?.clientHost) forwardable.push(["x-lgw-client-host", attribution.clientHost]);
+  if (gatewayRow && attribution?.clientAddress) forwardable.push(["x-lgw-client-address", attribution.clientAddress]);
   return forwardable;
 }
 
 /** Copy the provider's opted-in caller metadata onto outbound headers it has not already set. */
 export function copyForwardedClientHeaders(
   forwardClientHeaders: readonly string[] | undefined, headers: Record<string, string>, incoming: Headers | undefined,
+  attribution?: RequestAttribution,
 ): void {
-  for (const [name, value] of forwardableClientHeaders(forwardClientHeaders, incoming)) {
+  for (const [name, value] of forwardableClientHeaders(forwardClientHeaders, incoming, attribution)) {
     if (!Object.keys(headers).some(existing => existing.toLowerCase() === name)) headers[name] = value;
   }
 }

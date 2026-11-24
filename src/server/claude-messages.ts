@@ -7,7 +7,7 @@ import { ownedDisabledModelResponse, normalizeMessagesProxyRefusal, ownedAnthrop
 import { CLAUDE_CONTEXT_OVERFLOW_MESSAGE, isProxyError, markProxyError, carryProxyError, attachComboFailureEvidence, comboFailureEvidence } from "../lib/client-error-body";
 import type { MessagesFailureVerdictSink } from "../claude/failure-verdict";
 import { clientFacingModelLabel, clientFacingModelText } from "../lib/error-destination";
-import { GATEWAY_IDENTITY_HEADERS, deriveClientWorkloadLabel, forwardedClientHeaderValueAllowed, isGatewayAttributionHeader } from "../lib/provider-client-headers";
+import { GATEWAY_IDENTITY_HEADERS, forwardedClientHeaderValueAllowed, isGatewayAttributionHeader } from "../lib/provider-client-headers";
 import { classifyUpstreamCondition } from "../lib/upstream-condition";
 import { CodexInstallationIdUnavailableError } from "../codex/installation-id";
 import { recordLocalFailureDetail, type FailureDetail } from "./request-log-failure-detail";
@@ -100,6 +100,7 @@ import { readJsonRequestBody, readBoundedJsonRequestBody, resolveInboundBodyLimi
 import { claudeWireSessionId } from "../adapters/openai-responses/transport";
 import { callerSessionAlias, claudeTranscriptQualifier, promotedCallerSession, scopedWireHash, safeCallerSessionId, withCallerSessionIdentity } from "./caller-session-identity";
 import { addFinalRequestLog, httpStatusForRequestLogTerminal, nextRequestLogId, recordFirstOutput, type RequestLogContext } from "./request-log";
+import { requestWorkload } from "./request-attribution";
 import { admissionFields } from "./auth-cors";
 import { createFinalRequestLog } from "./inference/final-log";
 import {
@@ -1402,8 +1403,8 @@ async function handleClaudeMessagesWithBudget(
     const value = req.headers.get(name);
     if (value && forwardedClientHeaderValueAllowed(name, value)) headers.set(name, value);
   }
-  // The hop drops the caller's User-Agent, so derive the label before rebuilding the request.
-  if (!headers.has("x-user-id")) headers.set("x-user-id", deriveClientWorkloadLabel(req.headers));
+  // The hop drops the caller's User-Agent and native session, so carry the caller's workload across it.
+  headers.set("x-user-id", requestWorkload(req, admission?.attribution));
   // Routed replays need main ChatGPT auth so OpenAI-backed sidecars remain reachable;
   // native replays have no caller ChatGPT credential. This enrichment is optional:
   // auth-context later rejects a real physical-main selection, while routed/pool

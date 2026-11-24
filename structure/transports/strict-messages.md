@@ -61,7 +61,10 @@ The request header filter also excludes ingress topology/identity: `Forwarded`, 
 `X-Forwarded-*`, `Tailscale-User-*` and `Tailscale-Headers-Info`. These reserved ingress fields
 are not application headers. The same filter drops the gateway attribution headers (`X-User-ID` and
 every `X-LGW-*`, `isGatewayAttributionHeader` in `src/lib/provider-client-headers.ts`): the hub
-records them on its own row from the original request, and no vendor receives them. This filter also
+records them on its own row from the original request, and no vendor receives them. A provider row
+that opted in through `forwardClientHeaders` (an LLM gateway row) gets its opted-in names back from
+the caller's headers through `copyForwardedClientHeaders`, the same gate the translated lanes use;
+the caller-credential lane sends to `claudeCode.anthropicBaseUrl`, which has no opt-in. This filter also
 feeds the `agy`, Devin and `/vibe` pass-throughs; the caller-credential native lane in
 `src/server/claude-messages.ts` and the Claude intercept relay apply the same predicate. Other caller
 application headers and response end-to-end fields remain intact.

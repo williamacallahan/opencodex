@@ -12,6 +12,7 @@ import { tryAdmitTurn } from "../lifecycle";
 import type { RequestLogContext } from "../request-log";
 import { createSseInspector } from "../relay";
 import type { HandleResponsesOptions } from "./core-options";
+import type { DataPlaneAdmission } from "../auth-cors";
 
 type HandleResponses = (
   req: Request,
@@ -27,6 +28,11 @@ export interface JevModelInvokerContext {
   /** Parent options: only the resolved admission scope, Advisor caller policy and Codex auth policy cross over. */
   options: Pick<HandleResponsesOptions, "admission" | "admissionScope" | "advisorAdmissionPolicy" | "codexAuthPolicy">;
   handleResponses: HandleResponses;
+}
+
+function withoutCallerAttribution(admission: DataPlaneAdmission): DataPlaneAdmission {
+  const { attribution: _parentAttribution, ...internal } = admission;
+  return internal;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -149,7 +155,9 @@ export function createJevModelInvoker(context: JevModelInvokerContext): JevModel
       });
       const response = await context.handleResponses(request, context.config, childLog, {
         abortSignal: signal,
-        ...(context.options.admission ? { admission: context.options.admission } : {}),
+        // The parent's admission authorizes the call, but its caller attribution does not carry over: a
+        // gateway row sees the hub's own decision call (`opencodex:hub-internal`), not the parent's identity.
+        ...(context.options.admission ? { admission: withoutCallerAttribution(context.options.admission) } : {}),
         // The parent's resolved snapshot, not a scope recomputed from its admission: a
         // capability-authenticated internal call carries the caller's scope while its own
         // admission is the host's broad key.

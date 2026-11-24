@@ -575,7 +575,7 @@ export async function executeResponsesSidecars(
       chatRawReasoningVisible: options.chatRawReasoningVisible,
       ...(transportState.adapter.name === "anthropic" ? { thinkingRecovery } : {}),
       clientToolCatalogRestriction: route.provider.authMode === "forward" ? undefined : requestState.clientToolCatalogRestriction,
-      incomingMeta: { headers: requestState.selectedForwardHeaders, providerName: route.providerName, abortSignal: options.abortSignal, translatorBudget, ...(options.comboInitialSend ? { providerFetch: imageProviderFetch } : {}), ...sidecarBudget.incomingMeta },
+      incomingMeta: { headers: requestState.selectedForwardHeaders, providerName: route.providerName, attribution: options.admission?.attribution, abortSignal: options.abortSignal, translatorBudget, ...(options.comboInitialSend ? { providerFetch: imageProviderFetch } : {}), ...sidecarBudget.incomingMeta },
       onProducerStart: sidecarBudget.takeProducerOwnership,
       onProducerEnd: sidecarBudget.release,
       onIterationEnd: sidecarBudget.releaseUnsentHop,
@@ -714,7 +714,7 @@ export async function executeResponsesSidecars(
       }),
       incomingMeta: {
         headers: requestState.selectedForwardHeaders,
-        providerName: route.providerName,
+        providerName: route.providerName, attribution: options.admission?.attribution,
         abortSignal: options.abortSignal,
         translatorBudget,
         providerFetch: routedProviderFetch,

@@ -3,6 +3,7 @@ import { applyChatDestinationPolicy, mistralNativeChatEffort } from "./destinati
 import { protectGlmSummaryBudget } from "./summary-budget";
 import { openAIChatTransport, stripBracketedModelSuffix } from "./wire";
 import { copyForwardedClientHeaders } from "../../lib/provider-client-headers";
+import type { RequestAttribution } from "../../server/request-attribution";
 import type { AdapterRequest } from "../base";
 import { frameAgentRouterMessages } from "../agentrouter";
 import { applyExplicitChatDeveloperRole } from "./developer-role";
@@ -72,9 +73,10 @@ export function buildOpenAIChatPassthroughRequest(
   maxSerializedBytes = TRANSLATOR_MAX_TURN_BYTES,
   translatorBudget?: TranslatorBudget,
   incomingHeaders?: Headers,
+  attribution?: RequestAttribution,
 ): AdapterRequest {
   const { url, headers, hasCredential } = openAIChatTransport(provider, providerName);
-  copyForwardedClientHeaders(provider.forwardClientHeaders, headers, incomingHeaders);
+  copyForwardedClientHeaders(provider.forwardClientHeaders, headers, incomingHeaders, attribution);
 
   const body: Record<string, unknown> = {
     model: provider.modelSuffixBracketStrip ? stripBracketedModelSuffix(modelId) : modelId,
