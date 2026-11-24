@@ -19,11 +19,13 @@ prefix on the public listener only, through one dynamic-import line in
   headers and body return unchanged except for hop-by-hop framing; SSE streams pass through as bytes.
 - **One send.** No retry, no translation, no failover to another account inside a request. A 429
   cools the account in the generic OAuth pool (`rotateGenericOAuthAccountOn429`) for later
-  project-less calls. A 403 on a generation call (`streamGenerateContent`, `generateContent`,
-  `countTokens`), such as an account Google holds at "Verification Required", cools that account for
-  6 hours or until its sign-in changes (`coolAntigravityAccountOnAuthRefusal`): an unused account
-  ranks least used, so without it every new caller landed on the refusing account. The 403 itself
-  passes through. Local refusals use Google's error shape with an `opencodex:` message prefix.
+  project-less calls. A 403 passes through while a bounded copy of its body is read: when
+  `classifyAntigravityRefusal` (`src/adapters/antigravity-refusal.ts`) finds Google's verification
+  demand, the account is marked `needs-reauth(verify)` with `markAccountNeedsReauthIfGeneration`,
+  fenced to the sign-in that was sent, the same durable mark the translated lane writes. The chooser
+  skips it until a new sign-in clears it; without the mark, an unused account ranks least used and
+  drew every new caller. Any other 403 (a model or project refusal) leaves the account in the pool.
+  Local refusals use Google's error shape with an `opencodex:` message prefix.
 - **Provider row optional.** The pool is the `google-antigravity` OAuth store; the lane needs no
   `config.providers["google-antigravity"]` row. With the switch on, a row (a Google login adds one)
   is listed by `GET /api/providers` with `nativeHarness: "agy"`, the catalog lists none of its
@@ -127,7 +129,7 @@ for open streams. A 401 from Google forces a token refresh for the next request.
 
 Coverage: `tests/server/agy-passthrough.test.ts` drives the real public listener against a loopback
 Cloud Code capture with synthetic accounts: byte, path, query and header preservation; caller
-affinity and project learning; usage balancing, same-project moves and sign-in-bound learned projects; 429 pass-through and cooldown; the 403 generation cooldown; refusals before any upstream call; and
+affinity and project learning; usage balancing, same-project moves and sign-in-bound learned projects; 429 pass-through and cooldown; the verify-refusal quarantine and an untouched non-verify 403; refusals before any upstream call; and
 a translated Responses turn refused with the switch on. `tests/server/agy-passthrough-resilience.test.ts`
 covers zero-AST project extraction, cooled-down project-owner failover, async gzip/deflate/brotli decoding,
 bounded header timeouts, and redacted upstream failure logging.

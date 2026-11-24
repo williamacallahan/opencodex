@@ -439,24 +439,6 @@ export function hasEligibleGenericOAuthFailoverTarget(
     ? preferKiroModelSupport(providerName, siblings, requestedModelId) : siblings).length > 0;
 }
 
-/**
- * Cool an Antigravity account Google refused, fenced to the sign-in that was sent: a new token or
- * login for the slot ends the cooldown early. A family-less cooldown covers the whole account.
- */
-export function coolAntigravityAccountOnAuthRefusal(
-  failedAccountId: string,
-  sentGeneration: string,
-  { cooldownMs = DEFAULT_COOLDOWN_MS, family, now = Date.now() }: { cooldownMs?: number; family?: QuotaModelFamily; now?: number } = {},
-): void {
-  const failed = getAccountSet("google-antigravity")?.accounts.find(row => row.id === failedAccountId);
-  if (!failed || credentialGeneration(failed.credential) !== sentGeneration) return;
-  health.set(healthKey("google-antigravity", failedAccountId, family), {
-    cooldownUntil: now + cooldownMs, cooldownSource: "auth", identity: sentGeneration,
-  });
-  presence.delete("google-antigravity");
-  sweepExpiredOnWrite(now);
-}
-
 /** Select a live Antigravity sibling using activation captured before the refused send. */
 export function rotateAntigravityAccountOnAuthRefusal(
   poolActivated: boolean,
@@ -469,7 +451,16 @@ export function rotateAntigravityAccountOnAuthRefusal(
   const set = getAccountSet("google-antigravity");
   if (!set || set.accounts.length < 2) return null;
   const family = classifyModelFamilyForQuota("google-antigravity", requestedModelId);
-  coolAntigravityAccountOnAuthRefusal(failedAccountId, sentGeneration, { family, now });
+  const failed = set.accounts.find(row => row.id === failedAccountId);
+  if (failed && credentialGeneration(failed.credential) === sentGeneration) {
+    health.set(healthKey("google-antigravity", failedAccountId, family), {
+      cooldownUntil: now + DEFAULT_COOLDOWN_MS,
+      cooldownSource: "auth",
+      identity: sentGeneration,
+    });
+    presence.delete("google-antigravity");
+    sweepExpiredOnWrite(now);
+  }
   const eligible = new Set(preferKiroModelSupport("google-antigravity",
     eligibleIdsIn(set, "google-antigravity", now, family).filter(id => id !== failedAccountId), requestedModelId));
   const order = set.accounts.map(row => row.id);

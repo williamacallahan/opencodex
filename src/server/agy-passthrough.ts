@@ -30,7 +30,7 @@ import {
   type ExactResponse,
 } from "./agy-passthrough-send";
 import { forceRefreshOAuthAccessSnapshot, getValidAccessSnapshotForAccount } from "../oauth";
-import { coolAntigravityAccountOnAuthRefusal, rotateGenericOAuthAccountOn429 } from "../oauth/generic-account-failover";
+import { rotateGenericOAuthAccountOn429 } from "../oauth/generic-account-failover";
 import { extractProjectId } from "../oauth/google-antigravity";
 import { oauthAccountLogLabel } from "../codex/account-label";
 import { nativeHarnessOnly } from "../lib/native-harness";
@@ -38,7 +38,8 @@ import { ANTIGRAVITY_OAUTH_STORE_KEY } from "../providers/antigravity-quota-iden
 import { PROVIDER_REGISTRY } from "../providers/registry";
 import { observedAntigravityAccountQuota, recordPassiveAccountQuota } from "../providers/quota/account-cache";
 import { antigravityLoginIdentity } from "../providers/antigravity-quota-identity";
-import { getAccountCredential } from "../oauth/store";
+import { getAccountCredential, markAccountNeedsReauthIfGeneration } from "../oauth/store";
+import { classifyAntigravityRefusal } from "../adapters/antigravity-refusal";
 import { antigravityQuotaFromRelayedAnswer } from "../providers/quota/antigravity";
 import { captureConfigGeneration } from "../lib/state-store-sweeper";
 import { classifyUsageClient } from "../usage/client";
@@ -61,7 +62,6 @@ const CLOUD_CODE_METHOD = /^\/v1internal:[A-Za-z]+$/;
 /** Generation calls always carry their account's project; refusing a project-less one keeps them off rotation. */
 const PROJECT_REQUIRED = /^\/v1internal:(?:streamGenerateContent|generateContent|countTokens)$/;
 const AGY_USER_AGENT = /^antigravity\/cli\//;
-const REFUSED_ACCOUNT_COOLDOWN_MS = 6 * 60 * 60_000;
 const REGISTRY_ORIGIN = new URL(PROVIDER_REGISTRY.find(entry => entry.id === ANTIGRAVITY_OAUTH_STORE_KEY)!.baseUrl).origin;
 
 export interface AgyPassthroughContext {
@@ -281,6 +281,18 @@ function cloudCodeOrigin(config: OcxConfig): string {
 
 /** A bounded, decoded copy of a relayed JSON answer; undefined when it is too large or not a JSON object. */
 async function readRelayedJson(copy: ReadableStream<Uint8Array>, contentEncoding: string | null): Promise<Record<string, unknown> | undefined> {
+  const text = await readRelayedText(copy, contentEncoding);
+  if (text === undefined) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A bounded, decoded copy of a relayed answer's text; undefined when it is too large or unreadable. */
+async function readRelayedText(copy: ReadableStream<Uint8Array>, contentEncoding: string | null): Promise<string | undefined> {
   const reader = copy.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -294,9 +306,7 @@ async function readRelayedJson(copy: ReadableStream<Uint8Array>, contentEncoding
     }
     // The decoded copy has the same bound, so a small compressed answer cannot expand past it.
     const plain = await decodeBoundedPayload(Buffer.concat(chunks), contentEncoding, MAX_OBSERVED_ANSWER_BYTES);
-    if (!plain) return undefined;
-    const parsed: unknown = JSON.parse(utf8Decoder.decode(plain));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+    return plain ? utf8Decoder.decode(plain) : undefined;
   } catch {
     return undefined;
   } finally {
@@ -326,6 +336,23 @@ async function observeRelayedAnswer(copy: ReadableStream<Uint8Array>, contentEnc
   // what usage balancing ranks by (a summary within the routing horizon replaces it instead).
   if (method === "fetchAvailableModels" && kept?.customWindows?.some(window => window.modelId === undefined)) return;
   recordPassiveAccountQuota(ANTIGRAVITY_OAUTH_STORE_KEY, accountId, quota, writerGeneration, login);
+}
+
+/**
+ * Take an account out of the pool when Google answers it with the verification demand: every turn sent to it
+ * fails, and an unused account ranks least used, so it draws each new caller. This is the same durable mark the
+ * translated lane writes (`needs-reauth(verify)`), fenced to the sign-in that was sent and cleared by a new sign-in;
+ * any other 403 (a model or project refusal) leaves the account in the pool.
+ */
+async function quarantineVerifyRefusal(copy: ReadableStream<Uint8Array>, contentEncoding: string | null, accountId: string,
+  sentGeneration: string, writerGeneration: number): Promise<void> {
+  const text = await readRelayedText(copy, contentEncoding);
+  if (text === undefined || classifyAntigravityRefusal(403, text).kind !== "verify_account") return;
+  try {
+    await markAccountNeedsReauthIfGeneration(ANTIGRAVITY_OAUTH_STORE_KEY, accountId, sentGeneration, writerGeneration, "verify_account");
+  } catch (error) {
+    console.warn(`[agy-passthrough] could not mark ${oauthAccountLogLabel(accountId, ANTIGRAVITY_OAUTH_STORE_KEY)} for verification: ${error instanceof Error ? error.name : "unknown"}`);
+  }
 }
 
 /** One caller is one hub key plus the agy sign-in it presents; the bearer itself is never stored. */
@@ -440,18 +467,16 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
   }
   // A token Google rejected before its recorded expiry: mint a fresh one for the next request.
   if (upstream.status === 401) void forceRefreshOAuthAccessSnapshot(snapshot).catch(() => {});
-  // A generation refused 403 (an account Google holds at "Verification Required") fails every turn sent to it,
-  // and an unused account ranks least used, so it drew each new caller. Cooling it moves this caller at its
-  // next loadCodeAssist and keeps new callers off it until the cooldown ends or its sign-in changes.
-  if (upstream.status === 403 && PROJECT_REQUIRED.test(parts.method)) {
-    coolAntigravityAccountOnAuthRefusal(choice.accountId, snapshot.generation, { cooldownMs: REFUSED_ACCOUNT_COOLDOWN_MS });
-  }
   let clientBody = upstream.body;
   const method = parts.method.slice("/v1internal:".length);
   if (upstream.status >= 200 && upstream.status < 300 && (method === "loadCodeAssist" || isQuotaMethod(method))) {
     const [forClient, forObserver] = upstream.body.tee();
     clientBody = forClient;
     void observeRelayedAnswer(forObserver, upstream.headers.get("content-encoding"), choice.accountId, method, quotaWriterGeneration, quotaLogin);
+  } else if (upstream.status === 403) {
+    const [forClient, forObserver] = upstream.body.tee();
+    clientBody = forClient;
+    void quarantineVerifyRefusal(forObserver, upstream.headers.get("content-encoding"), choice.accountId, snapshot.generation, quotaWriterGeneration);
   }
   return new Response(
     createSettledPassthroughBody({

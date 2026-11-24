@@ -457,29 +457,39 @@ describe("agy pass-through public HTTP lane", () => {
     expect(calls).toHaveLength(before + 2);
   });
 
-  test("an account Google refuses a generation with 403 passes it through, then leaves rotation for its caller and new callers", async () => {
-    await launch();
-    let served = "";
-    const denied = '{"error":{"code":403,"message":"Verification Required","status":"PERMISSION_DENIED"}}';
-    reply = captured => { served = captured.headers.get("authorization")!; return Response.json({}); };
-    expect((await post("loadCodeAssist", "{}")).status).toBe(200);
-    const refused = served;
-    const project = Object.keys(tokens).find(id => tokens[id] === refused)!;
-    reply = captured => {
-      served = captured.headers.get("authorization")!;
-      return new Response(denied, { status: 403, headers: { "content-type": "application/json" } });
-    };
-    const answer = await post("streamGenerateContent", JSON.stringify({ project, request: {} }));
-    expect(answer.status).toBe(403);
-    expect(answer.text).toBe(denied);
-    reply = captured => { served = captured.headers.get("authorization")!; return Response.json({}); };
-    expect((await post("loadCodeAssist", "{}")).status).toBe(200);
-    expect(served).not.toBe(refused);
-    for (const caller of ["first", "second", "third"]) {
-      expect((await post("loadCodeAssist", "{}", { authorization: `Bearer new-caller-${caller}` })).status).toBe(200);
-      expect(served).not.toBe(refused);
-    }
-  });
+  for (const [label, message, quarantined] of [
+    ["Google's verification demand marks the account needs-reauth(verify) and moves its callers", "Please verify your account to continue using Antigravity.", true],
+    ["any other 403 passes through and leaves the account in the pool", "Permission denied on model gemini-3.8-pro for this tier.", false],
+  ] as const) {
+    test(label, async () => {
+      await launch();
+      let served = "";
+      const denied = JSON.stringify({ error: { code: 403, message, status: "PERMISSION_DENIED" } });
+      reply = captured => { served = captured.headers.get("authorization")!; return Response.json({}); };
+      expect((await post("loadCodeAssist", "{}")).status).toBe(200);
+      const refused = served;
+      const project = Object.keys(tokens).find(id => tokens[id] === refused)!;
+      const refusedRow = () => getAccountSet("google-antigravity")!.accounts.find(row => row.credential.projectId === project)!;
+      reply = captured => {
+        served = captured.headers.get("authorization")!;
+        return new Response(denied, { status: 403, headers: { "content-type": "application/json" } });
+      };
+      const answer = await post("streamGenerateContent", JSON.stringify({ project, request: {} }));
+      expect(answer.status).toBe(403);
+      expect(answer.text).toBe(denied);
+      for (let wait = 0; wait < 50 && refusedRow().needsReauth !== true; wait++) await Bun.sleep(10);
+      expect(refusedRow().needsReauth === true).toBe(quarantined);
+      if (quarantined) expect(refusedRow().needsReauthReason).toBe("verify_account");
+      reply = captured => { served = captured.headers.get("authorization")!; return Response.json({}); };
+      expect((await post("loadCodeAssist", "{}")).status).toBe(200);
+      expect(served === refused).toBe(!quarantined);
+      if (!quarantined) return;
+      for (const caller of ["first", "second", "third"]) {
+        expect((await post("loadCodeAssist", "{}", { authorization: `Bearer new-caller-${caller}` })).status).toBe(200);
+        expect(served).not.toBe(refused);
+      }
+    });
+  }
 
   test("refuses before any upstream call when the key, client, project, account or switch does not qualify", async () => {
     await launch({ allowedProviders: ["google-antigravity"] });
