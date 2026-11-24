@@ -21,7 +21,10 @@ one branch in `src/server/index/serve-options.ts`.
   cooldowns (`Retry-After` / `x-ratelimit-reset-*`), and calendar-month 402 parks
   (`billing_vibe_budget_exhausted` / code `2304`, persisted in `vibe-key-cooldowns.json`). When a
   pooled key fails pre-output with 401/402(budget)/429/502/503/504 and a distinct healthy sibling
-  exists, the lane performs at most one byte-identical pre-output retry.
+  exists, the lane performs at most one byte-identical pre-output retry. An inference request
+  authenticated by a key scoped only to `mistral-vibe` may set `X-OpenCodex-Max-Sends: 1` to
+  disable all retries. The header is never forwarded upstream. Logged inference responses carry
+  `X-OpenCodex-Request-Id`, matching the request log row, whose `spend.sends` counts physical sends.
 - **Reservation.** When `nativeHarnessOnly` in `src/lib/native-harness.ts` is on, `mistral-vibe`
   reports `nativeHarness: "vibe"` in `/api/providers`, is excluded from bare routing, catalog
   discovery, key quota probes, and translated Chat/Responses/Messages dispatch, while metered

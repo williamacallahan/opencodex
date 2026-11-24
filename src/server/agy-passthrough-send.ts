@@ -10,6 +10,37 @@ import { Agent as HttpAgent, request as httpRequest, type IncomingMessage } from
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import type { Socket } from "node:net";
 import { redactSecretString, sanitizeLogMetadataString } from "../lib/redact";
+import { createSseInspector } from "./relay";
+
+/** Passively inspect bounded JSON or SSE payloads without changing relayed bytes. */
+export function createPassthroughPayloadObserver(
+  contentType: string | null,
+  contentEncoding: string | null,
+  maxJsonBytes: number,
+  onPayload: (payload: unknown) => void,
+): { observe(chunk: Uint8Array): void; finish(): void } {
+  const ct = (contentType ?? "").split(";")[0]!.trim().toLowerCase();
+  const unencoded = !contentEncoding || contentEncoding.trim().toLowerCase() === "identity";
+  const inspector = unencoded && ct === "text/event-stream" ? createSseInspector({ onParsedPayload: onPayload }) : null;
+  let chunks: Uint8Array[] | null = unencoded && ct === "application/json" ? [] : null;
+  let bytes = 0;
+  return {
+    observe(chunk) {
+      inspector?.feed(chunk);
+      if (!chunks) return;
+      bytes += chunk.byteLength;
+      if (bytes > maxJsonBytes) chunks = null;
+      else chunks.push(chunk);
+    },
+    finish() {
+      inspector?.finish();
+      if (!chunks || bytes === 0) return;
+      try { onPayload(JSON.parse(new TextDecoder().decode(Buffer.concat(chunks)))); }
+      catch { /* Observation must not change passthrough delivery. */ }
+      chunks = null;
+    },
+  };
+}
 
 const AGENT_OPTIONS = {
   keepAlive: true,

@@ -247,6 +247,7 @@ describe("vibe pass-through key pool resilience", () => {
           "user-agent": vibeUa,
           "content-type": "application/json",
           "x-affinity": "retry-session",
+          "x-opencodex-max-sends": "1",
         },
       }, message => {
         let text = "";
@@ -307,8 +308,9 @@ describe("vibe pass-through key pool resilience", () => {
 
   test("handles compressed 402 budget failover, untruncated non-budget 402, 401/drop settlement, and concurrent/oversized SSE streams", async () => {
     resetVibePassthroughKeyStateForTests();
-    let scenario: "gzip-budget-402" | "non-budget-402-small" | "non-budget-402-large" | "fail-401" | "sse-utf8-oversize" = "gzip-budget-402";
+    let scenario: "gzip-budget-402" | "non-budget-402-small" | "non-budget-402-large" | "fail-401" | "fail-429" | "server-error" | "sse-utf8-oversize" = "gzip-budget-402";
     let upstreamCalls = 0;
+    let errorStatus = 502;
     const largeNonBudgetPayload = JSON.stringify({ error: { code: "payment_required", detail: "p".repeat(80 * 1024) } });
 
     upstream = Bun.serve({
@@ -344,6 +346,8 @@ describe("vibe pass-through key pool resilience", () => {
           });
           return new Response(stream, { status: 402, headers: { "content-type": "application/json" } });
         }
+        if (scenario === "server-error") return new Response("upstream failed", { status: errorStatus });
+        if (scenario === "fail-429") return new Response("rate limited", { status: 429 });
         if (scenario === "fail-401") {
           if (upstreamCalls === 1) return new Response('{"error":"bad key"}', { status: 401 });
           return new Response(JSON.stringify({ id: "ok-401-failover" }), { status: 200, headers: { "content-type": "application/json" } });
@@ -381,7 +385,7 @@ describe("vibe pass-through key pool resilience", () => {
       hostname: "0.0.0.0",
       defaultProvider: VIBE_PROVIDER_ID,
       nativeHarnessOnly: true,
-      apiKeys: [{ id: "vibe", name: "vibe", key: hubKey, createdAt: "2026-01-01T00:00:00.000Z" }],
+      apiKeys: [{ id: "vibe", name: "vibe", key: hubKey, createdAt: "2026-01-01T00:00:00.000Z", allowedProviders: [VIBE_PROVIDER_ID] }],
       providers: {
         [VIBE_PROVIDER_ID]: {
           adapter: "openai-chat",
@@ -404,7 +408,7 @@ describe("vibe pass-through key pool resilience", () => {
     bindNativeHarnessConfig(config);
     proxy = (await import("../../src/server")).startServer(0);
 
-    const postVibe = (extraHeaders: Record<string, string> = {}) => new Promise<{ status: number; text: string }>((resolve, reject) => {
+    const postVibe = (extraHeaders: Record<string, string> = {}) => new Promise<{ status: number; text: string; requestId: string | string[] | undefined }>((resolve, reject) => {
       const req = request({
         host: "127.0.0.1",
         port: proxy!.port,
@@ -415,7 +419,7 @@ describe("vibe pass-through key pool resilience", () => {
         let text = "";
         message.setEncoding("utf8");
         message.on("data", chunk => { text += chunk; });
-        message.on("end", () => resolve({ status: message.statusCode ?? 0, text }));
+        message.on("end", () => resolve({ status: message.statusCode ?? 0, text, requestId: message.headers["x-opencodex-request-id"] }));
       });
       req.on("error", reject);
       req.end('{"model":"devstral-latest","messages":[]}');
@@ -448,6 +452,25 @@ describe("vibe pass-through key pool resilience", () => {
     expect(res401.status).toBe(200);
     expect(upstreamCalls).toBe(2);
 
+    for (const failed of ["gzip-budget-402", "fail-401", "fail-429"] as const) {
+      clearKeyCooldowns(VIBE_PROVIDER_ID);
+      scenario = failed;
+      upstreamCalls = 0;
+      const single = await postVibe({ "x-opencodex-max-sends": "1" });
+      expect(single.status).toBe(failed === "gzip-budget-402" ? 402 : failed === "fail-401" ? 401 : 429);
+      expect(upstreamCalls).toBe(1);
+    }
+
+    for (const status of [502, 503, 504]) {
+      clearKeyCooldowns(VIBE_PROVIDER_ID);
+      scenario = "server-error";
+      errorStatus = status;
+      upstreamCalls = 0;
+      const single = await postVibe({ "x-opencodex-max-sends": "1" });
+      expect(single.status).toBe(status);
+      expect(upstreamCalls).toBe(1);
+    }
+
     clearKeyCooldowns(VIBE_PROVIDER_ID);
     scenario = "sse-utf8-oversize";
     clearRequestLogsForTests();
@@ -469,8 +492,10 @@ describe("vibe pass-through key pool resilience", () => {
     }
 
     // Raw TCP server that truncates a 402 body mid-stream -> must settle 502 without leaking ActiveTurnLease.
+    let dropSends = 0;
     const dropServer = createNetServer(socket => {
       socket.once("data", () => {
+        dropSends++;
         socket.write("HTTP/1.1 402 Payment Required\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n{\"partial\":");
         socket.destroy();
       });
@@ -483,7 +508,8 @@ describe("vibe pass-through key pool resilience", () => {
         [VIBE_PROVIDER_ID]: {
           adapter: "openai-chat",
           authMode: "key",
-          apiKey: "only-one-key",
+          apiKey: "drop-key-one",
+          apiKeyPool: [{ id: "drop-one", key: "drop-key-one" }, { id: "drop-two", key: "drop-key-two" }],
           baseUrl: `http://127.0.0.1:${dropPort}/v1`,
           allowPrivateNetwork: true,
           liveModels: false,
@@ -495,9 +521,17 @@ describe("vibe pass-through key pool resilience", () => {
     bindNativeHarnessConfig(dropConfig);
     proxy = (await import("../../src/server")).startServer(0);
 
-    const dropRes = await postVibe();
+    const dropRes = await postVibe({ "x-opencodex-max-sends": "1" });
     expect(dropRes.status).toBe(502);
+    expect(dropSends).toBe(1);
+    const dropLog = (await import("../../src/server/request-log")).getRequestLogEntries().find(entry => entry.requestId === dropRes.requestId);
+    expect(dropLog?.spend?.sends).toBe(1);
     expect((await import("../../src/server/lifecycle")).getActiveTurnCount()).toBe(0);
     await new Promise<void>(resolve => dropServer.close(() => resolve()));
+
+    const connectionRes = await postVibe({ "x-opencodex-max-sends": "1" });
+    expect(connectionRes.status).toBe(503);
+    const connectionLog = (await import("../../src/server/request-log")).getRequestLogEntries().find(entry => entry.requestId === connectionRes.requestId);
+    expect(connectionLog?.spend?.sends).toBe(1);
   });
 });

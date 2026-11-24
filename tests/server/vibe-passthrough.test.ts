@@ -217,11 +217,11 @@ describe("vibe pass-through public HTTP lane", () => {
   }
 
   test("forwards all seven allowlisted endpoints byte-for-byte with strict header handling and SSE usage logging", async () => {
-    await launch();
+    await launch({ allowedProviders: [VIBE_PROVIDER_ID] });
     const rawChatBody = String.raw`{"model":"devstral-latest","messages":[{"role":"user","content":"café naïve"}],"future":{"big":9007199254740993},"stream":true}`;
     const chatRes = await rawRequest("POST", "/vibe/v1/chat/completions", {
       body: rawChatBody,
-      headers: { "x-affinity": "sess-123", "x-custom-vibe": "preserved" },
+      headers: { "x-affinity": "sess-123", "x-custom-vibe": "preserved", "x-opencodex-max-sends": "1" },
     });
     expect(chatRes.status).toBe(200);
     expect(chatRes.text).toBe(sseBody);
@@ -239,6 +239,7 @@ describe("vibe pass-through public HTTP lane", () => {
     expect(first.headers.get("x-request-id")).toBeNull();
     expect(first.headers.get("x-envoy-attempt-count")).toBeNull();
     expect(first.headers.get("x-opencodex-internal")).toBeNull();
+    expect(first.headers.get("x-opencodex-max-sends")).toBeNull();
     expect(first.headers.get("cookie")).toBeNull();
     const sentAuth = first.headers.get("authorization");
     expect([`Bearer ${vibePoolKeyOne}`, `Bearer ${vibePoolKeyTwo}`]).toContain(sentAuth);
@@ -274,6 +275,8 @@ describe("vibe pass-through public HTTP lane", () => {
     const logs = getRequestLogEntries();
     const chatLog = logs.find(entry => entry.model === "devstral-latest");
     expect(chatLog).toBeDefined();
+    expect(chatRes.headers["x-opencodex-request-id"]).toBe(chatLog?.requestId);
+    expect(chatLog?.spend?.sends).toBe(1);
     expect(chatLog?.provider).toBe(VIBE_PROVIDER_ID);
     expect(chatLog?.status).toBe(200);
     expect(chatLog?.usage?.inputTokens).toBe(12);
@@ -303,10 +306,12 @@ describe("vibe pass-through public HTTP lane", () => {
     expect((await rawRequest("GET", "/vibe/v1/models", { key: "ocx_data_invalid" })).status).toBe(401);
     expect((await rawRequest("GET", "/vibe/v1/models", { key: otherKey })).status).toBe(403);
 
-    expect((await rawRequest("POST", "/vibe/v1/chat/completions", {
+    const refusal = await rawRequest("POST", "/vibe/v1/chat/completions", {
       body: '{"model":"devstral-latest","messages":[]}',
       headers: { "user-agent": "curl/8.7.1" },
-    })).status).toBe(403);
+    });
+    expect(refusal.status).toBe(403);
+    expect(refusal.headers["x-opencodex-request-id"]).toBeUndefined();
     expect((await rawRequest("POST", "/vibe/v1/chat/completions", {
       body: '{"model":"devstral-latest","messages":[]}',
       headers: { "user-agent": httpxUa },

@@ -16,12 +16,16 @@ import {
   type RequestPolicyView,
 } from "./auth-cors";
 import { readBoundedRequestBytes } from "./index/bounded-request";
+import { readBoundedPrefix } from "./ws-bridge";
+import { withRequestLogId } from "./index/startup-warnings";
+import { beginInferenceAttempt } from "./inference/attempt";
 import { isDraining, tryAdmitTurn } from "./lifecycle";
 import { messagesEndToEndHeaders } from "./messages-native-integrity";
 import { disableResponsesRequestTimeout } from "./responses/fetch-helpers";
-import { addFinalRequestLog, nextRequestLogId, type RequestLogContext } from "./request-log";
+import { addFinalRequestLog, nextRequestLogId, noteAttemptSend, type RequestLogContext } from "./request-log";
 import {
   createSettledPassthroughBody,
+  createPassthroughPayloadObserver,
   logPassthroughUpstreamFailure,
   sendExactly,
   type ExactResponse,
@@ -46,7 +50,6 @@ const MAX_VIBE_REQUEST_BYTES = 32 * 1024 * 1024;
 const MAX_MODEL_SNIFF_DECODE_BYTES = 4 * 1024 * 1024;
 const MAX_RETRY_ERROR_PEEK_BYTES = 64 * 1024;
 const MAX_OBSERVED_JSON_USAGE_BYTES = 512 * 1024;
-const MAX_SSE_LINE_BYTES = 64 * 1024;
 const CANONICAL_MISTRAL_API_ORIGIN = "https://api.mistral.ai";
 const CANONICAL_MISTRAL_CHAT_ORIGIN = "https://chat.mistral.ai";
 const SAFE_MODEL_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -193,172 +196,6 @@ function parseMistralUsageObject(value: unknown): OcxUsage | undefined {
   };
 }
 
-function extractUsageFromJsonPayload(bytes: Uint8Array): OcxUsage | undefined {
-  if (bytes.byteLength === 0 || bytes.byteLength > MAX_OBSERVED_JSON_USAGE_BYTES) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-    return parseMistralUsageObject((parsed as Record<string, unknown>).usage);
-  } catch {
-    return undefined;
-  }
-}
-
-/** Bounded SSE/JSON usage observer attached cleanly without altering streamed bytes. */
-class BoundedUsageObserver {
-  private readonly sseDecoder: TextDecoder | null;
-  private pendingChunks: string[] = [];
-  private pendingLength = 0;
-  private droppingOversizedLine = false;
-  private jsonChunks: Uint8Array[] | null;
-  private jsonBytes = 0;
-  private readonly sseMode: boolean;
-
-  constructor(contentType: string | null, contentEncoding: string | null) {
-    const ct = (contentType ?? "").split(";")[0]!.trim().toLowerCase();
-    const unencoded = !contentEncoding || contentEncoding.trim().toLowerCase() === "identity";
-    this.sseMode = unencoded && ct === "text/event-stream";
-    this.sseDecoder = this.sseMode ? new TextDecoder() : null;
-    this.jsonChunks = unencoded && ct === "application/json" ? [] : null;
-  }
-
-  observe(chunk: Uint8Array, onUsage: (usage: OcxUsage) => void): void {
-    if (this.jsonChunks) {
-      if (this.jsonBytes + chunk.byteLength > MAX_OBSERVED_JSON_USAGE_BYTES) {
-        this.jsonChunks = null;
-        return;
-      }
-      this.jsonChunks.push(chunk);
-      this.jsonBytes += chunk.byteLength;
-      return;
-    }
-    if (!this.sseMode || !this.sseDecoder) return;
-    const text = this.sseDecoder.decode(chunk, { stream: true });
-    let lineStart = 0;
-    for (let i = 0; i < text.length; i++) {
-      if (text.charCodeAt(i) !== 0x0A) continue;
-      this.drainCompleteLine(text.slice(lineStart, i), onUsage);
-      lineStart = i + 1;
-    }
-    this.appendPiece(text.slice(lineStart));
-  }
-
-  finish(onUsage: (usage: OcxUsage) => void): void {
-    if (this.jsonChunks && this.jsonChunks.length > 0) {
-      const joined = Buffer.concat(this.jsonChunks);
-      this.jsonChunks = null;
-      const usage = extractUsageFromJsonPayload(joined);
-      if (usage) onUsage(usage);
-      return;
-    }
-    if (!this.sseMode || !this.sseDecoder) return;
-    const trailing = this.sseDecoder.decode();
-    if (trailing || this.pendingLength > 0 || this.droppingOversizedLine) {
-      this.drainCompleteLine(trailing, onUsage);
-    }
-  }
-
-  private appendPiece(piece: string): void {
-    if (this.droppingOversizedLine || piece.length === 0) return;
-    if (this.pendingLength + piece.length > MAX_SSE_LINE_BYTES) {
-      this.pendingChunks = [];
-      this.pendingLength = 0;
-      this.droppingOversizedLine = true;
-      return;
-    }
-    this.pendingChunks.push(piece);
-    this.pendingLength += piece.length;
-  }
-
-  private drainCompleteLine(tailPiece: string, onUsage: (usage: OcxUsage) => void): void {
-    if (this.droppingOversizedLine) {
-      this.droppingOversizedLine = false;
-      this.pendingChunks = [];
-      this.pendingLength = 0;
-      return;
-    }
-    if (this.pendingLength + tailPiece.length > MAX_SSE_LINE_BYTES) {
-      this.pendingChunks = [];
-      this.pendingLength = 0;
-      return;
-    }
-    const line = this.pendingChunks.length === 0 ? tailPiece : `${this.pendingChunks.join("")}${tailPiece}`;
-    this.pendingChunks = [];
-    this.pendingLength = 0;
-    if (line) this.inspectSseLine(line, onUsage);
-  }
-
-  private inspectSseLine(rawLine: string, onUsage: (usage: OcxUsage) => void): void {
-    const trimmed = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-    if (!trimmed.startsWith("data:")) return;
-    const payloadText = trimmed.slice(5).trim();
-    if (!payloadText || payloadText === "[DONE]") return;
-    try {
-      const parsed: unknown = JSON.parse(payloadText);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
-      const usage = parseMistralUsageObject((parsed as Record<string, unknown>).usage);
-      if (usage) onUsage(usage);
-    } catch {
-      // Ignore partial/malformed SSE frames in the passive observer.
-    }
-  }
-}
-
-type BoundedPeekResult =
-  | { complete: true; bytes: Uint8Array<ArrayBuffer> }
-  | { complete: false; prefixChunks: Uint8Array[]; reader: ReadableStreamDefaultReader<Uint8Array> };
-
-async function peekBoundedPrefix(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<BoundedPeekResult> {
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) {
-        if (chunks.length === 0) return { complete: true, bytes: new Uint8Array(0) };
-        const joined = new Uint8Array(total);
-        let offset = 0;
-        for (const chunk of chunks) {
-          joined.set(chunk, offset);
-          offset += chunk.byteLength;
-        }
-        return { complete: true, bytes: joined };
-      }
-      if (!value || value.byteLength === 0) continue;
-      chunks.push(value);
-      total += value.byteLength;
-      if (total > maxBytes) {
-        return { complete: false, prefixChunks: chunks, reader };
-      }
-    }
-  } catch (error) {
-    await reader.cancel().catch(() => {});
-    throw error;
-  }
-}
-
-function replayPeekedStream(prefixChunks: Uint8Array[], reader: ReadableStreamDefaultReader<Uint8Array>): ReadableStream<Uint8Array> {
-  let index = 0;
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      if (index < prefixChunks.length) {
-        controller.enqueue(prefixChunks[index++]!);
-        return;
-      }
-      const { done, value } = await reader.read();
-      if (done) {
-        controller.close();
-        return;
-      }
-      if (value && value.byteLength > 0) controller.enqueue(value);
-    },
-    cancel(reason) {
-      return reader.cancel(reason);
-    },
-  });
-}
-
 function isAllowedVibeUserAgent(ua: string, policy: VibeRouteMatch["uaPolicy"]): boolean {
   if (VIBE_CLI_UA_PATTERN.test(ua)) return true;
   if (policy === "vibe-or-httpx" && VIBE_HTTPX_UA_PATTERN.test(ua)) return true;
@@ -482,6 +319,9 @@ export async function handleVibePassthrough(req: Request, ctx: VibePassthroughCo
     reusedSocket,
   }, error);
 
+  const responseFor = (response: Response) => route.isInference ? withRequestLogId(response, requestId) : response;
+  const maxSends = route.isInference && keyEntry?.allowedProviders?.length === 1
+    && keyEntry.allowedProviders[0] === VIBE_PROVIDER_ID && req.headers.get("x-opencodex-max-sends") === "1" ? 1 : 2;
   const triedKeyIds = new Set<string>();
   let activeChoice: Extract<VibeKeyChoice, { kind: "key" }> = initialChoice;
   let nextChoice: Extract<VibeKeyChoice, { kind: "key" }> | undefined;
@@ -489,7 +329,7 @@ export async function handleVibePassthrough(req: Request, ctx: VibePassthroughCo
   let bufferedTerminalBody: Uint8Array<ArrayBuffer> | undefined;
   let overflowTerminalStream: ReadableStream<Uint8Array> | undefined;
 
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < maxSends; attempt++) {
     if (nextChoice) {
       activeChoice = nextChoice;
       nextChoice = undefined;
@@ -498,6 +338,28 @@ export async function handleVibePassthrough(req: Request, ctx: VibePassthroughCo
     logCtx.accountLogLabel = activeChoice.accountLogLabel;
     const outgoingHeaders = buildOutgoingHeaders(req.headers, activeChoice.key.apiKey);
 
+    const inferenceAttempt = route.isInference
+      ? beginInferenceAttempt(logCtx, { provider: VIBE_PROVIDER_ID, model: inferredModel, adapter: "openai-chat" })
+      : undefined;
+    inferenceAttempt?.seal(activeChoice.accountLogLabel);
+    noteAttemptSend(inferenceAttempt?.attempt, undefined);
+    const retryAfterFailure = (error: unknown, phase: "unknown" | "body", reusedSocket?: boolean): Response | null => {
+      const cancelled = req.signal.aborted || controller.signal.aborted;
+      failLog(phase, error, reusedSocket);
+      if (!cancelled && !isDraining() && attempt + 1 < maxSends) {
+        const sibling = chooseVibeKey(providerRow, null, triedKeyIds);
+        if (sibling.kind === "key") {
+          inferenceAttempt?.finish(502);
+          nextChoice = sibling;
+          upstream = undefined;
+          return null;
+        }
+      }
+      settle(cancelled ? 499 : 502);
+      return responseFor(isDraining() ? refuse(503, "hub is restarting") : cancelled
+        ? refuse(499, "request cancelled") : phase === "body"
+          ? refuse(502, "Mistral upstream response failed") : refuse(503, "could not reach Mistral upstream"));
+    };
     try {
       upstream = await sendExactly(
         route.targetUrl,
@@ -509,18 +371,9 @@ export async function handleVibePassthrough(req: Request, ctx: VibePassthroughCo
         route.method,
       );
     } catch (error) {
-      const cancelled = req.signal.aborted || controller.signal.aborted;
-      failLog("unknown", error);
-      if (!cancelled && !isDraining() && attempt === 0) {
-        const siblingAvailable = chooseVibeKey(providerRow, null, triedKeyIds);
-        if (siblingAvailable.kind === "key") {
-          nextChoice = siblingAvailable;
-          continue;
-        }
-      }
-      settle(cancelled ? 499 : 502);
-      if (isDraining()) return refuse(503, "hub is restarting");
-      return cancelled ? refuse(499, "request cancelled") : refuse(503, "could not reach Mistral upstream");
+      const response = retryAfterFailure(error, "unknown");
+      if (response) return response;
+      continue;
     }
 
     upstreamStatus = upstream.status;
@@ -532,29 +385,19 @@ export async function handleVibePassthrough(req: Request, ctx: VibePassthroughCo
       recordVibeAuthFailureCooldown(activeChoice.key.id);
       forgetVibeAffinity(affinityHeader);
     } else if (upstream.status === 402) {
-      let peek: BoundedPeekResult;
+      let peek: Awaited<ReturnType<typeof readBoundedPrefix>>;
       try {
-        peek = await peekBoundedPrefix(upstream.body, MAX_RETRY_ERROR_PEEK_BYTES);
+        peek = await readBoundedPrefix(upstream.body, MAX_RETRY_ERROR_PEEK_BYTES + 1);
       } catch (error) {
-        const cancelled = req.signal.aborted || controller.signal.aborted;
-        failLog("body", error, upstream.reusedSocket);
         void upstream.body.cancel().catch(() => {});
-        if (!cancelled && !isDraining() && attempt === 0) {
-          const siblingAvailable = chooseVibeKey(providerRow, null, triedKeyIds);
-          if (siblingAvailable.kind === "key") {
-            nextChoice = siblingAvailable;
-            upstream = undefined;
-            continue;
-          }
-        }
-        settle(cancelled ? 499 : 502);
-        if (isDraining()) return refuse(503, "hub is restarting");
-        return cancelled ? refuse(499, "request cancelled") : refuse(502, "Mistral upstream response failed");
+        const response = retryAfterFailure(error, "body", upstream.reusedSocket);
+        if (response) return response;
+        continue;
       }
-      if (peek.complete) {
-        bufferedTerminalBody = peek.bytes;
+      if (peek.prefix.byteLength <= MAX_RETRY_ERROR_PEEK_BYTES) {
+        bufferedTerminalBody = Uint8Array.from(peek.prefix);
         const decodedPeek = await decodeBoundedPayload(
-          peek.bytes,
+          peek.prefix,
           upstream.headers.get("content-encoding"),
           MAX_RETRY_ERROR_PEEK_BYTES,
         );
@@ -567,13 +410,13 @@ export async function handleVibePassthrough(req: Request, ctx: VibePassthroughCo
         }
       } else {
         // Non-budget >64 KiB 402 passes through untruncated without retrying.
-        overflowTerminalStream = replayPeekedStream(peek.prefixChunks, peek.reader);
+        overflowTerminalStream = peek.stream;
         break;
       }
     }
 
     if (
-      attempt === 0
+      attempt + 1 < maxSends
       && RETRYABLE_PRE_OUTPUT_STATUSES.has(upstream.status)
       && !req.signal.aborted
       && !controller.signal.aborted
@@ -583,6 +426,7 @@ export async function handleVibePassthrough(req: Request, ctx: VibePassthroughCo
         if (!bufferedTerminalBody) void upstream.body.cancel().catch(() => {});
         bufferedTerminalBody = undefined;
         overflowTerminalStream = undefined;
+        inferenceAttempt?.finish(upstream.status);
         nextChoice = siblingAvailable;
         upstream = undefined;
         continue;
@@ -593,7 +437,7 @@ export async function handleVibePassthrough(req: Request, ctx: VibePassthroughCo
 
   if (!upstream) {
     settle(503);
-    return refuse(503, "could not reach Mistral upstream");
+    return responseFor(refuse(503, "could not reach Mistral upstream"));
   }
 
   if (upstream.status >= 200 && upstream.status < 300) {
@@ -601,46 +445,45 @@ export async function handleVibePassthrough(req: Request, ctx: VibePassthroughCo
   }
 
   const respHeaders = messagesEndToEndHeaders(upstream.headers);
-  if (NULL_BODY_STATUSES.has(upstream.status)) {
+  if (NULL_BODY_STATUSES.has(upstream.status) || bufferedTerminalBody !== undefined) {
     settle("complete");
-    void upstream.body.cancel().catch(() => {});
-    return new Response(null, { status: upstream.status, statusText: upstream.statusText, headers: respHeaders });
-  }
-
-  if (bufferedTerminalBody !== undefined) {
-    settle("complete");
-    return new Response(bufferedTerminalBody, {
-      status: upstream.status,
-      statusText: upstream.statusText,
-      headers: respHeaders,
-    });
+    if (NULL_BODY_STATUSES.has(upstream.status)) void upstream.body.cancel().catch(() => {});
+    return responseFor(new Response(bufferedTerminalBody ?? null, { status: upstream.status, statusText: upstream.statusText, headers: respHeaders }));
   }
 
   const observer = route.isInference && upstream.status >= 200 && upstream.status < 300
-    ? new BoundedUsageObserver(upstream.headers.get("content-type"), upstream.headers.get("content-encoding"))
+    ? createPassthroughPayloadObserver(
+      upstream.headers.get("content-type"), upstream.headers.get("content-encoding"), MAX_OBSERVED_JSON_USAGE_BYTES,
+      payload => {
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
+        const usage = parseMistralUsageObject((payload as Record<string, unknown>).usage);
+        if (usage) logCtx.usage = usage;
+      },
+    )
     : null;
 
   const baseStream = overflowTerminalStream ?? upstream.body;
   const source = observer
     ? baseStream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, transformController) {
-        observer.observe(chunk, usage => { logCtx.usage = usage; });
+        observer.observe(chunk);
         transformController.enqueue(chunk);
       },
       flush() {
-        observer.finish(usage => { logCtx.usage = usage; });
+        observer.finish();
       },
     }))
     : baseStream;
 
-  return new Response(
+  const reusedSocket = upstream.reusedSocket;
+  return responseFor(new Response(
     createSettledPassthroughBody({
       source,
       settle,
       abort: () => controller.abort(),
       isAborted: () => req.signal.aborted,
-      onError: error => failLog("body", error, upstream.reusedSocket),
+      onError: error => failLog("body", error, reusedSocket),
     }),
     { status: upstream.status, statusText: upstream.statusText, headers: respHeaders },
-  );
+  ));
 }
