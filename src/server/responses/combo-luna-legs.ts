@@ -1,8 +1,9 @@
 import { inspectedReserveRefusal } from "./reserve-refusal-body";
 import { comboFailureDecision, comboFailureCooldownScope, comboTargetSkipTrigger, earliestComboCooldownExpiry, getCombo, isComboTargetInCooldown, targetKey, type ComboPick } from "../../combos";
 import type { OcxConfig } from "../../types";
-import type { ConsumedComboFailure } from "./core-options";
+import type { ConsumedComboFailure, HandleResponsesOptions } from "./core-options";
 import { consumeComboFailure } from "./core-combo-failure";
+import { captureCallerDirectAuth } from "../../providers/caller-authorization";
 import { isNonReplayableResponse } from "../../lib/upstream-retry";
 import { wasAccountAutoPaused } from "../../oauth/account-auto-pause";
 import { isReserveQuotaCode } from "./combo-stream-preflight";
@@ -352,7 +353,21 @@ export async function advanceLunaLegAfterFailure(args: {
   const ordinaryPick = ordinaryNext && !args.aborted
     ? await args.pickOrdinary(args.attemptedTargets.filter(key => key !== args.legs.nativeKey))
     : null;
-  return { lunaStage: nextStage, pick: ordinaryPick ?? args.pick };
+  return {
+    lunaStage: nextStage,
+    pick: ordinaryPick ?? (args.pick && targetKey(args.pick.target) === args.legs.nativeKey ? null : args.pick),
+  };
+}
+
+/** True when the caller supplied a direct ChatGPT-domain bearer, never proxy admission or Claude-injected main auth. */
+export function hasCallerOrdinaryLunaAuth(
+  headers: Headers,
+  config: OcxConfig,
+  options: Pick<HandleResponsesOptions, "admission" | "callerDirectAuth" | "stripClaudeMainAuthForNoncanonicalForward">,
+): boolean {
+  if (options.admission?.source === "bearer" || options.stripClaudeMainAuthForNoncanonicalForward === true) return false;
+  const direct = options.callerDirectAuth === undefined ? captureCallerDirectAuth(headers, config) : options.callerDirectAuth;
+  return direct !== null;
 }
 
 /** True when native ordinary Luna has a stored/main pool seat or a caller-owned bearer to spend. */
@@ -368,7 +383,7 @@ export async function resolveEmptyLunaReserveStart(args: {
   currentPick: ComboPick | null;
   targetEligible: (target: ComboTarget) => boolean;
   hasCallerAuth?: boolean;
-  pickWithWait: (opts: { exclude?: Iterable<string>; eligible: (target: ComboTarget) => boolean; now: number; allowCooldownReprobe?: boolean; waitForCooldownMs?: number }) => Promise<ComboPick | null>;
+  pickWithWait: (opts: { exclude?: Iterable<string>; eligible: (target: ComboTarget) => boolean; cooldownReprobeTargets?: Iterable<readonly [string, number]>; now: number; allowCooldownReprobe?: boolean; waitForCooldownMs?: number }) => Promise<ComboPick | null>;
 }): Promise<{ pick: ComboPick | null; evaluatedStrictReserve: boolean; lunaStage: "off" | "relay" | "done"; skippedEmptyReserve: "reserve-cooldown" | "reserve-unavailable" | undefined; includedOnly: boolean }> {
   const plan = args.lunaLegs;
   const unchanged = { pick: args.currentPick, evaluatedStrictReserve: false, lunaStage: "off", skippedEmptyReserve: undefined, includedOnly: false } as const;
@@ -380,8 +395,13 @@ export async function resolveEmptyLunaReserveStart(args: {
   // Native main may be draining and cannot justify skipping the relay before dispatch acquires its lease.
   const includedAvailable = getEligiblePoolAccounts(args.config, MAIN_CODEX_ACCOUNT_ID, now, "shared", { poolCapacity: "included" }).length > 0;
   const ordinaryAvailable = includedAvailable || hasOrdinaryLunaCapacity(args.config, args.hasCallerAuth === true, now);
+  const cooldownReprobeTargets = args.currentPick.cooldownReprobeTargets
+    ? Object.entries(args.currentPick.cooldownReprobeTargets)
+    : undefined;
   const relayPick = await args.pickWithWait({
+    exclude: [plan.nativeKey],
     eligible: target => targetKey(target) === plan.relayKey && args.targetEligible(target),
+    cooldownReprobeTargets,
     now,
     ...(includedAvailable ? { allowCooldownReprobe: false, waitForCooldownMs: 0 } : {}),
   });
@@ -389,9 +409,9 @@ export async function resolveEmptyLunaReserveStart(args: {
     ? await args.pickWithWait({
       exclude: [plan.nativeKey, plan.relayKey],
       eligible: args.targetEligible,
+      cooldownReprobeTargets,
       now,
       allowCooldownReprobe: false,
-      waitForCooldownMs: 0,
     })
     : null;
   return { pick: relayPick ?? fallbackPick ?? (ordinaryAvailable ? args.currentPick : null), evaluatedStrictReserve: true, lunaStage: relayPick ? "relay" : "done",

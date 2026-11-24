@@ -84,7 +84,14 @@ export class NoAvailableComboTargetsError extends Error {
   }
 }
 
-type ComboExclusionReason = "provider missing" | "provider disabled" | "quota exhausted" | "cooldown" | "ineligible for this request";
+type ComboExclusionReason =
+  | "provider missing"
+  | "provider disabled"
+  | "quota exhausted"
+  | "cooldown"
+  | "ineligible for this request"
+  | "reserve-cooldown"
+  | "reserve-unavailable";
 
 function providerExclusionReason(config: OcxConfig, target: OcxComboTarget, now: number): ComboExclusionReason | undefined {
   const provider = Object.hasOwn(config.providers, target.provider) ? config.providers[target.provider] : undefined;
@@ -126,6 +133,7 @@ export function comboExclusionReasons(
   comboId: string,
   eligible?: (target: NormalizedComboTarget) => boolean,
   now = Date.now(),
+  targetReasonOverride?: Readonly<{ targetKey: string; reason: "reserve-cooldown" | "reserve-unavailable" }>,
 ): ComboExclusionReasons {
   const targets = getCombo(config, comboId)?.targets ?? [];
   const reasons = targets.flatMap((target, index) => {
@@ -139,6 +147,9 @@ export function comboExclusionReasons(
         // An eligibility check can exhaust the translator budget; the target still was not picked.
         reason = "ineligible for this request";
       }
+    }
+    if (!reason && targetReasonOverride?.targetKey === targetKey(target)) {
+      reason = targetReasonOverride.reason;
     }
     return reason ? [`target ${index + 1} (${errorDestinationText(providerErrorDestinationLabel(target.provider))}): ${reason}`] : [];
   }).join("; ");
@@ -549,6 +560,8 @@ export function advanceComboAfterFailure(
     status?: number;
     code?: string | null;
     message?: string;
+    /** Disable Reserve-only cooldown release when Reserve has already been evaluated for this turn. */
+    allowReserveCooldownRelease?: boolean;
     /** Account-qualified provider label of the account this failure came from, when a pool resolved one. */
     failedAccount?: string;
   } = {},
@@ -594,6 +607,7 @@ export function advanceComboAfterFailure(
     && combo.targets.some(target => !target.lastResort);
   return pickComboTarget(config, pick.comboId, {
     routeConcreteModel: options.routeConcreteModel,
+    allowReserveCooldownRelease: options.allowReserveCooldownRelease,
     exclude: pick.attempted,
     now: options.now,
     cooldownReprobeTargets: pick.cooldownReprobeTargets
