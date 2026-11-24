@@ -85,8 +85,7 @@ import { exhaustedCodexPoolRecovery, nextCodexPoolRecoveryAt, poolMainRecoveryAt
 import { getAccountQuota, isValidWhamHistoryObservation, parseUsageQuota, parseMainPolicyUsageQuota, setAccountQuotaFromParsed } from "./quota";
 import { codexAccountUsesCreditsAfterLimit } from "./account-credit-use";
 import type { CodexAccountMode, OcxConfig, OcxProviderConfig } from "../types";
-import { FORWARD_HEADERS } from "../adapters/openai-responses";
-import { isolateCodexPoolAccountHeaders } from "./forward-transport-headers";
+import { copyCodexForwardHeaders, isolateCodexPoolAccountHeaders } from "./forward-transport-headers";
 import { captureConfigGeneration } from "../lib/state-store-sweeper";
 import { extractAccountId } from "../oauth/chatgpt";
 import {
@@ -1830,15 +1829,6 @@ function substitutedMainHeaders(
   return selected;
 }
 
-function forwardedCodexHeaders(headers: Headers): Headers {
-  const selected = new Headers();
-  for (const name of FORWARD_HEADERS) {
-    const value = headers.get(name);
-    if (value || (value !== null && (name === "x-codex-installation-id" || name === "x-codex-turn-metadata"))) selected.set(name, value);
-  }
-  return selected;
-}
-
 /**
  * Build the upstream auth headers for one Codex turn. The two credential domains meet here only:
  *
@@ -1857,7 +1847,7 @@ export function materializeCodexUpstreamAuth(
   // assertion_only must never be answered with a pool, stored-main, or other substituted Bearer.
   if (hasAgentAssertionAuthorization(headers)) throw new AgentAssertionUnsupportedError();
   if (ctx.kind === "main") ctx.mainQuotaDispatch = undefined;
-  const selected = forwardedCodexHeaders(headers);
+  const selected = copyCodexForwardHeaders(headers);
   if (ctx.kind === "pool" || ctx.kind === "main-pool") {
     assertCodexAccountValidationReady(ctx.accountId);
     if (ctx.kind === "pool") assertPoolAccountCredits(ctx.accountId, poolContextCreditHoldResetAt(ctx, options.config), poolContextCreditRecoveryNeeded(ctx, options.config), ctx.quotaScope);
@@ -1955,7 +1945,7 @@ export async function materializeCodexUpstreamAuthAsync(
   if (ctx.kind !== "main" || options.substituteMainCredential !== true) {
     return materializeCodexUpstreamAuth(headers, ctx, options);
   }
-  const selected = forwardedCodexHeaders(headers);
+  const selected = copyCodexForwardHeaders(headers);
   if (options.config !== undefined && isMainAccountHardLockEnabled(options.config)) {
     reconcileMainCodexAccountRuntimeState();
   }

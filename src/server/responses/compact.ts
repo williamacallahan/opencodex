@@ -6,7 +6,7 @@ import { callerMatchesObservedMain } from "../../codex/request-owned-main-pin";
 import { sameCodexUploadedFileAccount } from "../../codex/collision-identity";
 import { CodexInstallationIdUnavailableError } from "../../codex/installation-id";
 import { MAIN_CODEX_ACCOUNT_ID } from "../../codex/account-id";
-import { isolateCodexPoolClientMetadata } from "../../codex/forward-transport-headers";
+import { copyCodexForwardHeaders, isolateCodexPoolClientMetadata } from "../../codex/forward-transport-headers";
 import { captureAccountAutoPauseAttempt, wasAccountAutoPaused, wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
 import { spendLedgerStorageErrorResponse } from "./spend-storage-error";
 import { captureAdmissionPolicy } from "../capture-admission-policy";
@@ -1822,11 +1822,7 @@ export async function handleResponsesCompact(
       stream: isCanonicalOpenAiForwardProvider(route.provider) || accountGatedCompactWireModel || route.combo ? true : false,
       input: [...inputItems, { type: "compaction_trigger" }],
     };
-    const internalHeaders = new Headers({ "content-type": "application/json" });
-    for (const name of FORWARD_HEADERS) {
-      const value = req.headers.get(name);
-      if (value || (value !== null && (name === "x-codex-installation-id" || name === "x-codex-turn-metadata"))) internalHeaders.set(name, value);
-    }
+    const internalHeaders = copyCodexForwardHeaders(req.headers, new Headers({ "content-type": "application/json" }));
     copyResponsesClientMetadata(internalHeaders, req.headers, route.provider);
     const internalReq = new Request("http://localhost/v1/responses", {
       method: "POST",
