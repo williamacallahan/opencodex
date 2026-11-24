@@ -1890,3 +1890,35 @@ test(`registered Desktop IDs and exact overrides reach intended routes (fastRows
   }
 }, { timeout: SERVER_BUDGET_MS });
 }
+
+test("a codex-lb previous_response_not_found 400 reaches the Claude client with its cause and the proxy's own refusal keeps its wording", async () => {
+  clearRequestLogsForTests();
+  const upstream = serveUpstream({
+    port: 0,
+    fetch() {
+      return Response.json({ error: { type: "invalid_request_error", code: "previous_response_not_found",
+        message: "The previous response owner is out of usage. Resend the full conversation without previous_response_id." } }, { status: 400 });
+    },
+  });
+  saveConfig({
+    port: 0,
+    defaultProvider: "native",
+    providers: { native: { adapter: "openai-responses", baseUrl: `${upstream.url.toString().replace(/\/$/, "")}/v1`, authMode: "forward", allowPrivateNetwork: true } },
+  } as OcxConfig);
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/messages", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "native/gpt-test", max_tokens: 128, stream: false, messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(response.status).toBe(400);
+    const text = await response.text();
+    expect(text).toContain("previous_response_not_found");
+    expect(text).toContain("out of usage");
+    expect(text).not.toContain("The provider rejected the request.");
+  } finally {
+    await server.stop(true);
+    upstream.stop(true);
+  }
+});

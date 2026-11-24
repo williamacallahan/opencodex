@@ -77,12 +77,19 @@ export function isPausedTurn(context: object | undefined): boolean {
 const CODE_MESSAGES: ReadonlyMap<string, string> = new Map([
   ["context_length_exceeded", CLIENT_ERROR_CONTRACTS.context_overflow],
   ["reasoning_loop_detected", "The model's reasoning repeated itself, so the provider ended the reply. Sending the same request again is likely to loop again; shorten or change the context."],
-  ["previous_response_not_found", "The provider could not continue this conversation (previous_response_not_found): the account that owns its earlier response is unavailable or out of usage. Retry later or start a new conversation."],
   ["upstream_incomplete", CLIENT_ERROR_CONTRACTS.stream_incomplete],
   ["upstream_stream_incomplete", CLIENT_ERROR_CONTRACTS.stream_incomplete],
   ["upstream_reset_replay_refused", CLIENT_ERROR_CONTRACTS.replay_refused],
   ...["cyber_policy", "invalid_prompt", "misalignment_policy_violation", "bio_policy", "model_not_in_plan", "translation_buffer_limit", "invalid_refusal", "undeclared_tool_call", "required_tool_contract_unsatisfied"].map(code => [code, CLIENT_ERROR_CONTRACTS[code as ClientErrorContract]] as const),
 ]);
+/** codex-lb answers a spent continuation owner with this upstream code; the proxy's own refusals must not match. */
+export function upstreamContinuationMessage(evidence: UpstreamConditionEvidence): string | undefined {
+  // The wording is codex-lb's: this proxy's own refusals carry the same code with other text.
+  return evidence.code === "previous_response_not_found" && typeof evidence.message === "string"
+    && evidence.message.slice(0, 512).toLowerCase().includes("owner is out of usage")
+    ? "The provider could not continue this conversation (previous_response_not_found): the account that owns its earlier response is unavailable or out of usage. Retry later or start a new conversation."
+    : undefined;
+}
 export function clientErrorCodeMessage(code: string | undefined): string | undefined {
   return CODE_MESSAGES.get(code ?? "");
 }
@@ -115,6 +122,7 @@ export function ownedChatErrorPayload(options: OwnedChatErrorOptions) {
   const message = actionableRefusalMessage(evidence, code, options.contract)
     ?? (options.contract ? CLIENT_ERROR_CONTRACTS[options.contract] : undefined) ?? fixedMessage
     ?? LOCAL_CHAT_ERROR_MESSAGES.get(options.localReason ?? "") ?? CODE_MESSAGES.get(code ?? "")
+    ?? (options.localReason === undefined ? upstreamContinuationMessage(evidence) : undefined)
     ?? upstreamConditionMessage(classifyUpstreamCondition(evidence) ?? "upstream_failed", options.providerId);
   return { error: { message, type, param: null, code } };
 }

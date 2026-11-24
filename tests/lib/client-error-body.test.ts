@@ -287,13 +287,12 @@ test("committed combo context carries later synthetic incomplete origins", async
   expect(hasProxyIncomplete({}, "adapter_eof")).toBe(false);
 });
 
-test("a provider previous_response_not_found 400 names its code instead of a bare rejection on Chat and Messages", async () => {
+test("codex-lb's spent-owner previous_response_not_found names its cause on Chat and Messages; the proxy's own refusal does not", async () => {
   const code = "previous_response_not_found";
-  const evidence = { status: 400, type: "invalid_request_error", code, message: KEY };
-  const chat = ownedChatErrorPayload({ status: 400, type: "invalid_request_error", code, evidence });
-  expect(chat.error.message).toContain(code);
+  const upstream = { status: 400, type: "invalid_request_error", code, message: "The previous response owner is out of usage. Resend the full conversation without previous_response_id." };
   const { ownedAnthropicErrorPayload } = await import("../../src/lib/messages-error-body");
-  const messages = JSON.stringify(ownedAnthropicErrorPayload({ status: 400, type: "invalid_request_error", code, evidence }));
-  expect(messages).toContain("out of usage");
-  expect(messages).not.toContain(KEY);
+  expect(ownedChatErrorPayload({ status: 400, type: "invalid_request_error", code: "invalid_request_error", evidence: upstream }).error.message).toContain("out of usage");
+  expect(JSON.stringify(ownedAnthropicErrorPayload({ status: 400, evidence: upstream }))).toContain("out of usage");
+  const local = { ...upstream, message: "Continuation state is unavailable or corrupt; resend the full conversation without previous_response_id." };
+  expect(JSON.stringify(ownedAnthropicErrorPayload({ status: 400, evidence: local }))).toContain("The provider rejected the request.");
 });

@@ -2,7 +2,7 @@ import { carryReplayRefusal, isNonReplayableResponse, markResponseNonReplayable 
 import { appendClientRetryIn } from "./client-retry-after";
 import {
   ANTHROPIC_ERROR_CODES, ANTHROPIC_ERROR_TYPES, CLAUDE_CONTEXT_OVERFLOW_MESSAGE,
-  CLIENT_ERROR_CONTRACTS, clientErrorCodeMessage, actionableRefusalMessage, isProxyError, attachComboFailureEvidence, carryProxyError, proxyErrorPresentation, comboFailureEvidence, markProxyError, type ProxyErrorPresentation, type ClientErrorContract,
+  CLIENT_ERROR_CONTRACTS, clientErrorCodeMessage, upstreamContinuationMessage, actionableRefusalMessage, isProxyError, attachComboFailureEvidence, carryProxyError, proxyErrorPresentation, comboFailureEvidence, markProxyError, type ProxyErrorPresentation, type ClientErrorContract,
 } from "./client-error-body";
 import { classifyUpstreamCondition, upstreamConditionMessage, type UpstreamCondition, type UpstreamConditionEvidence } from "./upstream-condition";
 
@@ -85,6 +85,7 @@ export function ownedAnthropicErrorPayload(options: OwnedAnthropicErrorOptions):
       ?? (options.contract ? CLIENT_ERROR_CONTRACTS[options.contract] : undefined)
       ?? (options.condition ? upstreamConditionMessage(options.condition) : undefined)
       ?? clientErrorCodeMessage(code)
+      ?? upstreamContinuationMessage(options.evidence)
       ?? upstreamConditionMessage(classifyUpstreamCondition(options.evidence) ?? "upstream_failed");
   return { type: "error", error: { type, message, ...(code ? { code } : {}) } };
 }
