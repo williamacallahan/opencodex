@@ -1974,6 +1974,16 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect((await post(waitEmpty, { store: false })).status).toBe(200);
     expect(calls).toEqual(["relay:gpt-6-luna", "native:gpt-reserve"]);
 
+    // A newly available Reserve seat must not jump ahead of a ready normal target when native is marked last resort.
+    clearComboTargetCooldowns(); clearAccountQuota(); clearCodexUpstreamHealth();
+    calls.length = 0; nativeAccounts.length = 0; seats(true);
+    const lastResort = config();
+    lastResort.combos!.luna!.cooldownWaitPolicy = "before-last-resort";
+    Object.assign(lastResort.combos!.luna!.targets[0]!, { lastResort: true });
+    relay = reserveRefused;
+    expect((await post(lastResort, { store: false })).text).toContain("response.completed");
+    expect(calls).toEqual(["relay:gpt-6-luna", "metered:gpt-6-luna"]);
+
     // 6. Pre-Luna target failing into relay 500 keeps lunaStage="relay" so native Luna never replays 500.
     clearComboTargetCooldowns(); clearAccountQuota(); clearCodexUpstreamHealth();
     calls.length = 0; nativeAccounts.length = 0; seats(true);

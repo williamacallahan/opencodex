@@ -1928,12 +1928,15 @@ export async function executeComboResponses(
     }
     if (activeLunaLegs && failureDecision === "hop") {
       const prevLunaStage = lunaStage;
-      // After the strict Reserve leg the relay is next; after the relay, native ordinary Luna needs proof the relay never got the turn.
+      const preferNormal = combo.cooldownWaitPolicy === "before-last-resort" && pick && !pick.target.lastResort;
+      const nativeEligible = (target: NonNullable<typeof combo>["targets"][number]) => targetKey(target) === activeLunaLegs.nativeKey
+        && !(preferNormal && target.lastResort) && targetEligible(target);
+      // Ordinary Luna needs proof the relay never got the turn.
       ({ lunaStage, evaluatedStrictReserve, pick } = await advanceLunaLegAfterFailure({
         lunaStage, evaluatedStrictReserve, failedTargetKey, legs: activeLunaLegs, pick, unavailableOrdinaryTarget, attemptedTargets,
         aborted: Boolean(options.abortSignal?.aborted),
-        pickReserve: exclude => pickWithWait({ exclude, allowCooldownReprobe: false, waitForCooldownMs: nextPick ? undefined : 0, eligible: target => targetKey(target) === activeLunaLegs.nativeKey && targetEligible(target) && hasReserveNow() }),
-        pickOrdinary: exclude => pickWithWait({ exclude, allowCooldownReprobe: false, allowReserveCooldownRelease: false, waitForCooldownMs: 0, eligible: target => targetKey(target) === activeLunaLegs.nativeKey && targetEligible(target) && hasOrdinaryLunaCapacity(config, callerOrdinaryLunaAuth) }),
+        pickReserve: exclude => pickWithWait({ exclude, allowCooldownReprobe: false, waitForCooldownMs: nextPick ? undefined : 0, eligible: target => nativeEligible(target) && hasReserveNow() }),
+        pickOrdinary: exclude => pickWithWait({ exclude, allowCooldownReprobe: false, allowReserveCooldownRelease: false, waitForCooldownMs: 0, eligible: target => nativeEligible(target) && hasOrdinaryLunaCapacity(config, callerOrdinaryLunaAuth) }),
       }));
       if (prevLunaStage === "relay" && lunaStage === "reserve" && reserveWalk) reserveWalk = createPoolReserveWalk(config);
     }
