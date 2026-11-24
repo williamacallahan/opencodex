@@ -482,11 +482,23 @@ describe("managed native Messages over Anthropic OAuth", () => {
     } finally { warn.mockRestore(); }
   });
 
+  test("the second Anthropic pool, which fleet tokens never load, keeps the ocx login recovery", async () => {
+    const refusal = markProxyError(Response.json({ type: "error", error: { type: "authentication_error", message: "Not logged in to anthropic2." } }, { status: 401 }), publicOAuthErrorPresentation(new OAuthLoginRequiredError("anthropic2")));
+    const normalized = await normalizeMessagesProxyRefusal(new Request("http://localhost/v1/messages", { method: "POST" }), refusal);
+    expect(await normalized.json()).toMatchObject({ error: { message: "The anthropic2 provider needs sign-in. Run ocx login for that provider, then retry." } });
+  });
+
+  test("a provider outside the public OAuth list is not named in the client text", async () => {
+    const refusal = markProxyError(Response.json({ type: "error", error: { type: "authentication_error", message: "Not logged in." } }, { status: 401 }), publicOAuthErrorPresentation(new OAuthLoginRequiredError("private-internal-row")));
+    const normalized = await normalizeMessagesProxyRefusal(new Request("http://localhost/v1/messages", { method: "POST" }), refusal);
+    expect(await normalized.json()).toMatchObject({ error: { message: "The configured provider needs sign-in. Run ocx login for that provider, then retry." } });
+  });
+
   test("a provider that signs in with ocx login keeps that recovery, named for its provider", async () => {
-    const refusal = markProxyError(Response.json({ type: "error", error: { type: "authentication_error", message: "Not logged in to kimi-code. Run: ocx login kimi-code" } }, { status: 401 }), publicOAuthErrorPresentation(new OAuthLoginRequiredError("kimi-code")));
+    const refusal = markProxyError(Response.json({ type: "error", error: { type: "authentication_error", message: "Not logged in to xai. Run: ocx login xai" } }, { status: 401 }), publicOAuthErrorPresentation(new OAuthLoginRequiredError("xai")));
     const normalized = await normalizeMessagesProxyRefusal(new Request("http://localhost/v1/messages", { method: "POST" }), refusal);
     expect(normalized.status).toBe(401);
-    expect(await normalized.json()).toMatchObject({ error: { type: "authentication_error", message: "The kimi-code provider needs sign-in. Run ocx login for that provider, then retry." } });
+    expect(await normalized.json()).toMatchObject({ error: { type: "authentication_error", message: "The xai provider needs sign-in. Run ocx login for that provider, then retry." } });
   });
 });
 

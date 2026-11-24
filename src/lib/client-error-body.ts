@@ -164,7 +164,7 @@ export function comboFailureEvidence(response: Response): string | undefined { r
 
 /** Identity belongs to the locally constructed object, never to serialized fields. */
 const proxyErrors = new WeakSet<object>();
-export type ProxyErrorPresentation = "roster" | "pacing" | "input" | "outbound" | "inbound" | "send" | "cooldown" | "cooldown_pinned" | "hard_lock" | "recovery" | "usage" | "model_availability" | "discovery" | "muse_http" | "config" | "workflow" | "workflow_unbound" | "scope" | "body_stall" | "body_overflow" | "combo" | "copilot" | "pool_refresh" | `oauth_login:${string}`;
+export type ProxyErrorPresentation = "roster" | "pacing" | "input" | "outbound" | "inbound" | "send" | "cooldown" | "cooldown_pinned" | "hard_lock" | "recovery" | "usage" | "model_availability" | "oauth_login" | "discovery" | "muse_http" | "config" | "workflow" | "workflow_unbound" | "scope" | "body_stall" | "body_overflow" | "combo" | "copilot" | "pool_refresh" | `oauth_login:${string}`;
 const proxyPresentations = new WeakMap<object, ProxyErrorPresentation>();
 export function proxyErrorPresentation(value: object): ProxyErrorPresentation | undefined { return proxyPresentations.get(value); }
 export function markProxyError<T extends object>(value: T, presentation?: ProxyErrorPresentation): T {
