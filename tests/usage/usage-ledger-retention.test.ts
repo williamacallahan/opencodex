@@ -197,6 +197,70 @@ describe("usage ledger archive", () => {
     expect(Buffer.concat([archived, readFileSync(usageLogPath())]).equals(before)).toBe(true);
   });
 
+  test("rows that cannot name the segment never stop a trim: the first timed row in the cut span names it, else the trim time does", () => {
+    const lines = writeRows(200, 16 * 1024);
+    const path = usageLogPath();
+    writeFileSync(path, ["not json", JSON.stringify({ requestId: "no-time" }), ...lines.slice(2)].map(line => `${line}\n`).join(""));
+    expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
+    expect(archiveFiles()[0]).toStartWith(`${new Date(FIRST_ROW_AT + 2000).toISOString().replaceAll(":", "-")}_`);
+
+    rmSync(archiveDirectory(), { recursive: true });
+    mkdirSync(archiveDirectory());
+    writeFileSync(path, Array.from({ length: 200 }, (_, index) => `{"untimed":${index},"pad":"${"x".repeat(16 * 1024)}"}\n`).join(""));
+    const trimmedAt = Date.now();
+    expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
+    const [segment] = archiveFiles();
+    expect(segment).toMatch(/^untimed-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z_/);
+    expect(Date.parse(segment!.slice("untimed-".length, segment!.indexOf("_")).replace(/T(\d{2})-(\d{2})-/, "T$1:$2:"))).toBeGreaterThanOrEqual(trimmedAt - 1000);
+  });
+
+  test("a segment left by a trim that stopped before its rename is replaced, so one segment covers the cut span", () => {
+    writeRows(200, 16 * 1024);
+    const before = readFileSync(usageLogPath());
+    const ino = statSync(usageLogPath(), { bigint: true }).ino.toString();
+    const archived = (name: string, bytes: Buffer | string, ageMs: number) => {
+      const target = join(archiveDirectory(), name);
+      writeFileSync(target, bytes);
+      const at = new Date(Date.now() - ageMs);
+      utimesSync(target, at, at);
+      return name;
+    };
+    // The crash: an earlier trim archived the head of THIS ledger file, over 1 MiB of it, and never published.
+    const headEnd = before.indexOf(0x0a, 70 * 16 * 1024) + 1;
+    const leftover = archived(`2026-11-01T08-30-15.250Z_${ino}-${headEnd}.jsonl`, before.subarray(0, headEnd), 10 * 60_000);
+    // The same length differing only past the first MiB is not this ledger's prefix.
+    const altered = Buffer.from(before.subarray(0, headEnd));
+    altered[headEnd - 3] = 0x79;
+    const notPrefix = archived(`2026-10-02T00-00-00.000Z_${ino}-${headEnd}.jsonl`, altered, 10 * 60_000);
+    // A prefix written a moment ago may be another process's trim that has not renamed yet.
+    const young = archived(`2026-10-03T00-00-00.000Z_${ino}-${headEnd}.jsonl`, before.subarray(0, headEnd), 0);
+    expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
+    const files = archiveFiles();
+    expect(files).not.toContain(leftover);
+    expect(files).toContain(notPrefix);
+    expect(files).toContain(young);
+    const covering = files.filter(name => name.startsWith("2026-11-01"));
+    expect(covering).toHaveLength(1);
+    expect(Buffer.concat([readFileSync(join(archiveDirectory(), covering[0]!)), readFileSync(usageLogPath())]).equals(before)).toBe(true);
+  });
+
+  test("a trim whose ledger was replaced by something else keeps its segment, which may be the only copy of those rows", () => {
+    writeRows(200, 16 * 1024);
+    const before = readFileSync(usageLogPath());
+    const result = enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES, {
+      onSpanCopied: () => {
+        const replacement = `${usageLogPath()}.replacement`;
+        writeFileSync(replacement, `${JSON.stringify({ requestId: "after", timestamp: 1 })}\n`);
+        renameSync(replacement, usageLogPath());
+      },
+    });
+    expect(result).toMatchObject({ kind: "deferred", reason: "revision-changed" });
+    const [segment, ...others] = archiveFiles();
+    expect(others).toEqual([]);
+    expect(before.subarray(0, readFileSync(join(archiveDirectory(), segment!)).byteLength)
+      .equals(readFileSync(join(archiveDirectory(), segment!)))).toBe(true);
+  });
+
   test("a trim aborted because the ledger changed leaves no archive segment", () => {
     writeRows(200, 16 * 1024);
     const result = enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES, {

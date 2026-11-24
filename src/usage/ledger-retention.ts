@@ -90,27 +90,90 @@ function copyRange(sourceFd: number, targetFd: number, from: number, to: number)
   }
 }
 
-/** The `timestamp` of the ledger's first row, which names the segment that archives it. */
-function firstRowTimestamp(fd: number, end: number): Date {
-  const rowEnd = firstRowBoundary(fd, 0, end);
-  if (rowEnd === null) throw new Error("the first ledger row has no line ending");
-  const bytes = Buffer.allocUnsafe(rowEnd - 1);
-  for (let position = 0; position < bytes.byteLength;) {
-    const read = readSync(fd, bytes, position, bytes.byteLength - position, position);
-    if (read <= 0) throw new Error("usage ledger shrank while its first row was read");
-    position += read;
+function readRange(fd: number, from: number, to: number): Buffer {
+  const bytes = Buffer.allocUnsafe(to - from);
+  for (let offset = 0; offset < bytes.byteLength;) {
+    const read = readSync(fd, bytes, offset, bytes.byteLength - offset, from + offset);
+    if (read <= 0) throw new Error("usage ledger shrank while it was read");
+    offset += read;
   }
+  return bytes;
+}
+
+function rowTimestamp(line: Buffer): Date | undefined {
   let row: unknown;
   try {
-    row = JSON.parse(bytes.toString("utf8"));
-  } catch (cause) {
-    throw new Error("the first ledger row is not JSON", { cause });
+    row = JSON.parse(line.toString("utf8"));
+  } catch {
+    // A hand-edited or torn row cannot name the segment; the next row may.
+    return undefined;
   }
   const at = typeof row === "object" && row !== null && "timestamp" in row && typeof row.timestamp === "number"
     ? new Date(row.timestamp)
-    : null;
-  if (at === null || Number.isNaN(at.getTime())) throw new Error("the first ledger row has no numeric timestamp");
-  return at;
+    : undefined;
+  return at && !Number.isNaN(at.getTime()) ? at : undefined;
+}
+
+/** Names a segment whose cut span holds no row with a usable timestamp, in place of the row time. */
+const UNTIMED_SEGMENT_MARKER = "untimed";
+/** Rows read for a timestamp before the segment is named from the trim time instead. */
+const MAX_TIMESTAMP_SCAN_ROWS = 64;
+/** A segment this young may belong to a trim still running in another process, short of its rename. */
+const UNPUBLISHED_SEGMENT_MIN_AGE_MS = 5 * 60 * 1000;
+
+/**
+ * The name prefix of the segment archiving `[0, end)`: the timestamp of the first row in that span
+ * that parses with a numeric one, else the marker plus the trim time. A row that cannot name it
+ * never stops the trim, which would otherwise leave the ledger growing past its limit for good.
+ */
+function segmentTimeLabel(fd: number, end: number, now: Date): string {
+  for (let position = 0, rows = 0; position < end && rows < MAX_TIMESTAMP_SCAN_ROWS; rows++) {
+    const rowEnd = firstRowBoundary(fd, position, end);
+    if (rowEnd === null) break;
+    const at = rowTimestamp(readRange(fd, position, rowEnd - 1));
+    if (at) return at.toISOString().replaceAll(":", "-");
+    position = rowEnd;
+  }
+  return `${UNTIMED_SEGMENT_MARKER}-${now.toISOString().replaceAll(":", "-")}`;
+}
+
+/**
+ * Delete a segment an earlier trim of THIS ledger file wrote before it was stopped short of the
+ * rename. A completed trim publishes a new file through a rename, so the live ledger's inode in a
+ * segment name means that trim never published; its rows are still at the head of the ledger and
+ * the coming segment archives them again. The inode alone is not proof, since a filesystem may
+ * reuse a retired ledger's inode for a later one, so a segment is deleted only when its bytes are
+ * still the ledger's own prefix, and never while it is young enough to be another process's trim
+ * that has not reached its rename yet.
+ */
+function removeUnpublishedSegments(directory: string, sourceFd: number, sourceIno: string, sourceSize: number, now: number): void {
+  const marker = `_${sourceIno}-`;
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.includes(marker)) continue;
+    const path = join(directory, entry.name);
+    const stat = statSync(path);
+    if (stat.size > sourceSize || now - stat.mtimeMs < UNPUBLISHED_SEGMENT_MIN_AGE_MS) continue;
+    if (isLedgerPrefix(path, stat.size, sourceFd)) unlinkSync(path);
+  }
+}
+
+/** Whether the file's `size` bytes equal the ledger's first `size` bytes, compared one chunk at a time. */
+function isLedgerPrefix(path: string, size: number, ledgerFd: number): boolean {
+  const segmentFd = openSync(path, "r");
+  try {
+    const segment = Buffer.allocUnsafe(COPY_CHUNK_BYTES);
+    const ledger = Buffer.allocUnsafe(COPY_CHUNK_BYTES);
+    for (let position = 0; position < size;) {
+      const length = Math.min(COPY_CHUNK_BYTES, size - position);
+      const segmentRead = readSync(segmentFd, segment, 0, length, position);
+      const ledgerRead = readSync(ledgerFd, ledger, 0, length, position);
+      if (segmentRead !== length || ledgerRead !== length || !segment.subarray(0, length).equals(ledger.subarray(0, length))) return false;
+      position += length;
+    }
+    return true;
+  } finally {
+    closeSync(segmentFd);
+  }
 }
 
 /**
@@ -137,13 +200,14 @@ function pruneUsageArchive(directory: string, now: number): void {
  * and creating it on demand would put the archive in the container's own layer, where the next
  * redeploy deletes it without a word. A missing or unwritable directory throws, and no trim runs.
  */
-function archiveTrimmedSpan(sourceFd: number, start: number, sourceIno: string): string {
+function archiveTrimmedSpan(sourceFd: number, start: number, source: UsageLogRevision): string {
   const configDir = getConfigDir();
   const directory = join(configDir, "usage-archive");
   try {
-    pruneUsageArchive(directory, Date.now());
-    const firstRowAt = firstRowTimestamp(sourceFd, start).toISOString().replaceAll(":", "-");
-    const path = join(directory, `${firstRowAt}_${sourceIno}-${start}.jsonl`);
+    const now = new Date();
+    pruneUsageArchive(directory, now.getTime());
+    removeUnpublishedSegments(directory, sourceFd, source.ino, source.size, now.getTime());
+    const path = join(directory, `${segmentTimeLabel(sourceFd, start, now)}_${source.ino}-${start}.jsonl`);
     // Uninstall removes an owned directory with everything in it, so one manifest entry covers
     // every segment; one entry per segment would fill the capped manifest in about a year.
     recordOwnedConfigPath(configDir, directory);
@@ -213,7 +277,7 @@ export function enforceUsageLedgerSizeLimit(
     if (start === null || start >= captured.size) {
       return { kind: "deferred", currentBytes: captured.size, reason: "no-boundary" };
     }
-    const archivePath = archiveTrimmedSpan(sourceFd, start, captured.ino);
+    const archivePath = archiveTrimmedSpan(sourceFd, start, captured);
     try {
       atomicWriteFileStreamed(path, descriptor => {
         copyRange(sourceFd, descriptor, start, captured.size);
@@ -233,8 +297,10 @@ export function enforceUsageLedgerSizeLimit(
         },
       });
     } catch (error) {
-      // The ledger still holds these rows, so keeping the segment would archive them twice.
-      rmSync(archivePath, { force: true });
+      // While the ledger is still this trim's source it holds these rows, so the segment would archive
+      // them twice. Once its inode changed, something else replaced it and these rows may now exist
+      // only in the segment, so it stays.
+      if (currentUsageLogRevision()?.ino === captured.ino) rmSync(archivePath, { force: true });
       throw error;
     }
     return { kind: "replaced", currentBytes: captured.size - start, removedBytes: start };

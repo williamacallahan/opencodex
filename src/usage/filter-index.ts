@@ -82,8 +82,11 @@ import type { UsageTimeWindow } from "./time-range";
  * The shape of `usage_rows` is unchanged, but a version 4 projection carries indexes that cannot
  * deliver the pager's order; the derived tables are recreated and rebuilt from the ledger rather
  * than migrated, so no stale index survives to re-introduce the per-page sort.
+ * Bumped to 6 when a Reserve send became its own `gpt-reserve` model attribution: rows indexed
+ * before it sit under the client-facing model, and a `model=gpt-reserve` filter would drop them
+ * until the ledger was next replaced, so the projection rebuilds once from the ledger.
  */
-export const USAGE_FILTER_INDEX_SCHEMA_VERSION = 5;
+export const USAGE_FILTER_INDEX_SCHEMA_VERSION = 6;
 export const USAGE_FILTER_INDEX_DB_FILENAME = "usage-filter-index.sqlite";
 /** Rows per SQLite transaction during ingest; also the peak pending-row allocation. */
 export const USAGE_FILTER_INDEX_INSERT_BATCH = 500;
