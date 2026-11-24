@@ -21,6 +21,7 @@ import { existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import { getConfigDir } from "../../config";
 import { recordOwnedConfigPath } from "../../lib/config-ownership";
+import { UNDECLARED_WORKLOAD_SUFFIX, type RequestAttributionFilter } from "../../server/request-attribution";
 import { upstreamDiagnosticLogFields, upstreamDiagnosticLogProjection } from "../../server/request-log-terminal-status";
 import {
   currentUsageLogRevision,
@@ -73,7 +74,7 @@ export interface RequestHistoryIndexMeta {
   lastError: string | null;
 }
 
-export interface RequestHistoryFilters {
+export interface RequestHistoryFilters extends RequestAttributionFilter {
   provider?: string;
   model?: string;
   requestedModel?: string;
@@ -701,6 +702,10 @@ function queryRows(
   if (filters.apiKeyId !== undefined) add("api_key_id = ?", filters.apiKeyId);
   if (filters.profileId !== undefined) add("profile_id = ?", filters.profileId);
   if (filters.fallback !== undefined) add("fallback = ?", filters.fallback ? 1 : 0);
+  if (filters.workload !== undefined) add("workload = ?", filters.workload);
+  if (filters.clientHost !== undefined) add("client_host = ?", filters.clientHost);
+  if (filters.clientAddress !== undefined) add("client_address = ?", filters.clientAddress);
+  if (filters.undeclared) add("workload LIKE ?", `%${UNDECLARED_WORKLOAD_SUFFIX}`);
   if (filters.from !== undefined) add("timestamp >= ?", filters.from);
   if (cursor && (filters.to === undefined || cursor.t <= filters.to)) {
     where.push("(timestamp, request_id) < (?, ?)");

@@ -59,7 +59,12 @@ Authentication is replaced with the selected managed credential. Cookies and `x-
 headers are removed, as are hop-by-hop fields (including Connection nominations), Host and framing.
 The request header filter also excludes ingress topology/identity: `Forwarded`, `X-Real-IP`,
 `X-Forwarded-*`, `Tailscale-User-*` and `Tailscale-Headers-Info`. These reserved ingress fields
-are not application headers; other caller application headers and response end-to-end fields remain intact.
+are not application headers. The same filter drops the gateway attribution headers (`X-User-ID` and
+every `X-LGW-*`, `isGatewayAttributionHeader` in `src/lib/provider-client-headers.ts`): the hub
+records them on its own row from the original request, and no vendor receives them. This filter also
+feeds the `agy`, Devin and `/vibe` pass-throughs; the caller-credential native lane in
+`src/server/claude-messages.ts` and the Claude intercept relay apply the same predicate. Other caller
+application headers and response end-to-end fields remain intact.
 Fetch owns header casing/order, framing, and connection freshness; gateway CORS/security response
 headers remain gateway policy. These exceptions do not permit request-body changes.
 One end-to-end header is narrowed: for a streaming request `Accept-Encoding` is rewritten to the

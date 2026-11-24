@@ -68,6 +68,7 @@ import {
 } from "../../lib/debug-settings";
 import type { OcxClaudeCodeConfig, OcxConfig, OcxCustomModel, OcxProviderConfig } from "../../types";
 import { drainAndShutdown } from "../lifecycle";
+import { parseAttributionFilter } from "../request-attribution";
 import { getRequestLogEntries, queryRequestLogs, type RequestLogEntry } from "../request-log";
 import { decodeRequestLogCursor, selectRequestLogPoll } from "../request-log-cursor";
 import { upstreamDiagnosticLogProjection } from "../request-log-terminal-status";
@@ -314,14 +315,16 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     // A filtered summary must never reach the cache or the warm loop below:
     // the key is `range:surface`, so a filtered entry stored under it would be
     // served to the next unfiltered caller, dashboard included.
+    const attribution = parseAttributionFilter(url.searchParams);
     const filter = {
       provider: url.searchParams.get("provider"),
       model: url.searchParams.get("model"),
       apiKeyId: url.searchParams.get("apiKeyId"),
+      ...(Object.keys(attribution).length ? { attribution } : {}),
       ...(source.kind === "filtered" ? { sourceFilter: source.filter } : {}),
       ...(configuredIds ? { configuredApiKeyIds: configuredIds } : {}),
     };
-    const filterRequested = source.kind === "filtered" || window !== undefined || [filter.provider, filter.model, filter.apiKeyId]
+    const filterRequested = source.kind === "filtered" || window !== undefined || filter.attribution !== undefined || [filter.provider, filter.model, filter.apiKeyId]
       .some(value => typeof value === "string" && value.trim() !== "");
     const now = Date.now();
     try {

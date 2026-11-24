@@ -14,7 +14,9 @@
 // so filtered /api/request-history pages seek via index instead of temp-B-tree sorting on the event loop.
 // Version 5 widens idx_requests_provider_model_ts to (provider, model, timestamp DESC, request_id DESC)
 // ahead of single-column filter indexes so provider+model and health lookups never scan another provider's rows.
-export const HISTORY_SCHEMA_VERSION = 5;
+// Version 6 adds the request-attribution columns (user agent, client address, workload, device, conversation key)
+// with their composite filter indexes.
+export const HISTORY_SCHEMA_VERSION = 6;
 export const HISTORY_DB_FILENAME = "routing-history.sqlite";
 
 export const HISTORY_META_KEYS = {
@@ -62,6 +64,11 @@ CREATE TABLE IF NOT EXISTS requests (
   close_reason     TEXT,
   attempt_count    INTEGER NOT NULL DEFAULT 1,
   decision_json    TEXT,
+  user_agent       TEXT,
+  client_address   TEXT,
+  workload         TEXT,
+  client_host      TEXT,
+  conversation_key TEXT,
   row_json         TEXT NOT NULL
 );
 
@@ -75,6 +82,11 @@ CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status, timestamp DES
 CREATE INDEX IF NOT EXISTS idx_requests_conversation ON requests(conversation_id, timestamp DESC, request_id DESC);
 CREATE INDEX IF NOT EXISTS idx_requests_api_key ON requests(api_key_id, timestamp DESC, request_id DESC);
 CREATE INDEX IF NOT EXISTS idx_requests_profile ON requests(profile_id, timestamp DESC, request_id DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_user_agent ON requests(user_agent, timestamp DESC, request_id DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_client_address ON requests(client_address, timestamp DESC, request_id DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_workload ON requests(workload, timestamp DESC, request_id DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_client_host ON requests(client_host, timestamp DESC, request_id DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_conversation_key ON requests(conversation_key, timestamp DESC, request_id DESC);
 -- Routing-time health evidence (routing/health.ts): rare multi-attempt rows outside top-level provider/model.
 CREATE INDEX IF NOT EXISTS idx_requests_multi_attempt_ts ON requests(timestamp) WHERE attempt_count > 1;
 `;

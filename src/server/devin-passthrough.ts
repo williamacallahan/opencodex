@@ -5,7 +5,7 @@
  */
 import { createHash, randomInt } from "node:crypto";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { admissionFields, resolveDataPlaneAdmissionSecret, type DataPlaneAdmission } from "./auth-cors";
+import { admissionFields, resolveDataPlaneAdmissionSecret, withRequestAttribution, type DataPlaneAdmission } from "./auth-cors";
 import { readBoundedRequestBytes } from "./index/bounded-request";
 import { isDraining, tryAdmitTurn } from "./lifecycle";
 import { messagesEndToEndHeaders } from "./messages-native-integrity";
@@ -321,7 +321,7 @@ export async function handleDevinPassthrough(req: Request, ctx: DevinPassthrough
   if (!parts || !DEVIN_RPC_PATH.test(parts.rpcPath)) return refuse(404, "unknown Devin pass-through RPC path");
   if (ctx.draining) return refuse(503, "hub is restarting");
 
-  const admission = resolveDataPlaneAdmissionSecret(parts.key, config, "dedicated");
+  const admission = withRequestAttribution(req, resolveDataPlaneAdmissionSecret(parts.key, config, "dedicated"));
   if (!admission) return refuse(401, "opencodex API key required in WINDSURF_API_SERVER_URL (/devin/<key>)");
   const keyEntry = admission.kind === "configured" ? config.apiKeys?.find(e => e.id === admission.keyId) : undefined;
   if (keyEntry?.allowedProviders?.length && !keyEntry.allowedProviders.includes(DEVIN_PROVIDER)) {

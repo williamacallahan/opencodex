@@ -17,6 +17,7 @@ import {
   REQUEST_HISTORY_MAX_PAGE_SIZE,
 } from "../../routing/history/indexer";
 import { InvalidCursorError } from "../../routing/history/cursor";
+import { parseAttributionFilter } from "../request-attribution";
 import { requestLogEntryFromPersistedUsage } from "../request-log";
 import { upstreamDiagnosticLogProjection } from "../request-log-terminal-status";
 import { requestLogDto } from "./shared";
@@ -100,6 +101,7 @@ export async function handleRequestHistoryRoutes(ctx: ManagementContext): Promis
         inboundProtocol: url.searchParams.get("inboundProtocol")?.trim() || undefined,
         apiKeyId: url.searchParams.get("apiKeyId")?.trim() || undefined,
         profileId: url.searchParams.get("profileId")?.trim() || undefined,
+        ...parseAttributionFilter(url.searchParams),
         fallback: url.searchParams.get("fallback") === "true"
           ? true
           : url.searchParams.get("fallback") === "false" ? false : undefined,

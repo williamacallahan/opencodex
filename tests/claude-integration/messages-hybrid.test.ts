@@ -9,6 +9,7 @@ import { buildDesktop3pRegistry, desktop3pAlias } from "../../src/claude/desktop
 import { clearAnthropicAccountPoolState, forgetAnthropicFailoverQuorum } from "../../src/oauth/anthropic-routing";
 import { getAccountSet, saveCredential, setActiveAccount, setAccountPaused } from "../../src/oauth/store";
 import { handleClaudeMessages } from "../../src/server/claude-messages";
+import { getRequestLogEntries } from "../../src/server/request-log";
 import { MAX_ACTIVE_SESSION_LANES, tryAdmitTurn, type ActiveTurnLease } from "../../src/server/lifecycle";
 import type { OcxConfig } from "../../src/types";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
@@ -180,6 +181,26 @@ describe("hybrid Messages public HTTP transport", () => {
       expect(captured.headers.has("x-opencodex-api-key")).toBe(false);
     }
     expect([...nativeCalls[1]!.headers]).toEqual([...nativeCalls[0]!.headers]);
+  });
+
+  test("launcher attribution is recorded but never reaches Anthropic on the native lane", async () => {
+    await launch();
+    const attribution = { "x-user-id": "claude-oc:session-1", "x-lgw-cache-key": "claude-oc:conversation-1",
+      "X-LGW-Client-Host": "laptop-1", "x-lgw-client-address": "192.0.2.66" };
+    const response = await post("/strict/v1/messages", encode(raw), attribution);
+    expect(response.status).toBe(200);
+    await response.text();
+    const plain = await post("/strict/v1/messages");
+    expect(plain.status).toBe(200);
+    await plain.text();
+    const [attributed, baseline] = nativeCalls;
+    expect(attributed!.bytes).toEqual(encode(raw));
+    expect(attributed!.headers.get("x-future-client")).toBe("opaque");
+    for (const name of Object.keys(attribution)) expect(attributed!.headers.has(name)).toBe(false);
+    expect([...attributed!.headers]).toEqual([...baseline!.headers]);
+    const row = getRequestLogEntries().find(entry => entry.workload === "claude-oc:session-1");
+    expect(row?.clientHost).toBe("laptop-1");
+    expect(row?.conversationKey).toBe("claude-oc:conversation-1");
   });
 
   test("root path still serves a routed id", async () => {

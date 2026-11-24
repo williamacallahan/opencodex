@@ -242,8 +242,15 @@ describe("openai-chat forwardClientHeaders carries the session identity to a gat
     expect(headers.authorization).toBe("Bearer gateway-key");
     expect(headers["x-other"]).toBeUndefined();
   });
+  test("accepts any launcher's name but never a declared hub operation", () => {
+    const forwarded = chatHeaders(gateway, { "x-user-id": "codex-oc:019e-abc", "x-lgw-cache-key": "muse-oc:thread.1" });
+    expect([forwarded["x-user-id"], forwarded["x-lgw-cache-key"]]).toEqual(["codex-oc:019e-abc", "muse-oc:thread.1"]);
+    expect(chatHeaders(gateway, { "x-lgw-cache-key": "amp:session:via-opencodex" })["x-lgw-cache-key"]).toBeUndefined();
+    expect(chatHeaders(gateway, { "x-lgw-cache-key": `${"a".repeat(33)}:session` })["x-lgw-cache-key"]).toBeUndefined();
+  });
+
   test("replaces a gateway identity that is not a hub launcher's with the derived label", () => {
-    const headers = chatHeaders(gateway, { "x-lgw-cache-key": "someone-else:session", "x-user-id": "admin" });
+    const headers = chatHeaders(gateway, { "x-lgw-cache-key": "Someone-Else:session", "x-user-id": "admin" });
     expect(headers["x-lgw-cache-key"]).toBeUndefined();
     expect(headers["x-user-id"]).toBe("unknown-client:via-opencodex");
     expect(chatHeaders(gateway, { "x-user-id": "claude-code:codeAgent", "x-lgw-cache-key": "pi-av:019e-abc" })["x-user-id"])

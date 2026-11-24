@@ -7,7 +7,7 @@ import { ownedDisabledModelResponse, normalizeMessagesProxyRefusal, ownedAnthrop
 import { CLAUDE_CONTEXT_OVERFLOW_MESSAGE, isProxyError, markProxyError, carryProxyError, attachComboFailureEvidence, comboFailureEvidence } from "../lib/client-error-body";
 import type { MessagesFailureVerdictSink } from "../claude/failure-verdict";
 import { clientFacingModelLabel, clientFacingModelText } from "../lib/error-destination";
-import { GATEWAY_IDENTITY_HEADERS, deriveClientWorkloadLabel, forwardedClientHeaderValueAllowed } from "../lib/provider-client-headers";
+import { GATEWAY_IDENTITY_HEADERS, deriveClientWorkloadLabel, forwardedClientHeaderValueAllowed, isGatewayAttributionHeader } from "../lib/provider-client-headers";
 import { classifyUpstreamCondition } from "../lib/upstream-condition";
 import { CodexInstallationIdUnavailableError } from "../codex/installation-id";
 import { recordLocalFailureDetail, type FailureDetail } from "./request-log-failure-detail";
@@ -309,7 +309,7 @@ function wantsNativePassthrough(
 
 function shouldForwardNativeHeader(name: string, value: string, config: OcxConfig): boolean {
   const lowerName = name.toLowerCase();
-  if (PASSTHROUGH_STRIP_HEADERS.has(lowerName)) return false;
+  if (PASSTHROUGH_STRIP_HEADERS.has(lowerName) || isGatewayAttributionHeader(lowerName)) return false;
   if (lowerName !== "authorization" && lowerName !== "x-api-key") return true;
   const token = singleCredentialToken(lowerName, value);
   return !!token && !isProxyAdmissionSecret(token, config);

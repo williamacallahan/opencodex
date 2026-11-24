@@ -14,6 +14,7 @@ import {
   type PersistedUsageEntry,
   type UsageLogRevision,
 } from "../../usage/log";
+import { requestAttributionLogFields } from "../../server/request-attribution";
 import { HISTORY_DDL, HISTORY_META_KEYS, HISTORY_SCHEMA_VERSION } from "./schema";
 
 export const REQUEST_HISTORY_INSERT_BATCH = 500;
@@ -89,6 +90,8 @@ export function recordSourceMeta(dbHandle: Database, revision: UsageLogRevision 
 /** Extract the `requests` row columns from a canonical persisted entry. */
 function extractRow(entry: PersistedUsageEntry): Array<string | number | null> {
   const attempts = entry.attempts;
+  // Raw ledger lines reach here unnormalized; a hand-edited non-string must not reach a bound column.
+  const attribution = requestAttributionLogFields(entry);
   return [
     entry.requestId,
     entry.timestamp,
@@ -116,6 +119,11 @@ function extractRow(entry: PersistedUsageEntry): Array<string | number | null> {
     entry.closeReason ?? null,
     attempts?.length ?? 1,
     entry.routeDecision ? JSON.stringify(entry.routeDecision) : null,
+    attribution.userAgent ?? null,
+    attribution.clientAddress ?? null,
+    attribution.workload ?? null,
+    attribution.clientHost ?? null,
+    attribution.conversationKey ?? null,
     JSON.stringify(entry),
   ];
 }
@@ -126,12 +134,14 @@ INSERT OR IGNORE INTO requests (
   inbound_protocol, api_key_id, conversation_id, route_kind, profile_id,
   profile_revision, fallback, duration_ms, first_output_ms, usage_status,
   usage_json, total_tokens, error_code, terminal_status, close_reason,
-  attempt_count, decision_json, row_json
+  attempt_count, decision_json, user_agent, client_address, workload,
+  client_host, conversation_key, row_json
 ) VALUES (
   ?, ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?, ?, ?, ?,
-  ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?
 )`;
 
 function parsedEntryFromLine(line: string): PersistedUsageEntry | null {

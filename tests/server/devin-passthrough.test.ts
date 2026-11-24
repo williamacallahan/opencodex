@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { getRequestLogEntries } from "../../src/server/request-log";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -195,6 +196,8 @@ describe("devin pass-through public HTTP lane", () => {
         "x-api-key": "leaked",
         referer: `https://opencodex.haiku.host/devin/${hubKey}/secret`,
         "x-opencodex-api-key": hubKey,
+        "x-user-id": "claude-oc:session-1", "x-lgw-cache-key": "claude-oc:conversation-1",
+        "x-lgw-client-host": "laptop-1", "x-lgw-client-address": "192.0.2.66",
       },
       body,
     });
@@ -208,6 +211,10 @@ describe("devin pass-through public HTTP lane", () => {
     expect(calls[0]!.headers.get("x-api-key")).toBeNull();
     expect(calls[0]!.headers.get("referer")).toBeNull();
     expect(calls[0]!.headers.get("x-opencodex-api-key")).toBeNull();
+    for (const name of ["x-user-id", "x-lgw-cache-key", "x-lgw-client-host", "x-lgw-client-address"]) expect(calls[0]!.headers.has(name)).toBe(false);
+    const row = getRequestLogEntries().find(entry => entry.workload === "claude-oc:session-1");
+    expect(row?.workload).toBe("claude-oc:session-1");
+    expect(row?.clientHost).toBe("laptop-1");
   });
 
   test("fails over on HTTP 429 and on HTTP 200 Connect EOS resource_exhausted trailer", async () => {

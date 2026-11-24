@@ -336,8 +336,8 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       // Neither Host nor any X-Forwarded-* header can manufacture this process-local mark.
       if (managementIngress && config.runtimeRole === "hub") {
         markTrustedHubManagementRequest(req);
-      } else if (ingress === "public" && config.dashboardTrustedProxy !== undefined) {
-        // #8338: the kernel-observed peer, so the configured standalone dashboard proxy can be verified.
+      } else if (ingress === "public") {
+        // #8338: the kernel-observed peer, for dashboard-proxy verification and request attribution.
         markDashboardProxyPeer(req, requestServer.requestIP(req)?.address);
       }
       const requestUrl = codexCompatibleUrl(req.url);

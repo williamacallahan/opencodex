@@ -9,6 +9,7 @@ import type { CredentialMask } from "../lib/outbound-credential-registry";
 import { BOUNDED_BODY_MAX_BYTES, BOUNDED_BODY_TIMEOUT_MS, readBoundedResponseBytes } from "../lib/bounded-body";
 import { decodeRequestBody } from "./request-decompress";
 import { nativeHarnessOnly } from "../lib/native-harness";
+import { isGatewayAttributionHeader } from "../lib/provider-client-headers";
 import { createGunzip, createInflate, type Zlib } from "node:zlib";
 import type { Transform } from "node:stream";
 import { BoundedSseFrameBuffer, MAX_CLIENT_SSE_FRAME_BYTES, joinSseFrameBytes, type BoundedSseFrame } from "./sse-frame-buffer";
@@ -25,7 +26,9 @@ export function messagesEndToEndHeaders(source: Headers, stripIngress = false): 
   if (stripIngress) for (const name of [...headers.keys()]) {
     // The hub's own ingress proxies add these (Traefik forwarding, Envoy's request id and x-envoy-*); clients do not.
     if (name === "forwarded" || name === "x-real-ip" || name.startsWith("x-forwarded-") || name === "x-request-id"
-      || name.startsWith("x-envoy-") || name.startsWith("tailscale-user-") || name === "tailscale-headers-info") headers.delete(name);
+      || name.startsWith("x-envoy-") || name.startsWith("tailscale-user-") || name === "tailscale-headers-info"
+      // Launcher attribution is the hub's to record; it never reaches a vendor.
+      || isGatewayAttributionHeader(name)) headers.delete(name);
   }
   return headers;
 }

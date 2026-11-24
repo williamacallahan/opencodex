@@ -162,7 +162,7 @@ describe("the two wrappers still differ", () => {
     const bearer = request({ authorization: "Bearer ocx_data_firstsecret" });
 
     // /v1/models and /v1/messages take bearer...
-    expect(resolveApiAuth(bearer, config)).toEqual({ kind: "configured", keyId: "first-key", source: "bearer", contextPrincipalId: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(resolveApiAuth(bearer, config)).toEqual({ kind: "configured", keyId: "first-key", source: "bearer", contextPrincipalId: expect.stringMatching(/^[a-f0-9]{64}$/), attribution: { workload: "unknown-client:via-opencodex" } });
     expect(hasValidApiAuth(bearer, config)).toBe(true);
 
     // ...and Responses now does too. Rejecting it meant a Codex client configured with
@@ -170,7 +170,7 @@ describe("the two wrappers still differ", () => {
     // credential is substituted rather than forwarded -- see materializeCodexUpstreamAuth.
     // The source is recorded so that substitution can be made conditional on it.
     expect(resolveResponsesApiAuth(request({ authorization: "Bearer ocx_data_firstsecret" }), config))
-      .toEqual({ kind: "configured", keyId: "first-key", source: "bearer", contextPrincipalId: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      .toEqual({ kind: "configured", keyId: "first-key", source: "bearer", contextPrincipalId: expect.stringMatching(/^[a-f0-9]{64}$/), attribution: { workload: "unknown-client:via-opencodex" } });
     expect(requireResponsesApiAuth(request({ authorization: "Bearer ocx_data_firstsecret" }), config)).toBeNull();
   });
 
@@ -190,7 +190,7 @@ describe("the two wrappers still differ", () => {
       authorization: "Bearer ocx_data_firstsecret",
     });
     expect(resolveResponsesApiAuth(both, config))
-      .toEqual({ kind: "configured", keyId: "second-key", source: "dedicated", contextPrincipalId: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      .toEqual({ kind: "configured", keyId: "second-key", source: "dedicated", contextPrincipalId: expect.stringMatching(/^[a-f0-9]{64}$/), attribution: { workload: "unknown-client:via-opencodex" } });
   });
 
   test("x-api-key is accepted only by the broad path", () => {
@@ -202,8 +202,8 @@ describe("the two wrappers still differ", () => {
   test("the dedicated header works on both", () => {
     const config = remoteConfig();
     const dedicated = () => request({ "x-opencodex-api-key": "ocx_data_secondsecret" });
-    expect(resolveApiAuth(dedicated(), config)).toEqual({ kind: "configured", keyId: "second-key", source: "dedicated", contextPrincipalId: expect.stringMatching(/^[a-f0-9]{64}$/) });
-    expect(resolveResponsesApiAuth(dedicated(), config)).toEqual({ kind: "configured", keyId: "second-key", source: "dedicated", contextPrincipalId: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(resolveApiAuth(dedicated(), config)).toEqual({ kind: "configured", keyId: "second-key", source: "dedicated", contextPrincipalId: expect.stringMatching(/^[a-f0-9]{64}$/), attribution: { workload: "unknown-client:via-opencodex" } });
+    expect(resolveResponsesApiAuth(dedicated(), config)).toEqual({ kind: "configured", keyId: "second-key", source: "dedicated", contextPrincipalId: expect.stringMatching(/^[a-f0-9]{64}$/), attribution: { workload: "unknown-client:via-opencodex" } });
     expect(requireResponsesApiAuth(dedicated(), config)).toBeNull();
   });
 });
@@ -211,8 +211,8 @@ describe("the two wrappers still differ", () => {
 describe("loopback binds", () => {
   test("admit without reading a token, and say so", () => {
     const config = loopbackConfig();
-    expect(resolveApiAuth(request(), config)).toEqual({ kind: "loopback", source: "loopback" });
-    expect(resolveResponsesApiAuth(request(), config)).toEqual({ kind: "loopback", source: "loopback" });
+    expect(resolveApiAuth(request(), config)).toEqual({ kind: "loopback", source: "loopback", attribution: { workload: "unknown-client:via-opencodex" } });
+    expect(resolveResponsesApiAuth(request(), config)).toEqual({ kind: "loopback", source: "loopback", attribution: { workload: "unknown-client:via-opencodex" } });
     expect(hasValidApiAuth(request(), config)).toBe(true);
     expect(requireResponsesApiAuth(request(), config)).toBeNull();
   });
