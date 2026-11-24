@@ -16,7 +16,9 @@
 // ahead of single-column filter indexes so provider+model and health lookups never scan another provider's rows.
 // Version 6 adds the request-attribution columns (user agent, client address, workload, device, conversation key)
 // with their composite filter indexes.
-export const HISTORY_SCHEMA_VERSION = 6;
+// Version 7 adds the harness columns (client, workload source, native harness session id); ingest
+// classifies pre-existing rows' workload source so `undeclared` seeks an index instead of a LIKE.
+export const HISTORY_SCHEMA_VERSION = 7;
 export const HISTORY_DB_FILENAME = "routing-history.sqlite";
 
 export const HISTORY_META_KEYS = {
@@ -69,6 +71,9 @@ CREATE TABLE IF NOT EXISTS requests (
   workload         TEXT,
   client_host      TEXT,
   conversation_key TEXT,
+  client           TEXT,
+  workload_source  TEXT,
+  harness_session_id TEXT,
   row_json         TEXT NOT NULL
 );
 
@@ -87,6 +92,9 @@ CREATE INDEX IF NOT EXISTS idx_requests_client_address ON requests(client_addres
 CREATE INDEX IF NOT EXISTS idx_requests_workload ON requests(workload, timestamp DESC, request_id DESC);
 CREATE INDEX IF NOT EXISTS idx_requests_client_host ON requests(client_host, timestamp DESC, request_id DESC);
 CREATE INDEX IF NOT EXISTS idx_requests_conversation_key ON requests(conversation_key, timestamp DESC, request_id DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_client ON requests(client, timestamp DESC, request_id DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_workload_source ON requests(workload_source, timestamp DESC, request_id DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_harness_session ON requests(harness_session_id, timestamp DESC, request_id DESC);
 -- Routing-time health evidence (routing/health.ts): rare multi-attempt rows outside top-level provider/model.
 CREATE INDEX IF NOT EXISTS idx_requests_multi_attempt_ts ON requests(timestamp) WHERE attempt_count > 1;
 `;

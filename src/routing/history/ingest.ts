@@ -14,7 +14,8 @@ import {
   type PersistedUsageEntry,
   type UsageLogRevision,
 } from "../../usage/log";
-import { requestAttributionLogFields } from "../../server/request-attribution";
+import { requestAttributionLogFields, rowWorkloadSource } from "../../server/request-attribution";
+import { normalizeRecordedClient } from "../../usage/client";
 import { HISTORY_DDL, HISTORY_META_KEYS, HISTORY_SCHEMA_VERSION } from "./schema";
 
 export const REQUEST_HISTORY_INSERT_BATCH = 500;
@@ -124,6 +125,9 @@ function extractRow(entry: PersistedUsageEntry): Array<string | number | null> {
     attribution.workload ?? null,
     attribution.clientHost ?? null,
     attribution.conversationKey ?? null,
+    normalizeRecordedClient(entry.client) ?? null,
+    rowWorkloadSource(attribution) ?? null,
+    attribution.harnessSessionId ?? null,
     JSON.stringify(entry),
   ];
 }
@@ -135,13 +139,13 @@ INSERT OR IGNORE INTO requests (
   profile_revision, fallback, duration_ms, first_output_ms, usage_status,
   usage_json, total_tokens, error_code, terminal_status, close_reason,
   attempt_count, decision_json, user_agent, client_address, workload,
-  client_host, conversation_key, row_json
+  client_host, conversation_key, client, workload_source, harness_session_id, row_json
 ) VALUES (
   ?, ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?, ?, ?,
-  ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?, ?
 )`;
 
 function parsedEntryFromLine(line: string): PersistedUsageEntry | null {

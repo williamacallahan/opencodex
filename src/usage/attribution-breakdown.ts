@@ -1,8 +1,10 @@
-import type { RequestAttribution } from "../server/request-attribution";
+import { rowWorkloadSource, type RequestAttribution } from "../server/request-attribution";
 
-/** Who sent the window's requests: harness, declared workload, device, and client address. */
+/** Who sent the window's requests: harness, workload and its source, device, and client address. */
 export interface UsageAttributionBreakdown {
   byHarness: UsageAttributionRow[];
+  /** `declared`, `harness`, or `hub`: whether the caller named its workload or the hub built it. */
+  byWorkloadSource: UsageAttributionRow[];
   byWorkload: UsageAttributionRow[];
   byClientHost: UsageAttributionRow[];
   byClientAddress: UsageAttributionRow[];
@@ -14,7 +16,7 @@ export interface UsageAttributionRow {
   totalTokens: number;
 }
 
-const DIMENSIONS = ["byHarness", "byWorkload", "byClientHost", "byClientAddress"] as const satisfies ReadonlyArray<keyof UsageAttributionBreakdown>;
+const DIMENSIONS = ["byHarness", "byWorkloadSource", "byWorkload", "byClientHost", "byClientAddress"] as const satisfies ReadonlyArray<keyof UsageAttributionBreakdown>;
 type UsageAttributionDimension = typeof DIMENSIONS[number];
 type AttributionTally = { requests: number; totalTokens: number };
 /** Per-partition tallies; rows that never carried a dimension are not counted in it. */
@@ -27,13 +29,14 @@ const RETAINED_KEYS = 1_000;
 const OVERFLOW_KEY = "(other)";
 
 export function blankAttributionCounts(): UsageAttributionCounts {
-  return { byHarness: new Map(), byWorkload: new Map(), byClientHost: new Map(), byClientAddress: new Map() };
+  return { byHarness: new Map(), byWorkloadSource: new Map(), byWorkload: new Map(), byClientHost: new Map(), byClientAddress: new Map() };
 }
 
-/** The harness is the User-Agent's first product token, `claude-cli/2.1.0` from a full Claude Code agent string. */
+/** The harness is the row's classified `client`; rows written before it was recorded are not counted. */
 function attributionKeys(row: RequestAttribution): { [dimension in UsageAttributionDimension]: string | undefined } {
   return {
-    byHarness: row.userAgent?.split(/\s/, 1)[0] || undefined,
+    byHarness: row.client,
+    byWorkloadSource: rowWorkloadSource(row),
     byWorkload: row.workload,
     byClientHost: row.clientHost,
     byClientAddress: row.clientAddress,
@@ -81,5 +84,5 @@ export function summarizeAttribution(counts: UsageAttributionCounts): UsageAttri
     .map(([key, current]) => ({ key, requests: current.requests, totalTokens: current.totalTokens }))
     .sort((left, right) => right.requests - left.requests || right.totalTokens - left.totalTokens || left.key.localeCompare(right.key))
     .slice(0, REPORTED_ROWS);
-  return { byHarness: top("byHarness"), byWorkload: top("byWorkload"), byClientHost: top("byClientHost"), byClientAddress: top("byClientAddress") };
+  return { byHarness: top("byHarness"), byWorkloadSource: top("byWorkloadSource"), byWorkload: top("byWorkload"), byClientHost: top("byClientHost"), byClientAddress: top("byClientAddress") };
 }

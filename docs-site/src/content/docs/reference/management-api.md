@@ -445,9 +445,20 @@ are observed before image/search loops or continuation guards combine their usag
 sum the flat attempts by provider/account and do not add the parent combo total again. These
 records identify usage; provider quota percentages remain separate upstream observations.
 
+`GET /api/usage` and `GET /api/request-history` also filter by who sent each request:
+`workload`, `clientHost`, `clientAddress`, `harness` (a recorded client such as `claude_code`,
+`codex_cli`, `pi`, `amp`, or `antigravity_cli`; an unrecognized value matches `unknown` rows),
+`harnessSession` (the session id the harness itself sent, such as Claude Code's
+`X-Claude-Code-Session-Id` or Amp's `X-Amp-Thread-Id`), and `undeclared=true` (requests whose
+caller sent no `X-User-ID`, so the workload came from the harness session or the hub's
+`<product>:via-opencodex` label). Each usage summary's `attribution` object counts requests by
+`byHarness` (the recorded client), `byWorkloadSource` (`declared`, `harness`, or `hub`),
+`byWorkload`, `byClientHost`, and `byClientAddress`. These values are reported by the caller and
+never affect routing.
+
 For app and device attribution, `GET /api/usage` accepts both `client` and `device` together.
-`client` is `all`, `codex`, `claude_code`, `claude_desktop`, `grok`, `opencode`, `aside`,
-`other`, or `unknown`. `device` is `all`, `no-key`, `key`, or `unconfigured`; `key` requires exactly one
+`client` is `all`, `codex`, `claude_code`, `claude_desktop`, `grok`, `opencode`, `aside`, `pi`, `amp`,
+`antigravity_cli`, `other`, or `unknown`. `device` is `all`, `no-key`, `key`, or `unconfigured`; `key` requires exactly one
 case-sensitive `apiKeyId`. These filters require `surface=all` or an omitted surface and cannot
 be combined with the JEV or failure projections. Invalid or repeated source options return 400.
 The response echoes the applied `sourceFilter` and `legacyUnclassifiedRequests` so consumers can

@@ -21,7 +21,7 @@ import { existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import { getConfigDir } from "../../config";
 import { recordOwnedConfigPath } from "../../lib/config-ownership";
-import { UNDECLARED_WORKLOAD_SUFFIX, type RequestAttributionFilter } from "../../server/request-attribution";
+import { UNDECLARED_WORKLOAD_SOURCES, type RequestAttributionFilter } from "../../server/request-attribution";
 import { upstreamDiagnosticLogFields, upstreamDiagnosticLogProjection } from "../../server/request-log-terminal-status";
 import {
   currentUsageLogRevision,
@@ -705,16 +705,23 @@ function queryRows(
   if (filters.workload !== undefined) add("workload = ?", filters.workload);
   if (filters.clientHost !== undefined) add("client_host = ?", filters.clientHost);
   if (filters.clientAddress !== undefined) add("client_address = ?", filters.clientAddress);
-  if (filters.undeclared) add("workload LIKE ?", `%${UNDECLARED_WORKLOAD_SUFFIX}`);
+  if (filters.harness !== undefined) add("client = ?", filters.harness);
+  if (filters.harnessSession !== undefined) add("harness_session_id = ?", filters.harnessSession);
   if (filters.from !== undefined) add("timestamp >= ?", filters.from);
   if (cursor && (filters.to === undefined || cursor.t <= filters.to)) {
     where.push("(timestamp, request_id) < (?, ?)");
     values.push(cursor.t, cursor.i);
   } else if (filters.to !== undefined) add("timestamp <= ?", filters.to);
-  const whereSql = where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "";
-  const rows = handle.query(
-    `SELECT row_json, timestamp, request_id FROM requests${whereSql} ORDER BY timestamp DESC, request_id DESC LIMIT ?`,
-  ).all(...values, limit + 1) as Array<HistoryQueryRow>;
+  const order = "ORDER BY timestamp DESC, request_id DESC LIMIT ?";
+  const select = (clauses: string[]) =>
+    `SELECT row_json, timestamp, request_id FROM requests${clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : ""} ${order}`;
+  // `undeclared` is one equality branch per source, each walking (workload_source, timestamp DESC)
+  // in order, merged by a final sort of at most limit+1 rows per branch. An IN list would seek but
+  // then sort every matching row, which is most of the table when few callers declare a workload.
+  const rows = (filters.undeclared
+    ? handle.query(`${UNDECLARED_WORKLOAD_SOURCES.map(() => `SELECT * FROM (${select(["workload_source = ?", ...where])})`).join(" UNION ALL ")} ${order}`)
+      .all(...UNDECLARED_WORKLOAD_SOURCES.flatMap(source => [source, ...values, limit + 1]), limit + 1)
+    : handle.query(select(where)).all(...values, limit + 1)) as Array<HistoryQueryRow>;
   return { rows, fetched: rows.length };
 }
 
