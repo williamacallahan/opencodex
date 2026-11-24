@@ -16,7 +16,7 @@
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { brotliDecompress, gunzip, inflate, zstdDecompress } from "node:zlib";
-import { admissionFields, resolveDataPlaneAdmissionSecret, type DataPlaneAdmission } from "./auth-cors";
+import { admissionFields, resolveDataPlaneAdmissionSecret, withRequestAttribution, type DataPlaneAdmission } from "./auth-cors";
 import { readBoundedRequestBytes } from "./index/bounded-request";
 import { isDraining, tryAdmitTurn } from "./lifecycle";
 import { messagesEndToEndHeaders } from "./messages-native-integrity";
@@ -367,7 +367,7 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
   const parts = splitAgyPath(url.pathname);
   if (!parts || !CLOUD_CODE_METHOD.test(parts.method)) return refuse(404, "unknown Antigravity pass-through path");
   if (ctx.draining) return refuse(503, "hub is restarting");
-  const admission = resolveDataPlaneAdmissionSecret(parts.key, config, "dedicated");
+  const admission = withRequestAttribution(req, resolveDataPlaneAdmissionSecret(parts.key, config, "dedicated"));
   if (!admission) return refuse(401, "opencodex API key required in CLOUD_CODE_URL (/agy/<key>)");
   const keyEntry = admission.kind === "configured" ? config.apiKeys?.find(entry => entry.id === admission.keyId) : undefined;
   if (keyEntry?.allowedProviders?.length && !keyEntry.allowedProviders.includes(ANTIGRAVITY_OAUTH_STORE_KEY)) {

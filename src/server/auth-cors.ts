@@ -46,6 +46,7 @@ import { providerConfigSeed } from "../providers/derive";
 import { anthropicOAuthInstanceConfigError } from "../config/schema/anthropic-account-pool";
 import { accountAutoPausePolicySchema } from "../config/schema/account-auto-pause";
 import { normalizeProxyAddress, parseDashboardTrustedProxy } from "../config/dashboard-trusted-proxy";
+import { computeRequestAttribution, type RequestAttribution } from "./request-attribution";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { openRouterRoutingConfigError } from "../providers/openrouter-routing";
 import { modelAutoCompactTokenLimitsConfigError } from "../providers/auto-compact-budget";
@@ -496,7 +497,16 @@ export type DataPlaneAdmission = (
   | { kind: "configured"; keyId: string; source: DataPlaneAdmissionSource; contextPrincipalId?: string }
   | { kind: "environment"; source: DataPlaneAdmissionSource; contextPrincipalId?: string }
   | { kind: "loopback"; source: "loopback" }
-) & { readonly callerPolicy?: import("../types/admission-policy").CapturedAdmissionPolicy };
+) & {
+  readonly callerPolicy?: import("../types/admission-policy").CapturedAdmissionPolicy;
+  /** Observational caller identity for log rows and the codex-lb relay; no admission decision reads it. */
+  readonly attribution?: RequestAttribution;
+};
+
+/** The admission with this request's attribution attached; null stays null. */
+export function withRequestAttribution(req: Request, admission: DataPlaneAdmission | null): DataPlaneAdmission | null {
+  return admission && { ...admission, attribution: computeRequestAttribution(req, dashboardProxyPeers.get(req)) };
+}
 
 /**
  * Which admission secret `token` is, or null when it is none of them.
@@ -612,14 +622,14 @@ export function isDataPlaneAdmissionSecret(token: string, config: OcxConfig): bo
  * Every admitted data-plane path builds its log context here, so this is also where the request's
  * caller is recorded for turn-state handle binding (src/server/turn-state-handles.ts).
  */
-export function admissionFields(admission: DataPlaneAdmission): {
+export function admissionFields(admission: DataPlaneAdmission): RequestAttribution & {
   admissionKind: DataPlaneAdmission["kind"];
   apiKeyId?: string;
 } {
   noteTurnStateCaller(admission);
   return admission.kind === "configured"
-    ? { admissionKind: "configured", apiKeyId: admission.keyId }
-    : { admissionKind: admission.kind };
+    ? { ...admission.attribution, admissionKind: "configured", apiKeyId: admission.keyId }
+    : { ...admission.attribution, admissionKind: admission.kind };
 }
 
 export type ApiAuthDisposition = "required" | "accepted" | "rejected";
@@ -705,6 +715,10 @@ export function hasForwardableCodexBearer(headers: Headers, config: OcxConfig): 
  * decision, but it names the admission instead of collapsing it to a boolean.
  */
 export function resolveApiAuth(req: Request, config: RequestPolicyView): DataPlaneAdmission | null {
+  return withRequestAttribution(req, resolveApiAdmission(req, config));
+}
+
+function resolveApiAdmission(req: Request, config: RequestPolicyView): DataPlaneAdmission | null {
   // A loopback bind never reads a token at all, so there is no key to name.
   if (!isApiAuthRequired(config)) return { kind: "loopback", source: "loopback" };
   const dedicated = req.headers.get("x-opencodex-api-key")?.trim();
@@ -718,7 +732,7 @@ export function resolveApiAuth(req: Request, config: RequestPolicyView): DataPla
 }
 
 export function hasValidApiAuth(req: Request, config: RequestPolicyView): boolean {
-  return resolveApiAuth(req, config) !== null;
+  return resolveApiAdmission(req, config) !== null;
 }
 
 export function requireApiAuth(req: Request, config: RequestPolicyView, _kind: "data-plane"): Response | null {
@@ -732,6 +746,10 @@ export function requireApiAuth(req: Request, config: RequestPolicyView, _kind: "
  * domains can never be confused.
  */
 export function resolveResponsesApiAuth(req: Request, config: RequestPolicyView): DataPlaneAdmission | null {
+  return withRequestAttribution(req, resolveResponsesApiAdmission(req, config));
+}
+
+function resolveResponsesApiAdmission(req: Request, config: RequestPolicyView): DataPlaneAdmission | null {
   if (!isApiAuthRequired(config)) return { kind: "loopback", source: "loopback" };
   // The dedicated header still WINS, because it is unambiguous.
   const dedicated = req.headers.get("x-opencodex-api-key")?.trim();
@@ -750,7 +768,7 @@ export function resolveResponsesApiAuth(req: Request, config: RequestPolicyView)
 
 
 export function requireResponsesApiAuth(req: Request, config: RequestPolicyView): Response | null {
-  if (resolveResponsesApiAuth(req, config)) return null;
+  if (resolveResponsesApiAdmission(req, config)) return null;
   return formatErrorResponse(401, "authentication_error", "opencodex API key required");
 }
 

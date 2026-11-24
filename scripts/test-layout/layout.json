@@ -1193,6 +1193,7 @@
     "fixture-teardown-helper.test.ts": "ci-workflows",
     "replay-refusal-parity.test.ts": "server",
     "repo-hygiene.test.ts": "ci-workflows",
+    "request-attribution.test.ts": "usage",
     "request-decompress.test.ts": "usage",
     "request-evidence.test.ts": "usage",
     "request-history-index.test.ts": "usage", "request-history-integrity.test.ts": "usage",

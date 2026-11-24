@@ -32,6 +32,7 @@ import { claudeCompatibilityReason, normalizeClaudeFeatureCodes, type ClaudeFeat
 import type { UpstreamCondition } from "../lib/upstream-condition";
 import { errorDetailFor, normalizeLogErrorCode } from "./error-detail";
 import { parseClaudeRequestShape, type ClaudeRequestShape } from "../server/claude-request-shape";
+import { requestAttributionLogFields, type RequestAttribution } from "../server/request-attribution";
 import type { CodexWsStageRecord, CodexWsTerminalEvent } from "../server/responses/codex-ws-wire";
 import {
   ATTEMPT_RECOVERY_KIND_ROSTER,
@@ -313,7 +314,7 @@ export function normalizeRequestSpend(value: unknown): PersistedRequestSpend | u
   };
 }
 
-export interface PersistedUsageEntry extends UpstreamErrorDiagnostics {
+export interface PersistedUsageEntry extends UpstreamErrorDiagnostics, RequestAttribution {
   requestedAlias?: string;
   requestId: string;
   /** Best-effort classified client; absent only for records predating attribution. */
@@ -1069,7 +1070,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry, projectDiagnostics = up
     ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
     ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
     ...(entry.localTerminalReason ? { localTerminalReason: sanitizeLogMetadataString(entry.localTerminalReason) } : {}),
-    ...projectDiagnostics(entry),
+    ...projectDiagnostics(entry), ...requestAttributionLogFields(entry),
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
       : {}),
