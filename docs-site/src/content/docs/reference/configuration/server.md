@@ -572,6 +572,14 @@ outright if anything appended to the ledger while it ran, so a request logged du
 never lost; the next append tries again. Trimming also refreshes what the dashboard shows, so
 `/api/logs` stops serving rows the ledger no longer has.
 
+Trimmed rows are moved, not deleted. Before each trim the proxy copies the rows it is about to
+remove, byte for byte, into a new file in the `usage-archive` directory beside `usage.jsonl`, named
+after the first row's UTC time, and deletes archive files last written more than 31 days ago. The
+directory must already exist and be writable: if it is missing or the copy fails, nothing is
+trimmed, the ledger keeps growing, and the proxy logs a `[usage-retention]` warning naming the
+directory and the cause. Create it with `mkdir -m 700 ~/.opencodex/usage-archive` before setting a
+limit; the container image creates it for you.
+
 Configure it in `config.json`, with `ocx config set usageLedgerMaxBytes <bytes>`, or through
 `GET`/`PUT /api/settings` (`null` clears the limit).
 
