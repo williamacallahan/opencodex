@@ -1280,8 +1280,8 @@ export function codexForwardTerminalOutcomeRecorder(
       releaseRequestOwnedMainOnOutcome(authCtx, outcome, modelId);
     };
   }
-  const windowMeta = codexFailureWindowOutcomeMeta(authCtx);
   return (status, httpStatusOverride, reserveServed, capacityStatus) => {
+    const windowMeta = codexFailureWindowOutcomeMeta(authCtx);
     const wsEvidence = response && readCodexWsResponseEvidence(response);
     if (status === "failed" && (wsEvidence?.hardStopStatus === 401 || wsEvidence?.hardStopStatus === 403) && !wsEvidence.authRejection) {
       releaseCodexAuthContextProbeLease(authCtx);

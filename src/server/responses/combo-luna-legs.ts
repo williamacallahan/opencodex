@@ -8,6 +8,7 @@ import { wasAccountAutoPaused } from "../../oauth/account-auto-pause";
 import { isReserveQuotaCode } from "./combo-stream-preflight";
 import { createPoolReserveWalk, modelHasPoolReserve } from "../../codex/pool-reserve";
 import { getEligiblePoolAccounts } from "../../codex/routing/selection";
+import { MAIN_CODEX_ACCOUNT_ID } from "../../codex/account-id";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { isCodexLbProvider } from "../../providers/quota/codex-lb-url";
 import type { RouteResult } from "../../router";
@@ -363,20 +364,21 @@ export async function resolveEmptyLunaReserveStart(args: {
   currentPick: ComboPick | null;
   targetEligible: (target: ComboTarget) => boolean;
   pickWithWait: (opts: { eligible: (target: ComboTarget) => boolean; now: number; allowCooldownReprobe?: boolean; waitForCooldownMs?: number }) => Promise<ComboPick | null>;
-}): Promise<{ pick: ComboPick | null; evaluatedStrictReserve: boolean; lunaStage: "off" | "relay" | "done"; skippedEmptyReserve: "reserve-cooldown" | "reserve-unavailable" | undefined }> {
+}): Promise<{ pick: ComboPick | null; evaluatedStrictReserve: boolean; lunaStage: "off" | "relay" | "done"; skippedEmptyReserve: "reserve-cooldown" | "reserve-unavailable" | undefined; includedOnly: boolean }> {
   const plan = args.lunaLegs;
-  const unchanged = { pick: args.currentPick, evaluatedStrictReserve: false, lunaStage: "off", skippedEmptyReserve: undefined } as const;
+  const unchanged = { pick: args.currentPick, evaluatedStrictReserve: false, lunaStage: "off", skippedEmptyReserve: undefined, includedOnly: false } as const;
   if (args.conversationPin || args.boundTargetKey || !plan
     || !args.currentPick || targetKey(args.currentPick.target) !== plan.nativeKey) return unchanged;
   const now = Date.now();
   const walk = createPoolReserveWalk(args.config, now);
   if (walk.remaining.size > 0) return unchanged;
-  const includedAvailable = getEligiblePoolAccounts(args.config, undefined, now, "shared", { poolCapacity: "included" }).length > 0;
+  // Native main may be draining and cannot justify skipping the relay before dispatch acquires its lease.
+  const includedAvailable = getEligiblePoolAccounts(args.config, MAIN_CODEX_ACCOUNT_ID, now, "shared", { poolCapacity: "included" }).length > 0;
   const relayPick = await args.pickWithWait({
     eligible: target => targetKey(target) === plan.relayKey && args.targetEligible(target),
     now,
     ...(includedAvailable ? { allowCooldownReprobe: false, waitForCooldownMs: 0 } : {}),
   });
   return { pick: relayPick ?? args.currentPick, evaluatedStrictReserve: true, lunaStage: relayPick ? "relay" : "done",
-    skippedEmptyReserve: walk.hasHeldSeat ? "reserve-cooldown" : "reserve-unavailable" };
+    includedOnly: !relayPick && includedAvailable, skippedEmptyReserve: walk.hasHeldSeat ? "reserve-cooldown" : "reserve-unavailable" };
 }

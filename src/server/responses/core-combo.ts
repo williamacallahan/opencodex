@@ -776,7 +776,7 @@ export async function executeComboResponses(
   const conversationPin = !turnRebuilt && recalledPick && (!boundTargetKey || boundTargetKey === targetKey(recalledPick.target))
     && (!lunaLegs || targetKey(recalledPick.target) === lunaLegs.nativeKey) ? recalledPick : undefined;
   let evaluatedStrictReserve = false;
-  let skippedEmptyReserve: Awaited<ReturnType<typeof resolveEmptyLunaReserveStart>>["skippedEmptyReserve"];
+
   let lunaStage: "off" | "reserve" | "relay" | "done" = "off";
   let encryptedTaskRecoveryAttempted = false;
   let recoveryFailureReason: AgentTaskRecoveryFailureReason | undefined;
@@ -844,10 +844,9 @@ export async function executeComboResponses(
     abortSignal: options.abortSignal,
   });
   let pick = conversationPin ?? await pickWithWait({ eligible: targetEligible, now: initialNow });
-  ({ pick, evaluatedStrictReserve, lunaStage, skippedEmptyReserve } = await resolveEmptyLunaReserveStart({
-    config, lunaLegs, conversationPin, boundTargetKey, currentPick: pick, targetEligible, pickWithWait,
-  }));
-  // Opt-in JEV session pin (#7525); override routes neither read nor write it, like the lane recall.
+  const emptyReserve = await resolveEmptyLunaReserveStart({ config, lunaLegs, conversationPin, boundTargetKey, currentPick: pick, targetEligible, pickWithWait });
+  ({ pick, evaluatedStrictReserve, lunaStage } = emptyReserve);
+  const { skippedEmptyReserve } = emptyReserve;
   const jevPin = options.compactionRoutingOverride || options.mainHardLockFallbackOverride
     ? undefined
     : jevSessionPinScope({ combo, comboId, admission: options.admission, lane: comboLane });
@@ -1072,7 +1071,7 @@ export async function executeComboResponses(
     ? memoryModelRouteReason(options.memoryModelPhase)
     : portedBeforeDispatch || (ported !== undefined && dispatchBody === ported) ? "luna-owner-spent-ported"
     : lunaReplay?.kind === "bound" ? `luna-owner-${lunaReplay.reason}`
-    : !evaluatedStrictReserve && lunaLegs?.nativeKey === targetKey(pick.target) ? "luna-reserve-first"
+    : lunaLegs?.nativeKey === targetKey(pick.target) ? skippedEmptyReserve ?? "luna-reserve-first"
     : conversationPin ? COMBO_CONVERSATION_PIN_REASON : jevDecision?.pinned ? JEV_SESSION_PIN_ROUTE_REASON : undefined;
   logCtx.routeDecision = selectedReason
     ? { ...decision, selected: { ...decision.selected, reason: selectedReason } }
@@ -1196,7 +1195,8 @@ export async function executeComboResponses(
     const legIntent: PoolCapacityIntent | undefined = boundTargetKey && boundTargetKey === nativeKey ? "owner-only"
       : portedReserveOnly && legTargetKey === nativeKey ? "reserve-only"
       : legTargetKey !== lunaLegs?.nativeKey ? undefined
-      : lunaStage === "reserve" ? "reserve-only" : lunaStage === "done" ? "ordinary-only" : undefined;
+      : lunaStage === "reserve" ? "reserve-only" : lunaStage === "done"
+        ? firstComboTarget && emptyReserve.includedOnly ? "included-only" : "ordinary-only" : undefined;
     // The physical destination after provider aliases and blockedModelRedirects: hops are
     // classified by where the request really goes, not by the selector the combo names.
     const targetRoute = routeConcreteModel(config, `${pick.target.provider}/${pick.target.model}`);

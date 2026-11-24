@@ -245,6 +245,7 @@ export type CodexAuthContext = TurnStateConstrained & (
       generation: number;
       poolQuotaWriter?: PoolQuotaWriter;
       poolReserve?: true;
+      poolIncludedOnly?: true;
       reserveDispatchGeneration?: number;
       bindIncludedAlternateOnCompletion?: true;
       accessToken: string;
@@ -1760,6 +1761,7 @@ async function resolveCodexAuthContextUnannotated(
       generation: token.generation,
       poolQuotaWriter: capturePoolQuotaWriter(accountId, token),
       ...(poolReserve ? { poolReserve: true as const } : {}),
+      ...(options.poolCapacityIntent === "included-only" ? { poolIncludedOnly: true as const } : {}),
       accessToken: token.accessToken,
       chatgptAccountId: token.chatgptAccountId,
       ...selectedBindings(),

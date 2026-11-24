@@ -10,7 +10,7 @@ import { failureWindowSteeringEndsAt } from "./routing/failure-window";
 import { poolReserveHoldResetAt } from "./pool-reserve";
 
 export type PoolCreditPolicyConfig = Readonly<Pick<OcxConfig, "creditCodexAccountIds" | "codexAccounts">>;
-type PoolContext = { kind: "pool"; accountId: string; poolReserve?: true; poolQuotaWriter?: PoolQuotaWriter };
+type PoolContext = { kind: "pool"; accountId: string; poolReserve?: true; poolIncludedOnly?: true; poolQuotaWriter?: PoolQuotaWriter };
 
 // Keep live policy references private: they must not enter DTOs or serialized auth context.
 const policies = new WeakMap<object, {
@@ -74,7 +74,7 @@ export function poolContextCreditHoldResetAt(
   // enforcement must supply `override` (or resolve through bindPoolCreditPolicy).
   if (!policy) return undefined;
   const catalog = override?.codexAccounts ? override : bound?.config ?? policy;
-  return poolCreditHoldResetAt(policy, context.accountId, catalog, now, context.poolReserve === true);
+  return poolCreditHoldResetAt(context.poolIncludedOnly ? {} : policy, context.accountId, catalog, now, context.poolReserve === true);
 }
 
 /** Retry advice only: absent/uncertain evidence can be re-observed, never spent. */

@@ -19,7 +19,7 @@ export const POOL_RESERVE_UNAVAILABLE_MESSAGE = "No Codex pool account can serve
 /** The one model whose ChatGPT pool seats can hold a separate Reserve window. */
 export const modelHasPoolReserve = (modelId: unknown): boolean => modelId === "gpt-6-luna";
 /** Request-local capacity for a native Luna leg: Reserve or nothing, or ordinary Luna without ever consulting Reserve. */
-export type PoolCapacityIntent = "reserve-only" | "ordinary-only" | "owner-only";
+export type PoolCapacityIntent = "reserve-only" | "ordinary-only" | "included-only" | "owner-only";
 export const permitsPoolWireModel = (intent: PoolCapacityIntent | undefined, wireModel: string | undefined): boolean =>
   intent !== "reserve-only" || wireModel === NATIVE_RESERVE_MODEL;
 // Longer than the 5-minute recovery probe cadence (CODEX_QUOTA_PROBE_INTERVAL_MS), so a grant
@@ -114,8 +114,12 @@ export function createPoolReserveWalk(config: OcxConfig, now = Date.now()): Pool
     if (reserveSeatEvidence(account, now, false)) seats.add(account.id);
     if (hasHeldSeat || codexUsageLimitResetAt(getAccountQuota(account.id), account.plan, now) === undefined) continue;
     const health = scopedHealthFor(account.id, "reserve");
-    hasHeldSeat = !!health && ((health.cooldownUntil ?? 0) > now || (health.quotaAvoidUntil ?? 0) > now
-      || (!holdsPoolReserveWindow(account.id) && health.lastProbeAt !== undefined && now - health.lastProbeAt < CODEX_QUOTA_PROBE_INTERVAL_MS));
+    const unreported = !holdsPoolReserveWindow(account.id);
+    const held = health && ((health.cooldownUntil ?? 0) > now || (health.quotaAvoidUntil ?? 0) > now
+      || (unreported && health.lastProbeAt !== undefined && now - health.lastProbeAt < CODEX_QUOTA_PROBE_INTERVAL_MS));
+    if (held && (unreported || hasFreshPoolReserve(account.id, now))) {
+      hasHeldSeat = isCodexAccountSelectable(config, account.id, now, undefined, { poolCapacity: "reserve", modelEligibleAccountIds: new Set([account.id]) });
+    }
   }
   const options: CodexAccountUsabilityOptions = { poolCapacity: "reserve", modelEligibleAccountIds: seats };
   for (const id of seats) if (!isCodexAccountSelectable(config, id, now, "reserve", options)) seats.delete(id);
@@ -144,6 +148,7 @@ export function poolLunaReserveSelection(
     ) };
   }
   const unchanged = { options, quotaScope, reserve: false };
+  if (intent === "included-only") return { ...unchanged, options: { ...options, poolCapacity: "included" } };
   if (!modelHasPoolReserve(modelId) || intent === "ordinary-only") return unchanged;
   // A pin cannot move after a refusal, so it is offered Reserve only on a fresh reported grant.
   const verified = new Set<string>();

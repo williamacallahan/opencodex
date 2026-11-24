@@ -1725,10 +1725,28 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
   test("empty Reserve does not reprobe a held relay when native included Luna is available", async () => {
     const cfg = config();
     seats(false);
+    cfg.activeCodexAccountId = B;
+    cfg.creditCodexAccountIds = [B];
+    setAccountQuotaFromParsed(B, { credits: { hasCredits: true, balance: 20, observedAt: now } });
     Object.assign(cfg.combos!.luna!, { cooldownReprobe: { enabled: true }, waitForCooldownMs: 0 });
     coolComboTarget("luna", { provider: "relay", model: "gpt-6-luna" }, { now, cooldownMs: 60_000 });
-    expect((await post(cfg, { store: false })).text).toContain("response.completed");
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    expect((await post(cfg, { store: false }, {}, undefined, { logCtx })).text).toContain("response.completed");
     expect(calls).toEqual(["native:gpt-6-luna"]);
+    expect(nativeAccounts).toEqual([`fixture-workspace-${A}`]);
+    expect(logCtx.routeDecision?.selected.reason).toBe("reserve-unavailable");
+  });
+
+  test("a paused spent seat does not claim Reserve will return when its hold expires", async () => {
+    const cfg = config();
+    updateAccountQuota(A, 40, now + 86_400_000);
+    updateAccountQuota(B, 100, now + 86_400_000);
+    recordCodexUpstreamOutcome(cfg, B, 429, { modelId: "gpt-reserve", poolReserve: true, now });
+    cfg.pausedCodexAccountIds = [B];
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    expect((await post(cfg, { store: false }, {}, undefined, { logCtx })).text).toContain("response.completed");
+    expect(calls).toEqual(["relay:gpt-6-luna"]);
+    expect(logCtx.routeDecision?.candidates[0]?.exclusions).toEqual([{ code: "reserve-unavailable" }]);
   });
 
   test("zero Reserve eligibility starts directly on relay without native 429 noise and still falls back to ordinary Luna", async () => {
