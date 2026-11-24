@@ -1642,24 +1642,13 @@ class StreamingUsageSummaryAccumulator implements UsageSummaryAccumulator {
     return label;
   }
 
-  private noteSnapshot(sourceEntry: PersistedUsageEntry): void {
-    if (Number.isFinite(sourceEntry.timestamp)) {
-      this.snapshotStart = this.snapshotStart === null
-        ? sourceEntry.timestamp
-        : Math.min(this.snapshotStart, sourceEntry.timestamp);
-      this.snapshotEnd = this.snapshotEnd === null
-        ? sourceEntry.timestamp
-        : Math.max(this.snapshotEnd, sourceEntry.timestamp);
-    }
-  }
-
   add(sourceEntry: PersistedUsageEntry): void {
-    if (!this.filter?.sourceFilter) this.noteSnapshot(sourceEntry);
+    if (!this.filter?.sourceFilter) this.noteLedgerSpan(sourceEntry.timestamp, sourceEntry.timestamp);
     if (this.window && (!Number.isFinite(sourceEntry.timestamp)
       || sourceEntry.timestamp < this.window.since || sourceEntry.timestamp > this.window.until)) return;
     const projected = this.filter ? projectedEntryForFilter(sourceEntry, this.filter) : { entry: sourceEntry, comboOverlap: false };
     if (!projected) return;
-    if (this.filter?.sourceFilter) this.noteSnapshot(sourceEntry);
+    if (this.filter?.sourceFilter) this.noteLedgerSpan(sourceEntry.timestamp, sourceEntry.timestamp);
     this.comboOverlap ||= projected.comboOverlap;
     const entry = projected.entry;
     const partition = this.partitionFor(entry);
