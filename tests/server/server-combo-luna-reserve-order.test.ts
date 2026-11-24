@@ -1412,7 +1412,7 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     const last = new Response("readable alternate refusal", { status: 503, headers: { "retry-after": "0", "x-fixture": "from B" } });
     let vetoed = false;
     try {
-      const result = await sendReserveSeat({ remaining: new Set([B]), movesSent: 0, transientRetries: 0 }, budget, booking.permit,
+      const result = await sendReserveSeat({ remaining: new Set([B]), movesSent: 0, transientRetries: 0, hasHeldSeat: false }, budget, booking.permit,
         new AbortController().signal, async (permit, transient) => {
           if (transient) { vetoed = true; return undefined; }
           expect(permit.use()).toBe(true); return last;
@@ -1427,7 +1427,7 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     const budget = createRequestExecutionBudget();
     const booking = budget.reserveDispatch({ sendClass: "account-failover", targetKey: "alternate" });
     if (!booking.allowed) throw new Error("first move not admitted");
-    return sendReserveSeat({ remaining: new Set([B]), movesSent: 0, transientRetries: 0 }, budget, booking.permit, signal,
+    return sendReserveSeat({ remaining: new Set([B]), movesSent: 0, transientRetries: 0, hasHeldSeat: false }, budget, booking.permit, signal,
       async (permit, transient, onAdmitted) => {
         const admit = () => { expect(permit.use()).toBe(true); onAdmitted?.(); };
         if (transient) return retry(admit);
@@ -1786,7 +1786,7 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
           calls.push("other:gpt-5");
           return sse("gpt-5", "ok");
         }
-        return sse("gpt-6-luna", "unexpected");
+        throw new Error("Unexpected Luna request");
       }, { preconnect() {} });
       const primaryOk = await post(cfgWithPrimary);
       expect(primaryOk.status).toBe(200);
@@ -1830,6 +1830,12 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(logCtx.routeDecision?.candidates[0]?.exclusions).toEqual([{ code: "reserve-cooldown" }]);
     expect(logCtx.attempts).toHaveLength(1);
     expect(logCtx.attempts?.[0]).toMatchObject({ provider: "metered", sendCount: 1 });
+
+    calls.length = 0;
+    cfg.combos!.luna!.targets = cfg.combos!.luna!.targets.slice(0, 2);
+    cfg.combos!.luna!.cooldownReprobe = { enabled: true };
+    expect((await post(cfg, { store: false })).text).toContain("response.completed");
+    expect(calls).toEqual(["relay:gpt-6-luna"]);
   });
 
   test("skipped empty Reserve with uncooled openai never wakes zero-send ordinary-only on relay refusal or non-Codex bearer, and reports reserve reason when all targets are unavailable", async () => {
@@ -1882,6 +1888,16 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     const callerRes = await post(twoTarget(), { store: false }, { authorization: `Bearer ${jwt}` });
     expect(callerRes.status).toBe(200);
     expect(calls).toEqual(["relay:gpt-6-luna", "native:gpt-6-luna"]);
+
+    clearComboTargetCooldowns();
+    calls.length = 0;
+    const poolOnly = config();
+    poolOnly.codexPool = { ...poolOnly.codexPool, poolOnly: true };
+    const poolOnlyLog: RequestLogContext = { model: "", provider: "" };
+    const poolOnlyResponse = await post(poolOnly, { store: false }, { authorization: `Bearer ${jwt}` }, undefined, { logCtx: poolOnlyLog });
+    expect(poolOnlyResponse.status).toBe(200);
+    expect(calls).toEqual(["relay:gpt-6-luna", "metered:gpt-6-luna"]);
+    expect(poolOnlyLog.attempts?.some(attempt => attempt.provider === "openai")).toBe(false);
 
     // 4. Zero-attempt combo_unavailable preserves target 1 reserve-cooldown exclusion reason alongside cooled relay.
     clearComboTargetCooldowns();
@@ -1947,6 +1963,16 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect((await post(recoverCfg, { store: false })).status).toBe(200);
     expect(calls).toEqual(["relay:gpt-6-luna", "native:gpt-reserve"]);
     expect(nativeAccounts).toEqual([`fixture-workspace-${B}`]);
+
+    clearComboTargetCooldowns(); clearAccountQuota(); clearCodexUpstreamHealth();
+    calls.length = 0; nativeAccounts.length = 0; seats(true);
+    const waitEmpty = config({}, waitCfg.combos!.luna!.targets.slice(0, 2));
+    waitEmpty.combos!.luna!.waitForCooldownMs = 500;
+    recordCodexUpstreamOutcome(waitEmpty, B, 429, { modelId: "gpt-reserve", poolReserve: true, now, retryAfter: "1" });
+    coolComboTarget("luna", { provider: "openai", model: "gpt-6-luna" }, { now, status: 503, cooldownMs: 100 });
+    relay = () => { setTimeout(() => { now += 1_500; }, 10); return reserveRefused(); };
+    expect((await post(waitEmpty, { store: false })).status).toBe(200);
+    expect(calls).toEqual(["relay:gpt-6-luna", "native:gpt-reserve"]);
 
     // 6. Pre-Luna target failing into relay 500 keeps lunaStage="relay" so native Luna never replays 500.
     clearComboTargetCooldowns(); clearAccountQuota(); clearCodexUpstreamHealth();

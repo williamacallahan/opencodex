@@ -136,7 +136,7 @@ import {
 } from "../relay";
 import { preflightComboStreamResponse } from "./combo-stream-preflight";
 import { isOwnerCapacityRefusal } from "./owner-capacity-refusal";
-import { advanceLunaLegAfterFailure, hasCallerOrdinaryLunaAuth, hasOrdinaryLunaCapacity, isReserveSeatQuotaRefusal, nativeLunaTarget, onlyReplayIncompatibleTargetsRemain, planLunaReserveLegs, portCoolingLunaOwnerBeforeDispatch, portLunaConversationTarget, portSpentLunaReasoning, portUnavailableLunaTurn, prepareLunaReplay, relayFailureEvaluatedStrictReserve, relayProvedNotStarted, resolveEmptyLunaReserveStart } from "./combo-luna-legs";
+import { advanceLunaLegAfterFailure, hasCallerOrdinaryLunaAuth, hasOrdinaryLunaCapacity, isReserveSeatQuotaRefusal, nativeLunaTarget, onlyReplayIncompatibleTargetsRemain, planLunaReserveLegs, portCoolingLunaOwnerBeforeDispatch, portLunaConversationTarget, portSpentLunaReasoning, portUnavailableLunaTurn, prepareLunaReplay, relayProvedNotStarted, resolveEmptyLunaReserveStart } from "./combo-luna-legs";
 import { createPoolReserveWalk, modelHasPoolReserve, type PoolCapacityIntent } from "../../codex/pool-reserve";
 import { requiredToolContractOf } from "./combo-required-tool-contract";
 import {
@@ -1869,9 +1869,11 @@ export async function executeComboResponses(
       unavailableOrdinaryTarget = lunaLegs.nativeKey;
     }
     const activeLunaLegs = lunaLegs;
-    evaluatedStrictReserve = relayFailureEvaluatedStrictReserve(config, activeLunaLegs, lunaStage, evaluatedStrictReserve, failureNow);
-    const relayHopEligible = activeLunaLegs && lunaStage === "relay" && evaluatedStrictReserve
-      ? (target: NonNullable<typeof combo>["targets"][number]) => targetKey(target) !== activeLunaLegs.nativeKey && targetEligible(target)
+    const hasReserveNow = () => createPoolReserveWalk(config).remaining.size > 0;
+    const relayHopEligible = activeLunaLegs && lunaStage === "relay"
+      ? (target: NonNullable<typeof combo>["targets"][number]) => targetEligible(target) && (targetKey(target) !== activeLunaLegs.nativeKey
+        || (!evaluatedStrictReserve && unavailableOrdinaryTarget !== activeLunaLegs.nativeKey
+          && (isComboTargetInCooldown(comboId, target) || hasReserveNow())))
       : targetEligible;
     const hopEligible = legIntent === "reserve-only" && activeLunaLegs
       ? (target: NonNullable<typeof combo>["targets"][number]) => targetKey(target) === activeLunaLegs.relayKey && targetEligible(target)
@@ -1930,8 +1932,8 @@ export async function executeComboResponses(
       ({ lunaStage, evaluatedStrictReserve, pick } = await advanceLunaLegAfterFailure({
         lunaStage, evaluatedStrictReserve, failedTargetKey, legs: activeLunaLegs, pick, unavailableOrdinaryTarget, attemptedTargets,
         aborted: Boolean(options.abortSignal?.aborted),
-        pickReserve: exclude => pickWithWait({ exclude, allowReserveCooldownRelease: true, eligible: target => targetKey(target) === activeLunaLegs.nativeKey && targetEligible(target), now: failureNow }),
-        pickOrdinary: exclude => pickWithWait({ exclude, allowReserveCooldownRelease: false, eligible: target => targetKey(target) === activeLunaLegs.nativeKey && hasOrdinaryLunaCapacity(config, callerOrdinaryLunaAuth, failureNow) && targetEligible(target), now: failureNow }),
+        pickReserve: exclude => pickWithWait({ exclude, allowCooldownReprobe: false, waitForCooldownMs: nextPick ? undefined : 0, eligible: target => targetKey(target) === activeLunaLegs.nativeKey && targetEligible(target) && hasReserveNow() }),
+        pickOrdinary: exclude => pickWithWait({ exclude, allowCooldownReprobe: false, allowReserveCooldownRelease: false, waitForCooldownMs: 0, eligible: target => targetKey(target) === activeLunaLegs.nativeKey && targetEligible(target) && hasOrdinaryLunaCapacity(config, callerOrdinaryLunaAuth) }),
       }));
       if (prevLunaStage === "relay" && lunaStage === "reserve" && reserveWalk) reserveWalk = createPoolReserveWalk(config);
     }
