@@ -78,6 +78,7 @@ import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../p
 import { providerCodexAccountMode } from "../providers/registry";
 import type { StorageCleanupPolicy } from "../types";
 import { MAIN_CODEX_ACCOUNT_ID } from "../codex/main-account";
+import { codexHealthCooldownStore } from "../codex/routing/health-cooldown-store";
 export {
   clearThreadAccountMap,
   formatCodexProviderForLog,
@@ -778,7 +779,7 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
             // hardening deadline can settle before its child exits, so also wait for that
             // child's reap before stop() promises the directory is removable. The spend owner
             // is retained when a listener stop failed because the socket may live.
-            try { if (listenersStopped) spendLedgerLifecycle.release(); }
+            try { if (listenersStopped) { codexHealthCooldownStore.flushForShutdown(); spendLedgerLifecycle.release(); } }
             finally { await flushConfigDirHardeningAndReaps(startupConfigDir); }
           }
         },

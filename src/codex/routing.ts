@@ -1318,14 +1318,16 @@ export function recordCodexUpstreamOutcome(
     const scopedProbe = meta.probeQuotaScope
       ? scopedHealthFor(accountId, meta.probeQuotaScope)
       : undefined;
+    const reserveSuccessIsCurrent = !meta.poolReserve || meta.reserveDispatchGeneration === undefined
+      || meta.reserveDispatchGeneration === (scopedHealthFor(accountId, "reserve")?.cooldownGeneration ?? 0);
     if (scopedProbe && meta.probeQuotaScope) {
-      if (scopedProbe.cooldownUntil && probeMayClearCooldown(scopedProbe, meta)) {
+      if (!meta.poolReserve && scopedProbe.cooldownUntil && probeMayClearCooldown(scopedProbe, meta)) {
         deleteScopedHealth(accountId, meta.probeQuotaScope);
       } else if (ownsProbeLease(scopedProbe, meta)) {
         setScopedHealth(accountId, meta.probeQuotaScope, withProbeLeaseReleased(scopedProbe, now));
       }
     }
-    if (quotaScope && (!meta.poolReserve || meta.reserveServed)) {
+    if (quotaScope && reserveSuccessIsCurrent && (!meta.poolReserve || meta.reserveServed)) {
       noteScopedCodexSuccess(accountId, quotaScope, now, meta.reserveServed ? meta.failureWindowCredentialGeneration : undefined);
       if (meta.poolReserve && meta.reserveServed && meta.threadId && !meta.fixedAccount) {
         const previous = getThreadAffinity(meta.threadId, quotaScope);

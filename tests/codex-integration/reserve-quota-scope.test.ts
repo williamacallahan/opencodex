@@ -251,6 +251,28 @@ describe("Reserve quota scope", () => {
 
   });
 
+  test("an abandoned Reserve discovery retains its five-minute interval after restart", () => {
+    const now = Date.now();
+    expect(tryAcquireCodexQuotaScopeProbeLease("reserve-fixture", "reserve", now, true)).toBeTruthy();
+    expect(flushCodexHealthCooldowns()).toBe(true);
+    reloadCodexHealthCooldownsForTests();
+    expect(tryAcquireCodexQuotaScopeProbeLease("reserve-fixture", "reserve", now + 90_000, true)).toBeNull();
+    expect(tryAcquireCodexQuotaScopeProbeLease("reserve-fixture", "reserve", now + 300_000, true)).toBeTruthy();
+  });
+
+  test("a late Reserve completion does not erase a newer refusal after its short hold expires", () => {
+    const cfg = makeConfig();
+    const now = Date.now();
+    recordCodexUpstreamOutcome(cfg, "reserve-fixture", 429, { poolReserve: true, now });
+    recordCodexUpstreamOutcome(cfg, "reserve-fixture", 200, {
+      poolReserve: true, reserveServed: true, reserveDispatchGeneration: 0, now: now + 61_000,
+    });
+    expect(flushCodexHealthCooldowns()).toBe(true);
+    reloadCodexHealthCooldownsForTests();
+    expect(tryAcquireCodexQuotaScopeProbeLease("reserve-fixture", "reserve", now + 90_000, true)).toBeNull();
+    expect(tryAcquireCodexQuotaScopeProbeLease("reserve-fixture", "reserve", now + 300_000, true)).toBeTruthy();
+  });
+
   test("explicit Reserve and account-wide holds survive restart and manual clear", () => {
     const config = makeConfig();
     const now = Date.now();

@@ -100,6 +100,7 @@ function sanitizeStoredRow(raw: unknown, scope?: CodexQuotaScope): CodexUpstream
   // Older releases persisted an escalating local hold. Shorten only that Reserve hold, not upstream advice.
   if (scope === "reserve" && row.cooldownSource === "default"
     && (finiteNumber(src.reserveRefusalStreak) ?? 0) > 0 && row.lastFailureAt !== undefined) {
+    row.lastProbeAt ??= row.lastFailureAt;
     const deadline = row.lastFailureAt + CODEX_DEFAULT_QUOTA_COOLDOWN_MS;
     if (row.cooldownUntil !== undefined) row.cooldownUntil = Math.min(row.cooldownUntil, deadline);
     if (row.quotaAvoidUntil !== undefined) row.quotaAvoidUntil = Math.min(row.quotaAvoidUntil, deadline);
@@ -117,7 +118,7 @@ export function codexHealthRowHorizon(row: CodexUpstreamHealth, scope?: CodexQuo
     finiteNumber(row.cooldownUntil) ?? 0,
     finiteNumber(row.quotaAvoidUntil) ?? 0,
     finiteNumber(row.softAvoidUntil) ?? 0,
-    scope === "reserve" && (row.lastFailureStatus === 429 || row.lastFailureStatus === 402) && row.lastProbeAt !== undefined
+    scope === "reserve" && row.lastProbeAt !== undefined
       ? row.lastProbeAt + CODEX_QUOTA_PROBE_INTERVAL_MS : 0,
   );
 }
@@ -321,7 +322,9 @@ class CodexHealthCooldownStore {
           if (!own || !isCodexHealthRowAlive(own, now, scope)) continue;
           const persisted = serializeForDisk(own);
           const other = out[key];
-          out[key] = other && codexHealthRowHorizon(other, scope) > codexHealthRowHorizon(persisted, scope) ? other : persisted;
+          const winner = other && codexHealthRowHorizon(other) > codexHealthRowHorizon(persisted) ? other : persisted;
+          const lastProbeAt = Math.max(other?.lastProbeAt ?? 0, persisted.lastProbeAt ?? 0);
+          out[key] = scope === "reserve" && lastProbeAt > 0 ? { ...winner, lastProbeAt } : winner;
         }
         mkdirSync(dir, { recursive: true });
         atomicWriteFile(path, JSON.stringify(out));

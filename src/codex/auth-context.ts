@@ -245,6 +245,7 @@ export type CodexAuthContext = TurnStateConstrained & (
       generation: number;
       poolQuotaWriter?: PoolQuotaWriter;
       poolReserve?: true;
+      reserveDispatchGeneration?: number;
       bindIncludedAlternateOnCompletion?: true;
       accessToken: string;
       chatgptAccountId: string;
@@ -769,6 +770,7 @@ export function createCodexAuthDispatchGuard(
         || (!ownsTrial && (trial?.probeLeaseId !== undefined || !verified))) {
         throw new CodexAccountCooldownError(ctx.accountId, hold?.cooldownUntil ?? trial?.quotaAvoidUntil ?? 0, hold?.cooldownSource, "reserve", hold?.confirmedCapacity);
       }
+      ctx.reserveDispatchGeneration = trial?.cooldownGeneration ?? 0;
     }
     reserveGuard?.(headers);
   };

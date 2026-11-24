@@ -96,6 +96,7 @@ export type CodexUpstreamOutcomeMeta = {
   poolReserve?: true;
   /** The physical Reserve send returned a genuine successful terminal. */
   reserveServed?: boolean;
+  reserveDispatchGeneration?: number;
   /** When set, clears affinity for this thread immediately on transient failure. */
   threadId?: string | null;
   /**
