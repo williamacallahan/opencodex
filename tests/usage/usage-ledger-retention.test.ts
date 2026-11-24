@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync, chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { enforceUsageLedgerSizeLimit } from "../../src/usage/ledger-retention";
 import {
   MIN_USAGE_LEDGER_MAX_BYTES,
+  USAGE_ARCHIVE_RETENTION_DAYS,
   USAGE_LEDGER_RETENTION_TARGET_RATIO,
 } from "../../src/usage/retention-contract";
 import { appendUsageEntry, usageLogPath } from "../../src/usage/log";
@@ -14,12 +18,24 @@ import { setUsageLedgerRetention } from "../../src/server/usage-ledger-retention
 let home: string;
 let previousHome: string | undefined;
 
+/** Rows start at this instant and advance one second each, like a ledger appended in order. */
+const FIRST_ROW_AT = Date.UTC(2026, 10, 1, 8, 30, 15, 250);
+
+function archiveDirectory(): string {
+  return join(home, "usage-archive");
+}
+
+function archiveFiles(): string[] {
+  return readdirSync(archiveDirectory()).sort();
+}
+
 /** Rows of a known size, each carrying a field no normalizer in this build knows about. */
 function writeRows(count: number, padding: number): string[] {
   const path = usageLogPath();
   mkdirSync(dirname(path), { recursive: true });
   const lines = Array.from({ length: count }, (_, index) => JSON.stringify({
     requestId: `req-${index}`,
+    timestamp: FIRST_ROW_AT + index * 1000,
     aFieldThisBuildDoesNotKnow: "x".repeat(padding),
   }));
   writeFileSync(path, lines.map(line => `${line}\n`).join(""), { encoding: "utf-8", mode: 0o600 });
@@ -30,6 +46,7 @@ beforeEach(() => {
   previousHome = process.env.OPENCODEX_HOME;
   home = mkdtempSync(join(tmpdir(), "ocx-ledger-retention-"));
   process.env.OPENCODEX_HOME = home;
+  mkdirSync(archiveDirectory());
 });
 
 afterEach(() => {
@@ -160,5 +177,78 @@ describe("usage ledger retention", () => {
     writeRows(200, 16 * 1024);
     expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
     expect(statSync(usageLogPath()).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe("usage ledger archive", () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  test("the trimmed rows land in one segment that, followed by the new ledger, is the old ledger byte for byte", () => {
+    writeRows(200, 16 * 1024);
+    const before = readFileSync(usageLogPath());
+    const ino = statSync(usageLogPath(), { bigint: true }).ino.toString();
+    expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
+
+    const [segment, ...others] = archiveFiles();
+    expect(others).toEqual([]);
+    const archived = readFileSync(join(archiveDirectory(), segment!));
+    expect(segment).toBe(`2026-11-01T08-30-15.250Z_${ino}-${archived.byteLength}.jsonl`);
+    expect(Buffer.concat([archived, readFileSync(usageLogPath())]).equals(before)).toBe(true);
+  });
+
+  test("a trim aborted because the ledger changed leaves no archive segment", () => {
+    writeRows(200, 16 * 1024);
+    const result = enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES, {
+      onSpanCopied: () => appendFileSync(usageLogPath(), `${JSON.stringify({ requestId: "raced", timestamp: 1 })}\n`),
+    });
+    expect(result).toMatchObject({ kind: "deferred", reason: "revision-changed" });
+    expect(archiveFiles()).toEqual([]);
+  });
+
+  const unusable: Array<[string, () => void]> = [
+    ["missing", () => rmSync(archiveDirectory(), { recursive: true })],
+    ["unwritable", () => chmodSync(archiveDirectory(), 0o500)],
+  ];
+  for (const [condition, breakArchive] of unusable) {
+    test(`a ${condition} archive directory leaves the ledger untrimmed and says why`, async () => {
+      // Root ignores directory modes, and Windows does not map them, so only the missing case is real there.
+      if (condition === "unwritable" && (process.platform === "win32" || process.getuid?.() === 0)) return;
+      writeRows(200, 16 * 1024);
+      const before = readFileSync(usageLogPath());
+      breakArchive();
+      const warnings: string[] = [];
+      const originalWarn = console.warn;
+      console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+      setUsageLedgerRetention(MIN_USAGE_LEDGER_MAX_BYTES);
+      try {
+        const deadline = Date.now() + 5_000;
+        while (warnings.length === 0 && Date.now() < deadline) await Bun.sleep(50);
+        expect(warnings.join("\n")).toContain(
+          `[usage-retention] could not enforce the usage ledger size limit: the ledger was not trimmed because its oldest rows could not be archived in ${archiveDirectory()}`,
+        );
+        expect(readFileSync(usageLogPath()).equals(before)).toBe(true);
+      } finally {
+        setUsageLedgerRetention(undefined);
+        console.warn = originalWarn;
+        if (condition === "unwritable") chmodSync(archiveDirectory(), 0o700);
+      }
+    });
+  }
+
+  test(`a trim deletes archive files last written more than ${USAGE_ARCHIVE_RETENTION_DAYS} days ago and keeps younger ones`, () => {
+    const now = Date.now();
+    const expired = join(archiveDirectory(), "expired.jsonl");
+    const kept = join(archiveDirectory(), "kept.jsonl");
+    for (const [path, ageDays] of [[expired, USAGE_ARCHIVE_RETENTION_DAYS + 1], [kept, USAGE_ARCHIVE_RETENTION_DAYS - 1]] as const) {
+      writeFileSync(path, "{}\n");
+      const at = new Date(now - ageDays * DAY_MS);
+      utimesSync(path, at, at);
+    }
+    writeRows(200, 16 * 1024);
+    expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
+    const files = archiveFiles();
+    expect(files).not.toContain("expired.jsonl");
+    expect(files).toContain("kept.jsonl");
+    expect(files).toHaveLength(2);
   });
 });
