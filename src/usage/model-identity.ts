@@ -1,3 +1,4 @@
+import { NATIVE_RESERVE_MODEL } from "../codex/catalog/native-models";
 import { baseProviderLabel } from "../providers/label";
 import type { PriceResolutionOptions } from "./cost";
 import type { PersistedUsageEntry } from "./log";
@@ -23,4 +24,13 @@ export function usageModelPriceOptions(source: TraceSource, target: ModelTarget)
   return {
     allowModelLevelFallback: !target.model.includes("/") || !isUnresolvedRequestedModel(source, target),
   };
+}
+
+/**
+ * The model a usage row is reported under. A Reserve send keeps its client-facing model in
+ * `model` and records `gpt-reserve` only as the wire model, so without this Reserve traffic
+ * merges into the row of the model the client asked for.
+ */
+export function attributedUsageModel(target: { model: string; wireModel?: string }): string {
+  return target.wireModel === NATIVE_RESERVE_MODEL ? NATIVE_RESERVE_MODEL : target.model;
 }

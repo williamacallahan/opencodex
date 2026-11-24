@@ -158,3 +158,16 @@ describe("attribution in the usage summary", () => {
     expect((await summary("&workload=claude-oc%3Asession-1")).attribution.byWorkload).toEqual([{ key: "claude-oc:session-1", requests: 2, totalTokens: 20 }]);
   });
 });
+
+describe("Reserve in the usage summary", () => {
+  test("a Reserve send is its own model row instead of merging into the requested model", async () => {
+    const now = Date.now();
+    appendUsageEntry({ ...log({ requestId: "reserve", timestamp: now, provider: "openai", model: "gpt-5.5", usageStatus: "reported", totalTokens: 7 }), wireModel: "gpt-reserve" });
+    appendUsageEntry({ ...log({ requestId: "direct", timestamp: now, provider: "openai", model: "gpt-5.5", usageStatus: "reported", totalTokens: 5 }) });
+    const response = await managementGet("/api/usage?range=1d");
+    const body = await response.json() as { models: Array<{ model: string; requests: number }> };
+    expect(body.models.map(row => [row.model, row.requests]).sort()).toEqual([["gpt-5.5", 1], ["gpt-reserve", 1]]);
+    const filtered = await (await managementGet("/api/usage?range=1d&model=gpt-reserve")).json() as { summary: { requests: number } };
+    expect(filtered.summary.requests).toBe(1);
+  });
+});

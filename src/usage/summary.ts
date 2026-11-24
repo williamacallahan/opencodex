@@ -6,7 +6,7 @@ import { addAttributionCounts, blankAttributionCounts, cloneAttributionCounts, m
 import { matchesAttributionFilter, type RequestAttributionFilter } from "../server/request-attribution";
 import { isLegacyCodexUsage, matchesUsageSource, snapshotConfiguredKeyIds, type UsageSourceFilter } from "./source-filter";
 import type { UsageTimeWindow } from "./time-range";
-import { isUnresolvedRequestedModel, usageModelPriceOptions } from "./model-identity";
+import { attributedUsageModel, isUnresolvedRequestedModel, usageModelPriceOptions } from "./model-identity";
 import {
   classifyCacheTelemetryProvenance,
   isCodexUsageAccountLogLabel,
@@ -512,7 +512,7 @@ export function usageAttributions(entry: PersistedUsageEntry): UsageAttribution[
     return [{
       requestId: entry.requestId,
       provider: entry.provider,
-      ...usageModelIdentity(entry.provider, entry.model, entry.resolvedModel),
+      ...usageModelIdentity(entry.provider, attributedUsageModel(entry), entry.resolvedModel),
       ...(isUnresolvedRequestedModel(entry, entry) ? { hasUnresolvedRequestedModel: true as const } : {}),
       ...(entry.accountLogLabel ? { accountLogLabel: entry.accountLogLabel } : {}),
       usageStatus: entry.usageStatus,
@@ -530,7 +530,7 @@ export function usageAttributions(entry: PersistedUsageEntry): UsageAttribution[
     return {
       requestId: entry.requestId,
       provider: attempt.provider,
-      ...usageModelIdentity(attempt.provider, attempt.model),
+      ...usageModelIdentity(attempt.provider, attributedUsageModel(attempt)),
       ...(isUnresolvedRequestedModel(entry, attempt) ? { hasUnresolvedRequestedModel: true as const } : {}),
       ...(attempt.accountLogLabel ? { accountLogLabel: attempt.accountLogLabel } : {}),
       usageStatus: attempt.usageStatus,
@@ -1125,13 +1125,13 @@ function projectedEntryForFilter(
   if (filter.sourceFilter && !matchesUsageSource(entry, filter.sourceFilter, filter.configuredApiKeyIdSet)) return null;
   if (filter.attribution && !matchesAttributionFilter(entry, filter.attribution)) return null;
   if (!entry.attempts?.length) {
-    const identity = usageModelIdentity(entry.provider, entry.model, entry.resolvedModel);
+    const identity = usageModelIdentity(entry.provider, attributedUsageModel(entry), entry.resolvedModel);
     return filterMatchesAttribution(filter, entry.provider, identity.model)
       ? { entry, comboOverlap: false }
       : null;
   }
   const attempts = entry.attempts.filter(attempt => {
-    const identity = usageModelIdentity(attempt.provider, attempt.model);
+    const identity = usageModelIdentity(attempt.provider, attributedUsageModel(attempt));
     return filterMatchesAttribution(filter, attempt.provider, identity.model);
   });
   if (attempts.length === 0) return null;
