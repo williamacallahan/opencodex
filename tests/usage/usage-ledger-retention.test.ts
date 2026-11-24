@@ -14,6 +14,7 @@ import {
 } from "../../src/usage/retention-contract";
 import { appendUsageEntry, usageLogPath } from "../../src/usage/log";
 import { setUsageLedgerRetention } from "../../src/server/usage-ledger-retention";
+import { CONFIG_UNINSTALL_MANIFEST, initializeConfigOwnership } from "../../src/lib/config-ownership";
 
 let home: string;
 let previousHome: string | undefined;
@@ -250,5 +251,32 @@ describe("usage ledger archive", () => {
     expect(files).not.toContain("expired.jsonl");
     expect(files).toContain("kept.jsonl");
     expect(files).toHaveLength(2);
+  });
+
+  test("the uninstall manifest owns the archive directory once and never lists a segment", () => {
+    // Ownership is only created in an empty home.
+    rmSync(archiveDirectory(), { recursive: true });
+    expect(initializeConfigOwnership(home)).toBe(true);
+    mkdirSync(archiveDirectory());
+    const manifestPaths = () =>
+      (JSON.parse(readFileSync(join(home, CONFIG_UNINSTALL_MANIFEST), "utf8")) as { paths: string[] }).paths;
+
+    const counts: number[] = [];
+    for (let trim = 0; trim < 3; trim += 1) {
+      writeRows(200, 16 * 1024);
+      expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
+      counts.push(manifestPaths().length);
+    }
+    expect(archiveFiles()).toHaveLength(3);
+    const expiredAt = new Date(Date.now() - (USAGE_ARCHIVE_RETENTION_DAYS + 1) * DAY_MS);
+    for (const name of archiveFiles()) utimesSync(join(archiveDirectory(), name), expiredAt, expiredAt);
+    writeRows(200, 16 * 1024);
+    expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
+    expect(archiveFiles()).toHaveLength(1);
+
+    const paths = manifestPaths();
+    expect(paths).toContain("usage-archive");
+    expect(paths.filter(path => path.startsWith("usage-archive/"))).toEqual([]);
+    expect([...counts, paths.length]).toEqual([counts[0]!, counts[0]!, counts[0]!, counts[0]!]);
   });
 });

@@ -26,6 +26,7 @@ import { closeSync, fstatSync, openSync, readdirSync, readSync, rmSync, statSync
 import { join } from "node:path";
 import { getConfigDir } from "../config";
 import { atomicWriteFileStreamed } from "../config/atomic-write";
+import { recordOwnedConfigPath } from "../lib/config-ownership";
 import {
   currentUsageLogRevision,
   exactFileIdentity,
@@ -137,12 +138,16 @@ function pruneUsageArchive(directory: string, now: number): void {
  * redeploy deletes it without a word. A missing or unwritable directory throws, and no trim runs.
  */
 function archiveTrimmedSpan(sourceFd: number, start: number, sourceIno: string): string {
-  const directory = join(getConfigDir(), "usage-archive");
+  const configDir = getConfigDir();
+  const directory = join(configDir, "usage-archive");
   try {
     pruneUsageArchive(directory, Date.now());
     const firstRowAt = firstRowTimestamp(sourceFd, start).toISOString().replaceAll(":", "-");
     const path = join(directory, `${firstRowAt}_${sourceIno}-${start}.jsonl`);
-    atomicWriteFileStreamed(path, descriptor => copyRange(sourceFd, descriptor, 0, start));
+    // Uninstall removes an owned directory with everything in it, so one manifest entry covers
+    // every segment; one entry per segment would fill the capped manifest in about a year.
+    recordOwnedConfigPath(configDir, directory);
+    atomicWriteFileStreamed(path, descriptor => copyRange(sourceFd, descriptor, 0, start), {}, { recordOwnership: false });
     return path;
   } catch (cause) {
     throw new Error(
