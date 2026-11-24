@@ -350,14 +350,27 @@ export async function advanceLunaLegAfterFailure(args: {
   unavailableOrdinaryTarget: string | undefined;
   attemptedTargets: readonly string[];
   aborted: boolean;
+  pickReserve: (exclude: string[]) => Promise<ComboPick | null>;
   pickOrdinary: (exclude: string[]) => Promise<ComboPick | null>;
 }): Promise<{ lunaStage: "off" | "reserve" | "relay" | "done"; evaluatedStrictReserve: boolean; pick: ComboPick | null }> {
   if (!(args.lunaStage === "reserve" && args.failedTargetKey === args.legs.nativeKey
     || args.lunaStage === "relay" && args.failedTargetKey === args.legs.relayKey)) {
     return { lunaStage: args.lunaStage, evaluatedStrictReserve: args.evaluatedStrictReserve, pick: args.pick };
   }
-  if (args.lunaStage === "relay" && !args.evaluatedStrictReserve && args.pick && targetKey(args.pick.target) === args.legs.nativeKey) {
-    return { lunaStage: "reserve", evaluatedStrictReserve: true, pick: args.pick };
+  if (args.lunaStage === "relay" && !args.evaluatedStrictReserve) {
+    if (args.pick && targetKey(args.pick.target) === args.legs.nativeKey) {
+      return { lunaStage: "reserve", evaluatedStrictReserve: true, pick: args.pick };
+    }
+    const reservePick = args.unavailableOrdinaryTarget !== args.legs.nativeKey && !args.aborted
+      ? await args.pickReserve(args.attemptedTargets.filter(key => key !== args.legs.nativeKey))
+      : null;
+    if (reservePick) return { lunaStage: "reserve", evaluatedStrictReserve: true, pick: reservePick };
+    const fallbackPick = args.pick && targetKey(args.pick.target) === args.legs.nativeKey ? null : args.pick;
+    return {
+      lunaStage: fallbackPick ? "off" : "done",
+      evaluatedStrictReserve: fallbackPick === null,
+      pick: fallbackPick,
+    };
   }
   const afterReserve = args.lunaStage === "reserve";
   const ordinaryNext = afterReserve

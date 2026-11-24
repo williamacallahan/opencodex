@@ -1175,7 +1175,7 @@ export async function executeComboResponses(
     if (options.abortSignal?.aborted) return clientCancelledResponse();
     const firstComboTarget = comboTargetsDispatched === 0;
     const legTargetKey = targetKey(pick.target);
-    if (lunaLegs && firstComboTarget && !evaluatedStrictReserve) lunaStage = legTargetKey === lunaLegs.nativeKey ? "reserve" : legTargetKey === lunaLegs.relayKey ? "relay" : "off";
+    if (lunaLegs && !evaluatedStrictReserve) lunaStage = legTargetKey === lunaLegs.nativeKey ? "reserve" : legTargetKey === lunaLegs.relayKey ? "relay" : "off";
     if (lunaLegs && legTargetKey === lunaLegs.nativeKey && !evaluatedStrictReserve) {
       lunaStage = "reserve";
       evaluatedStrictReserve = true;
@@ -1925,19 +1925,15 @@ export async function executeComboResponses(
       }
     }
     if (activeLunaLegs && failureDecision === "hop") {
-      // After the strict Reserve leg the relay is next; after the relay, native ordinary Luna is next only on proof the relay never got the turn.
-      const next = await advanceLunaLegAfterFailure({
+      const prevLunaStage = lunaStage;
+      // After the strict Reserve leg the relay is next; after the relay, native ordinary Luna needs proof the relay never got the turn.
+      ({ lunaStage, evaluatedStrictReserve, pick } = await advanceLunaLegAfterFailure({
         lunaStage, evaluatedStrictReserve, failedTargetKey, legs: activeLunaLegs, pick, unavailableOrdinaryTarget, attemptedTargets,
         aborted: Boolean(options.abortSignal?.aborted),
-        pickOrdinary: exclude => pickWithWait({
-          exclude,
-          allowReserveCooldownRelease: false,
-          eligible: target => targetKey(target) === activeLunaLegs.nativeKey
-            && hasOrdinaryLunaCapacity(config, callerOrdinaryLunaAuth, failureNow) && targetEligible(target),
-          now: failureNow,
-        }),
-      });
-      ({ lunaStage, evaluatedStrictReserve, pick } = next);
+        pickReserve: exclude => pickWithWait({ exclude, allowReserveCooldownRelease: true, eligible: target => targetKey(target) === activeLunaLegs.nativeKey && targetEligible(target), now: failureNow }),
+        pickOrdinary: exclude => pickWithWait({ exclude, allowReserveCooldownRelease: false, eligible: target => targetKey(target) === activeLunaLegs.nativeKey && hasOrdinaryLunaCapacity(config, callerOrdinaryLunaAuth, failureNow) && targetEligible(target), now: failureNow }),
+      }));
+      if (prevLunaStage === "relay" && lunaStage === "reserve" && reserveWalk) reserveWalk = createPoolReserveWalk(config);
     }
     if (!pick) {
       if (options.abortSignal?.aborted) return clientCancelledResponse();
