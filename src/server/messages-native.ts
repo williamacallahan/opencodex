@@ -509,6 +509,7 @@ async function runNativeMessagesAttempt(options: NativeMessagesExecution, attemp
   const watchFirstOutput = (body: ReadableStream<Uint8Array>) => onFirstOutput
     ? observeFirstChunk(body, onFirstOutput, () => logCtx.generationStartedAt !== undefined) : body;
   const localOAuthFailure = (error: unknown): Response | null => {
+    if (error instanceof OAuthLoginRequiredError) logCtx.oauthLoginProvider = error.provider;
     if (error instanceof AnthropicAccountCooldownError) {
       const scope = error.routePosition === undefined ? "All Anthropic OAuth accounts" : "Anthropic OAuth accounts for this model route";
       const reset = error.usageLimit?.resetsAt;

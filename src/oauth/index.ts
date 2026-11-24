@@ -448,11 +448,12 @@ export function getOAuthCredentialApiBaseUrl(provider: string): string | undefin
 export function listOAuthProviders(): string[] {
   return Object.keys(OAUTH_PROVIDERS).filter(isPublicOAuthProvider);
 }
+import { errorDestinationText, providerErrorDestinationLabel } from "../lib/error-destination";
 import { OAuthAccountUnusableError, OAuthLoginSupersededError, OAuthAccountPausedError, OAuthLoginRequiredError, OAuthProviderNamespaceCollisionError, OAuthProviderPublicationError, OAuthReauthIdentityMismatchError, OAuthReauthIdentityUnverifiedError, UnsupportedOAuthProviderError } from "./oauth-errors";
 export { OAuthAccountPausedError, OAuthLoginRequiredError, OAuthProviderNamespaceCollisionError, OAuthProviderPublicationError, OAuthReauthIdentityMismatchError, OAuthReauthIdentityUnverifiedError, UnsupportedOAuthProviderError } from "./oauth-errors";
 /** Project arbitrary OAuth failures onto the small, stable public error vocabulary. */
 export function publicOAuthErrorPresentation(error: unknown): import("../lib/client-error-body").ProxyErrorPresentation | undefined {
-  if (error instanceof OAuthLoginRequiredError) return "oauth_login";
+  if (error instanceof OAuthLoginRequiredError) return `oauth_login:${errorDestinationText(providerErrorDestinationLabel(error.provider))}`;
   if (error instanceof AntigravityProjectDiscoveryError) return "discovery";
   if (error instanceof MuseLoginError && error.kind === "validation-http" && error.status !== undefined) return "muse_http";
   return undefined;

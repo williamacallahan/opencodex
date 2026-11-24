@@ -1,4 +1,5 @@
 import { carryReplayRefusal, isNonReplayableResponse, markResponseNonReplayable } from "./upstream-retry";
+import { isAnthropicInstanceId } from "../providers/anthropic-instance-id";
 import { appendClientRetryIn } from "./client-retry-after";
 import {
   ANTHROPIC_ERROR_CODES, ANTHROPIC_ERROR_TYPES, CLAUDE_CONTEXT_OVERFLOW_MESSAGE,
@@ -127,7 +128,6 @@ const FIXED_MESSAGES: ReadonlyMap<ProxyErrorPresentation, string> = new Map([
   ["recovery", "The selected Codex account is held after repeated upstream failures and the pool's recovery budget for this window is spent, so nothing was sent upstream. Retry later. This clears on its own as the account recovers; no cooldown to lift and no account to switch."],
   ["usage", "The configured account usage limit was reached. Wait for its reset or adjust the usage limits before retrying."],
   ["model_availability", "The requested model is unavailable for the selected account. Choose a supported model or retry when it becomes available."],
-  ["oauth_login", "The configured provider needs sign-in. Run ocx login for that provider, then retry."],
   ["discovery", "Antigravity login could not discover a Cloud Code Assist project for this account. Ensure the account has Antigravity/Cloud Code Assist access and try again."],
   ["muse_http", "The Muse Code credential was rejected by the Meta Model API. Renew it with `muse login` or copy it again from https://dev.meta.ai, then retry."],
   ["config", "The configured OAuth provider is unsupported. Remove or reconfigure the provider in the OpenCodex configuration."],
@@ -143,9 +143,15 @@ const FIXED_MESSAGES: ReadonlyMap<ProxyErrorPresentation, string> = new Map([
 const LOCAL_CODES: ReadonlyMap<string, ProxyErrorPresentation> = new Map([
   ["request_send_budget_exhausted", "send"], ["send_budget_exhausted", "send"], ["model_not_allowed_for_key", "scope"],
 ]);
+/** The Anthropic pools are loaded from fleet setup tokens; every other OAuth provider signs in with `ocx login`. */
+function presentationMessage(kind: ProxyErrorPresentation): string | undefined {
+  if (!kind.startsWith("oauth_login:")) return FIXED_MESSAGES.get(kind);
+  const provider = kind.slice("oauth_login:".length);
+  return `The ${provider} provider needs sign-in. ${isAnthropicInstanceId(provider) ? "Run cswap-fleet-tokens hub" : "Run ocx login for that provider"}, then retry.`;
+}
 function fixedLocalMessage(local: object, code?: string, type?: string): string | undefined {
   const kind = proxyErrorPresentation(local) ?? LOCAL_CODES.get(code ?? "") ?? LOCAL_CODES.get(type ?? "");
-  return kind === undefined ? undefined : FIXED_MESSAGES.get(kind);
+  return kind === undefined ? undefined : presentationMessage(kind);
 }
 function isMessagesRequest(req: Request): boolean {
   const path = new URL(req.url).pathname;
@@ -155,7 +161,7 @@ export async function normalizeMessagesProxyRefusal(req: Request, response: Resp
   if (!isMessagesRequest(req) || response.ok || !isProxyError(response)) return response;
   const kind = proxyErrorPresentation(response);
   if (kind === undefined) return response;
-  const message = FIXED_MESSAGES.get(kind);
+  const message = presentationMessage(kind);
   if (message === undefined) throw new Error("Unknown local Messages presentation");
   const original = await response.clone().json() as Rec;
   const error = original.error as Rec;

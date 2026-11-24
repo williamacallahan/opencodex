@@ -20,6 +20,9 @@ import { clearAnthropicAccountPoolState, resetAnthropicRoutingForManualSelection
 import { captureOAuthAccountSelection, getAccountCredential, getAccountSet, markAccountNeedsReauth, replaceProviderAccountSet, saveAccountCredential, saveCredential, setAccountPaused, setActiveAccount } from "../../src/oauth/store";
 import { clearUpstreamHostHealth, getUpstreamHostHealth, upstreamHostHealthKey } from "../../src/codex/upstream-host-health";
 import { handleClaudeMessages } from "../../src/server/claude-messages";
+import { markProxyError } from "../../src/lib/client-error-body";
+import { normalizeMessagesProxyRefusal } from "../../src/lib/messages-error-body";
+import { OAuthLoginRequiredError, publicOAuthErrorPresentation } from "../../src/oauth";
 import { clearComboRecallForTests } from "../../src/server/responses/combo-session-recall";
 import * as familyQuota from "../../src/oauth/anthropic-model-quota";
 import { anthropicRoutingFor, anthropicSessionAffinitySizeForTests, bindAnthropicSessionAffinity, resetAnthropicSessionAffinityConfirmed } from "../../src/oauth/anthropic-routing";
@@ -468,11 +471,22 @@ describe("managed native Messages over Anthropic OAuth", () => {
     expect(row.protocolTrace?.reasonCodes).toContain("auth-mode-not-native");
   });
 
-  test("no stored account answers 401 in Anthropic shape and sends nothing", async () => {
-    const { response, text } = await send(fixtureConfig(), { ...BODY, stream: false });
-    expect(response.status).toBe(401);
-    expect(JSON.parse(text)).toMatchObject({ type: "error", error: { type: "authentication_error" } });
-    expect(sent).toHaveLength(0);
+  test("no stored account answers 401 in Anthropic shape, names the pool recovery and the provider in the failure log, and sends nothing", async () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { response, text } = await send(fixtureConfig(), { ...BODY, stream: false });
+      expect(response.status).toBe(401);
+      expect(JSON.parse(text)).toMatchObject({ type: "error", error: { type: "authentication_error", message: "The anthropic provider needs sign-in. Run cswap-fleet-tokens hub, then retry." } });
+      expect(sent).toHaveLength(0);
+      expect(warn.mock.calls.map(call => String(call[0])).some(line => line.includes("upstream failure") && line.includes(" oauth_login_provider=anthropic"))).toBe(true);
+    } finally { warn.mockRestore(); }
+  });
+
+  test("a provider that signs in with ocx login keeps that recovery, named for its provider", async () => {
+    const refusal = markProxyError(Response.json({ type: "error", error: { type: "authentication_error", message: "Not logged in to kimi-code. Run: ocx login kimi-code" } }, { status: 401 }), publicOAuthErrorPresentation(new OAuthLoginRequiredError("kimi-code")));
+    const normalized = await normalizeMessagesProxyRefusal(new Request("http://localhost/v1/messages", { method: "POST" }), refusal);
+    expect(normalized.status).toBe(401);
+    expect(await normalized.json()).toMatchObject({ error: { type: "authentication_error", message: "The kimi-code provider needs sign-in. Run ocx login for that provider, then retry." } });
   });
 });
 

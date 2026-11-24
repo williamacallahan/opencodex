@@ -99,7 +99,7 @@ const deferred = [
     "path": "src/claude/outbound.ts",
     "start": "export function claudeOverflowSsePayload",
     "end": "/**\n * A throughput",
-    "sha256": "a8520a3fd8db14c72ebcfbc55c1ee102a08c14cefc887138cc0fb3ca4dc9b067"
+    "sha256": "74d02ab5267858f2f9363640bb0298a761a421df40fcac3a182c702d85424556"
   },
   {
     "path": "src/claude/outbound.ts",
@@ -184,7 +184,7 @@ const envelopeWriterRows = [
   ["src/claude/outbound.ts", 6, "shared baseline helpers, original verdict and incomplete/unfinished presentation construction"],
   ["src/protocols/encoders/messages.ts", 4, "original verdict construction and fixed local collection failures"],
   ["src/server/messages-native.ts", 8, "local/evidence legacy formatters, original combo and fold envelopes, owned workflow refusal projection, strict gateway local refusals (non-object body, client cancel, oversized body)"],
-  ["src/server/claude-messages.ts", 33, "mapped local ingress/bypass constructors, original combo and defensive JSON presentation envelopes, hybrid lane client-cancel and incompatible-model refusals"],
+  ["src/server/claude-messages.ts", 34, "mapped local ingress/bypass constructors, original combo and defensive JSON presentation envelopes, hybrid lane client-cancel and incompatible-model refusals"],
   ["src/server/index/serve-options.ts", 4, "fixed endpoint auth/origin bypasses"],
   ["src/server/messages-native-tool-guard.ts", 1, "deferred local guard terminal"],
 ] as const;

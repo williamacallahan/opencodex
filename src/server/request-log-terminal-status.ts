@@ -19,6 +19,8 @@ export interface UpstreamErrorDiagnostics {
   upstreamErrorCode?: string;
   upstreamErrorType?: string;
   upstreamRequestId?: string;
+  /** Provider id of the OAuth login-required refusal that ended the request, for a failure line whose provider label is unreadable. */
+  oauthLoginProvider?: string;
 }
 
 interface TerminalStatusContext extends UpstreamErrorDiagnostics {
@@ -118,6 +120,11 @@ function attributionLabel(value: unknown, snapshot: DiagnosticSources): string {
     && diagnosticValueAllowed(value, snapshot.registry, snapshot.configured) ? value : "unknown";
 }
 
+/** A provider id is a configured name, never a credential, so it prints even when the registry cannot vouch for labels. */
+function oauthLoginField(provider: string | undefined): string {
+  return provider !== undefined && /^[A-Za-z0-9._-]{1,64}$/.test(provider) ? ` oauth_login_provider=${provider}` : "";
+}
+
 interface DiagnosticSources { registry: OutboundCredentialRegistry; configured: ConfiguredCredentials }
 
 export interface FailedAttemptView { ordinal: number; provider: string; model: string; status: number; failureCause?: RequestFailureCause | undefined }
@@ -158,7 +165,7 @@ export function warnUpstreamFailures(input: {
     // operator that the account is spent rather than briefly throttled.
     const code = rawCode !== undefined && (KNOWN_BARE_ERROR_CODES.has(rawCode) || STRUCTURED_QUOTA_CODES.has(rawCode))
       ? rawCode : undefined;
-    console.warn(`[opencodex] level=warn upstream failure request=${attributionLabel(input.requestId, snapshot)} attempt=${attempt.ordinal} provider=${attributionLabel(attempt.provider, snapshot)} model=${attributionLabel(attempt.model, snapshot)} status=${attempt.status >= 100 ? attempt.status : "unknown"} type=${type ?? "unknown"} code=${code ?? "unknown"} cause=${FAILURE_CAUSES.has(attempt.failureCause as string) ? attempt.failureCause : "unknown"} final=${input.finalStatus}`);
+    console.warn(`[opencodex] level=warn upstream failure request=${attributionLabel(input.requestId, snapshot)} attempt=${attempt.ordinal} provider=${attributionLabel(attempt.provider, snapshot)} model=${attributionLabel(attempt.model, snapshot)} status=${attempt.status >= 100 ? attempt.status : "unknown"} type=${type ?? "unknown"} code=${code ?? "unknown"} cause=${FAILURE_CAUSES.has(attempt.failureCause as string) ? attempt.failureCause : "unknown"} final=${input.finalStatus}${index === lastIndex ? oauthLoginField(input.diagnostics.oauthLoginProvider) : ""}`);
   });
 }
 
