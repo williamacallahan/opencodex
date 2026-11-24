@@ -139,3 +139,23 @@ export function matchesAttributionFilter(row: RequestAttribution, filter: Reques
   if (filter.clientAddress !== undefined && row.clientAddress !== filter.clientAddress) return false;
   return !filter.undeclared || (row.workload?.endsWith(UNDECLARED_WORKLOAD_SUFFIX) ?? false);
 }
+
+/** Set `name` unless the outbound headers already carry it in any casing. */
+function setIfAbsent(headers: Record<string, string>, name: string, value: string | undefined): void {
+  if (value !== undefined && !Object.keys(headers).some(existing => existing.toLowerCase() === name.toLowerCase())) headers[name] = value;
+}
+
+/**
+ * The caller's identity on an outbound request to the codex-lb relay, which records it per row.
+ * Configured or forwarded values win for the caller-declared headers; X-LGW-Client-Address is the
+ * hub's own observation, so every caller-supplied casing of it is dropped first. Session, thread,
+ * and prompt-cache identity are not touched.
+ */
+export function applyCodexLbAttributionHeaders(headers: Record<string, string>, attribution: RequestAttribution): void {
+  for (const name of Object.keys(headers)) if (name.toLowerCase() === "x-lgw-client-address") delete headers[name];
+  if (attribution.clientAddress) headers["X-LGW-Client-Address"] = attribution.clientAddress;
+  setIfAbsent(headers, "User-Agent", attribution.userAgent);
+  setIfAbsent(headers, "X-User-ID", attribution.workload);
+  setIfAbsent(headers, "X-LGW-Cache-Key", attribution.conversationKey);
+  setIfAbsent(headers, "X-LGW-Client-Host", attribution.clientHost);
+}
