@@ -1,4 +1,5 @@
 import { projectLocalModelRefusalLog } from "./request-log-failure-detail";
+import { NativeHarnessRefusal, nativeHarnessOnly, VIBE_PROVIDER_ID } from "../lib/native-harness";
 import { AmbiguousModelIdError } from "../providers/slug-codec";
 import { MessagesSseFrameContext } from "../lib/messages-sse-error-presentation";
 import { createMessagesSseErrorFilter } from "./messages-sse-error-filter";
@@ -1198,6 +1199,11 @@ async function handleClaudeMessagesWithBudget(
   if (directPlan && !settledRoute) directLeaveError ??= leaveDirectPlan();
   if (directLeaveError !== undefined) return translationFailure(directLeaveError, logCtx, logIds);
   const directRoute = directPlan && settledRoute ? settledRoute : undefined;
+  if (settledRoute?.providerName === VIBE_PROVIDER_ID && !settledRoute.combo && settledRoute.routeKind !== "policy" && nativeHarnessOnly()) {
+    const refusal = new NativeHarnessRefusal("mistral-vibe");
+    if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 400, { closeReason: "non_stream" });
+    return markProxyError(anthropicErrorResponse(400, refusal.message, "invalid_request_error"));
+  }
   // The direct lane answers through the direct encoder whatever `directEncoders` says: neither
   // direction passes through the internal Responses body.
   if (directRoute) {

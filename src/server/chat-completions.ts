@@ -2,7 +2,8 @@ import { projectLocalModelRefusalLog } from "./request-log-failure-detail";
 import { carryWorkflowRefusal } from "./workflow-refusal";
 import { clientFacingModelLabel, clientFacingModelText, type ClientFacingModelLabel } from "../lib/error-destination";
 import { wasAccountAutoPaused } from "../lib/account-auto-pause-response";
-import { ownedChatErrorPayload, isProxyError, LOCAL_CHAT_ERROR_MESSAGES } from "../lib/client-error-body";
+import { ownedChatErrorPayload, isProxyError, LOCAL_CHAT_ERROR_MESSAGES, markProxyError } from "../lib/client-error-body";
+import { NativeHarnessRefusal, nativeHarnessOnly, VIBE_PROVIDER_ID } from "../lib/native-harness";
 import { ownedChatErrorResponse } from "../chat/outbound";
 import type { FailureVerdictSink } from "../chat/failure-verdict";
 /**
@@ -402,6 +403,12 @@ async function handleChatCompletionsWithBudget(
     features: envelope ? () => envelope.features() : () => featuresFromChatBody(chatBody),
   });
   recordProtocolShadowPlan(logCtx, config, { inbound: "chat", model: requestedModel });
+  if (settledRoute && !settledRoute.combo && settledRoute.routeKind !== "policy"
+    && settledRoute.providerName === VIBE_PROVIDER_ID && nativeHarnessOnly()) {
+    const refusal = new NativeHarnessRefusal("mistral-vibe");
+    if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 400, { closeReason: "non_stream" });
+    return markProxyError(chatCompletionsErrorResponse(400, refusal.message, "invalid_request_error"));
+  }
   if (chatNativeRoute) {
     return handleNativeChatCompletions({
       req,

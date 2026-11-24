@@ -248,9 +248,12 @@ function activeProviderEntries(config: OcxConfig): [string, OcxProviderConfig][]
   return Object.entries(config.providers)
     .filter(([name, provider]) => name !== LEGACY_CHATGPT_PROVIDER_ID && provider.disabled !== true
       && !(name === "anthropic2" && anthropicInstanceRowShapeMatches(name, provider))
-      // A row reserved to agy serves only the /agy lane; letting it win a bare model id would refuse a
+      // A row reserved to a native CLI serves only its passthrough lane; letting it win a bare model id would refuse a
       // request another provider used to serve. Anthropic rows stay: the strict lane routes bare `claude-*`.
-      && nativeHarnessFor(provider, effectiveGoogleMode(name, provider)) !== "agy");
+      && (() => {
+        const harness = nativeHarnessFor(provider, effectiveGoogleMode(name, provider), name);
+        return harness !== "agy" && harness !== "vibe";
+      })());
 }
 
 export class NoEnabledOpenAiProviderError extends Error {

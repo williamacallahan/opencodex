@@ -237,7 +237,7 @@ export function extractTopLevelJsonStringField(bytes: Uint8Array, field: string)
 }
 
 /** Decode a copy for reading only; null when the coding is one this lane does not read. */
-async function decoded(bytes: Uint8Array, contentEncoding: string | null, maxOutputLength = MAX_AGY_REQUEST_BYTES): Promise<Uint8Array | null> {
+export async function decodeBoundedPayload(bytes: Uint8Array, contentEncoding: string | null, maxOutputLength = MAX_AGY_REQUEST_BYTES): Promise<Uint8Array | null> {
   const coding = contentEncoding?.trim().toLowerCase();
   // Bounded: a small compressed body must not inflate past the caller's limit.
   const bound = { maxOutputLength };
@@ -255,7 +255,7 @@ async function decoded(bytes: Uint8Array, contentEncoding: string | null, maxOut
 
 /** Read-only routing view of the body: the `project` it names. The forwarded bytes stay the originals. */
 async function projectNamedBy(bytes: Uint8Array, contentEncoding: string | null): Promise<string | undefined | null> {
-  const plain = await decoded(bytes, contentEncoding);
+  const plain = await decodeBoundedPayload(bytes, contentEncoding);
   if (plain === null) return null;
   if (plain.byteLength === 0) return undefined;
   return extractTopLevelJsonStringField(plain, "project");
@@ -292,7 +292,7 @@ async function readRelayedJson(copy: ReadableStream<Uint8Array>, contentEncoding
       chunks.push(value);
     }
     // The decoded copy has the same bound, so a small compressed answer cannot expand past it.
-    const plain = await decoded(Buffer.concat(chunks), contentEncoding, MAX_OBSERVED_ANSWER_BYTES);
+    const plain = await decodeBoundedPayload(Buffer.concat(chunks), contentEncoding, MAX_OBSERVED_ANSWER_BYTES);
     if (!plain) return undefined;
     const parsed: unknown = JSON.parse(utf8Decoder.decode(plain));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;

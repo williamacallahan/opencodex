@@ -3,6 +3,7 @@ import { resolveProviderApiKey } from "../key-store";
 import { getProviderRegistryEntry, registryEntryForProviderDestination } from "../registry";
 import { isCanonicalOllamaCloudUrl } from "../../adapters/ollama-native-url";
 import { providerEgressFetchInit, resolveProviderEgress } from "../../lib/provider-egress";
+import { nativeHarnessOnly, VIBE_PROVIDER_ID } from "../../lib/native-harness";
 import { configuredOutboundFetch } from "../../lib/proxy-env";
 import { QUOTA_JSON_READ_FAILURE, asRecord, normalizePercent, normalizeResetAt, readQuotaJson, REQUEST_TIMEOUT_MS, toFiniteNumber } from "../quota-wire";
 import {
@@ -116,6 +117,7 @@ const MISTRAL_BUDGETS = [["api_budget", "API budget"], ["vibe_budget", "Vibe bud
  * suppresses the previous row; transport trouble, 408, 429 and 5xx are transient and keep it.
  */
 async function fetchMistralQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
+  if (provider === VIBE_PROVIDER_ID && nativeHarnessOnly()) return null;
   if (!isCanonicalMistralBaseUrl(config.baseUrl)) return null;
   const apiKey = resolveProviderApiKey(config.apiKey)?.trim();
   if (!apiKey) return null;
@@ -1562,6 +1564,7 @@ export function keyQuotaReaderForProvider(name: string, provider: OcxProviderCon
   if (name === "deepseek" && isCanonicalDeepSeekBaseUrl(provider.baseUrl)) return fetchDeepSeekQuota;
   // The canonical-URL guard alone decides eligibility, so a custom provider name that points
   // at Mistral's own origin still probes, and a Mistral-named lookalike still dispatches nothing.
+  if (name === VIBE_PROVIDER_ID && nativeHarnessOnly()) return null;
   if (isCanonicalMistralBaseUrl(provider.baseUrl)) return fetchMistralQuota;
   if (name === "cline-pass" && isCanonicalClineBaseUrl(provider.baseUrl)) return fetchClineQuota;
   if (isCanonicalOllamaCloudBaseUrl(provider.baseUrl ?? getProviderRegistryEntry(name)?.baseUrl)) return fetchOllamaCloudQuota;

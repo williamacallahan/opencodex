@@ -9,6 +9,7 @@ import { PROVIDER_REGISTRY } from "../../providers/registry";
 import { resolveModelAlias } from "../../providers/default-aliases";
 import { providerApiKeySelectionIsCurrent } from "../../providers/api-key-selection";
 import { resolveWireProtocolOverride } from "../adapter-resolve";
+import { nativeHarnessOnly, VIBE_PROVIDER_ID } from "../../lib/native-harness";
 import { openAIChatTransport, stripBracketedModelSuffix } from "../../adapters/openai-chat/wire";
 import { buildResponsesTransport } from "../../adapters/openai-responses/transport";
 import { openRouterProviderPayload, resolveOpenRouterRouting } from "../../providers/openrouter-routing";
@@ -49,7 +50,7 @@ export type ProviderCompletionTestResult = {
   applicable: false;
   reason: "disabled" | "forward_auth" | "oauth_auth" | "unsupported_adapter" | "unsupported_transport";
   adapter?: string;
-  detail?: "tls_profile" | "upstream_http_version" | "request_pacing" | "custom_executor_egress";
+  detail?: "tls_profile" | "upstream_http_version" | "request_pacing" | "custom_executor_egress" | "native_harness_only";
 } | {
   applicable: true; ok: boolean; provider: string; requestedModel: string; wireModel: string; wire: Wire;
   upstreamModel: string | null; modelComparison: "match" | "mismatch" | "unknown";
@@ -82,7 +83,7 @@ function derive(config: OcxConfig, name: string, row: OcxProviderConfig, model: 
   const routed = resolveWireProtocolOverride(name, native, resolved);
   const wire = routed.adapter;
   if (wire !== "openai-chat" && wire !== "openai-responses") throw new Error("unsupported adapter");
-  const transport = wire === "openai-chat" ? openAIChatTransport(routed)
+  const transport = wire === "openai-chat" ? openAIChatTransport(routed, name)
     : buildResponsesTransport(routed, { headers: new Headers() });
   const headers = new Headers(transport.headers);
   headers.set("Accept", "text/event-stream");
@@ -124,6 +125,9 @@ export async function runProviderCompletionTest(
   const row = config.providers[name];
   if (!Object.hasOwn(config.providers, name) || !row) throw new Error("unknown provider");
   if (row.disabled) return { applicable: false, reason: "disabled" };
+  if (name === VIBE_PROVIDER_ID && nativeHarnessOnly()) {
+    return { applicable: false, reason: "unsupported_transport", detail: "native_harness_only" };
+  }
   const authKind = PROVIDER_REGISTRY.find(entry => entry.id === name)?.authKind;
   if (row.authMode === "forward" || authKind === "forward") return { applicable: false, reason: "forward_auth" };
   if (row.authMode === "oauth" || authKind === "oauth") return { applicable: false, reason: "oauth_auth" };

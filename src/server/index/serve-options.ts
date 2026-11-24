@@ -465,9 +465,8 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         // /readyz is exact-GET only; OPTIONS (like POST and the trailing-slash
         // path) must answer the deterministic JSON 404, never the generic 204
         // preflight response that the SPA fallback would otherwise allow.
-        if (readyzPath !== undefined) {
-          return withCors(formatErrorResponse(404, "not_found", messagesUnknownEndpointMessage(req)), req, policy);
-        }
+        if (readyzPath !== undefined) return withCors(formatErrorResponse(404, "not_found", messagesUnknownEndpointMessage(req)), req, policy);
+        if (ingress === "public" && url.pathname.startsWith("/vibe/")) return (await import("../vibe-passthrough")).handleVibePassthrough(req, { config, policy, draining: isDraining(), server: requestServer });
         // The exact Ollama-compatible paths are data-plane routes and take data-plane CORS.
         const managementPreflight = url.pathname.startsWith("/api/") && !isOllamaNativePath(url.pathname);
         const allowed = managementPreflight
@@ -842,7 +841,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         );
       }
 
-      if (ingress === "public" && (url.pathname.startsWith("/agy/") || url.pathname.startsWith("/devin/"))) return url.pathname.startsWith("/agy/") ? (await import("../agy-passthrough")).handleAgyPassthrough(req, { config, draining: isDraining(), server: requestServer }) : (await import("../devin-passthrough")).handleDevinPassthrough(req, { config, draining: isDraining(), server: requestServer });
+      if (ingress === "public" && (url.pathname.startsWith("/agy/") || url.pathname.startsWith("/devin/") || url.pathname.startsWith("/vibe/"))) return url.pathname.startsWith("/agy/") ? (await import("../agy-passthrough")).handleAgyPassthrough(req, { config, draining: isDraining(), server: requestServer }) : url.pathname.startsWith("/devin/") ? (await import("../devin-passthrough")).handleDevinPassthrough(req, { config, draining: isDraining(), server: requestServer }) : (await import("../vibe-passthrough")).handleVibePassthrough(req, { config, policy, draining: isDraining(), server: requestServer });
       if (url.pathname === "/v1/usage" && req.method === "GET") {
         const { handleHubUsage } = await import("../hub-usage");
         return handleHubUsage(req, config, policy);

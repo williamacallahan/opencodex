@@ -47,7 +47,7 @@ import { replaceProviderAccountSet } from "../../oauth/store";
 import { captureModelsOAuthTarget, mayResolveModelsOAuth, modelsOAuthTargetMatches } from "../../oauth/model-discovery-auth";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
 import { providerProxyForDisplay } from "../../lib/provider-egress";
-import { nativeHarnessFor, nativeHarnessOnly } from "../../lib/native-harness";
+import { nativeHarnessFor, nativeHarnessOnly, VIBE_PROVIDER_ID } from "../../lib/native-harness";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
 import { ProviderOutboundPolicyError, providerOutboundGet, providerOutboundPost, providerRedirectError } from "../../lib/provider-outbound";
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
@@ -945,7 +945,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       disabled: p.disabled === true,
       codexAccountMode: providerCodexAccountMode(name, p),
       // Undefined when the row is not reserved to one client; JSON omits it.
-      nativeHarness: nativeHarnessFor(p, effectiveGoogleMode(name, p)),
+      nativeHarness: nativeHarnessFor(p, effectiveGoogleMode(name, p), name),
       ...(name === "xai" ? { xaiResponsesOptInState: xaiResponsesOptInState(p) } : {}),
       // Only opt-in Fast lanes (Anthropic fast mode bills usage credits) get a dashboard switch.
       ...(getProviderRegistryEntry(name)?.fastOptIn === true ? { fastOptIn: { enabled: p.fastEnabled === true } } : {}),
@@ -1661,8 +1661,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       return jsonResponse({ applicable: false, reason: "static_catalog", latencyMs: 0 });
     }
     const antigravity = effectiveGoogleMode(name, prov) === "cloud-code-assist";
-    if (antigravity && nativeHarnessOnly()) {
-      // Cloud Code discovery would present an Antigravity identity; agy owns that traffic.
+    if ((antigravity || name === VIBE_PROVIDER_ID) && nativeHarnessOnly()) {
+      // Cloud Code and Mistral Vibe discovery/tests would present native harness identities.
       return jsonResponse({ applicable: false, reason: "native_harness_only", latencyMs: 0 });
     }
     const { buildModelsRequest, getModelsOAuthAccessSnapshot, resolveModelsAuthToken } = await import("../../oauth");

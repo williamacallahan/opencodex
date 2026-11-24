@@ -170,7 +170,7 @@ export function createSettledPassthroughBody(options: SettledPassthroughBodyOpti
 
 export interface UpstreamFailureLogContext {
   readonly prefix: string;
-  readonly targetKey: "method" | "rpcPath";
+  readonly targetKey: "method" | "rpcPath" | "path";
   readonly target: string;
   readonly account: string | undefined;
   readonly defaultPhase: "unknown" | "body";
@@ -198,7 +198,9 @@ export function logPassthroughUpstreamFailure(ctx: UpstreamFailureLogContext, er
   };
   const fields = ctx.targetKey === "method"
     ? { method: ctx.target, ...common }
-    : { rpcPath: ctx.target, ...common };
+    : ctx.targetKey === "rpcPath"
+      ? { rpcPath: ctx.target, ...common }
+      : { path: ctx.target, ...common };
   console.warn(`${ctx.prefix} upstream failure ${JSON.stringify(fields)}`);
 }
 
@@ -222,22 +224,27 @@ function responseHeaders(message: IncomingMessage): Headers {
 
 /** The response bytes as a web stream with backpressure; cancelling it closes the upstream socket. */
 function webBody(message: IncomingMessage): ReadableStream<Uint8Array> {
+  let cancelled = false;
   return new ReadableStream<Uint8Array>({
     start(controller) {
       message.on("data", (chunk: Buffer) => {
+        if (cancelled) return;
         controller.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
         if ((controller.desiredSize ?? 1) <= 0) message.pause();
       });
-      message.on("end", () => controller.close());
-      message.on("error", error => controller.error(error));
-      message.on("close", () => { if (!message.complete) controller.error(new Error("Cloud Code response closed before it completed")); });
+      message.on("end", () => { if (!cancelled) controller.close(); });
+      message.on("error", error => { if (!cancelled) controller.error(error); });
+      message.on("close", () => { if (!cancelled && !message.complete) controller.error(new Error("Upstream response closed before it completed")); });
     },
     pull() { message.resume(); },
-    cancel() { message.destroy(); },
+    cancel() {
+      cancelled = true;
+      message.destroy();
+    },
   });
 }
 
-/** POST `body` to `url` with exactly `headers`; the response body streams back undecoded. */
+/** Send `method` with `body` to `url` with exactly `headers`; the response body streams back undecoded. */
 export function sendExactly(
   url: URL,
   headers: Headers,
@@ -245,6 +252,7 @@ export function sendExactly(
   signal: AbortSignal,
   headerTimeoutMs = DEFAULT_AGY_HEADER_TIMEOUT_MS,
   connectTimeoutMs = DEFAULT_AGY_CONNECT_TIMEOUT_MS,
+  method: "POST" | "GET" = "POST",
 ): Promise<ExactResponse> {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
@@ -272,10 +280,14 @@ export function sendExactly(
     };
 
     const outgoing: Record<string, string> = Object.fromEntries(headers);
-    outgoing["content-length"] = String(body.byteLength);
+    if (method === "POST" || body.byteLength > 0) {
+      outgoing["content-length"] = String(body.byteLength);
+    } else {
+      delete outgoing["content-length"];
+    }
     const secure = url.protocol === "https:";
     const send = secure ? httpsRequest : httpRequest;
-    const req = send(url, { method: "POST", headers: outgoing, agent: secure ? httpsAgent : httpAgent, signal }, message => {
+    const req = send(url, { method, headers: outgoing, agent: secure ? httpsAgent : httpAgent, signal }, message => {
       if (settled) {
         message.destroy();
         return;
@@ -366,6 +378,7 @@ export function sendExactly(
         cause: error,
       }));
     });
-    req.end(body);
+    if (body.byteLength > 0) req.end(body);
+    else req.end();
   });
 }

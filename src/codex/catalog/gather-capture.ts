@@ -47,7 +47,7 @@ import {
 } from "../../providers/service-tier";
 import type { FastPolicyAuthority } from "../../providers/fastwire";
 import { effectiveGoogleMode, getProviderRegistryEntry, providerMatchesRegistryTransport, registryEntryForProviderDestination } from "../../providers/registry";
-import { assertNativeHarnessSend, nativeHarnessOnly } from "../../lib/native-harness";
+import { assertNativeHarnessSend, nativeHarnessOnly, VIBE_PROVIDER_ID } from "../../lib/native-harness";
 import { parseAntigravityAvailableModels, registerAntigravityDiscoveredWireModels } from "../../providers/antigravity-models";
 import { applyProviderContextCap, providerContextCap, resolveUnknownRoutedContextWindow } from "../../providers/context-cap";
 import { clampAutoCompactTokenLimit } from "../../providers/auto-compact-budget";
@@ -342,6 +342,7 @@ export function captureModelsRequest(
   const observed = { oauthApiBaseUrl, workbuddy };
   // Cloud Code model discovery presents agy's client identity from the hub; only agy itself may ask.
   if (effectiveGoogleMode(name, provider) === "cloud-code-assist") assertNativeHarnessSend("antigravity");
+  if (name === VIBE_PROVIDER_ID) assertNativeHarnessSend("mistral-vibe");
   const withoutCredential = buildModelsRequest(provider, undefined, name, observed);
   const withCredential = buildModelsRequest(provider, REQUEST_CREDENTIAL_SENTINEL, name, observed);
   const method = withoutCredential.method ?? "GET";
@@ -467,8 +468,9 @@ export function captureGatherFlight(
     // A decision service (canonical TypeSafe or a self-hosted `jev-decision` row) owns no model
     // transport: never probe its endpoint for /models and never publish its model id as routable.
     .filter(([, provider]) => provider.disabled !== true && provider.adapter !== "jev-decision")
-    // Under nativeHarnessOnly a Cloud Code row lists nothing: its discovery would present agy's identity.
-    .filter(([name, provider]) => !(nativeHarnessOnly() && effectiveGoogleMode(name, provider) === "cloud-code-assist"))
+    // Under nativeHarnessOnly a Cloud Code or Mistral Vibe row lists nothing from hub discovery.
+    .filter(([name, provider]) => !(nativeHarnessOnly()
+      && (effectiveGoogleMode(name, provider) === "cloud-code-assist" || name === VIBE_PROVIDER_ID)))
     .map(([name, provider]) => captureProviderGather(
       name,
       provider,

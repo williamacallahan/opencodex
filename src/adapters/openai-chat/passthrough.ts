@@ -73,7 +73,7 @@ export function buildOpenAIChatPassthroughRequest(
   translatorBudget?: TranslatorBudget,
   incomingHeaders?: Headers,
 ): AdapterRequest {
-  const { url, headers, hasCredential } = openAIChatTransport(provider);
+  const { url, headers, hasCredential } = openAIChatTransport(provider, providerName);
   copyForwardedClientHeaders(provider.forwardClientHeaders, headers, incomingHeaders);
 
   const body: Record<string, unknown> = {

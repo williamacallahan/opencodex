@@ -914,6 +914,8 @@
   "server-generic-oauth-affinity.test.ts": "server",
   "agy-passthrough.test.ts": "server",
   "devin-passthrough.test.ts": "server",
+  "vibe-passthrough.test.ts": "server",
+  "vibe-passthrough-resilience.test.ts": "server",
   "harness-only-client-refusal.test.ts": "server",
   "harness-only-sidecar-refusal.test.ts": "server",
   "harness-only-gates.test.ts": "server",

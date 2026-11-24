@@ -107,3 +107,20 @@ export function runDrainStartHooks(): void {
 export function didRunDrainStartHooks(): boolean {
   return drainStartHooksRan;
 }
+
+type AsyncFlushHook = () => Promise<void>;
+
+const asyncFlushHooks = new Map<string, AsyncFlushHook>();
+
+/** Register a keyed async state-flush hook awaited during graceful shutdown drain. */
+export function registerOptionalAsyncFlushHook(key: string, hook: AsyncFlushHook): () => void {
+  asyncFlushHooks.set(key, hook);
+  return () => {
+    if (asyncFlushHooks.get(key) === hook) asyncFlushHooks.delete(key);
+  };
+}
+
+/** Run every registered async flush hook in parallel without throwing. */
+export function runOptionalAsyncFlushHooks(): Promise<PromiseSettledResult<void>[]> {
+  return Promise.allSettled([...asyncFlushHooks.values()].map(hook => hook()));
+}

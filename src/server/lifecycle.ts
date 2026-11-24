@@ -8,7 +8,7 @@ import {
 } from "../storage/policy-job";
 import { abortRestoreTrashJobAsync } from "../storage/restore-job";
 import { stopStorageCleanupScheduler } from "../storage/policy-scheduler";
-import { runDrainStartHooks, runOptionalShutdownHooks } from "../lib/optional-shutdown-hooks";
+import { runDrainStartHooks, runOptionalAsyncFlushHooks, runOptionalShutdownHooks } from "../lib/optional-shutdown-hooks";
 import { stopStateStoreSweeper } from "../lib/state-store-sweeper";
 import {
   cancelQueuedStorageWorkerSpawns,
@@ -576,7 +576,7 @@ export async function drainAndShutdown(
     // Debounced replay-state snapshots may still be pending; flush so the last completed turn's
     // previous_response_id chain and antigravity thought signatures survive the restart this
     // shutdown is usually part of.
-    const stateFlush = await Promise.allSettled([flushResponseState(), flushAntigravityReplay()]);
+    const stateFlush = await Promise.allSettled([flushResponseState(), flushAntigravityReplay(), runOptionalAsyncFlushHooks()]);
     if (stateFlush[0]?.status === "rejected") {
       shutdownSucceeded = false;
       console.warn("[responses] state flush during shutdown failed");
@@ -584,6 +584,14 @@ export async function drainAndShutdown(
     if (stateFlush[1]?.status === "rejected") {
       shutdownSucceeded = false;
       console.warn("[antigravity] replay flush during shutdown failed");
+    }
+    if (stateFlush[2]?.status === "fulfilled") {
+      for (const hookResult of stateFlush[2].value) {
+        if (hookResult.status === "rejected") {
+          shutdownSucceeded = false;
+          console.warn("[shutdown] optional async flush hook failed");
+        }
+      }
     }
 
     // Tear down opt-in storage policy timers / worker / live-config sink so they cannot fire after stop.

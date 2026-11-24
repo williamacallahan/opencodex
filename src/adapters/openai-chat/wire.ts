@@ -1,3 +1,4 @@
+import { assertNativeHarnessSend, VIBE_PROVIDER_ID } from "../../lib/native-harness";
 import { agentRouterDefaultHeaders } from "../agentrouter";
 import { openaiChatCompletionsUrl } from "../openai-chat-url";
 import type { OcxProviderConfig } from "../../types";
@@ -16,11 +17,12 @@ export function stripBracketedModelSuffix(modelId: string): string {
   return suffixStart === -1 ? modelId : modelId.slice(0, suffixStart);
 }
 
-export function openAIChatTransport(provider: OcxProviderConfig): {
+export function openAIChatTransport(provider: OcxProviderConfig, providerName?: string): {
   url: string;
   headers: Record<string, string>;
   hasCredential: boolean;
 } {
+  if (providerName === VIBE_PROVIDER_ID) assertNativeHarnessSend("mistral-vibe");
   const hasCredential = typeof provider.apiKey === "string" && provider.apiKey.trim().length > 0;
   if ((provider.authMode === "key" || provider.authMode === "oauth") && !provider.keyOptional && !hasCredential) {
     throw new Error(`${provider.adapter} requires a non-empty credential (authMode: ${provider.authMode})`);

@@ -25,13 +25,17 @@ export function nativeHarnessOnly(): boolean {
   return bound?.nativeHarnessOnly === true;
 }
 
-export type NativeHarnessVendor = "antigravity" | "anthropic";
+export const VIBE_PROVIDER_ID = "mistral-vibe";
+
+export type NativeHarnessVendor = "antigravity" | "anthropic" | "mistral-vibe";
 
 export class NativeHarnessRefusal extends Error {
   constructor(readonly vendor: NativeHarnessVendor) {
     super(vendor === "antigravity"
       ? "Antigravity accounts serve only the agy harness through /agy (nativeHarnessOnly is on)"
-      : "Anthropic subscription accounts serve only Claude Code through the strict Messages lane (nativeHarnessOnly is on)");
+      : vendor === "mistral-vibe"
+        ? "Mistral Vibe accounts serve only the native Vibe harness through /vibe (nativeHarnessOnly is on)"
+        : "Anthropic subscription accounts serve only Claude Code through the strict Messages lane (nativeHarnessOnly is on)");
     this.name = "NativeHarnessRefusal";
     // The sentence is the proxy's own, so every client protocol may show it verbatim.
     markProxyError(this);
@@ -39,15 +43,21 @@ export class NativeHarnessRefusal extends Error {
 }
 
 /** The only client a provider's subscription accounts serve while the switch is on. */
-export type NativeHarness = "agy" | "claude-code";
+export type NativeHarness = "agy" | "claude-code" | "vibe";
 
 /**
  * Which client a provider is reserved to, or undefined when it is not (switch off, or not a
  * subscription row). `googleMode` is the caller's resolved Google mode, so this module stays free of
  * the provider registry that the adapters importing it also load.
  */
-export function nativeHarnessFor(provider: { adapter?: string; authMode?: string }, googleMode: string | null | undefined): NativeHarness | undefined {
-  if (!nativeHarnessOnly() || provider.authMode !== "oauth") return undefined;
+export function nativeHarnessFor(
+  provider: { adapter?: string; authMode?: string },
+  googleMode: string | null | undefined,
+  providerName?: string,
+): NativeHarness | undefined {
+  if (!nativeHarnessOnly()) return undefined;
+  if (providerName === VIBE_PROVIDER_ID) return "vibe";
+  if (provider.authMode !== "oauth") return undefined;
   if (googleMode === "cloud-code-assist") return "agy";
   return provider.adapter === "anthropic" ? "claude-code" : undefined;
 }

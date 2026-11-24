@@ -1,8 +1,20 @@
 /** Process-local cooldown state shared by selection validation and key failover. */
 const keyCooldowns = new Map<string, { cooldownUntil: number }>();
+const clearListeners = new Set<(providerName?: string) => void>();
+const clearAtByProvider = new Map<string, number>();
+let lastClearAllAt = 0;
 
 function cooldownKey(providerName: string, keyId: string): string {
   return `${providerName}\0${keyId}`;
+}
+
+export function registerKeyCooldownClearListener(listener: (providerName?: string) => void): () => void {
+  clearListeners.add(listener);
+  return () => { clearListeners.delete(listener); };
+}
+
+export function getLastKeyCooldownClearAt(providerName: string): number {
+  return Math.max(lastClearAllAt, clearAtByProvider.get(providerName) ?? 0);
 }
 
 export function setKeyCooldown(providerName: string, keyId: string, cooldownUntil: number): void {
@@ -37,11 +49,29 @@ export function sweepExpiredApiKeyCooldowns(now = Date.now()): number {
 }
 
 /** Manual key management clears this provider's cooldowns. */
-export function clearKeyCooldowns(providerName?: string): void {
+export function clearKeyCooldowns(providerName?: string, now = Date.now()): void {
   if (!providerName) {
+    lastClearAllAt = Math.max(lastClearAllAt, now);
+    keyCooldowns.clear();
+  } else {
+    clearAtByProvider.set(providerName, Math.max(clearAtByProvider.get(providerName) ?? 0, now));
+    const prefix = `${providerName}\0`;
+    for (const key of keyCooldowns.keys()) {
+      if (key.startsWith(prefix)) keyCooldowns.delete(key);
+    }
+  }
+  for (const listener of clearListeners) listener(providerName);
+}
+
+/** Test seam: reset process-local cooldown memory without invoking persistent-clear listeners. */
+export function resetKeyCooldownsForTests(providerName?: string): void {
+  if (!providerName) {
+    lastClearAllAt = 0;
+    clearAtByProvider.clear();
     keyCooldowns.clear();
     return;
   }
+  clearAtByProvider.delete(providerName);
   const prefix = `${providerName}\0`;
   for (const key of keyCooldowns.keys()) {
     if (key.startsWith(prefix)) keyCooldowns.delete(key);

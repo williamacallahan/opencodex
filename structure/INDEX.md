@@ -73,6 +73,7 @@ The wire surfaces a client actually talks to.
 | [`data-planes/protocol-paths.md`](data-planes/protocol-paths.md) | Shared protocol vocabulary, declared feature dispositions, the ingress-by-upstream baseline, plan/trace shapes, and protocol settings. |
 | [`transports/strict-messages.md`](transports/strict-messages.md) | Opt-in byte-preserving managed Messages transport, final dispatch integrity, and account lifecycle boundaries. |
 | [`transports/agy-passthrough.md`](transports/agy-passthrough.md) | The /agy byte-preserving Cloud Code lane, its pooled account choice, and the nativeHarnessOnly subscription-account boundary. |
+| [`transports/vibe-passthrough.md`](transports/vibe-passthrough.md) | The /vibe byte-preserving Mistral Vibe CLI lane, pooled CHAT-plan key rotation with affinity/cooldowns/monthly 402 parks, and nativeHarnessOnly enforcement. |
 | [`providers/codex-installation-identity.md`](providers/codex-installation-identity.md) | Per-account Pool wire installation identity, private secret, existence gates and fail-closed delivery. |
 | [`providers/codex-request-owned-affinity.md`](providers/codex-request-owned-affinity.md) | Opt-in conversation affinity for a caller's own ChatGPT bearer in Pool mode, honest selection-time affinity labels, and the persistence exclusion contract. |
 | [`fallback-policy.md`](fallback-policy.md) | OCX-11 fallback off: what is a model or provider fallback (and what intra-pool rotation is not), scope precedence, the guarded hop sites, the fallback_refused and home_unreachable contracts, and the ocx.fallback/1 state. |
@@ -377,7 +378,7 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/lib/messages-error-body.ts` | [`data-planes/error-detail.md`](data-planes/error-detail.md) |
 | `src/lib/messages-sse-error-presentation.ts` | [`data-planes/error-detail.md`](data-planes/error-detail.md) |
 | `src/lib/model-identity.ts` | [`data-planes/error-detail.md`](data-planes/error-detail.md) |
-| `src/lib/native-harness.ts` | [`transports/agy-passthrough.md`](transports/agy-passthrough.md) |
+| `src/lib/native-harness.ts` | [`transports/agy-passthrough.md`](transports/agy-passthrough.md)<br>[`transports/vibe-passthrough.md`](transports/vibe-passthrough.md) |
 | `src/lib/response-service-tier.ts` | [`data-planes/error-detail.md`](data-planes/error-detail.md) |
 | `src/lib/tool-argument-integers.ts` | [`providers-and-adapters.md`](providers-and-adapters.md) |
 | `src/lib/upstream-condition.ts` | [`data-planes/error-detail.md`](data-planes/error-detail.md) |
@@ -521,6 +522,8 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/server/safe-response-headers.ts` | [`data-planes/error-detail.md`](data-planes/error-detail.md) |
 | `src/server/search.ts` | [`providers/codex-installation-identity.md`](providers/codex-installation-identity.md) |
 | `src/server/sse-payload-rewrite.ts` | [`data-planes/error-detail.md`](data-planes/error-detail.md) |
+| `src/server/vibe-passthrough-keys.ts` | [`transports/vibe-passthrough.md`](transports/vibe-passthrough.md) |
+| `src/server/vibe-passthrough.ts` | [`transports/vibe-passthrough.md`](transports/vibe-passthrough.md) |
 | `src/server/ws-bridge.ts` | [`providers/codex-installation-identity.md`](providers/codex-installation-identity.md) |
 | `src/service-manager-probe.ts` | [`ops/service-and-sidecars.md`](ops/service-and-sidecars.md) |
 | `src/service.ts` | [`runtime.md`](runtime.md)<br>[`ops/docs-and-release.md`](ops/docs-and-release.md) |

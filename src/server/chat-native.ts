@@ -1,7 +1,8 @@
 import { recordUpstreamProviderErrorDetail } from "./request-log-failure-detail";
 import { normalizeNativeChatContent } from "../adapters/openai-chat/native-content";
+import { NativeHarnessRefusal, nativeHarnessOnly, VIBE_PROVIDER_ID } from "../lib/native-harness";
 import { attachCredentialMask, responseCredentialMask, type CredentialMask } from "../lib/outbound-credential-registry";
-import { attachComboFailureEvidence, ownedChatErrorPayload, type ClientErrorContract } from "../lib/client-error-body";
+import { attachComboFailureEvidence, markProxyError, ownedChatErrorPayload, type ClientErrorContract } from "../lib/client-error-body";
 import type { FailureVerdictSink } from "../chat/failure-verdict";
 import { normalizeChatChoiceErrors } from "./chat-native-sse";
 import { captureAccountAutoPauseAttempt, wasAccountAutoPaused } from "../oauth/account-auto-pause";
@@ -362,11 +363,15 @@ export async function runNativeChatAttempt(
   // Transport variant: the bare picker answers with the persisted row, which for a built-in
   // provider carries no adapter id or base URL until routedProviderConfig backfills it.
   try {
+    if (route.providerName === VIBE_PROVIDER_ID && nativeHarnessOnly()) {
+      throw new NativeHarnessRefusal("mistral-vibe");
+    }
     const proactiveKeyProvider = selectProactiveApiKeyTransport(config, route.providerName, route.provider);
     if (proactiveKeyProvider) route.provider = proactiveKeyProvider;
     if (isProviderApiKeyPaused(route.provider)) throw new ProviderApiKeyPausedError();
   } catch (error) {
     cleanupAbort(); upstream.abort();
+    if (error instanceof NativeHarnessRefusal) return failLocal(400, error.message, "invalid_request_error");
     if (error instanceof ProviderApiKeyPausedError) {
       return failLocal(403, error.message, "permission_error");
     }
@@ -424,6 +429,9 @@ export async function runNativeChatAttempt(
     upstream.abort();
     if (isTranslatorBudgetExceededError(error)) {
       return failLocal(413, "request translation buffer exceeded the safe limit", "request_too_large", "translation_buffer_limit");
+    }
+    if (error instanceof NativeHarnessRefusal) {
+      return markProxyError(failLocal(400, error.message, "invalid_request_error"));
     }
     return failLocal(400, error instanceof Error ? error.message : String(error), "invalid_request_error");
   }

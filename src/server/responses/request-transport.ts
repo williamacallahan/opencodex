@@ -1,7 +1,7 @@
 import { publicOAuthErrorPresentation } from "../../oauth";
 import { observeProviderFailureEvent, projectLocalModelRefusalLog } from "../request-log-failure-detail";
 import { markProxyError } from "../../lib/client-error-body";
-import { NativeHarnessRefusal, nativeHarnessOnly } from "../../lib/native-harness";
+import { NativeHarnessRefusal, nativeHarnessOnly, VIBE_PROVIDER_ID } from "../../lib/native-harness";
 import { formatClientRetryAfter } from "../../lib/client-retry-after";
 import { SendBudgetExhaustedError, errorDestinationText, providerErrorDestinationLabel } from "../../lib/upstream-retry";
 import { appendLoadedToolDefinitions, toolLoadingModelMatches } from "../../claude/inbound-tool-loading";
@@ -1327,6 +1327,9 @@ export async function prepareResponsesTransport(
   // The Transport variant, not the bare picker: the picker answers with the PERSISTED row, and
   // a built-in provider stored in its valid minimal form would lose the adapter id, base URL
   // and static headers registry backfill supplies, throwing `Unknown adapter: undefined`.
+  if (route.providerName === VIBE_PROVIDER_ID && nativeHarnessOnly()) {
+    return markProxyError(formatErrorResponse(400, "invalid_request_error", new NativeHarnessRefusal("mistral-vibe").message));
+  }
   let proactiveKeyProvider: OcxProviderConfig | null;
   try {
     proactiveKeyProvider = pickKey(route.provider);
