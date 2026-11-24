@@ -286,3 +286,14 @@ test("committed combo context carries later synthetic incomplete origins", async
   expect(hasProxyIncomplete(parent, "adapter_eof")).toBe(true);
   expect(hasProxyIncomplete({}, "adapter_eof")).toBe(false);
 });
+
+test("a provider previous_response_not_found 400 names its code instead of a bare rejection on Chat and Messages", async () => {
+  const code = "previous_response_not_found";
+  const evidence = { status: 400, type: "invalid_request_error", code, message: KEY };
+  const chat = ownedChatErrorPayload({ status: 400, type: "invalid_request_error", code, evidence });
+  expect(chat.error.message).toContain(code);
+  const { ownedAnthropicErrorPayload } = await import("../../src/lib/messages-error-body");
+  const messages = JSON.stringify(ownedAnthropicErrorPayload({ status: 400, type: "invalid_request_error", code, evidence }));
+  expect(messages).toContain("out of usage");
+  expect(messages).not.toContain(KEY);
+});

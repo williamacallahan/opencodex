@@ -77,6 +77,7 @@ export function isPausedTurn(context: object | undefined): boolean {
 const CODE_MESSAGES: ReadonlyMap<string, string> = new Map([
   ["context_length_exceeded", CLIENT_ERROR_CONTRACTS.context_overflow],
   ["reasoning_loop_detected", "The model's reasoning repeated itself, so the provider ended the reply. Sending the same request again is likely to loop again; shorten or change the context."],
+  ["previous_response_not_found", "The provider could not continue this conversation (previous_response_not_found): the account that owns its earlier response is unavailable or out of usage. Retry later or start a new conversation."],
   ["upstream_incomplete", CLIENT_ERROR_CONTRACTS.stream_incomplete],
   ["upstream_stream_incomplete", CLIENT_ERROR_CONTRACTS.stream_incomplete],
   ["upstream_reset_replay_refused", CLIENT_ERROR_CONTRACTS.replay_refused],
