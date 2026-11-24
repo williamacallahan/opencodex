@@ -776,7 +776,7 @@ export async function executeComboResponses(
   const conversationPin = !turnRebuilt && recalledPick && (!boundTargetKey || boundTargetKey === targetKey(recalledPick.target))
     && (!lunaLegs || targetKey(recalledPick.target) === lunaLegs.nativeKey) ? recalledPick : undefined;
   let evaluatedStrictReserve = false;
-  let skippedEmptyReserve = false;
+  let skippedEmptyReserve: Awaited<ReturnType<typeof resolveEmptyLunaReserveStart>>["skippedEmptyReserve"];
   let lunaStage: "off" | "reserve" | "relay" | "done" = "off";
   let encryptedTaskRecoveryAttempted = false;
   let recoveryFailureReason: AgentTaskRecoveryFailureReason | undefined;
@@ -831,7 +831,7 @@ export async function executeComboResponses(
     allowCooldownReprobe?: boolean;
     /** This request's own cooldown-reprobe reservation, carried through its failover hops. */
     cooldownReprobeTargets?: Iterable<readonly [string, number]>;
-    now?: number;
+    now?: number; waitForCooldownMs?: number;
   }) => pickComboTargetWithWait(config, comboId, {
     ...pickOptions,
     allowCooldownReprobe: boundTargetKey ? false : pickOptions.allowCooldownReprobe,
@@ -840,12 +840,12 @@ export async function executeComboResponses(
     // targets away from callers that may not spend on them.
     eligible: target => (!boundTargetKey || targetKey(target) === boundTargetKey) && (meteredAllowed || !target.metered)
       && (pickOptions.eligible?.(target) ?? true),
-    waitForCooldownMs: combo.waitForCooldownMs,
+    waitForCooldownMs: pickOptions.waitForCooldownMs ?? combo.waitForCooldownMs,
     abortSignal: options.abortSignal,
   });
   let pick = conversationPin ?? await pickWithWait({ eligible: targetEligible, now: initialNow });
   ({ pick, evaluatedStrictReserve, lunaStage, skippedEmptyReserve } = await resolveEmptyLunaReserveStart({
-    config, lunaLegs, conversationPin, boundTargetKey, currentPick: pick, targetEligible, pickWithWait, now: initialNow,
+    config, lunaLegs, conversationPin, boundTargetKey, currentPick: pick, targetEligible, pickWithWait,
   }));
   // Opt-in JEV session pin (#7525); override routes neither read nor write it, like the lane recall.
   const jevPin = options.compactionRoutingOverride || options.mainHardLockFallbackOverride
@@ -1064,11 +1064,15 @@ export async function executeComboResponses(
   // One immutable combo selection trace, before any child dispatch; child
   // adoption below must never replace it with a concrete child route trace.
   const decision = comboRouteDecisionTrace(config, comboId, pick, responseModel);
+  if (skippedEmptyReserve && lunaLegs && targetKey(pick.target) !== lunaLegs.nativeKey) {
+    const skipped = decision.candidates.find(candidate => targetKey(candidate) === lunaLegs?.nativeKey);
+    if (skipped) { skipped.eligible = false; skipped.exclusions = [{ code: skippedEmptyReserve }]; }
+  }
   const selectedReason = options.memoryModelPhase
     ? memoryModelRouteReason(options.memoryModelPhase)
     : portedBeforeDispatch || (ported !== undefined && dispatchBody === ported) ? "luna-owner-spent-ported"
     : lunaReplay?.kind === "bound" ? `luna-owner-${lunaReplay.reason}`
-    : lunaLegs?.nativeKey === targetKey(pick.target) ? "luna-reserve-first"
+    : !evaluatedStrictReserve && lunaLegs?.nativeKey === targetKey(pick.target) ? "luna-reserve-first"
     : conversationPin ? COMBO_CONVERSATION_PIN_REASON : jevDecision?.pinned ? JEV_SESSION_PIN_ROUTE_REASON : undefined;
   logCtx.routeDecision = selectedReason
     ? { ...decision, selected: { ...decision.selected, reason: selectedReason } }

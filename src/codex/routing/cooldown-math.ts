@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   CODEX_EXHAUSTED_USAGE_PERCENT,
   CODEX_UNKNOWN_USAGE_SCORE,
@@ -13,7 +12,6 @@ import type { MainQuotaDispatch } from "../main-account-cache";
 export { TERMINAL_SHORT_WINDOW_FRESHNESS_MS } from "../quota-types";
 
 export const CODEX_DEFAULT_QUOTA_COOLDOWN_MS = 60_000;
-export const CODEX_MAX_RESERVE_REFUSAL_BACKOFF_MS = 30 * 60_000;
 export const CODEX_MAX_QUOTA_COOLDOWN_MS = 24 * 60 * 60_000;
 /**
  * A weekly/monthly quota `resetAt` announces when the window refreshes; it is not
@@ -272,35 +270,6 @@ export function computeQuotaCooldown(meta: CodexUpstreamOutcomeMeta = {}): {
   return { until: now + CODEX_DEFAULT_QUOTA_COOLDOWN_MS, source: "default" };
 }
 
-function reserveRefusalJitterFactor(accountId: string | undefined): number {
-  if (!accountId) return 0;
-  const digest = createHash("sha256").update(accountId).digest();
-  const bucket = digest.readUInt32BE(0) % 1500;
-  return bucket / 10_000;
-}
-
-/**
- * Escalate consecutive Reserve refusals on an exponential curve (60s first refusal, then
- * 5m -> 10m -> 20m -> 30m with 0-15% deterministic per-account jitter) unless Retry-After speaks.
- */
-export function computeReserveRefusalCooldown(
-  meta: CodexUpstreamOutcomeMeta = {},
-  priorStreak = 0,
-  accountId?: string,
-): { until: number; source: CodexCooldownSource } {
-  const now = meta.now ?? Date.now();
-  const retryAfterMs = parseRetryAfterMs(meta.retryAfter, now);
-  if (retryAfterMs !== undefined) return { until: now + retryAfterMs, source: "retry-after" };
-  if (priorStreak <= 0) return { until: now + CODEX_DEFAULT_QUOTA_COOLDOWN_MS, source: "default" };
-  const exponent = Math.min(Math.max(priorStreak - 1, 0), 3);
-  const baseMs = Math.min(
-    CODEX_DEFAULT_QUOTA_COOLDOWN_MS * 5 * (2 ** exponent),
-    CODEX_MAX_RESERVE_REFUSAL_BACKOFF_MS,
-  );
-  const jitterMs = Math.round(baseMs * reserveRefusalJitterFactor(accountId));
-  return { until: now + baseMs + jitterMs, source: "default" };
-}
-
 /**
  * When the pool should stop preferring an account after it refused on quota.
  *
@@ -320,6 +289,13 @@ export function quotaAvoidUntilFor(meta: CodexUpstreamOutcomeMeta, now: number, 
     if (announced === undefined || until < announced) announced = until;
   }
   return Math.max(cooldownUntil, announced ?? 0);
+}
+
+/** A plan reset is not Reserve advice; a later default cannot shorten explicit advice. */
+export function computeReserveRefusalCooldown(meta: CodexUpstreamOutcomeMeta, prior?: Pick<import("./health-store").CodexUpstreamHealth, "cooldownSource" | "cooldownUntil">) {
+  const next = computeQuotaCooldown({ now: meta.now, retryAfter: meta.retryAfter });
+  return prior?.cooldownSource === "retry-after" && prior.cooldownUntil !== undefined && prior.cooldownUntil > next.until
+    ? { until: prior.cooldownUntil, source: prior.cooldownSource } : next;
 }
 
 export function computeQuotaCooldownUntil(meta: CodexUpstreamOutcomeMeta = {}): number {

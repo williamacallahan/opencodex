@@ -6,7 +6,7 @@ import { shouldRetryCodexPoolAccountQuota } from "../../src/server/responses/cor
 import { sendReserveSeat } from "../../src/server/responses/reserve-seat-dispatch";
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OcxConfig } from "../../src/types";
@@ -16,6 +16,7 @@ import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { clearAccountQuota, setAccountQuotaFromParsed, updateAccountQuota } from "../../src/codex/quota";
 import { clearCodexUpstreamHealth, clearThreadAccountMap, recordCodexUpstreamOutcome } from "../../src/codex/routing";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
+import { flushCodexHealthCooldowns, reloadCodexHealthCooldownsForTests } from "../../src/codex/routing/health-store";
 import { clearAccountNeedsReauth } from "../../src/codex/account-runtime-state";
 import { resetQuotaQueryBackoffForTests } from "../../src/codex/quota-query-backoff";
 import { comboExecutionBudgetPolicy } from "../../src/server/responses/core-combo";
@@ -1670,6 +1671,66 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(wire).not.toContain(item.encrypted_content);
   });
 
+  test.each([undefined, "900"])("persisted Reserve refusals honor discovery cadence and explicit Retry-After (%s)", async retryAfter => {
+    const cfg = config();
+    updateAccountQuota(A, 40, now + 86_400_000);
+    updateAccountQuota(B, 100, now + 86_400_000);
+    for (let i = 0; i < 3; i++) {
+      recordCodexUpstreamOutcome(cfg, B, 429, { modelId: "gpt-reserve", poolReserve: true, now, retryAfter });
+      now += 1_000;
+    }
+    expect(flushCodexHealthCooldowns()).toBe(true);
+    reloadCodexHealthCooldownsForTests();
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    expect((await post(cfg, { store: false }, {}, undefined, { logCtx })).text).toContain("response.completed");
+    expect(calls).toEqual(["relay:gpt-6-luna"]);
+    expect(logCtx.routeDecision?.candidates[0]?.exclusions).toEqual([{ code: "reserve-cooldown" }]);
+    now += 2 * 60_000;
+    reloadCodexHealthCooldownsForTests();
+    calls.length = 0;
+    expect((await post(cfg, { store: false })).text).toContain("response.completed");
+    expect(calls).toEqual(["relay:gpt-6-luna"]);
+    now += 4 * 60_000;
+    calls.length = 0;
+    expect((await post(cfg, { store: false })).text).toContain("response.completed");
+    expect(calls).toEqual([retryAfter ? "relay:gpt-6-luna" : "native:gpt-reserve"]);
+  });
+
+  test("a persisted legacy default hold does not delay an unknown seat past the probe interval", async () => {
+    const cfg = config();
+    updateAccountQuota(A, 40, now + 86_400_000);
+    updateAccountQuota(B, 100, now + 86_400_000);
+    const refusedAt = now - 6 * 60_000;
+    const until = refusedAt + 30 * 60_000;
+    writeFileSync(join(home, "codex-health-cooldowns.json"), JSON.stringify({ [`s\0${B}\0reserve`]: {
+      consecutiveFailures: 0, lastFailureStatus: 429, lastFailureAt: refusedAt, lastProbeAt: refusedAt,
+      cooldownUntil: until, quotaAvoidUntil: until, cooldownSource: "default", reserveRefusalStreak: 5,
+    } }));
+    reloadCodexHealthCooldownsForTests();
+    saveConfig(cfg);
+    release?.();
+    release = undefined;
+    const server = startServer(0);
+    try {
+      const response = await clientFetch(new URL("/v1/responses", server.url), {
+        method: "POST", headers: { "content-type": "application/json" }, signal: AbortSignal.timeout(5_000),
+        body: JSON.stringify({ model: "combo/luna", input: "ping", store: false, stream: true }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("response.completed");
+      expect(calls).toEqual(["native:gpt-reserve"]);
+    } finally { await server.stop(true); }
+  });
+
+  test("empty Reserve does not reprobe a held relay when native included Luna is available", async () => {
+    const cfg = config();
+    seats(false);
+    Object.assign(cfg.combos!.luna!, { cooldownReprobe: { enabled: true }, waitForCooldownMs: 0 });
+    coolComboTarget("luna", { provider: "relay", model: "gpt-6-luna" }, { now, cooldownMs: 60_000 });
+    expect((await post(cfg, { store: false })).text).toContain("response.completed");
+    expect(calls).toEqual(["native:gpt-6-luna"]);
+  });
+
   test("zero Reserve eligibility starts directly on relay without native 429 noise and still falls back to ordinary Luna", async () => {
     const cfg = config();
     updateAccountQuota(A, 100, now + 86_400_000);
@@ -1691,7 +1752,7 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
 
       // A healthy non-Luna primary target ahead of native Luna must never be hijacked to relay when Reserve is empty.
       calls.length = 0;
-      relay = (_req, body) => sse(body.model, "relay-unexpected");
+      relay = (_req, body) => sse(body.model, "ok");
       const cfgWithPrimary = config(
         { other: { adapter: "openai-responses", authMode: "key", apiKey: "other-key", baseUrl: "https://other.example.test/v1" } },
         [

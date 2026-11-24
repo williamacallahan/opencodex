@@ -1,6 +1,6 @@
 /**
  * Disk-backed persistence for Codex per-account (`upstreamHealth`) and scoped
- * (`quotaScopedHealth`) cooldowns, avoidance deadlines, and Reserve refusal streaks.
+ * (`quotaScopedHealth`) cooldowns, avoidance deadlines, and Reserve probe timing.
  *
  * Mirrors {@link PersistedCooldownMap}: `<config dir>/codex-health-cooldowns.json` loads lazily per
  * config dir and flushes coalesced dirty writes under the config mutation lock so a restart does
@@ -12,6 +12,7 @@ import { atomicWriteFile } from "../../config/atomic-write";
 import { withConfigMutationLockSync } from "../../config/mutation-lock";
 import { getConfigDir } from "../../config/paths";
 import { registerOptionalShutdownHook } from "../../lib/optional-shutdown-hooks";
+import { CODEX_DEFAULT_QUOTA_COOLDOWN_MS, CODEX_QUOTA_PROBE_INTERVAL_MS } from "./cooldown-math";
 import type { CodexQuotaScope, CodexUpstreamHealth } from "./health-store";
 
 const FILE = "codex-health-cooldowns.json";
@@ -20,7 +21,6 @@ const MAX_FLUSH_DELAY_MS = 4_000;
 const MAX_LOAD_ATTEMPTS = 3;
 const SHUTDOWN_ATTEMPTS = 5;
 const SHUTDOWN_RETRY_MS = 200;
-const MAX_PERSISTED_RESERVE_STREAK_IDLE_MS = 60 * 60_000;
 const ACCOUNT_KEY_PREFIX = "a\0";
 const SCOPED_KEY_PREFIX = "s\0";
 
@@ -63,7 +63,7 @@ function finiteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function sanitizeStoredRow(raw: unknown): CodexUpstreamHealth | null {
+function sanitizeStoredRow(raw: unknown, scope?: CodexQuotaScope): CodexUpstreamHealth | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const src = raw as Record<string, unknown>;
   const consecutiveFailures = finiteNumber(src.consecutiveFailures) ?? 0;
@@ -78,7 +78,6 @@ function sanitizeStoredRow(raw: unknown): CodexUpstreamHealth | null {
     "cooldownSince",
     "cooldownGeneration",
     "lastProbeAt",
-    "reserveRefusalStreak",
     "credentialFailureGeneration",
   ] as const;
   for (const field of numberFields) {
@@ -98,6 +97,13 @@ function sanitizeStoredRow(raw: unknown): CodexUpstreamHealth | null {
     const gen = finiteNumber(rs.credentialGeneration);
     if (at !== undefined && gen !== undefined) row.reserveSuccess = { at, credentialGeneration: gen };
   }
+  // Older releases persisted an escalating local hold. Shorten only that Reserve hold, not upstream advice.
+  if (scope === "reserve" && row.cooldownSource === "default"
+    && (finiteNumber(src.reserveRefusalStreak) ?? 0) > 0 && row.lastFailureAt !== undefined) {
+    const deadline = row.lastFailureAt + CODEX_DEFAULT_QUOTA_COOLDOWN_MS;
+    if (row.cooldownUntil !== undefined) row.cooldownUntil = Math.min(row.cooldownUntil, deadline);
+    if (row.quotaAvoidUntil !== undefined) row.quotaAvoidUntil = Math.min(row.quotaAvoidUntil, deadline);
+  }
   return row;
 }
 
@@ -106,31 +112,18 @@ function serializeForDisk(health: CodexUpstreamHealth): CodexUpstreamHealth {
   return persisted;
 }
 
-export function codexHealthRowHorizon(row: CodexUpstreamHealth): number {
+export function codexHealthRowHorizon(row: CodexUpstreamHealth, scope?: CodexQuotaScope): number {
   return Math.max(
     finiteNumber(row.cooldownUntil) ?? 0,
     finiteNumber(row.quotaAvoidUntil) ?? 0,
     finiteNumber(row.softAvoidUntil) ?? 0,
-    (finiteNumber(row.reserveRefusalStreak) ?? 0) > 0
-      ? Math.max(finiteNumber(row.cooldownUntil) ?? 0, finiteNumber(row.lastFailureAt) ?? 0) +
-        MAX_PERSISTED_RESERVE_STREAK_IDLE_MS
-      : 0,
+    scope === "reserve" && (row.lastFailureStatus === 429 || row.lastFailureStatus === 402) && row.lastProbeAt !== undefined
+      ? row.lastProbeAt + CODEX_QUOTA_PROBE_INTERVAL_MS : 0,
   );
 }
 
-export function isCodexHealthRowAlive(row: CodexUpstreamHealth, now: number): boolean {
-  if ((finiteNumber(row.cooldownUntil) ?? 0) > now) return true;
-  if ((finiteNumber(row.quotaAvoidUntil) ?? 0) > now) return true;
-  if ((finiteNumber(row.softAvoidUntil) ?? 0) > now) return true;
-  if (
-    (finiteNumber(row.reserveRefusalStreak) ?? 0) > 0 &&
-    Math.max(finiteNumber(row.cooldownUntil) ?? 0, finiteNumber(row.lastFailureAt) ?? 0) +
-      MAX_PERSISTED_RESERVE_STREAK_IDLE_MS >
-      now
-  ) {
-    return true;
-  }
-  return false;
+export function isCodexHealthRowAlive(row: CodexUpstreamHealth, now: number, scope?: CodexQuotaScope): boolean {
+  return codexHealthRowHorizon(row, scope) > now;
 }
 
 function readStoredRows(path: string): Record<string, CodexUpstreamHealth> {
@@ -150,8 +143,9 @@ function readStoredRows(path: string): Record<string, CodexUpstreamHealth> {
   const rows: Record<string, CodexUpstreamHealth> = {};
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return rows;
   for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-    if (!parseStoreKey(key)) continue;
-    const row = sanitizeStoredRow(value);
+    const parsed = parseStoreKey(key);
+    if (!parsed) continue;
+    const row = sanitizeStoredRow(value, parsed.kind === "scoped" ? parsed.scope : undefined);
     if (row) rows[key] = row;
   }
   return rows;
@@ -192,9 +186,8 @@ class CodexHealthCooldownStore {
     this.loadedFor = dir;
     const now = Date.now();
     for (const [key, row] of Object.entries(rows)) {
-      if (!isCodexHealthRowAlive(row, now)) continue;
       const parsed = parseStoreKey(key);
-      if (!parsed) continue;
+      if (!parsed || !isCodexHealthRowAlive(row, now, parsed.kind === "scoped" ? parsed.scope : undefined)) continue;
       if (parsed.kind === "account") {
         if (!upstream.has(parsed.accountId)) upstream.set(parsed.accountId, row);
         continue;
@@ -314,7 +307,7 @@ class CodexHealthCooldownStore {
         const out: Record<string, CodexUpstreamHealth> = {};
         for (const [key, row] of Object.entries(file)) {
           const parsed = parseStoreKey(key);
-          if (!parsed || !isCodexHealthRowAlive(row, now)) continue;
+          if (!parsed || !isCodexHealthRowAlive(row, now, parsed.kind === "scoped" ? parsed.scope : undefined)) continue;
           if (this.tombstones.has(key) || this.clearedAccounts.has(parsed.accountId)) continue;
           out[key] = row;
         }
@@ -324,10 +317,11 @@ class CodexHealthCooldownStore {
           const own = parsed.kind === "account"
             ? upstream.get(parsed.accountId)
             : scoped.get(parsed.accountId)?.get(parsed.scope);
-          if (!own || !isCodexHealthRowAlive(own, now)) continue;
+          const scope = parsed.kind === "scoped" ? parsed.scope : undefined;
+          if (!own || !isCodexHealthRowAlive(own, now, scope)) continue;
           const persisted = serializeForDisk(own);
           const other = out[key];
-          out[key] = other && codexHealthRowHorizon(other) > codexHealthRowHorizon(persisted) ? other : persisted;
+          out[key] = other && codexHealthRowHorizon(other, scope) > codexHealthRowHorizon(persisted, scope) ? other : persisted;
         }
         mkdirSync(dir, { recursive: true });
         atomicWriteFile(path, JSON.stringify(out));

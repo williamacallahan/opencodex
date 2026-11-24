@@ -1448,10 +1448,7 @@ export function recordCodexUpstreamOutcome(
   if (outcomeClass === "quota") {
     const capacityEvidence = { confirmed: false };
     const scopedPrior = quotaScope ? scopedHealthFor(accountId, quotaScope) : undefined;
-    // Pool Reserve resetAt names the seat's plan window, not Reserve, so only Retry-After overrides backoff.
-    const { until, source } = meta.poolReserve
-      ? computeReserveRefusalCooldown(meta, scopedPrior?.reserveRefusalStreak ?? 0, accountId)
-      : computeQuotaCooldown(meta);
+    const { until, source } = meta.poolReserve ? computeReserveRefusalCooldown(meta, scopedPrior) : computeQuotaCooldown(meta);
     // Explicit Retry-After/default 429s remain account-wide unless this attempt used only Reserve.
     if (quotaScope && (source === "reset-derived" || meta.poolReserve)) {
       const cooldownGeneration = (scopedPrior?.cooldownGeneration ?? 0) + 1;
@@ -1465,13 +1462,13 @@ export function recordCodexUpstreamOutcome(
         cooldownSince: now,
         cooldownSource: source,
         cooldownGeneration,
-        ...(meta.poolReserve ? { reserveRefusalStreak: (scopedPrior?.reserveRefusalStreak ?? 0) + 1 } : {}),
         ...(ownsLease
           ? { lastProbeAt: now }
           : {
             ...(scopedPrior?.probeLeaseId !== undefined ? { probeLeaseId: scopedPrior.probeLeaseId } : {}),
             ...(scopedPrior?.probeLeaseGeneration !== undefined ? { probeLeaseGeneration: scopedPrior.probeLeaseGeneration } : {}),
-            ...(scopedPrior?.lastProbeAt !== undefined ? { lastProbeAt: scopedPrior.lastProbeAt } : {}),
+            ...(meta.poolReserve ? { lastProbeAt: now }
+              : scopedPrior?.lastProbeAt !== undefined ? { lastProbeAt: scopedPrior.lastProbeAt } : {}),
         }),
       };
       setScopedHealth(accountId, quotaScope, cooldown);

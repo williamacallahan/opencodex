@@ -11,6 +11,7 @@ import { peekConversationStateIssuer, peekConversationStateStoredIssuerAccount, 
 import { isCodexAccountGenerationLive } from "./account-store";
 import { hasUnrecoveredCodexQuotaRefusal, scopedHealthFor, type CodexQuotaScope } from "./routing/health-store";
 import { canTryUnknownCodexReserve } from "./routing/probe-lease";
+import { CODEX_QUOTA_PROBE_INTERVAL_MS } from "./routing/cooldown-math";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers-destination";
 
 const LABEL = "Luna Reserve";
@@ -105,15 +106,20 @@ function reserveSeatEvidence(account: NonNullable<OcxConfig["codexAccounts"]>[nu
 }
 
 /** Freeze membership, not entitlement: the picker rechecks these seats before every move. */
-export interface PoolReserveWalk { remaining: Set<string>; movesSent: number; transientRetries: number }
+export interface PoolReserveWalk { remaining: Set<string>; movesSent: number; transientRetries: number; hasHeldSeat: boolean }
 export function createPoolReserveWalk(config: OcxConfig, now = Date.now()): PoolReserveWalk {
   const seats = new Set<string>();
+  let hasHeldSeat = false;
   for (const account of config.codexAccounts ?? []) {
     if (reserveSeatEvidence(account, now, false)) seats.add(account.id);
+    if (hasHeldSeat || codexUsageLimitResetAt(getAccountQuota(account.id), account.plan, now) === undefined) continue;
+    const health = scopedHealthFor(account.id, "reserve");
+    hasHeldSeat = !!health && ((health.cooldownUntil ?? 0) > now || (health.quotaAvoidUntil ?? 0) > now
+      || (!holdsPoolReserveWindow(account.id) && health.lastProbeAt !== undefined && now - health.lastProbeAt < CODEX_QUOTA_PROBE_INTERVAL_MS));
   }
   const options: CodexAccountUsabilityOptions = { poolCapacity: "reserve", modelEligibleAccountIds: seats };
   for (const id of seats) if (!isCodexAccountSelectable(config, id, now, "reserve", options)) seats.delete(id);
-  return { remaining: seats, movesSent: 0, transientRetries: 0 };
+  return { remaining: seats, movesSent: 0, transientRetries: 0, hasHeldSeat };
 }
 
 /**

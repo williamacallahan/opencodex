@@ -1329,7 +1329,9 @@ restores the normal Reserve path rather than the refusal.
 each reported grant as a separate **Luna Reserve** bar. Automatic Pool routing gives `gpt-6-luna`
 priority on eligible accounts that recently served Reserve or report a fresh grant. If no verified
 account can serve, one live request at a time can try an account whose Reserve status is unknown.
-A refusal cools only that account’s Reserve quota. The same request can switch once to another
+A refusal cools only that account’s Reserve quota. An account with unknown Reserve status can be
+tried again after five minutes, including after a proxy restart, unless a longer upstream
+`Retry-After` still applies. The same request can switch once to another
 verified Reserve account or regular Luna, but it does not try a second unknown account. An ongoing
 Reserve conversation stays on its account while it can serve, preserving its warm prompt cache.
 Reserve does not apply to other models.

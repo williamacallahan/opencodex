@@ -15,8 +15,6 @@ export type CodexUpstreamHealth = {
   consecutiveFailures: number;
   /** Consecutive healthy terminals observed while recovering from escalation level 2+. */
   consecutiveSuccesses?: number;
-  /** Consecutive Reserve quota refusals without an intervening completion. */
-  reserveRefusalStreak?: number;
   /** A completed Reserve turn is routing evidence, not a quota reading. */
   reserveSuccess?: { at: number; credentialGeneration: number };
   /** Shared by health writes that retain this cooldown, never by a replacement refusal. */
@@ -172,11 +170,11 @@ export function setScopedHealth(accountId: string, scope: CodexQuotaScope, healt
   }
   scopes.set(scope, health);
   const now = Date.now();
-  if (isCodexHealthRowAlive(health, now)) {
-    const shortened = previous !== undefined && codexHealthRowHorizon(health) < codexHealthRowHorizon(previous);
+  if (isCodexHealthRowAlive(health, now, scope)) {
+    const shortened = previous !== undefined && codexHealthRowHorizon(health, scope) < codexHealthRowHorizon(previous, scope);
     if (shortened) codexHealthCooldownStore.markScopedReplaced(accountId, scope);
     else codexHealthCooldownStore.markScopedDirty(accountId, scope);
-  } else if (previous !== undefined && isCodexHealthRowAlive(previous, now)) {
+  } else if (previous !== undefined && isCodexHealthRowAlive(previous, now, scope)) {
     codexHealthCooldownStore.markScopedDeleted(accountId, scope);
   }
 }
@@ -324,7 +322,6 @@ export function clearCodexAccountCooldown(accountId: string, now = Date.now()): 
       cooldownSource: _source,
       probeLeaseId: _leaseId,
       probeLeaseGeneration: _leaseGeneration,
-      reserveRefusalStreak: _streak,
       // Same reasoning as the probe recovery above: "the quota window moved" is a statement
       // about the whole refusal, so the avoidance it announced goes with the block it
       // produced. Keeping it would leave this escape hatch not escaping, because selection
@@ -355,7 +352,7 @@ export function clearCodexAccountCooldown(accountId: string, now = Date.now()): 
     const next = clear(health);
     if (next) {
       setScopedHealth(accountId, scope, next);
-      if (isCodexHealthRowAlive(next, wallNow)) codexHealthCooldownStore.markScopedReplaced(accountId, scope);
+      if (isCodexHealthRowAlive(next, wallNow, scope)) codexHealthCooldownStore.markScopedReplaced(accountId, scope);
       else codexHealthCooldownStore.markScopedDeleted(accountId, scope);
       cleared = true;
     }
@@ -422,7 +419,6 @@ export function noteScopedCodexSuccess(
     lastFailureStatus: _refusal,
     lastFailureAt: _refusedAt,
     quotaAvoidUntil: _avoid,
-    reserveRefusalStreak: _streak,
     ...retainedBase
   } = current ?? { consecutiveFailures: 0 };
   const retained = hasActiveCooldown
@@ -441,11 +437,11 @@ export function noteScopedCodexSuccess(
   if (reserveSuccess) {
     const updated = { ...retained, reserveSuccess };
     setScopedHealth(accountId, scope, updated);
-    if (isCodexHealthRowAlive(updated, wallNow)) codexHealthCooldownStore.markScopedReplaced(accountId, scope);
+    if (isCodexHealthRowAlive(updated, wallNow, scope)) codexHealthCooldownStore.markScopedReplaced(accountId, scope);
     else codexHealthCooldownStore.markScopedDeleted(accountId, scope);
   } else if (Object.keys(retained).length > 1) {
     setScopedHealth(accountId, scope, retained);
-    if (isCodexHealthRowAlive(retained, wallNow)) codexHealthCooldownStore.markScopedReplaced(accountId, scope);
+    if (isCodexHealthRowAlive(retained, wallNow, scope)) codexHealthCooldownStore.markScopedReplaced(accountId, scope);
     else codexHealthCooldownStore.markScopedDeleted(accountId, scope);
   } else {
     deleteScopedHealth(accountId, scope);
