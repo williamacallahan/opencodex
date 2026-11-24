@@ -136,7 +136,7 @@ import {
 } from "../relay";
 import { preflightComboStreamResponse } from "./combo-stream-preflight";
 import { isOwnerCapacityRefusal } from "./owner-capacity-refusal";
-import { advanceLunaLegAfterFailure, isReserveSeatQuotaRefusal, nativeLunaTarget, onlyReplayIncompatibleTargetsRemain, planLunaReserveLegs, portCoolingLunaOwnerBeforeDispatch, portLunaConversationTarget, portSpentLunaReasoning, portUnavailableLunaTurn, prepareLunaReplay, relayProvedNotStarted, resolveEmptyLunaReserveStart } from "./combo-luna-legs";
+import { advanceLunaLegAfterFailure, hasCallerOrdinaryLunaAuth, hasOrdinaryLunaCapacity, isReserveSeatQuotaRefusal, nativeLunaTarget, onlyReplayIncompatibleTargetsRemain, planLunaReserveLegs, portCoolingLunaOwnerBeforeDispatch, portLunaConversationTarget, portSpentLunaReasoning, portUnavailableLunaTurn, prepareLunaReplay, relayFailureEvaluatedStrictReserve, relayProvedNotStarted, resolveEmptyLunaReserveStart } from "./combo-luna-legs";
 import { createPoolReserveWalk, modelHasPoolReserve, type PoolCapacityIntent } from "../../codex/pool-reserve";
 import { requiredToolContractOf } from "./combo-required-tool-contract";
 import {
@@ -785,12 +785,7 @@ export async function executeComboResponses(
     if (encryptedTaskRecoveryAttempted) return false;
     encryptedTaskRecoveryAttempted = true;
     if (!encryptedTaskRecoveryAdmitted || !recovery) {
-      discardEncryptedAgentTaskRecovery(
-        req,
-        (body as { input?: unknown } | undefined)?.input,
-        config,
-        { parentThreadId: inboundClientThreadId },
-      );
+      discardEncryptedAgentTaskRecovery(req, (body as { input?: unknown } | undefined)?.input, config, { parentThreadId: inboundClientThreadId });
       return false;
     }
     let recovered = false;
@@ -809,16 +804,8 @@ export async function executeComboResponses(
       recoveryFailureReason = undefined;
     }
     // Recovery has the same in-place input mutation contract as the direct routed path.
-    if (
-      !recovered
-      || hasUnreadableEncryptedAgentTask((body as { input?: unknown } | undefined)?.input)
-    ) {
-      discardEncryptedAgentTaskRecovery(
-        req,
-        (body as { input?: unknown } | undefined)?.input,
-        config,
-        { parentThreadId: inboundClientThreadId },
-      );
+    if (!recovered || hasUnreadableEncryptedAgentTask((body as { input?: unknown } | undefined)?.input)) {
+      discardEncryptedAgentTaskRecovery(req, (body as { input?: unknown } | undefined)?.input, config, { parentThreadId: inboundClientThreadId });
       return false;
     }
     comboPayloadReadable = true;
@@ -829,6 +816,7 @@ export async function executeComboResponses(
     exclude?: Iterable<string>;
     eligible?: (target: NonNullable<typeof combo>["targets"][number]) => boolean;
     allowCooldownReprobe?: boolean;
+    allowReserveCooldownRelease?: boolean;
     /** This request's own cooldown-reprobe reservation, carried through its failover hops. */
     cooldownReprobeTargets?: Iterable<readonly [string, number]>;
     now?: number; waitForCooldownMs?: number;
@@ -843,8 +831,12 @@ export async function executeComboResponses(
     waitForCooldownMs: pickOptions.waitForCooldownMs ?? combo.waitForCooldownMs,
     abortSignal: options.abortSignal,
   });
+  const callerOrdinaryLunaAuth = hasCallerOrdinaryLunaAuth(req.headers, config, options);
   let pick = conversationPin ?? await pickWithWait({ eligible: targetEligible, now: initialNow });
-  const emptyReserve = await resolveEmptyLunaReserveStart({ config, lunaLegs, conversationPin, boundTargetKey, currentPick: pick, targetEligible, pickWithWait });
+  const emptyReserve = await resolveEmptyLunaReserveStart({
+    config, lunaLegs, conversationPin, boundTargetKey, currentPick: pick, targetEligible, pickWithWait,
+    hasCallerAuth: callerOrdinaryLunaAuth,
+  });
   ({ pick, evaluatedStrictReserve, lunaStage } = emptyReserve);
   const { skippedEmptyReserve } = emptyReserve;
   const jevPin = options.compactionRoutingOverride || options.mainHardLockFallbackOverride
@@ -877,20 +869,14 @@ export async function executeComboResponses(
       now: initialNow,
     });
     if (!pick) {
-      discardEncryptedAgentTaskRecovery(
-        req,
-        (body as { input?: unknown } | undefined)?.input,
-        config,
-        { parentThreadId: inboundClientThreadId },
-      );
+      discardEncryptedAgentTaskRecovery(req, (body as { input?: unknown } | undefined)?.input, config, { parentThreadId: inboundClientThreadId });
       if (boundTargetKey && !options.abortSignal?.aborted) return unavailableOwner();
       if (!options.abortSignal?.aborted && onlyMuseToolIncompatible()) {
         return comboUnavailableResponse("No available targets for combo; targets cannot preserve mandatory tool_choice");
       }
       return options.abortSignal?.aborted
         ? clientCancelledResponse()
-        : comboUnavailable(comboId, undefined,
-          comboExclusionReasons(config, comboId, recoveryEligible));
+        : comboUnavailable(comboId, undefined, comboExclusionReasons(config, comboId, recoveryEligible));
     }
     if (!(await recoverUnreadableEncryptedTask())) {
       return options.abortSignal?.aborted
@@ -907,9 +893,11 @@ export async function executeComboResponses(
     if (!options.abortSignal?.aborted && onlyMuseToolIncompatible()) {
       return comboUnavailableResponse("No available targets for combo; targets cannot preserve mandatory tool_choice");
     }
+    const reserveExclusion = skippedEmptyReserve && lunaLegs
+      ? { targetKey: lunaLegs.nativeKey, reason: skippedEmptyReserve } : undefined;
     return options.abortSignal?.aborted
       ? clientCancelledResponse()
-      : comboUnavailable(comboId, undefined, comboExclusionReasons(config, comboId, targetEligible));
+      : comboUnavailable(comboId, undefined, comboExclusionReasons(config, comboId, targetEligible, Date.now(), reserveExclusion));
   }
   // OCX-11: an ordered failover combo that starts on a later target than its first one, for any
   // reason (cooling down, provider disabled, cached quota spent, ineligible for this request),
@@ -1187,7 +1175,7 @@ export async function executeComboResponses(
     if (options.abortSignal?.aborted) return clientCancelledResponse();
     const firstComboTarget = comboTargetsDispatched === 0;
     const legTargetKey = targetKey(pick.target);
-    if (lunaLegs && firstComboTarget && !evaluatedStrictReserve) lunaStage = legTargetKey === lunaLegs.nativeKey ? "reserve" : legTargetKey === lunaLegs.relayKey ? "relay" : "off";
+    if (lunaLegs && !evaluatedStrictReserve) lunaStage = legTargetKey === lunaLegs.nativeKey ? "reserve" : legTargetKey === lunaLegs.relayKey ? "relay" : "off";
     if (lunaLegs && legTargetKey === lunaLegs.nativeKey && !evaluatedStrictReserve) {
       lunaStage = "reserve";
       evaluatedStrictReserve = true;
@@ -1881,6 +1869,13 @@ export async function executeComboResponses(
       unavailableOrdinaryTarget = lunaLegs.nativeKey;
     }
     const activeLunaLegs = lunaLegs;
+    evaluatedStrictReserve = relayFailureEvaluatedStrictReserve(config, activeLunaLegs, lunaStage, evaluatedStrictReserve, failureNow);
+    const relayHopEligible = activeLunaLegs && lunaStage === "relay" && evaluatedStrictReserve
+      ? (target: NonNullable<typeof combo>["targets"][number]) => targetKey(target) !== activeLunaLegs.nativeKey && targetEligible(target)
+      : targetEligible;
+    const hopEligible = legIntent === "reserve-only" && activeLunaLegs
+      ? (target: NonNullable<typeof combo>["targets"][number]) => targetKey(target) === activeLunaLegs.relayKey && targetEligible(target)
+      : relayHopEligible;
     const nextPick = advanceComboAfterFailure(config, pick, {
       routeConcreteModel,
       retryAfter: poolLocalRefusal || codexLocalRefusal || relayCooldown !== undefined ? undefined : failure.retryAfter,
@@ -1889,10 +1884,9 @@ export async function executeComboResponses(
       preserveLongerCooldown: pooledRelay,
       now: failureNow,
       cooldownScope: failureCooldownScope,
+      allowReserveCooldownRelease: !evaluatedStrictReserve,
       // A pin may start in the middle. Ask its planned relay before resuming configured order.
-      eligible: legIntent === "reserve-only" && activeLunaLegs
-        ? target => targetKey(target) === activeLunaLegs.relayKey && targetEligible(target)
-        : targetEligible,
+      eligible: hopEligible,
       status: failure.response.status,
       code: failure.upstreamCode,
       message: failure.classificationText,
@@ -1908,9 +1902,9 @@ export async function executeComboResponses(
     } else {
       pick = await pickWithWait({
         exclude: pick.attempted,
-        eligible: targetEligible,
+        eligible: relayHopEligible,
         cooldownReprobeTargets: carriedReprobe ? Object.entries(carriedReprobe) : undefined,
-        now: failureNow,
+        now: failureNow, allowReserveCooldownRelease: !evaluatedStrictReserve,
       });
       // Drop the attempted-target exclusion for one same-target retry. The picker rechecks
       // eligibility after sleeping: a removed target cannot lend a new membership to the failed pick.
@@ -1931,16 +1925,15 @@ export async function executeComboResponses(
       }
     }
     if (activeLunaLegs && failureDecision === "hop") {
-      // After the strict Reserve leg the relay is next; after the relay, native ordinary Luna is next only on proof the relay never got the turn.
-      const next = await advanceLunaLegAfterFailure({
-        lunaStage, failedTargetKey, legs: activeLunaLegs, pick, unavailableOrdinaryTarget, attemptedTargets,
+      const prevLunaStage = lunaStage;
+      // After the strict Reserve leg the relay is next; after the relay, native ordinary Luna needs proof the relay never got the turn.
+      ({ lunaStage, evaluatedStrictReserve, pick } = await advanceLunaLegAfterFailure({
+        lunaStage, evaluatedStrictReserve, failedTargetKey, legs: activeLunaLegs, pick, unavailableOrdinaryTarget, attemptedTargets,
         aborted: Boolean(options.abortSignal?.aborted),
-        pickOrdinary: exclude => pickWithWait({
-          exclude, eligible: target => targetKey(target) === activeLunaLegs.nativeKey && targetEligible(target), now: failureNow,
-        }),
-      });
-      lunaStage = next.lunaStage;
-      pick = next.pick;
+        pickReserve: exclude => pickWithWait({ exclude, allowReserveCooldownRelease: true, eligible: target => targetKey(target) === activeLunaLegs.nativeKey && targetEligible(target), now: failureNow }),
+        pickOrdinary: exclude => pickWithWait({ exclude, allowReserveCooldownRelease: false, eligible: target => targetKey(target) === activeLunaLegs.nativeKey && hasOrdinaryLunaCapacity(config, callerOrdinaryLunaAuth, failureNow) && targetEligible(target), now: failureNow }),
+      }));
+      if (prevLunaStage === "relay" && lunaStage === "reserve" && reserveWalk) reserveWalk = createPoolReserveWalk(config);
     }
     if (!pick) {
       if (options.abortSignal?.aborted) return clientCancelledResponse();

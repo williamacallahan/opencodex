@@ -91,6 +91,7 @@ test("a Luna pool quota cooldown releases when a spent account can try Reserve",
 
   setAccountQuotaFromParsed("pool-reset", { customWindows: [] });
   expect(pickComboTarget(cfg, "luna", { routeConcreteModel })?.target.provider).toBe("openai");
+  expect(pickComboTarget(cfg, "luna", { routeConcreteModel, allowReserveCooldownRelease: false })?.target.provider).toBe("relay");
 });
 
 test("a server-error cooldown on the pool target is not lifted by pool capacity", () => {
