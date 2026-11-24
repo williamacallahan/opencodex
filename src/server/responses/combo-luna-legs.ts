@@ -355,6 +355,10 @@ export async function advanceLunaLegAfterFailure(args: {
   return { lunaStage: nextStage, pick: ordinaryPick ?? args.pick };
 }
 
+/** True when native ordinary Luna has a stored/main pool seat or a caller-owned bearer to spend. */
+export const hasOrdinaryLunaCapacity = (config: OcxConfig, hasCallerAuth: boolean, now = Date.now()): boolean =>
+  hasCallerAuth || getEligiblePoolAccounts(config, undefined, now, "shared").length > 0;
+
 /** Skip strict Reserve when zero pool seats hold Reserve capacity; preserves ordinary Luna fallback. */
 export async function resolveEmptyLunaReserveStart(args: {
   config: OcxConfig;
@@ -363,7 +367,8 @@ export async function resolveEmptyLunaReserveStart(args: {
   boundTargetKey: string | undefined;
   currentPick: ComboPick | null;
   targetEligible: (target: ComboTarget) => boolean;
-  pickWithWait: (opts: { eligible: (target: ComboTarget) => boolean; now: number; allowCooldownReprobe?: boolean; waitForCooldownMs?: number }) => Promise<ComboPick | null>;
+  hasCallerAuth?: boolean;
+  pickWithWait: (opts: { exclude?: Iterable<string>; eligible: (target: ComboTarget) => boolean; now: number; allowCooldownReprobe?: boolean; waitForCooldownMs?: number }) => Promise<ComboPick | null>;
 }): Promise<{ pick: ComboPick | null; evaluatedStrictReserve: boolean; lunaStage: "off" | "relay" | "done"; skippedEmptyReserve: "reserve-cooldown" | "reserve-unavailable" | undefined; includedOnly: boolean }> {
   const plan = args.lunaLegs;
   const unchanged = { pick: args.currentPick, evaluatedStrictReserve: false, lunaStage: "off", skippedEmptyReserve: undefined, includedOnly: false } as const;
@@ -374,11 +379,21 @@ export async function resolveEmptyLunaReserveStart(args: {
   if (walk.remaining.size > 0) return unchanged;
   // Native main may be draining and cannot justify skipping the relay before dispatch acquires its lease.
   const includedAvailable = getEligiblePoolAccounts(args.config, MAIN_CODEX_ACCOUNT_ID, now, "shared", { poolCapacity: "included" }).length > 0;
+  const ordinaryAvailable = includedAvailable || hasOrdinaryLunaCapacity(args.config, args.hasCallerAuth === true, now);
   const relayPick = await args.pickWithWait({
     eligible: target => targetKey(target) === plan.relayKey && args.targetEligible(target),
     now,
     ...(includedAvailable ? { allowCooldownReprobe: false, waitForCooldownMs: 0 } : {}),
   });
-  return { pick: relayPick ?? args.currentPick, evaluatedStrictReserve: true, lunaStage: relayPick ? "relay" : "done",
+  const fallbackPick = !relayPick && !ordinaryAvailable
+    ? await args.pickWithWait({
+      exclude: [plan.nativeKey, plan.relayKey],
+      eligible: args.targetEligible,
+      now,
+      allowCooldownReprobe: false,
+      waitForCooldownMs: 0,
+    })
+    : null;
+  return { pick: relayPick ?? fallbackPick ?? (ordinaryAvailable ? args.currentPick : null), evaluatedStrictReserve: true, lunaStage: relayPick ? "relay" : "done",
     includedOnly: !relayPick && includedAvailable, skippedEmptyReserve: walk.hasHeldSeat ? "reserve-cooldown" : "reserve-unavailable" };
 }

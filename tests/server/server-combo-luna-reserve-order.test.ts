@@ -1794,4 +1794,40 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
       warn.mockRestore();
     }
   });
+
+  test("a cooled Reserve probe followed by a relay 429 does not wake native ordinary-only with zero pool capacity", async () => {
+    const cfg = config({}, [
+      { provider: "openai", model: "gpt-6-luna" },
+      { provider: "relay", model: "gpt-6-luna" },
+    ]);
+    cfg.combos!.luna!.waitForCooldownMs = 0;
+    for (const id of [A, B]) updateAccountQuota(id, 100, now + 86_400_000);
+    coolComboTarget("luna", { provider: "openai", model: "gpt-6-luna" }, { now, status: 429, retryAfter: "86400" });
+    native = () => reserveRefused();
+    relay = () => reserveRefused();
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const result = await post(cfg, { store: false }, {}, undefined, { logCtx });
+    expect(result.status).toBe(429);
+    expect(calls.every(entry => entry !== "native:gpt-6-luna")).toBe(true);
+    expect(calls).toContain("relay:gpt-6-luna");
+    expect(logCtx.attempts?.some(attempt => attempt.provider === "openai" && attempt.sendCount === 0)).toBe(false);
+  });
+
+  test("empty Reserve and empty ordinary capacity skips cooled relay directly to fallback without zero-send native attempt", async () => {
+    const cfg = config();
+    cfg.combos!.luna!.waitForCooldownMs = 0;
+    for (const id of [A, B]) {
+      updateAccountQuota(id, 100, now + 86_400_000);
+      recordCodexUpstreamOutcome(cfg, id, 429, { modelId: "gpt-reserve", poolReserve: true, now });
+    }
+    coolComboTarget("luna", { provider: "relay", model: "gpt-6-luna" }, { now, status: 429, cooldownMs: 60_000 });
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const result = await post(cfg, { store: false }, {}, undefined, { logCtx });
+    expect(result.status).toBe(200);
+    expect(result.text).toContain("response.completed");
+    expect(calls).toEqual(["metered:gpt-6-luna"]);
+    expect(logCtx.routeDecision?.candidates[0]?.exclusions).toEqual([{ code: "reserve-cooldown" }]);
+    expect(logCtx.attempts).toHaveLength(1);
+    expect(logCtx.attempts?.[0]).toMatchObject({ provider: "metered", sendCount: 1 });
+  });
 });

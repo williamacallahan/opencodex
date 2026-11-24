@@ -15,6 +15,7 @@ export function poolQuotaCooldownRevision(
   target: OcxComboTarget,
   now: number,
   lookup?: typeof routeConcreteModel,
+  allowReserve = true,
 ): number | undefined {
   if (!lookup || target.provider !== OPENAI_CODEX_PROVIDER_ID) return undefined;
   const revision = comboTargetRateLimitCooldownRevision(comboId, target, now);
@@ -30,7 +31,7 @@ export function poolQuotaCooldownRevision(
     || route.codexAccountId !== undefined || !isCanonicalOpenAiForwardProvider(route.provider)
     || ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(route.modelId)) return undefined;
   const scope = codexQuotaScopeForModel(route.modelId);
-  if (modelHasPoolReserve(route.modelId)
+  if (allowReserve && modelHasPoolReserve(route.modelId)
     && poolLunaReserveSelection(config, route.modelId, scope, {}, undefined, undefined, now).reserve) return revision;
   return getEligiblePoolAccounts(config, undefined, now, scope, undefined, true).length > 0 ? revision : undefined;
 }

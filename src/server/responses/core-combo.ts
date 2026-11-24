@@ -136,7 +136,7 @@ import {
 } from "../relay";
 import { preflightComboStreamResponse } from "./combo-stream-preflight";
 import { isOwnerCapacityRefusal } from "./owner-capacity-refusal";
-import { advanceLunaLegAfterFailure, isReserveSeatQuotaRefusal, nativeLunaTarget, onlyReplayIncompatibleTargetsRemain, planLunaReserveLegs, portCoolingLunaOwnerBeforeDispatch, portLunaConversationTarget, portSpentLunaReasoning, portUnavailableLunaTurn, prepareLunaReplay, relayProvedNotStarted, resolveEmptyLunaReserveStart } from "./combo-luna-legs";
+import { advanceLunaLegAfterFailure, hasOrdinaryLunaCapacity, isReserveSeatQuotaRefusal, nativeLunaTarget, onlyReplayIncompatibleTargetsRemain, planLunaReserveLegs, portCoolingLunaOwnerBeforeDispatch, portLunaConversationTarget, portSpentLunaReasoning, portUnavailableLunaTurn, prepareLunaReplay, relayProvedNotStarted, resolveEmptyLunaReserveStart } from "./combo-luna-legs";
 import { createPoolReserveWalk, modelHasPoolReserve, type PoolCapacityIntent } from "../../codex/pool-reserve";
 import { requiredToolContractOf } from "./combo-required-tool-contract";
 import {
@@ -829,6 +829,7 @@ export async function executeComboResponses(
     exclude?: Iterable<string>;
     eligible?: (target: NonNullable<typeof combo>["targets"][number]) => boolean;
     allowCooldownReprobe?: boolean;
+    allowReserveCooldownRelease?: boolean;
     /** This request's own cooldown-reprobe reservation, carried through its failover hops. */
     cooldownReprobeTargets?: Iterable<readonly [string, number]>;
     now?: number; waitForCooldownMs?: number;
@@ -844,7 +845,10 @@ export async function executeComboResponses(
     abortSignal: options.abortSignal,
   });
   let pick = conversationPin ?? await pickWithWait({ eligible: targetEligible, now: initialNow });
-  const emptyReserve = await resolveEmptyLunaReserveStart({ config, lunaLegs, conversationPin, boundTargetKey, currentPick: pick, targetEligible, pickWithWait });
+  const emptyReserve = await resolveEmptyLunaReserveStart({
+    config, lunaLegs, conversationPin, boundTargetKey, currentPick: pick, targetEligible, pickWithWait,
+    hasCallerAuth: req.headers.has("authorization"),
+  });
   ({ pick, evaluatedStrictReserve, lunaStage } = emptyReserve);
   const { skippedEmptyReserve } = emptyReserve;
   const jevPin = options.compactionRoutingOverride || options.mainHardLockFallbackOverride
@@ -1936,7 +1940,11 @@ export async function executeComboResponses(
         lunaStage, failedTargetKey, legs: activeLunaLegs, pick, unavailableOrdinaryTarget, attemptedTargets,
         aborted: Boolean(options.abortSignal?.aborted),
         pickOrdinary: exclude => pickWithWait({
-          exclude, eligible: target => targetKey(target) === activeLunaLegs.nativeKey && targetEligible(target), now: failureNow,
+          exclude,
+          allowReserveCooldownRelease: false,
+          eligible: target => targetKey(target) === activeLunaLegs.nativeKey
+            && hasOrdinaryLunaCapacity(config, req.headers.has("authorization"), failureNow) && targetEligible(target),
+          now: failureNow,
         }),
       });
       lunaStage = next.lunaStage;
