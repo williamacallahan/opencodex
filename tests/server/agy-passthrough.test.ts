@@ -457,6 +457,30 @@ describe("agy pass-through public HTTP lane", () => {
     expect(calls).toHaveLength(before + 2);
   });
 
+  test("an account Google refuses a generation with 403 passes it through, then leaves rotation for its caller and new callers", async () => {
+    await launch();
+    let served = "";
+    const denied = '{"error":{"code":403,"message":"Verification Required","status":"PERMISSION_DENIED"}}';
+    reply = captured => { served = captured.headers.get("authorization")!; return Response.json({}); };
+    expect((await post("loadCodeAssist", "{}")).status).toBe(200);
+    const refused = served;
+    const project = Object.keys(tokens).find(id => tokens[id] === refused)!;
+    reply = captured => {
+      served = captured.headers.get("authorization")!;
+      return new Response(denied, { status: 403, headers: { "content-type": "application/json" } });
+    };
+    const answer = await post("streamGenerateContent", JSON.stringify({ project, request: {} }));
+    expect(answer.status).toBe(403);
+    expect(answer.text).toBe(denied);
+    reply = captured => { served = captured.headers.get("authorization")!; return Response.json({}); };
+    expect((await post("loadCodeAssist", "{}")).status).toBe(200);
+    expect(served).not.toBe(refused);
+    for (const caller of ["first", "second", "third"]) {
+      expect((await post("loadCodeAssist", "{}", { authorization: `Bearer new-caller-${caller}` })).status).toBe(200);
+      expect(served).not.toBe(refused);
+    }
+  });
+
   test("refuses before any upstream call when the key, client, project, account or switch does not qualify", async () => {
     await launch({ allowedProviders: ["google-antigravity"] });
     const refusals: Array<[Promise<Answer>, number]> = [

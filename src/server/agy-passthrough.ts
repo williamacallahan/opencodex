@@ -30,7 +30,7 @@ import {
   type ExactResponse,
 } from "./agy-passthrough-send";
 import { forceRefreshOAuthAccessSnapshot, getValidAccessSnapshotForAccount } from "../oauth";
-import { rotateGenericOAuthAccountOn429 } from "../oauth/generic-account-failover";
+import { coolAntigravityAccountOnAuthRefusal, rotateGenericOAuthAccountOn429 } from "../oauth/generic-account-failover";
 import { extractProjectId } from "../oauth/google-antigravity";
 import { oauthAccountLogLabel } from "../codex/account-label";
 import { nativeHarnessOnly } from "../lib/native-harness";
@@ -61,6 +61,7 @@ const CLOUD_CODE_METHOD = /^\/v1internal:[A-Za-z]+$/;
 /** Generation calls always carry their account's project; refusing a project-less one keeps them off rotation. */
 const PROJECT_REQUIRED = /^\/v1internal:(?:streamGenerateContent|generateContent|countTokens)$/;
 const AGY_USER_AGENT = /^antigravity\/cli\//;
+const REFUSED_ACCOUNT_COOLDOWN_MS = 6 * 60 * 60_000;
 const REGISTRY_ORIGIN = new URL(PROVIDER_REGISTRY.find(entry => entry.id === ANTIGRAVITY_OAUTH_STORE_KEY)!.baseUrl).origin;
 
 export interface AgyPassthroughContext {
@@ -439,6 +440,12 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
   }
   // A token Google rejected before its recorded expiry: mint a fresh one for the next request.
   if (upstream.status === 401) void forceRefreshOAuthAccessSnapshot(snapshot).catch(() => {});
+  // A generation refused 403 (an account Google holds at "Verification Required") fails every turn sent to it,
+  // and an unused account ranks least used, so it drew each new caller. Cooling it moves this caller at its
+  // next loadCodeAssist and keeps new callers off it until the cooldown ends or its sign-in changes.
+  if (upstream.status === 403 && PROJECT_REQUIRED.test(parts.method)) {
+    coolAntigravityAccountOnAuthRefusal(choice.accountId, snapshot.generation, { cooldownMs: REFUSED_ACCOUNT_COOLDOWN_MS });
+  }
   let clientBody = upstream.body;
   const method = parts.method.slice("/v1internal:".length);
   if (upstream.status >= 200 && upstream.status < 300 && (method === "loadCodeAssist" || isQuotaMethod(method))) {
