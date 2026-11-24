@@ -1,6 +1,6 @@
 import { normalizeProxyAddress } from "../config/dashboard-trusted-proxy";
 import { assessUrlDestination } from "../lib/destination-policy";
-import { deriveClientWorkloadLabel, forwardedClientHeaderValueAllowed } from "../lib/provider-client-headers";
+import { deriveClientWorkloadLabel, forwardedClientHeaderValueAllowed, HUB_WORKLOAD_OPERATION } from "../lib/provider-client-headers";
 import { sanitizeLogMetadataString } from "../lib/redact";
 
 /**
@@ -105,4 +105,37 @@ export function requestAttributionLogFields(source: RequestAttribution | undefin
     if (address) fields[name] = address;
   }
   return fields;
+}
+
+/** The attribution filters `/api/request-history` and `/api/usage` accept. */
+export interface RequestAttributionFilter {
+  workload?: string;
+  clientHost?: string;
+  clientAddress?: string;
+  /** Only rows whose workload the hub derived because the caller declared none. */
+  undeclared?: boolean;
+}
+
+/** The attribution filters in a management query string; blank values are absent. */
+export function parseAttributionFilter(params: URLSearchParams): RequestAttributionFilter {
+  const workload = params.get("workload")?.trim();
+  const clientHost = params.get("clientHost")?.trim();
+  const clientAddress = ipAddress(params.get("clientAddress")) ?? params.get("clientAddress")?.trim();
+  return {
+    ...(workload ? { workload } : {}),
+    ...(clientHost ? { clientHost } : {}),
+    ...(clientAddress ? { clientAddress } : {}),
+    ...(params.get("undeclared") === "true" ? { undeclared: true } : {}),
+  };
+}
+
+/** The suffix that marks a workload label the hub derived for an undeclared caller. */
+export const UNDECLARED_WORKLOAD_SUFFIX = `:${HUB_WORKLOAD_OPERATION}`;
+
+/** Whether a row's attribution satisfies every set filter. */
+export function matchesAttributionFilter(row: RequestAttribution, filter: RequestAttributionFilter): boolean {
+  if (filter.workload !== undefined && row.workload !== filter.workload) return false;
+  if (filter.clientHost !== undefined && row.clientHost !== filter.clientHost) return false;
+  if (filter.clientAddress !== undefined && row.clientAddress !== filter.clientAddress) return false;
+  return !filter.undeclared || (row.workload?.endsWith(UNDECLARED_WORKLOAD_SUFFIX) ?? false);
 }
