@@ -1894,4 +1894,31 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(unavailRes.text).toContain("target 1 (openai): reserve-cooldown");
     expect(unavailRes.text).toContain("target 2 (relay): cooldown");
   });
+
+  test("relay start when native target is cooling re-enters strict Reserve once native cooldown lifts, and never when Reserve is empty", async () => {
+    // 1. Reserve seats exist, openai starts cooled so relay runs first, openai recovers before relay fails 429 -> enters strict Reserve.
+    const cfg = threeSpentSeats();
+    cfg.combos!.luna!.waitForCooldownMs = 0;
+    coolComboTarget("luna", { provider: "openai", model: "gpt-6-luna" }, { now, status: 503, cooldownMs: 100 });
+    relay = () => { now += 150; return reserveRefused(); };
+    native = body => nativeAccounts.length < 3 ? reserveRefused() : sse(body.model, "ok");
+    const recovered = await post(cfg, { store: false });
+    expect(recovered.status).toBe(200);
+    expect(calls).toEqual(["relay:gpt-6-luna", "native:gpt-reserve", "native:gpt-reserve", "native:gpt-reserve"]);
+    expect(new Set(nativeAccounts).size).toBe(3);
+
+    // 2. When zero Reserve seats remain and relay ran the turn (HTTP 500), expired native cooldown neither runs Reserve nor wakes ordinary-only.
+    clearComboTargetCooldowns();
+    calls.length = 0;
+    nativeAccounts.length = 0;
+    const noReserveCfg = config();
+    noReserveCfg.combos!.luna!.waitForCooldownMs = 0;
+    seats(false);
+    coolComboTarget("luna", { provider: "openai", model: "gpt-6-luna" }, { now, status: 503, cooldownMs: 100 });
+    relay = () => { now += 150; return new Response("upstream error", { status: 500 }); };
+    const skipped = await post(noReserveCfg, { store: false });
+    expect(skipped.status).toBe(200);
+    expect(calls).toEqual(["relay:gpt-6-luna", "relay:gpt-6-luna", "relay:gpt-6-luna", "metered:gpt-6-luna"]);
+    expect(nativeAccounts).toEqual([]);
+  });
 });

@@ -330,8 +330,20 @@ export async function portCoolingLunaOwnerBeforeDispatch(args: {
   });
 }
 
+/** True once strict Reserve has been evaluated or Reserve pool seats are empty during relay failover. */
+export function relayFailureEvaluatedStrictReserve(
+  config: OcxConfig,
+  legs: LunaReserveLegPlan | undefined,
+  lunaStage: "off" | "reserve" | "relay" | "done",
+  evaluatedStrictReserve: boolean,
+  now: number,
+): boolean {
+  return evaluatedStrictReserve || Boolean(legs && lunaStage === "relay" && createPoolReserveWalk(config, now).remaining.size === 0);
+}
+
 export async function advanceLunaLegAfterFailure(args: {
   lunaStage: "off" | "reserve" | "relay" | "done";
+  evaluatedStrictReserve: boolean;
   failedTargetKey: string;
   legs: LunaReserveLegPlan;
   pick: ComboPick | null;
@@ -339,10 +351,13 @@ export async function advanceLunaLegAfterFailure(args: {
   attemptedTargets: readonly string[];
   aborted: boolean;
   pickOrdinary: (exclude: string[]) => Promise<ComboPick | null>;
-}): Promise<{ lunaStage: "off" | "reserve" | "relay" | "done"; pick: ComboPick | null }> {
+}): Promise<{ lunaStage: "off" | "reserve" | "relay" | "done"; evaluatedStrictReserve: boolean; pick: ComboPick | null }> {
   if (!(args.lunaStage === "reserve" && args.failedTargetKey === args.legs.nativeKey
     || args.lunaStage === "relay" && args.failedTargetKey === args.legs.relayKey)) {
-    return { lunaStage: args.lunaStage, pick: args.pick };
+    return { lunaStage: args.lunaStage, evaluatedStrictReserve: args.evaluatedStrictReserve, pick: args.pick };
+  }
+  if (args.lunaStage === "relay" && !args.evaluatedStrictReserve && args.pick && targetKey(args.pick.target) === args.legs.nativeKey) {
+    return { lunaStage: "reserve", evaluatedStrictReserve: true, pick: args.pick };
   }
   const afterReserve = args.lunaStage === "reserve";
   const ordinaryNext = afterReserve
@@ -355,6 +370,7 @@ export async function advanceLunaLegAfterFailure(args: {
     : null;
   return {
     lunaStage: nextStage,
+    evaluatedStrictReserve: args.evaluatedStrictReserve || nextStage === "done",
     pick: ordinaryPick ?? (args.pick && targetKey(args.pick.target) === args.legs.nativeKey ? null : args.pick),
   };
 }

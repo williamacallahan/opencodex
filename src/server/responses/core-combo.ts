@@ -136,7 +136,7 @@ import {
 } from "../relay";
 import { preflightComboStreamResponse } from "./combo-stream-preflight";
 import { isOwnerCapacityRefusal } from "./owner-capacity-refusal";
-import { advanceLunaLegAfterFailure, hasCallerOrdinaryLunaAuth, hasOrdinaryLunaCapacity, isReserveSeatQuotaRefusal, nativeLunaTarget, onlyReplayIncompatibleTargetsRemain, planLunaReserveLegs, portCoolingLunaOwnerBeforeDispatch, portLunaConversationTarget, portSpentLunaReasoning, portUnavailableLunaTurn, prepareLunaReplay, relayProvedNotStarted, resolveEmptyLunaReserveStart } from "./combo-luna-legs";
+import { advanceLunaLegAfterFailure, hasCallerOrdinaryLunaAuth, hasOrdinaryLunaCapacity, isReserveSeatQuotaRefusal, nativeLunaTarget, onlyReplayIncompatibleTargetsRemain, planLunaReserveLegs, portCoolingLunaOwnerBeforeDispatch, portLunaConversationTarget, portSpentLunaReasoning, portUnavailableLunaTurn, prepareLunaReplay, relayFailureEvaluatedStrictReserve, relayProvedNotStarted, resolveEmptyLunaReserveStart } from "./combo-luna-legs";
 import { createPoolReserveWalk, modelHasPoolReserve, type PoolCapacityIntent } from "../../codex/pool-reserve";
 import { requiredToolContractOf } from "./combo-required-tool-contract";
 import {
@@ -1869,11 +1869,13 @@ export async function executeComboResponses(
       unavailableOrdinaryTarget = lunaLegs.nativeKey;
     }
     const activeLunaLegs = lunaLegs;
+    evaluatedStrictReserve = relayFailureEvaluatedStrictReserve(config, activeLunaLegs, lunaStage, evaluatedStrictReserve, failureNow);
+    const relayHopEligible = activeLunaLegs && lunaStage === "relay" && evaluatedStrictReserve
+      ? (target: NonNullable<typeof combo>["targets"][number]) => targetKey(target) !== activeLunaLegs.nativeKey && targetEligible(target)
+      : targetEligible;
     const hopEligible = legIntent === "reserve-only" && activeLunaLegs
       ? (target: NonNullable<typeof combo>["targets"][number]) => targetKey(target) === activeLunaLegs.relayKey && targetEligible(target)
-      : activeLunaLegs && lunaStage === "relay"
-        ? (target: NonNullable<typeof combo>["targets"][number]) => targetKey(target) !== activeLunaLegs.nativeKey && targetEligible(target)
-        : targetEligible;
+      : relayHopEligible;
     const nextPick = advanceComboAfterFailure(config, pick, {
       routeConcreteModel,
       retryAfter: poolLocalRefusal || codexLocalRefusal || relayCooldown !== undefined ? undefined : failure.retryAfter,
@@ -1900,11 +1902,9 @@ export async function executeComboResponses(
     } else {
       pick = await pickWithWait({
         exclude: pick.attempted,
-        eligible: activeLunaLegs && lunaStage === "relay"
-          ? target => targetKey(target) !== activeLunaLegs.nativeKey && targetEligible(target)
-          : targetEligible,
+        eligible: relayHopEligible,
         cooldownReprobeTargets: carriedReprobe ? Object.entries(carriedReprobe) : undefined,
-        now: failureNow,
+        now: failureNow, allowReserveCooldownRelease: !evaluatedStrictReserve,
       });
       // Drop the attempted-target exclusion for one same-target retry. The picker rechecks
       // eligibility after sleeping: a removed target cannot lend a new membership to the failed pick.
@@ -1927,7 +1927,7 @@ export async function executeComboResponses(
     if (activeLunaLegs && failureDecision === "hop") {
       // After the strict Reserve leg the relay is next; after the relay, native ordinary Luna is next only on proof the relay never got the turn.
       const next = await advanceLunaLegAfterFailure({
-        lunaStage, failedTargetKey, legs: activeLunaLegs, pick, unavailableOrdinaryTarget, attemptedTargets,
+        lunaStage, evaluatedStrictReserve, failedTargetKey, legs: activeLunaLegs, pick, unavailableOrdinaryTarget, attemptedTargets,
         aborted: Boolean(options.abortSignal?.aborted),
         pickOrdinary: exclude => pickWithWait({
           exclude,
@@ -1937,8 +1937,7 @@ export async function executeComboResponses(
           now: failureNow,
         }),
       });
-      lunaStage = next.lunaStage;
-      pick = next.pick;
+      ({ lunaStage, evaluatedStrictReserve, pick } = next);
     }
     if (!pick) {
       if (options.abortSignal?.aborted) return clientCancelledResponse();
