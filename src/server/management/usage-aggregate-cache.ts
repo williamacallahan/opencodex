@@ -330,6 +330,7 @@ export async function getFilteredUsageAggregate(filter: UsageSummaryFilterInput,
     model: normalizeFilterValue(filter.model),
     apiKeyId: normalizeExactFilterValue(filter.apiKeyId),
     ...(filter.sourceFilter ? { sourceFilter: { client: filter.sourceFilter.client, device: { ...filter.sourceFilter.device } } } : {}),
+    ...(filter.attribution ? { attribution: { ...filter.attribution } } : {}),
     ...(filter.configuredApiKeyIds ? { configuredApiKeyIds: snapshotConfiguredKeyIds(filter.configuredApiKeyIds) } : {}),
   };
   const key = JSON.stringify([
@@ -337,6 +338,7 @@ export async function getFilteredUsageAggregate(filter: UsageSummaryFilterInput,
     normalizedFilter.model,
     normalizedFilter.apiKeyId,
     normalizedFilter.sourceFilter ?? null,
+    normalizedFilter.attribution ?? null,
     normalizedFilter.configuredApiKeyIds ?? null,
     fixedWindow?.since ?? null,
     fixedWindow?.until ?? null,
@@ -361,6 +363,7 @@ type NormalizedUsageFilter = {
   model: string | null;
   apiKeyId: string | null;
   sourceFilter?: UsageSummaryFilterInput["sourceFilter"];
+  attribution?: UsageSummaryFilterInput["attribution"];
   configuredApiKeyIds?: readonly string[];
 };
 

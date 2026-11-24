@@ -17,6 +17,14 @@ export const FORWARD_HEADERS = [
   "x-oai-attestation", "x-openai-subagent", "x-responsesapi-include-timing-metrics", "version", CODEX_RESPONSES_LITE_HEADER,
 ];
 
+export function copyCodexForwardHeaders(source: Headers, destination = new Headers()): Headers {
+  for (const name of FORWARD_HEADERS) {
+    const value = source.get(name);
+    if (value || (value !== null && (name === CODEX_INSTALLATION_ID_HEADER || name === CODEX_TURN_METADATA_HEADER))) destination.set(name, value);
+  }
+  return destination;
+}
+
 const MAX_ROUTING_MODEL_BYTES = 256;
 const MAX_ROUTING_TIER_BYTES = 64;
 const MAX_TURN_METADATA_BYTES = 32 * 1024;

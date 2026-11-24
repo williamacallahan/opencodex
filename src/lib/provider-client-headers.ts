@@ -74,15 +74,30 @@ export const HUB_WORKLOAD_OPERATION = "via-opencodex";
 // The hub's own derived label survives the hub's internal header rebuilds, which re-apply this gate; its fixed
 // operation always shows the label was assigned by the hub.
 const HUB_DERIVED_WORKLOAD_VALUE = new RegExp(`^[a-z0-9-]{1,40}:(?:${HUB_WORKLOAD_OPERATION}|hub-internal)$`);
-// The hub's own launchers send `<launcher>:<label>` (`claude-av:<session>`, `pi-av:<session>`,
-// `claude-code:codeAgent`). Anything else is a caller choosing its own gateway identity.
-const GATEWAY_IDENTITY_VALUE = /^(?:claude|pi)[a-z0-9-]*:[A-Za-z0-9._:-]{1,128}$/;
+// A launcher sends `<launcher>:<session or operation>` (`claude-av:<session>`, `codex-oc:<id>`,
+// `claude-code:codeAgent`): a lowercase launcher name of at most 32 characters, then the label.
+const GATEWAY_IDENTITY_VALUE = /^[a-z][a-z0-9-]{0,31}:[A-Za-z0-9._:-]{1,128}$/;
+const HUB_OPERATION_SUFFIXES = [`:${HUB_WORKLOAD_OPERATION}`, ":hub-internal"];
 export const GATEWAY_IDENTITY_HEADERS: ReadonlySet<string> = new Set(["x-lgw-cache-key", "x-user-id"]);
+
+/**
+ * Whether a caller's own gateway identity has a launcher's form. A value ending in one of the
+ * hub's operations is not declarable: that suffix is how a hub-derived label is recognized.
+ */
+export function isDeclaredGatewayIdentity(value: string): boolean {
+  return GATEWAY_IDENTITY_VALUE.test(value) && !HUB_OPERATION_SUFFIXES.some(suffix => value.endsWith(suffix));
+}
 
 /** Whether a caller's value may be forwarded under this header name: gateway identities need a launcher's form. */
 export function forwardedClientHeaderValueAllowed(name: string, value: string): boolean {
   if (!GATEWAY_IDENTITY_HEADERS.has(name)) return true;
-  return GATEWAY_IDENTITY_VALUE.test(value) || (name === USER_ID_HEADER && HUB_DERIVED_WORKLOAD_VALUE.test(value));
+  return isDeclaredGatewayIdentity(value) || (name === USER_ID_HEADER && HUB_DERIVED_WORKLOAD_VALUE.test(value));
+}
+
+/** The gateway attribution headers (`X-User-ID` and every `X-LGW-*`), which no vendor pass-through forwards. */
+export function isGatewayAttributionHeader(name: string): boolean {
+  const lower = name.toLowerCase();
+  return lower === USER_ID_HEADER || lower.startsWith("x-lgw-");
 }
 
 /** Product half of a workload label from the caller's own User-Agent (else originator): `claude-cli/2.1 (...)` is `claude-code`. */

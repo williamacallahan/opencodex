@@ -21,6 +21,9 @@ export const SUGGESTED_USAGE_LEDGER_MAX_BYTES = 1024 * 1024 * 1024;
  */
 export const USAGE_LEDGER_RETENTION_TARGET_RATIO = 0.9;
 
+/** Rows a compaction trims are kept in the archive at least this long: a 30-day floor plus a day. */
+export const USAGE_ARCHIVE_RETENTION_DAYS = 31;
+
 export interface UsageLedgerRetentionStatus {
   /** Absent when no limit is configured. */
   maxBytes?: number;

@@ -11,7 +11,6 @@ import { KiroUserIdentityUnavailableError, kiroReauthIdentityMatches } from "./k
 import {
   OAuthMutationBusyError,
   OAuthRefreshIntentIOError,
-  clearOAuthRefreshIntent,
   createOAuthRefreshIntentLock,
   credentialGeneration,
   getAccountCredential,
@@ -813,6 +812,22 @@ export async function refreshXaiAccountWithLock(provider:string,accountId:string
 
 
 /**
+ * Best-effort: a stale intent keys a token that is no longer stored, so a failed unlink
+ * (EACCES/EPERM/EBUSY/EROFS) blocks nothing and must never become a refresh failure.
+ */
+function clearNousRefreshIntentBestEffort(provider: string, accountId: string, refresh: string): void {
+  try {
+    clearNousRefreshIntent(refresh);
+  } catch (cleanupErr) {
+    logOAuthEvent("OAuth refresh intent cleanup failed (non-fatal)", {
+      provider,
+      accountId,
+      cause: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+    });
+  }
+}
+
+/**
  * Preserve an already-rotated Nous refresh token (RT-B) after a terminal refresh
  * error (e.g. the returned access JWT lacked `inference:invoke`). The unusable
  * access token is NOT persisted as valid: the recovery credential carries an
@@ -1058,23 +1073,9 @@ export async function refreshGenericAccountWithLock(
         throw new OAuthLoginRequiredError(provider);
       }
       logOAuthEvent("OAuth credentials rotated and persisted", { provider, accountId });
-      // Best-effort bookkeeping cleanup: the rotated credential is already
-      // durably persisted. A failure to unlink the old-token intent file
-      // (EACCES/EPERM/EBUSY/EROFS) must not turn a committed rotation into a
-      // failed refresh. The stale intent keys the OLD token, which is no longer
-      // stored, so leaving it behind blocks nothing and is safe. It must also
-      // never route through the generic refresh error path (no needsReauth).
-      if (provider === "nous") {
-        try {
-          clearNousRefreshIntent(stored.refresh);
-        } catch (cleanupErr) {
-          logOAuthEvent("OAuth refresh intent cleanup failed (non-fatal)", {
-            provider,
-            accountId,
-            cause: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
-          });
-        }
-      }
+      // The rotated credential is already durable, so the cleanup never routes through the
+      // generic refresh error path (no needsReauth).
+      if (provider === "nous") clearNousRefreshIntentBestEffort(provider, accountId, stored.refresh);
       return fresh.access;
     } catch (error) {
       if (error instanceof OAuthMutationBusyError) throw error;
@@ -1103,15 +1104,7 @@ export async function refreshGenericAccountWithLock(
             // RT-A's intent is cleared only after RT-B is durably persisted;
             // cleanup itself stays best-effort (a stale RT-A intent keys a token
             // that is no longer stored).
-            try {
-              clearNousRefreshIntent(stored.refresh);
-            } catch (cleanupErr) {
-              logOAuthEvent("OAuth refresh intent cleanup failed (non-fatal)", {
-                provider,
-                accountId,
-                cause: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
-              });
-            }
+            clearNousRefreshIntentBestEffort(provider, accountId, stored.refresh);
             // Mark exactly the generation this write produced — never a
             // credential written by a concurrent login between the merge and
             // this step.
@@ -1944,6 +1937,12 @@ export async function startLoginFlow(
     // The row this flow's own credential write landed in, from the store's receipt. A token match
     // after the fact would miss it once a concurrent login for the same account rotates the token.
     let persistedAccountId: string | undefined;
+    const failFlow = (error: unknown): void => {
+      loginAbort.delete(flowId);
+      clearManualCodeSlot(flowId);
+      settleLoginFlow(flowId, { error: publicOAuthAuthenticationErrorMessage(error), errorCode: classifyLoginCodeError(error) });
+      if (!urlResolved) reject(error);
+    };
     const settle = async (error?: unknown): Promise<void> => {
       // Cancellation deletes this controller and records its own terminal result. A late provider
       // rejection (or an older flow settling after a replacement starts) must not overwrite that
@@ -1969,12 +1968,7 @@ export async function startLoginFlow(
         return;
       }
 
-      const e = finalError;
-      loginAbort.delete(flowId);
-      clearManualCodeSlot(flowId);
-      const msg = publicOAuthAuthenticationErrorMessage(e);
-      settleLoginFlow(flowId, { error: msg, errorCode: classifyLoginCodeError(e) });
-      if (!urlResolved) reject(e);
+      failFlow(finalError);
     };
     // Background: runLogin persists the credential + provider entry to disk. The lifecycle hook
     // lets a long-lived server config adopt that settled state before clients observe done=true.
@@ -1988,11 +1982,7 @@ export async function startLoginFlow(
     ).catch((e: unknown) => {
       // settle catches lifecycle failures, so this is only a defensive promise-boundary guard.
       if (abandonIfNotOwner(e)) return;
-      loginAbort.delete(flowId);
-      clearManualCodeSlot(flowId);
-      const msg = publicOAuthAuthenticationErrorMessage(e);
-      settleLoginFlow(flowId, { error: msg, errorCode: classifyLoginCodeError(e) });
-      if (!urlResolved) reject(e);
+      failFlow(e);
     }).finally(() => {
       if (provider === "kiro") kiroLoginSettling.delete(provider);
     });

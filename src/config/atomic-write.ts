@@ -472,13 +472,18 @@ export function atomicWriteFile(
  * rename, the platform-aware replace, and the residual cleanup on any failure. A custom
  * {@link AtomicWriteIO} is not accepted, because the point of this form is that the default
  * writer owns the descriptor.
+ *
+ * `recordOwnership: false` skips adding this file to the uninstall manifest, for a file inside a
+ * directory the caller has registered once: the manifest is capped, so a directory of rotating
+ * files must not add one entry per file.
  */
 export function atomicWriteFileStreamed(
   path: string,
   write: (descriptor: number) => void,
   hooks: AtomicWriteHooks = {},
+  options: { recordOwnership?: boolean } = {},
 ): void {
-  atomicWriteFileToTarget(path, write, resolveWriteTarget(path), undefined, hooks);
+  atomicWriteFileToTarget(path, write, resolveWriteTarget(path), undefined, hooks, options.recordOwnership ?? true);
 }
 
 /**

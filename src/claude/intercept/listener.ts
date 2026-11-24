@@ -1,4 +1,5 @@
 import type { Server } from "bun";
+import { isGatewayAttributionHeader } from "../../lib/provider-client-headers";
 import { cliCatalogKind, rewriteCliCatalogResponse, type CliCatalogKind } from "./cli-catalog";
 import type { PemKeyPair } from "./local-ca";
 import type { PickerModelEntry } from "./picker-bootstrap";
@@ -57,7 +58,7 @@ export function rewriteInterceptedRequest(req: Request, loopbackOrigin: string):
 export function forwardHeadersForUpstream(source: Headers): Headers {
   const headers = new Headers();
   source.forEach((value, name) => {
-    if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase())) headers.append(name, value);
+    if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase()) && !isGatewayAttributionHeader(name)) headers.append(name, value);
   });
   return headers;
 }

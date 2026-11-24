@@ -221,7 +221,8 @@ describe("vibe pass-through public HTTP lane", () => {
     const rawChatBody = String.raw`{"model":"devstral-latest","messages":[{"role":"user","content":"café naïve"}],"future":{"big":9007199254740993},"stream":true}`;
     const chatRes = await rawRequest("POST", "/vibe/v1/chat/completions", {
       body: rawChatBody,
-      headers: { "x-affinity": "sess-123", "x-custom-vibe": "preserved", "x-opencodex-max-sends": "1" },
+      headers: { "x-affinity": "sess-123", "x-custom-vibe": "preserved", "x-opencodex-max-sends": "1",
+        "x-user-id": "claude-oc:session-1", "x-lgw-cache-key": "claude-oc:conversation-1", "x-lgw-client-host": "laptop-1", "x-lgw-client-address": "192.0.2.66" },
     });
     expect(chatRes.status).toBe(200);
     expect(chatRes.text).toBe(sseBody);
@@ -241,6 +242,9 @@ describe("vibe pass-through public HTTP lane", () => {
     expect(first.headers.get("x-opencodex-internal")).toBeNull();
     expect(first.headers.get("x-opencodex-max-sends")).toBeNull();
     expect(first.headers.get("cookie")).toBeNull();
+    for (const name of ["x-user-id", "x-lgw-cache-key", "x-lgw-client-host", "x-lgw-client-address"]) expect(first.headers.has(name)).toBe(false);
+    const attributed = getRequestLogEntries().find(entry => entry.workload === "claude-oc:session-1");
+    expect(attributed?.clientHost).toBe("laptop-1");
     const sentAuth = first.headers.get("authorization");
     expect([`Bearer ${vibePoolKeyOne}`, `Bearer ${vibePoolKeyTwo}`]).toContain(sentAuth);
     expect(sentAuth).not.toContain(hubKey);

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { promptCacheOutcomeLine, providerReportsNativeCache } from "./prompt-cache-outcome";
+import { requestAttributionLogFields, type RequestAttribution } from "./request-attribution";
 import { normalizeRecordedClient, type UsageClient } from "../usage/client";
 import { anthropicAccountTagField, stampApiKeyAccountLabel, usesApiKeyAccount } from "../providers/label";
 import { KEY_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
@@ -123,7 +124,7 @@ export function cacheDiagnosticsObserving(): boolean {
   return cacheDiagnosticHooks()?.enabled() === true;
 }
 
-export interface RequestLogContext extends UpstreamErrorDiagnostics {
+export interface RequestLogContext extends UpstreamErrorDiagnostics, RequestAttribution {
   model: string;
   provider: string;
   /** Ephemeral lifecycle ownership; never serialized into request history. */
@@ -300,7 +301,7 @@ export function rebindCacheDiagnosticBody(
   cacheDiagnosticHooks()?.rebind(body, draft);
 }
 
-export interface RequestLogEntry extends UpstreamErrorDiagnostics {
+export interface RequestLogEntry extends UpstreamErrorDiagnostics, RequestAttribution {
   requestId: string;
   client?: UsageClient;
   /** The logical request this row belongs to (#4546); absent on rows written without a budget. */
@@ -520,7 +521,7 @@ export function requestLogEntryFromPersistedUsage(
     ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
     ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
     ...(entry.localTerminalReason ? { localTerminalReason: sanitizeLogMetadataString(entry.localTerminalReason) } : {}),
-    ...projectDiagnostics(entry),
+    ...projectDiagnostics(entry), ...requestAttributionLogFields(entry),
     ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
@@ -701,7 +702,7 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
       ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
       ...(entry.localTerminalReason ? { localTerminalReason: sanitizeLogMetadataString(entry.localTerminalReason) } : {}),
-      ...upstreamDiagnosticLogFields(entry),
+      ...upstreamDiagnosticLogFields(entry), ...requestAttributionLogFields(entry),
       ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
         ? { accountLogLabel: entry.accountLogLabel }
         : {}),
@@ -1518,7 +1519,7 @@ function writeFinalRequestLog(
     ...(logCtx.surface ? { surface: logCtx.surface } : {}),
     ...(logCtx.apiKeyId ? { apiKeyId: logCtx.apiKeyId } : {}),
     ...(logCtx.admissionKind ? { admissionKind: logCtx.admissionKind } : {}),
-    ...(logCtx.inboundProtocol ? { inboundProtocol: logCtx.inboundProtocol } : {}),
+    ...requestAttributionLogFields(logCtx), ...(logCtx.inboundProtocol ? { inboundProtocol: logCtx.inboundProtocol } : {}),
     ...(logCtx.localTerminalReason
       ? { localTerminalReason: sanitizeLogMetadataString(logCtx.localTerminalReason) }
       : {}),

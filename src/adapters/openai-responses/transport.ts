@@ -2,7 +2,7 @@ import type { HandleResponsesOptions } from "../../server/responses/core-options
 import type { CodexAuthContext } from "../../codex/auth-context";
 import type { DataPlaneAdmission } from "../../server/auth-cors";
 import { isPlainObject } from "../../lib/plain-data";
-import type { IncomingMeta, ProviderAdapter } from "../base";
+import type { AdapterRequest, IncomingMeta, ProviderAdapter } from "../base";
 import type { OcxProviderConfig } from "../../types";
 import {
   FORWARD_HEADERS,
@@ -17,6 +17,7 @@ import { isCodexLbResponsesEndpoint } from "../../providers/quota/codex-lb-url";
 import { isThreadSpawnRequest } from "../../server/effort-policy";
 import { callerSessionAlias, claudeTranscriptQualifier, safeCallerSessionId, scopedWireHash } from "../../server/caller-session-identity";
 import { agentServingThreadKey } from "../../oauth/session-affinity-key";
+import { applyCodexLbAttributionHeaders } from "../../server/request-attribution";
 
 export { responsesTransportUrl };
 export { FORWARD_HEADERS } from "../../codex/forward-transport-headers";
@@ -74,6 +75,19 @@ export function bindSharedCodexWireIdentity(
   adapter: ProviderAdapter, provider: OcxProviderConfig, callerHeaders: Headers,
   admission: DataPlaneAdmission | undefined, accountKind: CodexAuthContext["kind"], claudeWire?: HandleResponsesOptions["claudeCodexWire"],
 ): void {
+  const attribution = admission?.attribution;
+  if (attribution && isCodexRelaySend(provider)) {
+    const buildWithoutAttribution = adapter.buildRequest.bind(adapter);
+    const attribute = (request: AdapterRequest): AdapterRequest => {
+      applyCodexLbAttributionHeaders(request.headers, attribution);
+      return request;
+    };
+    // A synchronous build stays synchronous, so this wrapper never changes when a caller sees the request.
+    adapter.buildRequest = (parsed, incoming) => {
+      const built = buildWithoutAttribution(parsed, incoming);
+      return built instanceof Promise ? built.then(attribute) : attribute(built);
+    };
+  }
   if (claudeWire && (isCodexRelaySend(provider) || isCanonicalOpenAiForwardProvider(provider))) {
     const session = accountKind === "main" && isCanonicalOpenAiForwardProvider(provider)
       ? claudeWire.ownedDirectSessionId ?? claudeWire.sessionId : claudeWire.sessionId;

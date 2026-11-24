@@ -134,7 +134,7 @@ test("unmapped claude model + sk-ant credential passes through verbatim", async 
   try {
     const res = await fetch(new URL("/v1/messages?beta=true", server.url), {
       method: "POST",
-      headers: OAUTH_HEADERS,
+      headers: { ...OAUTH_HEADERS, "x-user-id": "claude-oc:session-1", "X-LGW-Client-Host": "laptop-1" },
       body: JSON.stringify(claudeBody()),
     });
     expect(res.status).toBe(200);
@@ -151,6 +151,7 @@ test("unmapped claude model + sk-ant credential passes through verbatim", async 
     expect(hit.headers.get("user-agent")).toBe("claude-cli/2.1.200");
     expect(hit.headers.get("x-app")).toBe("cli");
     expect(hit.headers.get("x-claude-code-session-id")).toBe(OAUTH_HEADERS["x-claude-code-session-id"]);
+    expect([hit.headers.has("x-user-id"), hit.headers.has("x-lgw-client-host")]).toEqual([false, false]);
     // Body untouched: thinking signature, cache_control, max_tokens all intact.
     expect(hit.body).toEqual(claudeBody());
 

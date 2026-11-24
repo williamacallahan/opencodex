@@ -87,8 +87,11 @@ ENV NODE_ENV=production \
 # The derived index and the response spills are rebuildable, so a deployment may mount each on its
 # own volume and leave it out of backups. A new named volume copies the ownership of an existing
 # image directory; at a path the image lacks it would come up root-owned and unwritable for bun.
+# usage-archive holds the ledger rows a size-limit trim removes; it is not rebuildable, but it is
+# large and append-only, so it too gets its own volume outside the nightly state archive.
 RUN install -d -m 0700 -o bun -g bun /home/bun/.opencodex /home/bun/.codex \
-  /home/bun/.opencodex/request-history /home/bun/.opencodex/responses-state-spill
+  /home/bun/.opencodex/request-history /home/bun/.opencodex/responses-state-spill \
+  /home/bun/.opencodex/usage-archive
 COPY --chown=bun:bun --chmod=0600 docker/config.json /home/bun/.opencodex/config.json
 
 COPY --from=build --chown=bun:bun /home/bun/app/package.json ./package.json
