@@ -301,6 +301,9 @@ export async function handleVibePassthrough(req: Request, ctx: VibePassthroughCo
   const settle = (status: number | "complete") => {
     if (settled) return;
     settled = true;
+    if (status !== "complete" && upstreamStatus >= 200 && upstreamStatus < 300 && logCtx.activeAttempt) {
+      logCtx.activeAttempt.streamAborted = true;
+    }
     req.signal.removeEventListener("abort", onClientAbort);
     lease.unbindAbortController(controller);
     lease.release();
@@ -320,8 +323,8 @@ export async function handleVibePassthrough(req: Request, ctx: VibePassthroughCo
   }, error);
 
   const responseFor = (response: Response) => route.isInference ? withRequestLogId(response, requestId) : response;
-  const maxSends = route.isInference && keyEntry?.allowedProviders?.length === 1
-    && keyEntry.allowedProviders[0] === VIBE_PROVIDER_ID && req.headers.get("x-opencodex-max-sends") === "1" ? 1 : 2;
+  const maxSends = route.isInference && keyEntry?.allowedProviders?.length
+    && keyEntry.allowedProviders.every(provider => provider === VIBE_PROVIDER_ID) && req.headers.get("x-opencodex-max-sends") === "1" ? 1 : 2;
   const triedKeyIds = new Set<string>();
   let activeChoice: Extract<VibeKeyChoice, { kind: "key" }> = initialChoice;
   let nextChoice: Extract<VibeKeyChoice, { kind: "key" }> | undefined;
@@ -342,7 +345,6 @@ export async function handleVibePassthrough(req: Request, ctx: VibePassthroughCo
       ? beginInferenceAttempt(logCtx, { provider: VIBE_PROVIDER_ID, model: inferredModel, adapter: "openai-chat" })
       : undefined;
     inferenceAttempt?.seal(activeChoice.accountLogLabel);
-    noteAttemptSend(inferenceAttempt?.attempt, undefined);
     const retryAfterFailure = (error: unknown, phase: "unknown" | "body", reusedSocket?: boolean): Response | null => {
       const cancelled = req.signal.aborted || controller.signal.aborted;
       failLog(phase, error, reusedSocket);
@@ -369,6 +371,7 @@ export async function handleVibePassthrough(req: Request, ctx: VibePassthroughCo
         undefined,
         undefined,
         route.method,
+        () => noteAttemptSend(inferenceAttempt?.attempt, undefined),
       );
     } catch (error) {
       const response = retryAfterFailure(error, "unknown");

@@ -354,7 +354,7 @@ describe("vibe pass-through key pool resilience", () => {
         }
         const splitIndex = Buffer.from('data: {"choices":[{"delta":{"content":"🚀').length - 2;
         const sseFirst = Buffer.from('data: {"choices":[{"delta":{"content":"🚀"}}]}\n\n');
-        const oversizedLine = `data: {"padding":"${"z".repeat(70_000)}"}\n\n`;
+        const oversizedLine = `data: {"padding":"${"z".repeat(70_000)}","usage":{"prompt_tokens":999,"completion_tokens":1}}\n\n`;
         const usageLine = 'data: {"choices":[],"usage":{"prompt_tokens":19,"completion_tokens":5,"total_tokens":24}}\n\ndata: [DONE]\n\n';
         const isStreamA = req.headers.get("x-stream-role") === "utf8-split";
         const stream = new ReadableStream<Uint8Array>({
@@ -368,7 +368,7 @@ describe("vibe pass-through key pool resilience", () => {
               controller.enqueue(Buffer.from(oversizedLine.slice(0, 40_000)));
               await Bun.sleep(10);
               controller.enqueue(Buffer.from(oversizedLine.slice(40_000)));
-              controller.enqueue(Buffer.from(usageLine));
+              if (req.headers.get("x-stream-role") !== "oversized-only") controller.enqueue(Buffer.from(usageLine));
             }
             controller.close();
           },
@@ -385,7 +385,7 @@ describe("vibe pass-through key pool resilience", () => {
       hostname: "0.0.0.0",
       defaultProvider: VIBE_PROVIDER_ID,
       nativeHarnessOnly: true,
-      apiKeys: [{ id: "vibe", name: "vibe", key: hubKey, createdAt: "2026-01-01T00:00:00.000Z", allowedProviders: [VIBE_PROVIDER_ID] }],
+      apiKeys: [{ id: "vibe", name: "vibe", key: hubKey, createdAt: "2026-01-01T00:00:00.000Z", allowedProviders: [VIBE_PROVIDER_ID, VIBE_PROVIDER_ID] }],
       providers: {
         [VIBE_PROVIDER_ID]: {
           adapter: "openai-chat",
@@ -491,13 +491,23 @@ describe("vibe pass-through key pool resilience", () => {
       expect(entry.usage?.totalTokens).toBe(24);
     }
 
+    const oversizedOnly = await postVibe({ "x-stream-role": "oversized-only" });
+    expect(oversizedOnly.text).toContain('"prompt_tokens":999');
+    const oversizedLog = (await import("../../src/server/request-log")).getRequestLogEntries().find(entry => entry.requestId === oversizedOnly.requestId);
+    expect(oversizedLog?.usage).toBeUndefined();
+
     // Raw TCP server that truncates a 402 body mid-stream -> must settle 502 without leaking ActiveTurnLease.
     let dropSends = 0;
     const dropServer = createNetServer(socket => {
-      socket.once("data", () => {
+      socket.once("data", bytes => {
         dropSends++;
-        socket.write("HTTP/1.1 402 Payment Required\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n{\"partial\":");
-        socket.destroy();
+        if (bytes.toString().includes("x-stream-role: broken-success")) {
+          socket.write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 500\r\n\r\ndata: {\"choices\":[]}\n\n");
+          setTimeout(() => socket.end(), 50);
+        } else {
+          socket.write("HTTP/1.1 402 Payment Required\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n{\"partial\":");
+          socket.destroy();
+        }
       });
     });
     await new Promise<void>(resolve => dropServer.listen(0, "127.0.0.1", () => resolve()));
@@ -527,11 +537,24 @@ describe("vibe pass-through key pool resilience", () => {
     const dropLog = (await import("../../src/server/request-log")).getRequestLogEntries().find(entry => entry.requestId === dropRes.requestId);
     expect(dropLog?.spend?.sends).toBe(1);
     expect((await import("../../src/server/lifecycle")).getActiveTurnCount()).toBe(0);
+    const brokenId = await new Promise<string | string[] | undefined>(resolve => {
+      const req = request({ host: "127.0.0.1", port: proxy!.port, path: "/vibe/v1/chat/completions", method: "POST",
+        headers: { authorization: `Bearer ${hubKey}`, "user-agent": vibeUa, "x-stream-role": "broken-success" } }, message => {
+        message.resume();
+        message.on("aborted", () => resolve(message.headers["x-opencodex-request-id"]));
+        message.on("error", () => resolve(message.headers["x-opencodex-request-id"]));
+      });
+      req.on("error", () => resolve(undefined));
+      req.end('{"model":"devstral-latest","messages":[]}');
+    });
+    const brokenLogs = (await import("../../src/server/request-log")).getRequestLogEntries();
+    const brokenLog = brokenId ? brokenLogs.find(entry => entry.requestId === brokenId) : brokenLogs.at(-1);
+    expect(brokenLog?.attempts?.[0]?.streamAborted).toBe(true);
     await new Promise<void>(resolve => dropServer.close(() => resolve()));
 
     const connectionRes = await postVibe({ "x-opencodex-max-sends": "1" });
     expect(connectionRes.status).toBe(503);
     const connectionLog = (await import("../../src/server/request-log")).getRequestLogEntries().find(entry => entry.requestId === connectionRes.requestId);
-    expect(connectionLog?.spend?.sends).toBe(1);
+    expect(connectionLog?.spend?.sends).toBe(0);
   });
 });

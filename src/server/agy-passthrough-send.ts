@@ -10,7 +10,7 @@ import { Agent as HttpAgent, request as httpRequest, type IncomingMessage } from
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import type { Socket } from "node:net";
 import { redactSecretString, sanitizeLogMetadataString } from "../lib/redact";
-import { createSseInspector } from "./relay";
+import { sseFieldValue } from "../lib/sse-decoder";
 
 /** Passively inspect bounded JSON or SSE payloads without changing relayed bytes. */
 export function createPassthroughPayloadObserver(
@@ -21,22 +21,39 @@ export function createPassthroughPayloadObserver(
 ): { observe(chunk: Uint8Array): void; finish(): void } {
   const ct = (contentType ?? "").split(";")[0]!.trim().toLowerCase();
   const unencoded = !contentEncoding || contentEncoding.trim().toLowerCase() === "identity";
-  const inspector = unencoded && ct === "text/event-stream" ? createSseInspector({ onParsedPayload: onPayload }) : null;
+  const decoder = unencoded && ct === "text/event-stream" ? new TextDecoder() : null;
   let chunks: Uint8Array[] | null = unencoded && ct === "application/json" ? [] : null;
   let bytes = 0;
+  let line = "";
+  let dropping = false;
+  const inspect = (text: string) => {
+    try { onPayload(JSON.parse(text)); } catch { /* Invalid payloads are not usage. */ }
+  };
+  const accept = (text: string) => {
+    for (const part of text.split(/(?<=\n)/)) {
+      const complete = part.endsWith("\n");
+      if (!dropping && line.length + part.length <= 64 * 1024) line += part;
+      else { line = ""; dropping = true; }
+      if (!complete) continue;
+      if (!dropping) {
+        const payload = sseFieldValue(line.trimEnd(), "data");
+        if (payload) inspect(payload);
+      }
+      line = "";
+      dropping = false;
+    }
+  };
   return {
     observe(chunk) {
-      inspector?.feed(chunk);
+      if (decoder) accept(decoder.decode(chunk, { stream: true }));
       if (!chunks) return;
       bytes += chunk.byteLength;
       if (bytes > maxJsonBytes) chunks = null;
       else chunks.push(chunk);
     },
     finish() {
-      inspector?.finish();
-      if (!chunks || bytes === 0) return;
-      try { onPayload(JSON.parse(new TextDecoder().decode(Buffer.concat(chunks)))); }
-      catch { /* Observation must not change passthrough delivery. */ }
+      if (decoder) { accept(decoder.decode()); accept("\n"); }
+      if (chunks && bytes > 0) inspect(new TextDecoder().decode(Buffer.concat(chunks)));
       chunks = null;
     },
   };
@@ -284,6 +301,7 @@ export function sendExactly(
   headerTimeoutMs = DEFAULT_AGY_HEADER_TIMEOUT_MS,
   connectTimeoutMs = DEFAULT_AGY_CONNECT_TIMEOUT_MS,
   method: "POST" | "GET" = "POST",
+  onSend?: () => void,
 ): Promise<ExactResponse> {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
@@ -339,12 +357,14 @@ export function sendExactly(
       socket.removeListener("timeout", destroyIdleSocket);
       socket.setTimeout(0);
       if (!socket.connecting && !socket.pending) {
+        onSend?.();
         phase = "headers";
         clearConnectTimer();
         return;
       }
       const connectEvent = secure ? "secureConnect" : "connect";
       const onConnect = () => {
+        onSend?.();
         phase = "headers";
         clearConnectTimer();
         detachSocketListener = undefined;
