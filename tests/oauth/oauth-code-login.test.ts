@@ -31,6 +31,19 @@ const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 let previousOpencodexHome: string | undefined;
 
 const TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
+const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
+
+/**
+ * Where every fetch mock in this file sends a request it does not answer itself. A completed
+ * exchange reads the account profile before the login settles, and that read waits up to 10s on
+ * Anthropic. Left on the real network it decides whether a login settles inside a case's timeout,
+ * and in what order two concurrent saves land. Anthropic answers this file's made-up bearer with
+ * 401, so the read gets that answer here instead.
+ */
+function forwardUnmockedFetch(originalFetch: typeof globalThis.fetch, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  if (String(input).startsWith(PROFILE_URL)) return Promise.resolve(new Response("{}", { status: 401 }));
+  return originalFetch(input, init);
+}
 
 function b64url(input: Buffer | string): string {
   return Buffer.from(input).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -60,7 +73,7 @@ function installTokenMock(reply: (request: TokenRequest) => TokenReply): {
   const originalFetch = globalThis.fetch;
   const requests: TokenRequest[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (!String(input).startsWith(TOKEN_URL)) return originalFetch(input, init);
+    if (!String(input).startsWith(TOKEN_URL)) return forwardUnmockedFetch(originalFetch, input, init);
     const request = JSON.parse(String(init?.body ?? "{}")) as TokenRequest;
     requests.push(request);
     const answer = reply(request);
@@ -336,9 +349,7 @@ describe("OAuth code-display login", () => {
     const originalFetch = globalThis.fetch;
     let issued = 0;
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      // No profile enrichment over the network: it would reorder the two saves at random.
-      if (String(input).startsWith("https://api.anthropic.com/api/oauth/profile")) return new Response("{}", { status: 401 });
-      if (!String(input).startsWith(TOKEN_URL)) return originalFetch(input, init);
+      if (!String(input).startsWith(TOKEN_URL)) return forwardUnmockedFetch(originalFetch, input, init);
       issued += 1;
       // Same account, a fresh refresh token per exchange: the later write rotates the row's token.
       return new Response(JSON.stringify({
@@ -377,7 +388,7 @@ describe("OAuth code-display login", () => {
     const originalFetch = globalThis.fetch;
     let tokenCalls = 0;
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (!String(input).startsWith(TOKEN_URL)) return originalFetch(input, init);
+      if (!String(input).startsWith(TOKEN_URL)) return forwardUnmockedFetch(originalFetch, input, init);
       tokenCalls += 1;
       await held;
       return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400, headers: { "Content-Type": "application/json" } });
@@ -469,7 +480,7 @@ describe("OAuth code-display login", () => {
     const originalFetch = globalThis.fetch;
     let tokenCalls = 0;
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (!String(input).startsWith(TOKEN_URL)) return originalFetch(input, init);
+      if (!String(input).startsWith(TOKEN_URL)) return forwardUnmockedFetch(originalFetch, input, init);
       tokenCalls += 1;
       await held;
       return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400, headers: { "Content-Type": "application/json" } });
