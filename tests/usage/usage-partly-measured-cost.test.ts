@@ -21,10 +21,20 @@ for (const usageStatus of ["unreported", "unsupported"] as const) {
       const result = computeEntryCost(row(attempts));
       expect(result.costTotal).toBeGreaterThan(0);
       expect(result.isPriced).toBe(false);
-      expect(result.attemptEstimates.filter(Boolean)).toHaveLength(1);
+      expect(result.attemptEstimates?.filter(Boolean)).toHaveLength(1);
     }
   });
 }
+
+test("an ambiguous send keeps measured sibling cost but leaves the total unpriced", () => {
+  const { usage: _usage, ...withoutUsage } = measured;
+  const ambiguous: Attempt = { ...withoutUsage, status: 502, usageStatus: "unreported", failureCause: "transport-ambiguous" };
+  const baseline = computeEntryCost(row([measured]));
+  const result = computeEntryCost(row([ambiguous, { ...measured, ordinal: 2 }]));
+  expect(result.costTotal).toBe(baseline.costTotal);
+  expect(result.costTotal).toBeGreaterThan(0);
+  expect(result.isPriced).toBe(false);
+});
 
 test("an upstream refusal without usage remains a known zero alongside measured usage", () => {
   const { usage: _usage, ...withoutUsage } = measured;
@@ -76,7 +86,9 @@ test("a refusal cannot hide a measured attempt with no matching price", () => {
   expect(baselineCost.isPriced).toBe(true);
   expect(baselineCost.costTotal).toBeGreaterThan(0);
   expect(cost.attemptEstimates?.map(Boolean)).toEqual([false, false, true]);
-  expect({ ...cost, attemptEstimates: cost.attemptEstimates?.slice(1) }).toEqual(baselineCost);
+  expect({ ...cost, attemptEstimates: cost.attemptEstimates?.slice(1) }).toEqual({
+    ...baselineCost, attemptEstimates: baselineCost.attemptEstimates,
+  });
   const summarize = (entry: PersistedUsageEntry) => summarizeUsage([entry], "30d", Date.UTC(2026, 5, 28, 12));
   const actual = summarize(withRefusal);
   const baseline = summarize(withoutRefusal);

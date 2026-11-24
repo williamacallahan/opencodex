@@ -888,7 +888,7 @@ function spentNothing(attempt: NonNullable<PersistedUsageEntry["attempts"]>[numb
   if (!attempt || attempt.usage) return false;
   if (attempt.sendCount === 0 || attempt.locallyAnswered === true) return true;
   // A 499 is the client hanging up on a send upstream may already be generating for.
-  return attempt.status >= 400 && attempt.status !== 499
+  return attempt.status >= 400 && attempt.status !== 499 && attempt.failureCause !== "transport-ambiguous"
     && attempt.streamAborted !== true && attempt.firstOutputMs === undefined;
 }
 
