@@ -1696,14 +1696,14 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(calls).toEqual([retryAfter ? "relay:gpt-6-luna" : "native:gpt-reserve"]);
   });
 
-  test("a persisted legacy default hold does not delay an unknown seat past the probe interval", async () => {
+  test.each([false, true])("a persisted legacy default hold expires after the probe interval (manually selected: %s)", async manuallySelected => {
     const cfg = config();
     updateAccountQuota(A, 40, now + 86_400_000);
     updateAccountQuota(B, 100, now + 86_400_000);
     const refusedAt = now - 6 * 60_000;
     const until = refusedAt + 30 * 60_000;
     writeFileSync(join(home, "codex-health-cooldowns.json"), JSON.stringify({ [`s\0${B}\0reserve`]: {
-      consecutiveFailures: 0, lastFailureStatus: 429, lastFailureAt: refusedAt, lastProbeAt: refusedAt,
+      consecutiveFailures: 0, cooldownSince: refusedAt, ...(manuallySelected ? {} : { lastFailureStatus: 429, lastFailureAt: refusedAt, lastProbeAt: refusedAt }),
       cooldownUntil: until, quotaAvoidUntil: until, cooldownSource: "default", reserveRefusalStreak: 5,
     } }));
     reloadCodexHealthCooldownsForTests();

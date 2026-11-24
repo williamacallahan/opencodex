@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { resolveCodexAuthContext } from "../../src/codex/auth-context";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OcxConfig } from "../../src/types";
@@ -23,7 +24,7 @@ let previousCodexHome: string | undefined;
 let now: number;
 function config(): OcxConfig {
   return {
-    port: 0, providers: { openai: { adapter: "openai-responses", authMode: "forward", baseUrl: "https://chatgpt.com/backend-api/codex" } },
+    port: 0, defaultProvider: "openai", providers: { openai: { adapter: "openai-responses", authMode: "forward", baseUrl: "https://chatgpt.com/backend-api/codex" } },
     codexMainAccountHardLock: false, accountPoolStrategy: "quota", autoSwitchThreshold: 0, activeCodexAccountId: SEAT,
     creditCodexAccountIds: [], codexAccounts: [{ id: SEAT, email: `${SEAT}@example.test`, isMain: false, plan: "pro" }],
   };
@@ -58,6 +59,18 @@ function spendIncluded(id: string) { updateAccountQuota(id, 100, now + 86_400_00
 function spendReserve(id: string) {
   setAccountQuotaFromParsed(id, { customWindows: [{ label: "Luna Reserve", percent: 100, resetAt: now + 604_800_000, observedAt: now }] });
 }
+
+test("the included-only retry uses stored capacity even when main is preferred", async () => {
+  const cfg = config();
+  cfg.activeCodexAccountId = MAIN;
+  cfg.creditCodexAccountIds = [MAIN];
+  writeFileSync(join(home, "auth.json"), JSON.stringify({ tokens: { access_token: "fixture-main-access", account_id: "fixture-main-workspace" } }));
+  updateAccountQuota(MAIN, 10, now + 86_400_000);
+  updateAccountQuota(SEAT, 40, now + 86_400_000);
+  const options = { modelId: "gpt-6-luna", isMainAccountTokenLive: () => true };
+  expect((await resolveCodexAuthContext(new Headers(), cfg, "pool", options)).accountId).toBe(MAIN);
+  expect((await resolveCodexAuthContext(new Headers(), cfg, "pool", { ...options, poolCapacityIntent: "included-only" })).accountId).toBe(SEAT);
+});
 
 test("__main__ without a credential is never a candidate, for Reserve or for included Luna", () => {
   spendIncluded(SEAT); updateAccountQuota(MAIN, 40, now + 86_400_000);

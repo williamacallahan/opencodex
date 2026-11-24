@@ -779,7 +779,7 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
             // hardening deadline can settle before its child exits, so also wait for that
             // child's reap before stop() promises the directory is removable. The spend owner
             // is retained when a listener stop failed because the socket may live.
-            try { if (listenersStopped) { codexHealthCooldownStore.flushForShutdown(); spendLedgerLifecycle.release(); } }
+            try { if (listenersStopped) { try { codexHealthCooldownStore.flushForShutdown(); } finally { spendLedgerLifecycle.release(); } } }
             finally { await flushConfigDirHardeningAndReaps(startupConfigDir); }
           }
         },

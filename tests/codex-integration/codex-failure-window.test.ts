@@ -10,6 +10,7 @@ import { deleteCodexAccount, reconcileMainCodexAccountRuntimeState, resetMainCod
 import { captureMainQuotaWriter, clearMainAccountInfoCache } from "../../src/codex/main-account-cache";
 import { MAIN_CODEX_ACCOUNT_ID } from "../../src/codex/account-id";
 import { captureConfigGeneration } from "../../src/lib/state-store-sweeper";
+import { getCodexQuotaHealthSnapshot } from "../../src/codex/routing/health-store";
 import { codexForwardTerminalOutcomeRecorder, sidecarOutcomeRecorder } from "../../src/server/responses/core-codex-account";
 import { clearAccountNeedsReauth, clearAccountQuota, updateAccountQuota } from "../../src/codex/auth-api";
 import {
@@ -122,6 +123,17 @@ function poolTerminal(config: OcxConfig) {
     accessToken: record.credential!.accessToken, chatgptAccountId: record.credential!.chatgptAccountId, fixedAccount: true,
   });
 }
+
+test("a late Pool quota refusal cannot cool a replacement credential", () => {
+  const cfg = config();
+  const old = poolTerminal(cfg);
+  const credential = readCodexAccountRecord("a")!.credential!;
+  saveCodexAccountCredential("a", { ...credential, accessToken: "replacement-access" });
+  old("failed", 429);
+  expect(getCodexQuotaHealthSnapshot("a", "shared")).toBeNull();
+  poolTerminal(cfg)("failed", 429);
+  expect(getCodexQuotaHealthSnapshot("a", "shared")?.cooldownUntil).toBeGreaterThan(Date.now());
+});
 
 test("late terminal outcomes cannot refill a replacement main failure window", () => {
   const cfg = config({ activeCodexAccountId: MAIN_CODEX_ACCOUNT_ID });

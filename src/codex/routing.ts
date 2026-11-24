@@ -67,7 +67,7 @@ import {
   type CodexQuotaScope,
   type CodexUpstreamHealth,
 } from "./routing/health-store";
-import { ownsProbeLease, probeMayClearCooldown, withProbeLeaseReleased } from "./routing/probe-lease";
+import { ownsProbeLease, probeMayClearCooldown, releaseCodexQuotaProbeLease, releaseCodexQuotaScopeProbeLease, withProbeLeaseReleased } from "./routing/probe-lease";
 // `./routing/probe-lease` above is the QUOTA-COOLDOWN lease; the module below owns the
 // unrelated TRANSIENT-HOLD trial and the pool-wide recovery bound above it (#4701).
 import {
@@ -1294,20 +1294,15 @@ export function recordCodexUpstreamOutcome(
   if (outcomeClass === "quota" && isRetiredCodexSparkModel(meta.modelId)
       && computeQuotaCooldown(meta).source === "reset-derived") return;
   const quotaScope = meta.poolReserve ? "reserve" : codexQuotaScopeForModel(meta.modelId);
-  /*
-   * Spend a stale credential failure BEFORE any branch reads health (#2892 gap 4 review).
-   *
-   * Reader-side spending alone is not enough: the transient and workspace branches derive their new
-   * entry from the current one, so a spent G1 401 would donate its `consecutiveFailures` to G2's
-   * first genuine 503 and drop the tag while doing it. The account then reaches the failover
-   * threshold one failure early, and no later read can tell. Clearing it here means every branch
-   * starts from evidence that still describes a live credential.
-   */
+  // A stale 401 must not donate its failure count to a later credential's transient outcome (#2892).
   dropSpentCredentialFailure(accountId);
-  if (meta.poolReserve && meta.failureWindowCredentialGeneration !== undefined
-    && !isCodexAccountGenerationLive(accountId, meta.failureWindowCredentialGeneration)) {
-    const scoped = scopedHealthFor(accountId, "reserve");
-    if (scoped && ownsProbeLease(scoped, meta)) setScopedHealth(accountId, "reserve", withProbeLeaseReleased(scoped, now));
+  const credentialGeneration = meta.credentialGeneration ?? meta.failureWindowCredentialGeneration;
+  if ((meta.poolReserve || outcomeClass === "quota") && credentialGeneration !== undefined
+    && !isCodexAccountGenerationLive(accountId, credentialGeneration)) {
+    if (meta.probeLeaseId !== undefined) {
+      if (meta.probeQuotaScope) releaseCodexQuotaScopeProbeLease(accountId, meta.probeQuotaScope, meta.probeLeaseId, now);
+      else releaseCodexQuotaProbeLease(accountId, meta.probeLeaseId, now);
+    }
     return;
   }
   if (outcomeClass === "success") {

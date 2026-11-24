@@ -98,10 +98,11 @@ function sanitizeStoredRow(raw: unknown, scope?: CodexQuotaScope): CodexUpstream
     if (at !== undefined && gen !== undefined) row.reserveSuccess = { at, credentialGeneration: gen };
   }
   // Older releases persisted an escalating local hold. Shorten only that Reserve hold, not upstream advice.
+  const refusalAt = row.lastFailureAt ?? row.cooldownSince;
   if (scope === "reserve" && row.cooldownSource === "default"
-    && (finiteNumber(src.reserveRefusalStreak) ?? 0) > 0 && row.lastFailureAt !== undefined) {
-    row.lastProbeAt ??= row.lastFailureAt;
-    const deadline = row.lastFailureAt + CODEX_DEFAULT_QUOTA_COOLDOWN_MS;
+    && (finiteNumber(src.reserveRefusalStreak) ?? 0) > 0 && refusalAt !== undefined) {
+    row.lastProbeAt ??= refusalAt;
+    const deadline = refusalAt + CODEX_DEFAULT_QUOTA_COOLDOWN_MS;
     if (row.cooldownUntil !== undefined) row.cooldownUntil = Math.min(row.cooldownUntil, deadline);
     if (row.quotaAvoidUntil !== undefined) row.quotaAvoidUntil = Math.min(row.quotaAvoidUntil, deadline);
   }
@@ -349,17 +350,14 @@ class CodexHealthCooldownStore {
     }
     if (!this.boundMaps) return;
     for (let attempt = 0; attempt < SHUTDOWN_ATTEMPTS; attempt += 1) {
-      if (this.flush(this.boundMaps.upstream, this.boundMaps.scoped)) break;
+      if (this.flush(this.boundMaps.upstream, this.boundMaps.scoped)) return;
       if (this.timer) {
         clearTimeout(this.timer);
         this.timer = undefined;
       }
       if (attempt < SHUTDOWN_ATTEMPTS - 1) Bun.sleepSync(SHUTDOWN_RETRY_MS);
     }
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = undefined;
-    }
+    throw new Error("Could not save Codex cooldowns before shutdown");
   }
 }
 

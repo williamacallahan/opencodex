@@ -1106,7 +1106,9 @@ async function resolveCodexAuthContextUnannotated(
   // #7410: automatic Pool resolution under `codexPool.poolOnly` never serves native main. Explicit
   // selectors (fixed account, Reserve) and Direct mode are operator choices outside the policy.
   // Read from the routing config, the same object the shared usability decision reads.
-  const poolOnlyApplies = mode === "pool" && fixedAccountId === undefined && codexPoolOnlyExcludesMain(config);
+  const includedOnly = options.poolCapacityIntent === "included-only";
+  if (includedOnly && (mode !== "pool" || fixedAccountId === MAIN_CODEX_ACCOUNT_ID)) throw new CodexPoolAuthenticationError("Included-only routing requires a stored Codex account");
+  const poolOnlyApplies = includedOnly || (mode === "pool" && fixedAccountId === undefined && codexPoolOnlyExcludesMain(config));
   let quotaScope = codexQuotaScopeForModel(options.modelId);
   // Pool pins and fallback must not resurrect an observed main credential that is cooling
   // down. Unrelated caller-owned credentials and explicit Direct keep their own policy.
@@ -1341,6 +1343,9 @@ async function resolveCodexAuthContextUnannotated(
     let modelEligibleAccountIds = entitledAccountIds
       ? new Set([...entitledAccountIds].filter(candidate => !excludeAccountIds?.has(candidate)))
       : undefined;
+    if (includedOnly && !modelEligibleAccountIds) {
+      modelEligibleAccountIds = new Set((config.codexAccounts ?? []).map(account => account.id).filter(id => id !== MAIN_CODEX_ACCOUNT_ID));
+    }
     if (options.turnStateOwner) {
       const owners = new Set<string>();
       const records = loadCodexAccountRecordSnapshot();

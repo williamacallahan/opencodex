@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync } from "node:fs";
+import { recordCodexUpstreamOutcome } from "../../src/codex/routing";
+import { spendLedgerOwnerSnapshot } from "../../src/lib/spend-ledger-owner";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../../src/config";
@@ -51,6 +53,16 @@ afterEach(async () => {
   isolatedCodexHome?.restore();
   isolatedCodexHome = null;
   if (testDir) removeTreeWithRetry(testDir);
+});
+
+test("server stop reports an unsaved Reserve cooldown and releases the serving home", async () => {
+  const cfg = { ...config(), codexAccounts: [{ id: "seat", email: "seat@example.test", isMain: false }] };
+  saveConfig(cfg);
+  const server = startServer(0);
+  mkdirSync(join(testDir, "codex-health-cooldowns.json"));
+  recordCodexUpstreamOutcome(cfg, "seat", 429, { modelId: "gpt-reserve", poolReserve: true });
+  await expect(server.stop(true)).rejects.toThrow("Could not save Codex cooldowns before shutdown");
+  expect(spendLedgerOwnerSnapshot().ownership).toBe("unheld");
 });
 
 test("server.stop(true) waits for the config-dir ACL flight the startup loadConfig started", async () => {
