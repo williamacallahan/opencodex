@@ -21,7 +21,7 @@ function errorResponse(ctx: ManagementContext, error: ProfileActionError): Respo
 }
 
 export async function handleGetProfileRoute(ctx: ManagementContext): Promise<Response> {
-  const snapshot = await buildProfileStatusSnapshot({ cachePreview: true });
+  const snapshot = await buildProfileStatusSnapshot({ preview: "background" });
   // A profile connected from the CLI while this proxy runs: start its loop on the next read.
   if ((snapshot.connected || snapshot.unreadable) && !isProfileSchedulerRunning()) startProfileScheduler();
   return jsonResponse({ ok: true, ...snapshot }, 200, ctx.req, ctx.config);
@@ -73,7 +73,7 @@ export async function handlePostProfileRoute(ctx: ManagementContext): Promise<Re
       avatar: record.avatar,
     });
     nudgeProfileScheduler();
-    const snapshot = await buildProfileStatusSnapshot();
+    const snapshot = await buildProfileStatusSnapshot({ preview: "background" });
     return jsonResponse({ ok: true, ...snapshot, profile }, 200, ctx.req, ctx.config);
   } catch (error) {
     if (error instanceof ProfileActionError) return errorResponse(ctx, error);

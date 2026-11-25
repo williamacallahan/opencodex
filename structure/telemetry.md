@@ -41,8 +41,14 @@ Casual-path consent guards require human interaction before transitioning an und
 - `GET /api/telemetry` (`buildTelemetryStatusSnapshot` in `src/telemetry/routes.ts`) builds `preview`
   for the same completed UTC day the scheduler would send next (oldest eligible unsent day, with
   `previewEligible: true`), or previews the latest completed UTC day with `previewEligible: false`
-  when no day is eligible to be sent. It reads consent from `config.json` on disk, like the scheduler,
-  and reuses a day's aggregate for `TELEMETRY_PREVIEW_CACHE_MS` because the dashboard polls it.
+  when no day is eligible to be sent. It reads consent from `config.json` on disk, like the scheduler.
+  A day's aggregate scans `usage.jsonl` from its first byte, so the GET and PUT routes (and the
+  profile routes) never await it: `telemetryPreviewAggregate` in `src/telemetry/preview-aggregate.ts`
+  answers from one shared background build per home, ledger file identity and UTC day, serving the
+  completed aggregate for `TELEMETRY_PREVIEW_FRESH_MS` (10 minutes) and the previous one while a
+  rebuild picks up late appends. Until a build completes the snapshot carries `preview: null` with
+  `previewStatus: "pending"`, or `"unavailable"` after a failed build (retried after a minute); never
+  an empty object. The CLI's local fallback and every send build a complete aggregate of their own.
 - `ocx telemetry enable` in `src/cli/telemetry.ts` requires an interactive human terminal (`isatty`
   on both stdin and stdout, not `OCX_SERVICE`, and not `isAgentDriven()`), prints the full
   disclosure block, asks a `[Y/n]` confirmation prompt (default yes), and records `accepted`;

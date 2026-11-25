@@ -2,6 +2,7 @@ import { getConfigDir } from "../../config/paths";
 import { isTelemetryEnvOptOut } from "../consent";
 import { formatUtcDay } from "../state";
 import { aggregateTelemetryForDay } from "../aggregate";
+import { telemetryPreviewAggregate } from "../preview-aggregate";
 import { createProfile, deleteProfile, fetchOwnProfileRank, type ProfileClientOptions } from "./client";
 import {
   PROFILE_SCHEMA_VERSION,
@@ -45,8 +46,9 @@ export interface ProfileStatusSnapshot {
   telemetryEffective: boolean;
   nextDay: string | null;
   nextDayReason: string;
-  /** Exactly what the next send would contain, or null. */
+  /** Exactly what the next send would contain, or null (`previewStatus` says whether one is coming). */
   preview: ProfileDayV1 | null;
+  previewStatus: "ready" | "pending" | "unavailable" | "none";
 }
 
 export interface ProfileServiceOptions extends ProfileClientOptions {
@@ -55,18 +57,16 @@ export interface ProfileServiceOptions extends ProfileClientOptions {
   env?: Record<string, string | undefined>;
 }
 
-const PREVIEW_CACHE_MS = 10 * 60 * 1000;
-let previewCache: { configDir: string; connectedAt: string; day: string; at: number; preview: ProfileDayV1 | null } | null = null;
 const RANK_CACHE_MS = 5 * 60 * 1000;
 let rankCache: { configDir: string; handle: string; at: number; rank: ProfileRankV1 } | null = null;
 
 export function resetProfileServiceCachesForTests(): void {
-  previewCache = null;
   rankCache = null;
 }
 
 export async function buildProfileStatusSnapshot(
-  options: ProfileServiceOptions & { cachePreview?: boolean } = {},
+  // `background` is for request handlers: the shared telemetry preview build, never awaited.
+  options: ProfileServiceOptions & { preview?: "await" | "background" } = {},
 ): Promise<ProfileStatusSnapshot> {
   const configDir = options.configDir ?? getConfigDir();
   const now = options.now ?? Date.now();
@@ -76,7 +76,7 @@ export async function buildProfileStatusSnapshot(
   const file = readTelemetryProfileFile(configDir);
   const base = { connected: file.state !== null, unreadable: file.unreadable, telemetryEffective };
   if (!file.state) {
-    return { ...base, profile: null, nextDay: null, nextDayReason: file.unreadable ? "state-unreadable" : "not-connected", preview: null };
+    return { ...base, profile: null, nextDay: null, nextDayReason: file.unreadable ? "state-unreadable" : "not-connected", preview: null, previewStatus: "none" };
   }
   const profile = file.state;
   const next = profile.pendingDelete
@@ -85,16 +85,16 @@ export async function buildProfileStatusSnapshot(
       ? { day: null, reason: "revoked" }
       : resolveNextProfileDay(profile, gate, now);
   let preview: ProfileDayV1 | null = null;
-  if (next.day) {
-    const hit = previewCache;
-    if (options.cachePreview && hit && hit.configDir === configDir && hit.connectedAt === profile.connectedAt && hit.day === next.day && now - hit.at >= 0 && now - hit.at < PREVIEW_CACHE_MS) {
-      preview = hit.preview;
-    } else {
-      preview = buildProfileDay(await aggregateTelemetryForDay(next.day));
-      if (options.cachePreview) previewCache = { configDir, connectedAt: profile.connectedAt, day: next.day, at: now, preview };
-    }
+  let previewStatus: ProfileStatusSnapshot["previewStatus"] = "none";
+  if (next.day && options.preview === "background") {
+    const shared = telemetryPreviewAggregate(next.day, configDir, now);
+    previewStatus = shared.status;
+    if (shared.status === "ready") preview = buildProfileDay(shared.aggregate);
+  } else if (next.day) {
+    preview = buildProfileDay(await aggregateTelemetryForDay(next.day));
+    previewStatus = "ready";
   }
-  return { ...base, profile: toPublicProfileState(profile), nextDay: next.day, nextDayReason: next.reason, preview };
+  return { ...base, profile: toPublicProfileState(profile), nextDay: next.day, nextDayReason: next.reason, preview, previewStatus };
 }
 
 export interface ConnectProfileInput {
@@ -166,7 +166,6 @@ export async function connectTelemetryProfile(
   };
   writeTelemetryProfileState(state, configDir, now);
   rankCache = null;
-  previewCache = null;
   return toPublicProfileState(state);
 }
 
@@ -200,7 +199,6 @@ export async function disconnectTelemetryProfile(options: ProfileServiceOptions 
   if (!state) return { status: "not_connected" };
   if (!state.pendingDelete) writeTelemetryProfileState({ ...state, pendingDelete: true, retryAfterUntil: null }, configDir, now);
   rankCache = null;
-  previewCache = null;
   const result = await deleteProfile(state.secret, options);
   if (result.deleted) {
     if (deleteTelemetryProfileFile(configDir)) return { status: "deleted" };

@@ -7,6 +7,7 @@ import type { ManagementPrincipal } from "../../src/server/management-auth";
 import type { ManagementRequestIngress } from "../../src/server/management/context";
 import { TELEMETRY_PREVIEW_HASH_PLACEHOLDER, readTelemetryInstallId, resetTelemetryInstallIdMemoForTests, telemetryIdPath } from "../../src/telemetry/install-id";
 import { buildTelemetryStatusSnapshot } from "../../src/telemetry/routes";
+import { resetTelemetryPreviewAggregateForTests, settleTelemetryPreviewBuildForTests } from "../../src/telemetry/preview-aggregate";
 import { latestCompletedUtcDay, readTelemetryState, recordPendingTelemetryDecision, runTelemetryTick } from "../../src/telemetry/scheduler";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -83,9 +84,18 @@ describe("/api/telemetry management routes", () => {
     };
   }
 
-  test("GET /api/telemetry returns status and preview with placeholder hash without creating an id", async () => {
+  test("GET /api/telemetry answers pending instead of waiting for the day's scan, then serves the completed preview", async () => {
+    resetTelemetryPreviewAggregateForTests();
+    const pending = await call("GET", "/api/telemetry");
+    expect(pending.status).toBe(200);
+    expect(pending.body).toMatchObject({ preview: null, previewStatus: "pending", previewEligible: false });
+    await settleTelemetryPreviewBuildForTests();
     const res = await call("GET", "/api/telemetry");
     expect(res.status).toBe(200);
+    expect(res.body.previewStatus).toBe("ready");
+    const awaited = await buildTelemetryStatusSnapshot(config, { env: {}, configDir: home });
+    // Every field but the per-send random batch id comes from the same rows.
+    expect({ ...(res.body.preview as object), batchId: null }).toEqual({ ...JSON.parse(JSON.stringify(awaited.preview)), batchId: null });
     expect(res.body).toMatchObject({
       effective: false,
       reason: "awaiting-notice",
@@ -115,7 +125,7 @@ describe("/api/telemetry management routes", () => {
       { now, env: {}, configDir: home },
     );
     expect(sameDaySnap.previewEligible).toBe(false);
-    expect(sameDaySnap.preview.day).toBe("2026-11-06");
+    expect(sameDaySnap.preview?.day).toBe("2026-11-06");
 
     // 2. Consent given on 2026-11-04 -> eligible unsent days are 2026-11-05 and 2026-11-06;
     // preview shows 2026-11-05 (the exact day the scheduler will send next) with previewEligible=true.
@@ -128,7 +138,7 @@ describe("/api/telemetry management routes", () => {
     };
     const firstSnap = await buildTelemetryStatusSnapshot(eligibleConfig, { now, env: {}, configDir: home });
     expect(firstSnap.previewEligible).toBe(true);
-    expect(firstSnap.preview.day).toBe("2026-11-05");
+    expect(firstSnap.preview?.day).toBe("2026-11-05");
 
     // Scheduler sends 2026-11-05; next preview moves to 2026-11-06 with previewEligible=true:
     const tick1 = await runTelemetryTick({
@@ -142,7 +152,7 @@ describe("/api/telemetry management routes", () => {
 
     const secondSnap = await buildTelemetryStatusSnapshot(eligibleConfig, { now, env: {}, configDir: home });
     expect(secondSnap.previewEligible).toBe(true);
-    expect(secondSnap.preview.day).toBe("2026-11-06");
+    expect(secondSnap.preview?.day).toBe("2026-11-06");
 
     // Scheduler sends 2026-11-06; now no eligible day remains, so previewEligible=false on 2026-11-06:
     const tick2 = await runTelemetryTick({
@@ -156,7 +166,7 @@ describe("/api/telemetry management routes", () => {
 
     const thirdSnap = await buildTelemetryStatusSnapshot(eligibleConfig, { now, env: {}, configDir: home });
     expect(thirdSnap.previewEligible).toBe(false);
-    expect(thirdSnap.preview.day).toBe("2026-11-06");
+    expect(thirdSnap.preview?.day).toBe("2026-11-06");
   });
 
   test("PUT /api/telemetry refuses admin-token and remembered-admin sessions, and POST /api/telemetry/notice is removed (D13)", async () => {

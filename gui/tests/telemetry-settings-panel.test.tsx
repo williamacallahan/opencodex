@@ -36,6 +36,7 @@ function makeStatus(overrides: Partial<TelemetryStatusSnapshot> = {}): Telemetry
     installChannel: "npm-global",
     lastSentDay: "2026-11-06",
     lastSentAt: "2026-11-07T01:00:00.000Z",
+    previewStatus: "ready",
     preview: {
       schemaVersion: 1,
       batchId: "00000000-0000-4000-8000-000000000002",
@@ -266,6 +267,18 @@ test("preview dialog shows 'This day would not be sent' when previewEligible is 
   expect(dialog?.querySelector(".telemetry-preview-ineligible")?.textContent).toBe(
     "This day would not be sent",
   );
+});
+
+test("a preview the server is still building shows why instead of an empty {} object", async () => {
+  // The wire shape a pending server sends; parseTelemetryStatus runs on it inside the panel.
+  statusResponse = { ...makeStatus(), preview: null, previewStatus: "pending" } as unknown as TelemetryStatusSnapshot;
+  await mountPanel();
+  await act(async () => {
+    click(host.querySelector<HTMLButtonElement>(".telemetry-preview-trigger")!);
+  });
+  const dialog = host.querySelector<HTMLDialogElement>("dialog.telemetry-preview-overlay");
+  expect(dialog?.querySelector("pre.telemetry-preview-json")).toBeNull();
+  expect(dialog?.querySelector(".telemetry-preview-pending")?.textContent).toContain("still being prepared");
 });
 
 test("never stacks preview dialog over an open TelemetryConsentCard and opens once the consent dialog closes", async () => {

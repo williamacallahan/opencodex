@@ -41,6 +41,7 @@ function makeStatus(overrides: Partial<TelemetryStatusSnapshot> = {}): Telemetry
     installChannel: "npm-global",
     lastSentDay: null,
     lastSentAt: null,
+    previewStatus: "ready",
     preview: {
       schemaVersion: 1,
       batchId: "00000000-0000-4000-8000-000000000001",

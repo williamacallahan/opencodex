@@ -156,7 +156,10 @@ day the scheduler would send next** (the oldest eligible unsent UTC day within t
 `previewEligible: true`). When no completed UTC day is currently eligible to be sent (for example
 before consent is given, on the UTC day consent was recorded, while disabled, or when all eligible
 days have already been sent), the snapshot previews the latest completed UTC day for inspection and
-returns `previewEligible: false` so it never implies that day will be sent:
+returns `previewEligible: false` so it never implies that day will be sent. The running proxy
+builds that day's preview in the background rather than making the request wait, so right after a
+start or a day change `GET /api/telemetry` returns `preview: null` with `previewStatus: "pending"`
+until the build completes, or `"unavailable"` if it failed:
 
 - **CLI (human-readable + JSON preview)**:
 

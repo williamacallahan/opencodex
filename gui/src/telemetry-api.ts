@@ -21,7 +21,9 @@ export interface TelemetryStatusSnapshot {
   installChannel: string;
   lastSentDay: string | null;
   lastSentAt: string | null;
-  preview: Record<string, unknown>;
+  /** `null` while the server has no completed aggregate for the day; `previewStatus` says why. */
+  preview: Record<string, unknown> | null;
+  previewStatus: "ready" | "pending" | "unavailable";
   previewEligible?: boolean;
 }
 
@@ -64,7 +66,11 @@ export function parseTelemetryStatus(value: unknown): TelemetryStatusSnapshot | 
   const preview =
     raw.preview && typeof raw.preview === "object" && !Array.isArray(raw.preview)
       ? (raw.preview as Record<string, unknown>)
-      : {};
+      : null;
+  // A proxy older than the pending contract always sent a preview object.
+  const previewStatus: TelemetryStatusSnapshot["previewStatus"] = preview
+    ? "ready"
+    : raw.previewStatus === "unavailable" ? "unavailable" : "pending";
   const previewEligible =
     typeof raw.previewEligible === "boolean" ? raw.previewEligible : undefined;
   return {
@@ -78,6 +84,7 @@ export function parseTelemetryStatus(value: unknown): TelemetryStatusSnapshot | 
     lastSentDay: typeof raw.lastSentDay === "string" ? raw.lastSentDay : null,
     lastSentAt: typeof raw.lastSentAt === "string" ? raw.lastSentAt : null,
     preview,
+    previewStatus,
     ...(previewEligible !== undefined ? { previewEligible } : {}),
   };
 }
@@ -92,8 +99,9 @@ export function shouldShowTelemetryConsentPrompt(status: TelemetryStatusSnapshot
   return status.reason === "awaiting-notice" || status.reason === "default-on";
 }
 
-export function formatTelemetryPreviewJson(status: TelemetryStatusSnapshot | null): string {
-  return JSON.stringify(status?.preview ?? {}, null, 2);
+/** The preview as shown, or null when there is none yet: never an empty `{}` that reads as "nothing sent". */
+export function formatTelemetryPreviewJson(status: TelemetryStatusSnapshot | null): string | null {
+  return status?.preview ? JSON.stringify(status.preview, null, 2) : null;
 }
 
 function notifyTelemetryStatusChanged(snapshot: TelemetryStatusSnapshot): void {
