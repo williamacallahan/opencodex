@@ -24,7 +24,7 @@ function ledgerPath(): string {
 }
 
 function row(index: number): PersistedUsageEntry {
-  return { requestId: `req-${index}`, timestamp: NOW, provider: "openai", model: "m", status: 200, durationMs: 1 };
+  return { requestId: `req-${index}`, timestamp: NOW, provider: "openai", model: "m", status: 200, durationMs: 1, usageStatus: "unreported" };
 }
 
 function retiredCounts(): { rows: number; attributions: number } {
@@ -116,6 +116,43 @@ describe("retired usage index reclamation", () => {
     // Raw appends only: nothing reads the index again.
     appendFileSync(ledgerPath(), Array.from({ length: 42 }, (_, index) => `${JSON.stringify(row(10_000 + index))}\n`).join(""));
     await settleUsageFilterIndexReclaimForTests();
+    expect(retiredCounts()).toEqual({ rows: 0, attributions: 0 });
+  });
+
+  test("a reclaimer meeting an exclusive lock never blocks the event loop while it opens the index", async () => {
+    writeFileSync(ledgerPath(), Array.from({ length: 3_000 }, (_, index) => `${JSON.stringify(row(index))}\n`).join(""));
+    await getFilteredUsageAggregate({ provider: "openai" });
+    let holdReclaim = true;
+    resetUsageAggregateCacheForTests();
+    setUsageFilterIndexTestHooksForTests({
+      // Keeps the reclaimer retrying, its connection closed between attempts, until the lock below is held.
+      betweenReclaimCheckAndLock: () => { if (holdReclaim) throw new Error("database is locked"); },
+    });
+    requestUsageFilterIndexRebuild();
+    await getFilteredUsageAggregate({ provider: "openai" });
+    // Another connection holds the index exclusively, so even reading its schema must wait.
+    const holder = new Database(usageFilterIndexPath(testDir));
+    holder.exec("PRAGMA locking_mode = EXCLUSIVE");
+    holder.exec("BEGIN EXCLUSIVE");
+    holder.query("SELECT COUNT(*) FROM usage_filter_index_meta").get();
+    holdReclaim = false;
+    let worstLag = 0;
+    let expected = performance.now() + 10;
+    const timer = setInterval(() => {
+      const now = performance.now();
+      worstLag = Math.max(worstLag, now - expected);
+      expected = now + 10;
+    }, 10);
+    try {
+      await Bun.sleep(700);
+    } finally {
+      clearInterval(timer);
+      holder.exec("COMMIT");
+      holder.close();
+    }
+    await settleUsageFilterIndexReclaimForTests();
+    setUsageFilterIndexTestHooksForTests(null);
+    expect(worstLag).toBeLessThan(100);
     expect(retiredCounts()).toEqual({ rows: 0, attributions: 0 });
   });
 });

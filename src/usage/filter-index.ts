@@ -624,14 +624,19 @@ function registerKeptSidecars(dir: string, path: string): void {
   if (present === 2) sidecarOwnershipChecked.add(path);
 }
 
-function openIndexForWrite(dir: string, path: string): Database {
+/**
+ * `busyTimeoutMs` is installed before the first read. A foreground caller waits briefly for another
+ * writer; background work passes 0 and retries off the event loop, because SQLite's busy wait is a
+ * synchronous sleep.
+ */
+function openIndexForWrite(dir: string, path: string, busyTimeoutMs = SQLITE_BUSY_TIMEOUT_MS): Database {
   const existed = existsSync(path);
   preparePrivateSqliteDatabase(path);
   const db = new Database(path, { create: true });
   try {
     // Before the first read: another process creating or writing the projection holds its lock
     // for a moment, and that must wait (then retry), never read as a foreign file.
-    db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
     const classification = classifyDatabase(db);
     if (classification === "foreign") throw new UsageFilterIndexForeignError();
     keepWalSidecars(db);
@@ -975,11 +980,10 @@ async function reclaimUntilDone(dir: string, path: string, current: () => boolea
 
 async function reclaimRetiredGenerations(dir: string, path: string): Promise<void> {
   if (getConfigDir() !== dir || !existsSync(path)) return;
-  const db = openIndexForWrite(dir, path);
+  // A held lock fails at once, from the first schema read on, and is retried by the caller off
+  // the event loop.
+  const db = openIndexForWrite(dir, path, 0);
   try {
-    // A held lock fails at once and is retried by the caller off the event loop, never waited
-    // for here: busy_timeout sleeps synchronously.
-    db.exec("PRAGMA busy_timeout = 0");
     for (;;) {
       const { candidates, orphanLease } = retiredGenerationCandidates(db, metaText(db, META_KEYS.generation));
       if (candidates.length === 0 && !orphanLease) return;

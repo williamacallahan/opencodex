@@ -165,7 +165,8 @@ loop for seconds (1.7 s, 1.3 s and a 1.3 s commit on a 725,946-row index), so th
 at most 2,000 rows per table per transaction in primary-key order (for attributions the whole
 `(byte_offset, provider, model)` key, since one ledger row can carry thousands), commits, and yields a
 timer turn before the next batch; the registry and lease rows go with the last batch. Another
-writer's lock fails a batch at once (busy timeout 0, so the event loop never waits on it); the
+writer's lock fails the reclaimer at once, from its first schema read on (it opens the index with
+busy timeout 0, so the event loop never waits on it); the
 reclaimer closes its connection and tries again after a backoff from 50 ms capped at 2 s, so the
 backlog drains after the lock is released without another index read. A generation whose writer
 is alive is never reclaimed. The registry row and the lease commit together, and every batch re-reads
