@@ -167,14 +167,39 @@ function removeSupersededSegments(archivePath: string, sourceIno: string): void 
       if (path === archivePath) continue;
       eachEntry(path, "a superseded archive segment", () => {
         // Shorter: every row it holds is in the new segment. Longer, with the new segment its prefix (a
-        // trim killed before its rename, then a smaller cut after the limit was raised): the rows past the
-        // new segment's end are in the ledger just published. Either way the shorter is the longer's prefix.
-        const size = Math.min(statSync(path).size, archiveSize);
-        if (isPrefixOf(path, size, archiveFd)) removeLeftover(directory, leftover, "a superseded archive segment");
+        // trim killed before its rename, then a smaller cut after the limit was raised): its bytes past the
+        // new segment's end must also be the head of the ledger just published, which a ledger rolled back
+        // to an older snapshot with the same inode would not hold; then it is the only copy and stays.
+        const leftoverSize = statSync(path).size;
+        if (!isPrefixOf(path, Math.min(leftoverSize, archiveSize), archiveFd)) return;
+        if (leftoverSize > archiveSize && !tailIsLedgerHead(path, archiveSize, leftoverSize)) return;
+        removeLeftover(directory, leftover, "a superseded archive segment");
       });
     }
   } finally {
     closeSync(archiveFd);
+  }
+}
+
+/** Whether bytes `[from, to)` of the file at `path` are the first bytes of the live ledger, compared one chunk at a time. */
+function tailIsLedgerHead(path: string, from: number, to: number): boolean {
+  const ledgerFd = openSync(usageLogPath(), "r");
+  const segmentFd = openSync(path, "r");
+  try {
+    if (Number(fstatSync(ledgerFd).size) < to - from) return false;
+    const segment = Buffer.allocUnsafe(COPY_CHUNK_BYTES);
+    const ledger = Buffer.allocUnsafe(COPY_CHUNK_BYTES);
+    for (let position = 0; position < to - from;) {
+      const length = Math.min(COPY_CHUNK_BYTES, to - from - position);
+      const segmentRead = readSync(segmentFd, segment, 0, length, from + position);
+      const ledgerRead = readSync(ledgerFd, ledger, 0, length, position);
+      if (segmentRead !== length || ledgerRead !== length || !segment.subarray(0, length).equals(ledger.subarray(0, length))) return false;
+      position += length;
+    }
+    return true;
+  } finally {
+    closeSync(segmentFd);
+    closeSync(ledgerFd);
   }
 }
 

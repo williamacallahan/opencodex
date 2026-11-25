@@ -6,13 +6,12 @@
  *   time, bounded by a row limit and a deadline.
  *
  * Neither route includes rows still in the live ledger: `coverage.liveLedgerSince` says where it
- * begins, and `/api/usage` answers for it. Both attribute a multi-attempt row to its final attempt
- * (the row's top-level provider, model and account), which `attribution` names in each answer.
+ * begins, and `/api/usage` answers for it. Both attribute a row per attempt, as the live summary
+ * does, which `attribution` names in each answer.
  */
 import { REQUEST_HISTORY_MAX_PAGE_SIZE } from "../../routing/history/indexer";
-import {
-  answerArchiveTotals, loadWindowSegments, queueMissingTotals, readArchiveListing, type ArchiveFilter, type ArchiveSegmentState,
-} from "../../usage/archive-query";
+import { answerArchiveTotals, type ArchiveFilter } from "../../usage/archive-answer";
+import { loadWindowSegments, queueMissingTotals, readArchiveListing, type ArchiveSegmentState } from "../../usage/archive-query";
 import { inArchiveRowsReadQueue, readArchivedRows, type ArchivedRowsQuery } from "../../usage/archive-rows";
 import { ARCHIVE_DIMENSIONS, MAX_DATE_MS, type ArchiveDimension } from "../../usage/archive-totals";
 import { parseUsageTimeWindow } from "../../usage/time-range";
@@ -26,8 +25,8 @@ import { requestLogDto } from "./shared";
 const HOUR_MS = 60 * 60 * 1000;
 /** The archive keeps 31 days; a day more lets a caller ask for the whole of it without arithmetic. */
 const MAX_TOTALS_WINDOW_MS = 32 * 24 * HOUR_MS;
-/** Buckets and rows carry the row's top-level provider, model and account: its final attempt. */
-const ATTRIBUTION = "final-attempt";
+/** Provider, model and account figures are each attempt's, as the live summary attributes them. */
+const ATTRIBUTION = "per-attempt";
 
 export class ArchiveQueryError extends Error {
   constructor(readonly code: string, message: string) {
@@ -106,9 +105,9 @@ async function archiveTotalsResponse(ctx: ManagementContext): Promise<Response> 
   const since = Math.floor(window.since / HOUR_MS) * HOUR_MS;
   const until = Math.ceil(window.until / HOUR_MS) * HOUR_MS;
   const listing = await readArchiveListing();
-  const states = await loadWindowSegments(listing, since, until);
-  queueMissingTotals(states);
-  const answer = await answerArchiveTotals(listing, states, since, until, filter);
+  const answer = await answerArchiveTotals(listing, since, until, filter);
+  queueMissingTotals(answer.windowSegments);
+  const capped = answer.foldedRows > 0 || answer.overlapRowsDropped > 0 || ARCHIVE_DIMENSIONS.some(dimension => answer.overflowRows[dimension] > 0);
   const breakdowns = Object.fromEntries(ARCHIVE_DIMENSIONS.map(dimension => [breakdownName(dimension), answer.byDimension[dimension]]));
   return jsonResponse({
     since: new Date(since).toISOString(),
@@ -124,6 +123,11 @@ async function archiveTotalsResponse(ctx: ManagementContext): Promise<Response> 
       failed: failedCoverage(answer.failedSegments),
       duplicateSegments: listing.skipped.length,
       unparsableRows: answer.unparsableRows,
+      // Per-segment caps folded some keys into `(other)`: a filtered or per-dimension figure may undercount.
+      capped,
+      overflowRows: answer.overflowRows,
+      foldedRows: answer.foldedRows,
+      overlapRowsDropped: answer.overlapRowsDropped,
       liveLedgerSince: isoOrNull(listing.liveLedgerSince),
     },
     summary: answer.summary,
@@ -159,12 +163,15 @@ async function archiveRowsResponse(ctx: ManagementContext): Promise<Response> {
     if (error instanceof ArchiveQueryError) return archiveQueryErrorResponse(ctx, error);
     throw error;
   }
+  // An abandoned request stops its read, or its wait for a turn, at once instead of at the deadline.
+  const abandoned = ctx.req.signal;
   const queued = await inArchiveRowsReadQueue(ARCHIVE_ROWS_DEADLINE_MS, async () => {
     const listing = await readArchiveListing();
     const states = await loadWindowSegments(listing, query.since, query.until);
     queueMissingTotals(states);
-    return { listing, result: await readArchivedRows(states, query, AbortSignal.timeout(ARCHIVE_ROWS_DEADLINE_MS)) };
-  });
+    const deadline = AbortSignal.any([AbortSignal.timeout(ARCHIVE_ROWS_DEADLINE_MS), abandoned]);
+    return { listing, result: await readArchivedRows(states, query, deadline) };
+  }, abandoned);
   if (queued.kind === "busy") {
     const response = jsonResponse({ error: { code: "archive_rows_busy", message: "another archive row read is running; retry shortly" } }, 503, ctx.req, ctx.config);
     response.headers.set("Retry-After", "1");
@@ -181,6 +188,8 @@ async function archiveRowsResponse(ctx: ManagementContext): Promise<Response> {
     entries: result.rows.map(row => requestLogDto(requestLogEntryFromPersistedUsage(row, { projectDiagnostics }), { includeDecodeRate: false, projectDiagnostics })),
     endedBy: result.endedBy,
     truncated: result.endedBy !== "window-end",
+    // Segments in the window without totals (pending or failed) were not read, so rows may be missing.
+    incomplete: result.endedBy !== "window-end" || result.pending.length > 0,
     coverage: {
       segments: result.segments,
       pending: pending.length > 0,

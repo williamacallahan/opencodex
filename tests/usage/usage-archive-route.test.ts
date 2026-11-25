@@ -35,6 +35,7 @@ interface TotalsBody {
   summary: ArchiveSumsBody;
   byHour: Array<{ key: string } & ArchiveSumsBody>;
   byProvider: BreakdownBody;
+  byModel: BreakdownBody;
   byHarness: BreakdownBody;
   byClientHost: BreakdownBody;
   byAccount: BreakdownBody;
@@ -248,6 +249,53 @@ describe("GET /api/usage/archive", () => {
     const { body } = await archiveGet(`${all}&clientAddress=${encodeURIComponent("::ffff:192.0.2.10")}&harness=${encodeURIComponent(" claude_code ")}`);
     expect(body.summary.requests).toBe(rows.filter(row => row.clientAddress === "192.0.2.10" && row.client === "claude_code").length);
     expect(body.summary.requests).toBeGreaterThan(0);
-    expect(body.attribution).toBe("final-attempt");
+    expect(body.attribution).toBe("per-attempt");
+  });
+
+  test("a segment named after its first row still counts an earlier-stamped row appended after it", async () => {
+    // The request stamped 13:59 completed after the 14:00:07 row, so the segment is named 14:00:07.
+    const at = Date.UTC(2026, 10, 3, 14, 0, 7);
+    const rows = [{ ...archiveRow(0), timestamp: at }, { ...archiveRow(1), timestamp: at - 68_000 }];
+    const path = writeSegment(archiveDirectory(), "514", jsonl(rows), iso(at).replaceAll(":", "-"));
+    const query = window(at - 2 * HOUR, Date.UTC(2026, 10, 3, 14));
+    // Not built yet: the name less the append slack still reaches back into the window.
+    expect((await archiveGet(query)).body.coverage).toMatchObject({ segments: 1, pending: true });
+    await scheduleArchiveTotalsBuild(path);
+    expect((await archiveGet(query)).body.summary.requests).toBe(1);
+  });
+
+  test("coverage reports the per-segment caps, so a caller knows a breakdown may fold keys", async () => {
+    const rows = Array.from({ length: 1_010 }, (_, index) => ({ ...archiveRow(0, 0), requestId: `cap-${index}`, clientHost: `host-${index}` }));
+    await builtSegment("515", rows);
+    const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR));
+    expect(body.coverage).toMatchObject({ capped: true, foldedRows: 0, overflowRows: { clientHost: 10 } });
+    expect(body.summary.requests).toBe(1_010);
+  });
+
+  test("a breakdown with thousands of keys still returns its top 200 in order", async () => {
+    const rows = Array.from({ length: 2_500 }, (_, index) => ({ ...archiveRow(0, 0), requestId: `many-${index}`, model: `model-${index % 900}` }));
+    await builtSegment("517", rows);
+    const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR));
+    expect(body.byModel.rows).toHaveLength(200);
+    expect(body.byModel.truncated).toBe(700);
+    const counts = body.byModel.rows.map(row => row.requests);
+    expect(counts).toEqual([...counts].sort((left, right) => right - left));
+    expect(counts[0]).toBe(3);
+  });
+
+  test("the live head is read again after an archive write, so a reused inode never hides a published segment", async () => {
+    // The ledger the trim cut keeps its inode in place here, as a filesystem reusing a retired inode would.
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    const old = archiveRows(5);
+    writeFileSync(usageLogPath(), jsonl(old));
+    const ino = String(statSync(usageLogPath(), { bigint: true }).ino);
+    const all = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 24 * HOUR);
+    await builtSegment(ino, old, iso(old[0]!.timestamp).replaceAll(":", "-"));
+    // While the ledger starts with those rows, the segment is an unpublished trim of it.
+    expect((await archiveGet(all)).body.summary.requests).toBe(0);
+    // The trim publishes: the new ledger, on the same inode, starts later; the segment now counts.
+    writeFileSync(usageLogPath(), jsonl(archiveRows(2, undefined, 50)));
+    noteArchiveChanged();
+    expect((await archiveGet(all)).body.summary.requests).toBe(5);
   });
 });

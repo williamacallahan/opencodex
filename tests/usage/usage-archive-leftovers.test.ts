@@ -83,4 +83,17 @@ describe("usage archive leftover cleanup", () => {
     // The archive followed by the live ledger is still the original ledger, each row once.
     expect(Buffer.concat([readFileSync(join(archiveDirectory(), published)), readFileSync(usageLogPath())]).equals(ledger)).toBe(true);
   });
+
+  test("a longer leftover whose rows past the new segment are not the published ledger's head is kept", () => {
+    // The ledger was rolled back to an older snapshot on the same inode while the archive was not:
+    // the leftover's tail differs from what the ledger now holds, so it may be the only copy.
+    const ledger = writeLedger();
+    const ino = ledgerIno();
+    const longCut = rowEnd(ledger, ledger.byteLength - 20 * 16 * 1024);
+    const diverged = Buffer.from(ledger.subarray(0, longCut));
+    diverged[longCut - 100] = 0x79;
+    const leftover = archived(`2026-11-01T08-30-00.000Z_${ino}-${longCut}.jsonl`, diverged, 60_000);
+    expect(enforceUsageLedgerSizeLimit(2 * 1024 * 1024).kind).toBe("replaced");
+    expect(readdirSync(archiveDirectory())).toContain(leftover);
+  });
 });

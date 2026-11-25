@@ -39,5 +39,6 @@
   "usage-archive-route.test.ts": "usage",
   "usage-archive-rows.test.ts": "usage",
   "usage-archive-totals-bounds.test.ts": "usage",
-  "usage-archive-leftovers.test.ts": "usage"
+  "usage-archive-leftovers.test.ts": "usage",
+  "usage-archive-attribution.test.ts": "usage"
 }

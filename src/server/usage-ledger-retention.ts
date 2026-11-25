@@ -133,28 +133,47 @@ export function setUsageLedgerRetention(maxBytes: number | undefined, options: {
 
 /** The first minute after listen belongs to startup work and the first requests, not a segment scan. */
 const ARCHIVE_TOTALS_STARTUP_DELAY_MS = 60_000;
+/** Segments built per background pass, newest first. A build of a 100 MB segment takes a few seconds. */
+export const ARCHIVE_TOTALS_PASS_SEGMENTS = 4;
+/** Idle time between passes, so a backlog of hundreds of segments keeps the loop busy only briefly per pass. */
+export const ARCHIVE_TOTALS_PASS_INTERVAL_MS = 5 * 60_000;
 let archiveTotalsStartupTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * Build totals for segments that have none (written before totals existed, a crash, a format bump),
- * once, a minute after the server starts serving, so the first archive read after a restart is not
- * all `pending`. Scheduled from the background lifecycle's startup run, beside the storage policy's;
- * the timer is unref'd and the work itself is a dynamic import, so startup pays one timer.
+ * starting a minute after the server starts serving, so the first archive read after a restart is not
+ * all `pending`. Each pass builds at most {@link ARCHIVE_TOTALS_PASS_SEGMENTS} segments, newest first,
+ * and re-arms after {@link ARCHIVE_TOTALS_PASS_INTERVAL_MS} while any remain. Scheduled from the
+ * background lifecycle's startup run, beside the storage policy's; the timers are unref'd and the work
+ * itself is a dynamic import, so startup pays one timer. A failed pass warns and does not re-arm.
  */
-export function scheduleArchiveTotalsStartupBuild(delayMs = ARCHIVE_TOTALS_STARTUP_DELAY_MS): void {
+export function scheduleArchiveTotalsStartupBuild(
+  delayMs = ARCHIVE_TOTALS_STARTUP_DELAY_MS,
+  pass: { segments: number; intervalMs: number } = { segments: ARCHIVE_TOTALS_PASS_SEGMENTS, intervalMs: ARCHIVE_TOTALS_PASS_INTERVAL_MS },
+): void {
   if (archiveTotalsStartupTimer) return;
+  const generation = archiveTotalsPassGeneration;
   archiveTotalsStartupTimer = setTimeout(() => {
-    archiveTotalsStartupTimer = null;
     void import("../usage/archive-query")
-      .then(({ buildMissingArchiveTotals }) => buildMissingArchiveTotals())
+      .then(({ buildMissingArchiveTotals }) => buildMissingArchiveTotals(pass.segments))
+      .then(remaining => {
+        if (generation !== archiveTotalsPassGeneration) return;
+        archiveTotalsStartupTimer = null;
+        if (remaining > 0) scheduleArchiveTotalsStartupBuild(pass.intervalMs, pass);
+      })
       .catch(error => {
+        if (generation === archiveTotalsPassGeneration) archiveTotalsStartupTimer = null;
         console.warn(`[usage-archive] hourly totals for existing segments could not be built: ${error instanceof Error ? error.message : String(error)}`);
       });
   }, delayMs);
   archiveTotalsStartupTimer.unref?.();
 }
 
+/** Bumped by a stop, so a pass already running when the lifecycle stops never re-arms. */
+let archiveTotalsPassGeneration = 0;
+
 export function stopArchiveTotalsStartupBuild(): void {
+  archiveTotalsPassGeneration += 1;
   if (archiveTotalsStartupTimer) clearTimeout(archiveTotalsStartupTimer);
   archiveTotalsStartupTimer = null;
 }
