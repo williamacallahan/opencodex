@@ -43,6 +43,7 @@ function unavailableConfigMutationReason(snapshot: ConfigFileSnapshot): "missing
  */
 export function mutatePersistedConfig<T>(
   mutate: (config: OcxConfig) => PersistedConfigMutation<T>,
+  options: { callbackWritesOutsideConfig?: boolean } = {},
 ): PersistedConfigMutationOutcome<T> {
   // Avoid creating/opening the coordinator database for a read-path update that already knows
   // there is no valid config. The same check runs again under the transaction for authority.
@@ -50,7 +51,9 @@ export function mutatePersistedConfig<T>(
   if (observed.diagnostics.source !== "file" || observed.raw === undefined) {
     return { status: "unavailable", reason: unavailableConfigMutationReason(observed) };
   }
-  if (!persistedConfigMutationBeforeCommitForTests) {
+  // The unlocked no-op precheck runs the callback outside the lock, so a callback that writes
+  // elsewhere (OS keychain) opts out: its writes must stay serialized with credential cleanup.
+  if (!persistedConfigMutationBeforeCommitForTests && !options.callbackWritesOutsideConfig) {
     const precheck = mutate(structuredClone(observed.diagnostics.config));
     if (!precheck.changed) {
       const rechecked = readConfigFileSnapshot();

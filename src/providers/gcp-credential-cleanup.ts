@@ -51,7 +51,7 @@ export function cleanupRemovedGcpCredentials(markers: readonly string[]): void {
         if (account && !retained.has(account)) providerKeychainEntry(account).deletePassword();
       }
       return { changed: false, value: true };
-    });
+    }, { callbackWritesOutsideConfig: true });
     if (outcome.status === "unavailable") throw new Error("configuration unavailable");
   } catch {
     console.warn("GCP credential cleanup incomplete; inspect the OS credential store. Configuration removal remains committed.");

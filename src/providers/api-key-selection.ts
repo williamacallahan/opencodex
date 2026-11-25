@@ -134,7 +134,7 @@ export function commitProviderApiKeySelection<T>(
       changed: result.changed || notify,
       value: { status: "committed", provider: structuredClone(provider), value: result.value, notify },
     };
-  });
+  }, { callbackWritesOutsideConfig: true });
   if (outcome.status === "unavailable") return { status: "unavailable" };
   const committed = outcome.value;
   if (committed.status !== "unavailable") config.providers[name] = structuredClone(committed.provider);
