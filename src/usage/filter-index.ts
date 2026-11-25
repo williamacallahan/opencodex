@@ -51,8 +51,10 @@
 import { constants as sqliteConstants, Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync } from "node:fs";
+import { dirname } from "node:path";
 import { getConfigDir } from "../config";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
+import { isPassiveRead } from "../lib/passive-read";
 import {
   preparePrivateSqliteDatabase,
   SQLITE_SIDECAR_SUFFIXES,
@@ -73,7 +75,8 @@ import {
   UsageLedgerRebuildRequiredError,
   type UsageLedgerScanResult,
 } from "./ledger-scanner";
-import { LINKED_CLIENT_FOLDED_CLIENTS, USAGE_CODEX_CLIENT_LABELS, type UsageSourceFilter } from "./source-filter";
+import { LINKED_CLIENT_FOLDED_CLIENTS, USAGE_CODEX_CLIENT_LABELS, type UsageSourceFields, type UsageSourceFilter } from "./source-filter";
+import { noteUsageRevision, setDestructiveUsageRevisionListener, usageRevisionIsDestructive } from "./revision-observation";
 import { usageAttributions } from "./summary";
 import type { UsageTimeWindow } from "./time-range";
 
@@ -186,6 +189,8 @@ const META_KEYS = {
   oversizedRows: "oversized_rows",
   minTimestamp: "min_timestamp",
   maxTimestamp: "max_timestamp",
+  validatedInvalidations: "validated_invalidations",
+  sourceInvalidations: "source_invalidations",
 } as const;
 
 /** The file at the index path is not this projection. It is left untouched. */
@@ -255,6 +260,20 @@ export interface UsageFilterIndexQuery {
   window?: UsageTimeWindow;
   /** Inclusive lower bound: the byte after the last row already folded in. */
   afterOffset?: number;
+  /**
+   * Refresh only by ingesting appended rows. Anything that would take a full ingest (a requested
+   * rebuild, another file, a shrink, a rewrite, an ingest already running) throws
+   * {@link UsageFilterIndexRebuildNeededError} instead, so a request never pays for it.
+   */
+  extendOnly?: true;
+}
+
+/** Answering would take a full index ingest, which only a background build may run. */
+export class UsageFilterIndexRebuildNeededError extends Error {
+  constructor() {
+    super("usage filter index needs a full rebuild");
+    this.name = "UsageFilterIndexRebuildNeededError";
+  }
 }
 
 export interface UsageFilterCandidateRead {
@@ -264,11 +283,19 @@ export interface UsageFilterCandidateRead {
   /** Returns the next bounded page of ascending row-start offsets. */
   nextPage(): number[];
   /**
+   * The next page of at most {@link CANDIDATE_PAGE_SIZE} physical indexed rows by ascending offset, as
+   * projected source fields, without reading `usage.jsonl`. The caller applies the window, so a page
+   * can hold no row in it and only `done` ends; each page re-checks schema and generation validity.
+   */
+  nextIndexedRows(): { rows: UsageSourceFields[]; done: boolean };
+  /**
    * Closes the database handle. Pages are not read from one long snapshot: each `nextPage()`
    * re-checks schema and generation inside its own short transaction.
    */
   close(): void;
 }
+
+
 
 /**
  * Counts a caller can assert on.
@@ -329,6 +356,7 @@ interface IndexMeta {
   oversizedRows: number;
   minTimestamp: number | null;
   maxTimestamp: number | null;
+  validatedInvalidations: number;
 }
 
 let ingestFlight: { path: string; promise: Promise<UsageFilterIndexSnapshot> } | null = null;
@@ -410,6 +438,7 @@ function readMeta(db: Database): IndexMeta {
     oversizedRows: metaNumber(db, META_KEYS.oversizedRows),
     minTimestamp: minTimestamp === "" ? null : Number(minTimestamp),
     maxTimestamp: maxTimestamp === "" ? null : Number(maxTimestamp),
+    validatedInvalidations: metaNumber(db, META_KEYS.validatedInvalidations),
   };
 }
 
@@ -430,6 +459,7 @@ function writeMetaStatements(db: Database, meta: IndexMeta): void {
   setMeta(db, META_KEYS.oversizedRows, meta.oversizedRows);
   setMeta(db, META_KEYS.minTimestamp, meta.minTimestamp === null ? "" : meta.minTimestamp);
   setMeta(db, META_KEYS.maxTimestamp, meta.maxTimestamp === null ? "" : meta.maxTimestamp);
+  setMeta(db, META_KEYS.validatedInvalidations, meta.validatedInvalidations);
 }
 
 function emptyMeta(generation: string): IndexMeta {
@@ -444,6 +474,7 @@ function emptyMeta(generation: string): IndexMeta {
     oversizedRows: 0,
     minTimestamp: null,
     maxTimestamp: null,
+    validatedInvalidations: 0,
   };
 }
 
@@ -600,14 +631,15 @@ function registerKeptSidecars(dir: string, path: string): void {
   if (present === 2) sidecarOwnershipChecked.add(path);
 }
 
-function openIndexForWrite(dir: string, path: string): Database {
+/** `busyTimeoutMs` precedes the first read; background work passes 0, since SQLite's busy wait is a synchronous sleep. */
+function openIndexForWrite(dir: string, path: string, busyTimeoutMs = SQLITE_BUSY_TIMEOUT_MS): Database {
   const existed = existsSync(path);
   preparePrivateSqliteDatabase(path);
   const db = new Database(path, { create: true });
   try {
     // Before the first read: another process creating or writing the projection holds its lock
     // for a moment, and that must wait (then retry), never read as a foreign file.
-    db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
     const classification = classifyDatabase(db);
     if (classification === "foreign") throw new UsageFilterIndexForeignError();
     keepWalSidecars(db);
@@ -827,13 +859,6 @@ function later(left: number | null, right: number | null): number | null {
   return Math.max(left, right);
 }
 
-function discardGeneration(db: Database, generation: string): void {
-  db.query("DELETE FROM usage_rows WHERE generation = ?").run(generation);
-  db.query("DELETE FROM usage_attributions WHERE generation = ?").run(generation);
-  db.query("DELETE FROM usage_filter_index_writers WHERE generation = ?").run(generation);
-  db.query("DELETE FROM usage_filter_index_generations WHERE generation = ?").run(generation);
-}
-
 /** Whether the process that staged a generation is still running. EPERM means it exists. */
 function processAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -881,64 +906,127 @@ function endLease(db: Database, generation: string): void {
   db.query("DELETE FROM usage_filter_index_writers WHERE generation = ?").run(generation);
 }
 
-/**
- * Remove staging generations left behind by writers that are gone.
- *
- * Every staging generation writes its lease before its first row and removes it with the rows,
- * so the lease table is the complete set of in-flight generations. A generation is reclaimed
- * only when it is not published and its recorded writer pid is dead; a live writer's staging is
- * never touched, which is what keeps this from repeating the multi-writer row loss it cleans up
- * after. The published generation never has a lease and is never a candidate.
- */
-function reclaimAbandonedStaging(db: Database, path: string, published: string): void {
-  // Cheap pre-check without the write lock: most refreshes have nothing to reclaim.
+/** Removable generations: registered, not published, and not leased by a live writer (staging leases before its first row). */
+function retiredGenerationCandidates(db: Database, published: string): { candidates: string[]; orphanLease: boolean } {
   const generations = db.query(
     "SELECT g.generation AS generation, w.pid AS pid FROM usage_filter_index_generations g LEFT JOIN usage_filter_index_writers w ON w.generation = g.generation",
   ).all() as Array<{ generation: string; pid: number | null }>;
-  const maybe = new Set<string>();
-  for (const entry of generations) {
-    if (entry.generation === published) continue;
-    // No lease means no live writer ever owned it; a dead pid means its writer is gone.
-    if (entry.pid === null || !processAlive(entry.pid)) maybe.add(entry.generation);
-  }
+  const candidates = generations
+    .filter(entry => entry.generation !== published && (entry.pid === null || !processAlive(entry.pid)))
+    .map(entry => entry.generation);
   // A lease whose generation is no longer registered cannot belong to a live writer, because
   // registration and the lease commit together.
   const orphanLease = db.query(
     "SELECT 1 AS present FROM usage_filter_index_writers WHERE generation NOT IN (SELECT generation FROM usage_filter_index_generations) LIMIT 1",
   ).get() !== null;
-  if (maybe.size === 0 && !orphanLease) return;
-  testHooks?.betweenReclaimCheckAndLock?.({ dbPath: path, candidates: [...maybe] });
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    // Re-read under the write lock: a writer may have registered its lease, or a publish may
-    // have moved the watermark, since the pre-check. Eligibility is decided here, not outside.
-    const currentPublished = metaText(db, META_KEYS.generation);
-    for (const generation of maybe) {
-      if (generation === currentPublished) continue;
-      const lease = db.query("SELECT pid FROM usage_filter_index_writers WHERE generation = ?")
-        .get(generation) as { pid: number } | null;
-      if (lease && processAlive(lease.pid)) continue;
-      db.query("DELETE FROM usage_rows WHERE generation = ?").run(generation);
-      db.query("DELETE FROM usage_attributions WHERE generation = ?").run(generation);
-      db.query("DELETE FROM usage_filter_index_writers WHERE generation = ?").run(generation);
-      db.query("DELETE FROM usage_filter_index_generations WHERE generation = ?").run(generation);
-    }
-    // A lease whose generation is no longer registered cannot belong to a live writer:
-    // registration is atomic, so this is a leftover record rather than an active one.
-    db.query(
-      "DELETE FROM usage_filter_index_writers WHERE generation NOT IN (SELECT generation FROM usage_filter_index_generations)",
-    ).run();
-    db.exec("COMMIT");
-  } catch (error) {
-    try { db.exec("ROLLBACK"); } catch { /* the close releases the lock */ }
-    throw error;
+  return { candidates, orphanLease };
+}
+
+/** Rows removed per table per transaction: one batch costs milliseconds, never a whole generation. */
+const RECLAIM_BATCH_ROWS = 2_000;
+let reclaimRun: { path: string; promise: Promise<void> } | null = null;
+let reclaimAgain = false;
+
+/**
+ * Remove retired, failed and abandoned generations in the background, one bounded primary-key batch
+ * per table per committed transaction: a whole-generation DELETE under the write lock stalled the
+ * event loop for seconds (1.7 s, 1.3 s and a 1.3 s COMMIT on a 725,946-row index).
+ */
+function scheduleRetiredGenerationReclaim(dir: string, path: string): void {
+  if (reclaimRun?.path === path) {
+    reclaimAgain = true;
+    return;
   }
+  const run: { path: string; promise: Promise<void> } = { path, promise: Promise.resolve() };
+  run.promise = new Promise<void>(resolve => setTimeout(resolve, 0))
+    .then(() => reclaimUntilDone(dir, path, () => reclaimRun === run))
+    .catch(error => {
+      console.warn(`[usage] retired usage index rows could not be reclaimed yet: ${error instanceof Error ? error.message : String(error)}`);
+    })
+    .finally(() => {
+      if (reclaimRun !== run) return;
+      reclaimRun = null;
+      if (reclaimAgain) {
+        reclaimAgain = false;
+        scheduleRetiredGenerationReclaim(dir, path);
+      }
+    });
+  reclaimRun = run;
+}
+
+const RECLAIM_BUSY_FIRST_DELAY_MS = 50;
+const RECLAIM_BUSY_MAX_DELAY_MS = 2_000;
+
+/** Another writer's lock is transient: retry with capped backoff, connection closed and no transaction open while waiting. */
+async function reclaimUntilDone(dir: string, path: string, current: () => boolean): Promise<void> {
+  for (let delay = RECLAIM_BUSY_FIRST_DELAY_MS; current(); delay = Math.min(delay * 2, RECLAIM_BUSY_MAX_DELAY_MS)) {
+    try {
+      await reclaimRetiredGenerations(dir, path);
+      return;
+    } catch (error) {
+      if (!isBusyError(error)) throw error;
+      await new Promise<void>(resolve => setTimeout(resolve, delay).unref?.());
+    }
+  }
+}
+
+async function reclaimRetiredGenerations(dir: string, path: string): Promise<void> {
+  if (getConfigDir() !== dir || !existsSync(path)) return;
+  // A held lock fails at once, from the first schema read on; the caller retries off the event loop.
+  const db = openIndexForWrite(dir, path, 0);
+  try {
+    for (;;) {
+      const { candidates, orphanLease } = retiredGenerationCandidates(db, metaText(db, META_KEYS.generation));
+      if (candidates.length === 0 && !orphanLease) return;
+      testHooks?.betweenReclaimCheckAndLock?.({ dbPath: path, candidates });
+      for (const generation of candidates) {
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          // Rechecked under the write lock: a lease or a publish may have landed since the check above.
+          const lease = db.query("SELECT pid FROM usage_filter_index_writers WHERE generation = ?")
+            .get(generation) as { pid: number } | null;
+          if (generation !== metaText(db, META_KEYS.generation) && !(lease && processAlive(lease.pid))) {
+            const rows = db.query(
+              "DELETE FROM usage_rows WHERE generation = ? AND byte_offset IN (SELECT byte_offset FROM usage_rows WHERE generation = ? ORDER BY byte_offset LIMIT ?)",
+            ).run(generation, generation, RECLAIM_BATCH_ROWS).changes;
+            // Bounded by attribution rows (the whole key): one ledger row can carry thousands.
+            const attributions = db.query(
+              "DELETE FROM usage_attributions WHERE generation = ? AND (byte_offset, provider, model) IN (SELECT byte_offset, provider, model FROM usage_attributions WHERE generation = ? ORDER BY byte_offset, provider, model LIMIT ?)",
+            ).run(generation, generation, RECLAIM_BATCH_ROWS).changes;
+            if (rows === 0 && attributions === 0) {
+              db.query("DELETE FROM usage_filter_index_writers WHERE generation = ?").run(generation);
+              db.query("DELETE FROM usage_filter_index_generations WHERE generation = ?").run(generation);
+            }
+          }
+          db.exec("COMMIT");
+        } catch (error) {
+          try { db.exec("ROLLBACK"); } catch { /* the close releases the lock */ }
+          throw error;
+        }
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+      }
+      if (orphanLease) {
+        db.query(
+          "DELETE FROM usage_filter_index_writers WHERE generation NOT IN (SELECT generation FROM usage_filter_index_generations)",
+        ).run();
+      }
+    }
+  } finally {
+    db.close();
+  }
+}
+
+/** Resolves once no reclamation is scheduled or running; for tests and benchmarks. */
+export async function settleUsageFilterIndexReclaimForTests(): Promise<void> {
+  while (reclaimRun) await reclaimRun.promise;
 }
 
 /** The watermark a publish must still be standing on: the generation and its cursor. */
 interface PublishFence {
   generation: string;
   indexedOffset: number;
+  /** A full ingest's `source_invalidations` at its start; publication is refused if it moved. */
+  invalidations?: number;
 }
 
 /**
@@ -958,32 +1046,15 @@ function publish(
   db.exec("BEGIN IMMEDIATE");
   try {
     if (metaText(db, META_KEYS.generation) !== fence.generation
-      || metaNumber(db, META_KEYS.indexedOffset) !== fence.indexedOffset) {
+      || metaNumber(db, META_KEYS.indexedOffset) !== fence.indexedOffset
+      || (fence.invalidations !== undefined && sourceInvalidations(db) !== fence.invalidations)) {
       db.exec("ROLLBACK");
       return false;
     }
     writeMetaStatements(db, next);
-    // A published staging generation no longer needs its writer lease.
+    // The replaced generation keeps its registry row with no lease (the retirement record); its rows
+    // are reclaimed in bounded batches after this commit, never in it.
     endLease(db, next.generation);
-    // Delete retired generations by equality. The registry is small and known, so this never
-    // scans the row table under the write lock.
-    const retired = db.query(
-      "SELECT generation FROM usage_filter_index_generations WHERE generation <> ?",
-    ).all(next.generation) as Array<{ generation: string }>;
-    for (const { generation } of retired) {
-      if (generation === "") continue;
-      // A live writer still owns its staging generation. Its own publish will fail the fence
-      // and retry, so leaving it here is what keeps its rows from being deleted mid-ingest.
-      const liveLease = db.query("SELECT pid FROM usage_filter_index_writers WHERE generation = ?")
-        .get(generation) as { pid: number } | null;
-      if (liveLease && processAlive(liveLease.pid)) continue;
-      db.query("DELETE FROM usage_rows WHERE generation = ?").run(generation);
-      db.query("DELETE FROM usage_attributions WHERE generation = ?").run(generation);
-      db.query("DELETE FROM usage_filter_index_generations WHERE generation = ?").run(generation);
-      // Drop a dead writer's record with its generation; a live writer keeps its lease so the
-      // fence can make it retry rather than look abandoned.
-      db.query("DELETE FROM usage_filter_index_writers WHERE generation = ?").run(generation);
-    }
     db.exec("COMMIT");
     return true;
   } catch (error) {
@@ -996,12 +1067,68 @@ function assertHomeUnchanged(dir: string): void {
   if (getConfigDir() !== dir) throw new UsageFilterIndexHomeChangedError();
 }
 
+/**
+ * Generation validity lives in the index database, so restarted, peer and passive readers agree. An
+ * append is judged by size and boundary digest, blind to a shrink another cache saw before regrowth:
+ * every writer-owned observer of a destructive change (`revision-observation.ts`) increments
+ * `source_invalidations`, and a full ingest publishes the count it started under, fenced, as
+ * `validated_invalidations`; equal counts mean valid. Until its increment commits the observer declines
+ * too (`pendingInvalidations`); a passive read only marks it, with `home`, for the next writer to record.
+ */
+const pendingInvalidations = new Map<string, { ticket: number; home?: string }>();
+let invalidationTicket = 0;
+
+function sourceInvalidations(db: Database): number {
+  return metaNumber(db, META_KEYS.sourceInvalidations);
+}
+
+function generationValidated(db: Database, path: string, meta: IndexMeta): boolean {
+  return meta.validatedInvalidations === sourceInvalidations(db) && !pendingInvalidations.has(path);
+}
+
+function recordSourceInvalidation(revision: UsageLogRevision | null): void {
+  if (!revision) return;
+  const dir = dirname(revision.path); // the observed ledger's home, not necessarily this process's
+  const path = usageFilterIndexPath(dir);
+  if (!existsSync(path)) return; // no index yet: its first ingest reads the file as it is now
+  const ticket = ++invalidationTicket;
+  // A passive read opens no write connection and schedules nothing: the mark waits for a writer.
+  pendingInvalidations.set(path, isPassiveRead() ? { ticket, home: dir } : { ticket });
+  if (!isPassiveRead()) persistSourceInvalidation(dir, path, ticket, RECLAIM_BUSY_FIRST_DELAY_MS);
+}
+
+function persistSourceInvalidation(dir: string, path: string, ticket: number, delayMs: number): void {
+  const pending = pendingInvalidations.get(path)?.ticket;
+  if (pending === undefined || pending < ticket) return; // superseded by a replacement
+  try {
+    const db = openIndexForWrite(dir, path, 0);
+    try {
+      db.query(`INSERT INTO ${META_TABLE} (key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1`)
+        .run(META_KEYS.sourceInvalidations);
+    } finally { db.close(); }
+    if (pendingInvalidations.get(path)?.ticket === ticket) pendingInvalidations.delete(path);
+  } catch (error) {
+    if (!isBusyError(error)) {
+      // Left pending: this process keeps declining the generation until it publishes a replacement.
+      console.warn(`[usage] a destructive usage log change could not be recorded in the filter index: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    setTimeout(() => persistSourceInvalidation(dir, path, ticket, Math.min(delayMs * 2, RECLAIM_BUSY_MAX_DELAY_MS)), delayMs).unref?.();
+  }
+}
+
+setDestructiveUsageRevisionListener(recordSourceInvalidation);
+
 async function rebuild(
   db: Database,
   dir: string,
   path: string,
   prior: IndexMeta,
 ): Promise<UsageFilterIndexSnapshot | null> {
+  // A destructive change seen now is recorded before the count this ingest is validated against.
+  noteUsageRevision(currentUsageLogRevision());
+  const validatedAgainst = sourceInvalidations(db);
+  const pendingAtStart = pendingInvalidations.get(path)?.ticket;
   const staging = randomUUID();
   beginStaging(db, path, staging);
   let published = false;
@@ -1019,6 +1146,7 @@ async function rebuild(
       oversizedRows: result.scan.oversizedRows,
       minTimestamp: result.minTimestamp,
       maxTimestamp: result.maxTimestamp,
+      validatedInvalidations: validatedAgainst,
     };
     await testHooks?.beforePublish?.({
       dbPath: path,
@@ -1028,18 +1156,28 @@ async function rebuild(
     // The ledger this ingest read is the live home's; publishing it under another home would
     // mix two installations.
     assertHomeUnchanged(dir);
-    if (!publish(db, { generation: prior.generation, indexedOffset: prior.indexedOffset }, next)) {
+    // A destructive change seen now, here or by any process, retires the staged rows; the caller retries.
+    const live = currentUsageLogRevision();
+    noteUsageRevision(live);
+    if (usageLogIdentityKey(live) !== usageLogIdentityKey(result.scan.revision)
+      || pendingInvalidations.get(path)?.ticket !== pendingAtStart) {
+      return null;
+    }
+    if (!publish(db, { generation: prior.generation, indexedOffset: prior.indexedOffset, invalidations: validatedAgainst }, next)) {
       return null;
     }
     published = true;
+    // An observation this process could not record yet predates this ingest, which supersedes it.
+    if (pendingAtStart !== undefined && pendingInvalidations.get(path)?.ticket === pendingAtStart) pendingInvalidations.delete(path);
+    scheduleRetiredGenerationReclaim(dir, path);
     await testHooks?.afterPublish?.({ dbPath: path, generation: staging });
     hardenSidecars(path);
     return snapshotFrom(next, result.rows, bumpIngestPasses(path));
   } finally {
     if (!published) {
-      // A failed or crashed attempt must not leave its staging behind.
-      discardGeneration(db, staging);
+      // Ending a failed attempt's lease makes its staging a candidate for the same bounded reclamation.
       endLease(db, staging);
+      scheduleRetiredGenerationReclaim(dir, path);
     }
   }
 }
@@ -1090,14 +1228,27 @@ async function refreshOnce(
   db: Database,
   dir: string,
   path: string,
+  extendOnly = false,
 ): Promise<UsageFilterIndexSnapshot | null> {
   assertHomeUnchanged(dir);
+  // A change only a passive read marked is recorded here: the high-water mark has already moved on.
+  const marked = pendingInvalidations.get(path);
+  if (marked?.home !== undefined && !isPassiveRead()) {
+    pendingInvalidations.set(path, { ticket: marked.ticket });
+    persistSourceInvalidation(marked.home, path, marked.ticket, RECLAIM_BUSY_FIRST_DELAY_MS);
+  }
   const meta = readMeta(db);
-  reclaimAbandonedStaging(db, path, meta.generation);
+  const leftovers = retiredGenerationCandidates(db, meta.generation);
+  if (leftovers.candidates.length > 0 || leftovers.orphanLease) scheduleRetiredGenerationReclaim(dir, path);
   const revision = currentUsageLogRevision();
+  const rebuildOrRetry = (db: Database, dir: string, path: string, meta: IndexMeta) => {
+    if (extendOnly) throw new UsageFilterIndexRebuildNeededError();
+    return rebuildOrRetryFull(db, dir, path, meta);
+  };
   if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION
     || !meta.generation
-    || usageLogIdentityKey(meta.revision) !== usageLogIdentityKey(revision)) {
+    || usageLogIdentityKey(meta.revision) !== usageLogIdentityKey(revision)
+    || (noteUsageRevision(revision), !generationValidated(db, path, meta))) {
     return rebuildOrRetry(db, dir, path, meta);
   }
   if (revision === null) return snapshotFrom(meta, 0, ingestPassesFor(path));
@@ -1124,7 +1275,7 @@ async function refreshOnce(
   }
 }
 
-async function rebuildOrRetry(
+async function rebuildOrRetryFull(
   db: Database,
   dir: string,
   path: string,
@@ -1142,11 +1293,12 @@ async function refreshWithRetry(
   db: Database,
   dir: string,
   path: string,
+  extendOnly = false,
 ): Promise<UsageFilterIndexSnapshot> {
   let lastError: unknown;
   for (let attempt = 0; attempt < MAX_REFRESH_ATTEMPTS; attempt += 1) {
     try {
-      const snapshot = await refreshOnce(db, dir, path);
+      const snapshot = await refreshOnce(db, dir, path, extendOnly);
       if (snapshot) return snapshot;
     } catch (error) {
       if (error instanceof UsageLedgerRebuildRequiredError) {
@@ -1171,8 +1323,14 @@ async function refreshWithRetry(
 async function refreshUsageFilterIndex(
   dir: string,
   path: string,
+  extendOnly = false,
 ): Promise<UsageFilterIndexSnapshot> {
-  if (ingestFlight?.path === path) return ingestFlight.promise;
+  // An ingest in flight may be a full rebuild; an extend-only caller never waits on one.
+  if (ingestFlight?.path === path) {
+    if (extendOnly) throw new UsageFilterIndexRebuildNeededError();
+    return ingestFlight.promise;
+  }
+  if (extendOnly && (rebuildRequestedPaths.has(path) || !existsSync(path))) throw new UsageFilterIndexRebuildNeededError();
   const promise = (async () => {
     const db = openIndexForWrite(dir, path);
     try {
@@ -1180,7 +1338,7 @@ async function refreshUsageFilterIndex(
         const rebuilt = await rebuild(db, dir, path, readMeta(db));
         return rebuilt ?? await refreshWithRetry(db, dir, path);
       }
-      return await refreshWithRetry(db, dir, path);
+      return await refreshWithRetry(db, dir, path, extendOnly);
     } finally {
       // A reader in another process can still pin the WAL; then this checkpoint is partial (SQLite
       // reports that as a result row, not an error) and a later writer's TRUNCATE empties it once
@@ -1367,6 +1525,50 @@ function rowAccessIndexWithoutClient(query: UsageFilterIndexQuery): string | nul
 export const CANDIDATE_PAGE_SIZE = 2_000;
 
 /**
+ * Pages `usage_rows` for one generation by physical offset up to the snapshot's indexed offset. No
+ * window predicate: one before the LIMIT made a page scan every row outside the window in one
+ * synchronous step (954 ms on 725,946 rows to return none). The cursor passes every row examined.
+ */
+function indexedRowPager(
+  db: Database,
+  path: string,
+  snapshot: UsageFilterIndexSnapshot,
+  query: UsageFilterIndexQuery,
+): () => { rows: UsageSourceFields[]; done: boolean } {
+  const statement = db.query(
+    "SELECT byte_offset AS byteOffset, timestamp, api_key_id AS apiKeyId, client, surface, admission_kind AS admissionKind"
+    + " FROM usage_rows WHERE generation = ? AND byte_offset > ? AND byte_offset < ? ORDER BY byte_offset LIMIT ?",
+  );
+  let cursor = (query.afterOffset ?? 0) - 1;
+  return () => {
+    db.exec("BEGIN");
+    try {
+      assertPageReadable(db, path, snapshot.generation);
+      const rows = statement.all(snapshot.generation, cursor, snapshot.indexedOffset, CANDIDATE_PAGE_SIZE) as Array<{
+        byteOffset: number; timestamp: number | null; apiKeyId: string | null; client: string | null; surface: string | null; admissionKind: string | null;
+      }>;
+      db.exec("COMMIT");
+      const last = rows.at(-1);
+      if (last) cursor = last.byteOffset;
+      return {
+        done: rows.length < CANDIDATE_PAGE_SIZE,
+        rows: rows.map(row => ({
+          // A row without a usable timestamp reaches the accumulator as NaN, which no window admits.
+          timestamp: row.timestamp ?? Number.NaN,
+          ...(row.apiKeyId !== null ? { apiKeyId: row.apiKeyId } : {}),
+          ...(row.client !== null ? { client: row.client } : {}),
+          ...(row.surface !== null ? { surface: row.surface } : {}),
+          ...(row.admissionKind !== null ? { admissionKind: row.admissionKind } : {}),
+        })),
+      };
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch { /* nothing to roll back */ }
+      throw error;
+    }
+  };
+}
+
+/**
  * The page statements behind the candidate pager: each branch seeks from the page cursor and
  * stops at the page size, so a late page reads at most `CANDIDATE_PAGE_SIZE` rows per branch and
  * never sorts. The pager merges the branch pages by offset; the cursor value is appended at the
@@ -1394,8 +1596,16 @@ function candidatePageStatements(
  * page; an offset that appears in two branches is emitted once because every head at that value is
  * consumed together.
  */
+/** Inside a page's read transaction: its generation is still published and still valid, or no row is read. */
+function assertPageReadable(db: Database, path: string, generation: string): void {
+  const meta = readMeta(db);
+  if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || meta.generation !== generation
+    || !generationValidated(db, path, meta)) throw new UsageLedgerRebuildRequiredError("content_changed");
+}
+
 function candidatePager(
   db: Database,
+  path: string,
   snapshot: UsageFilterIndexSnapshot,
   query: UsageFilterIndexQuery,
 ): Pick<UsageFilterCandidateRead, "candidateRows" | "nextPage"> {
@@ -1422,11 +1632,7 @@ function candidatePager(
     nextPage(): number[] {
       try {
         db.exec("BEGIN");
-        const meta = readMeta(db);
-        if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION
-          || meta.generation !== snapshot.generation) {
-          throw new UsageLedgerRebuildRequiredError("content_changed");
-        }
+        assertPageReadable(db, path, snapshot.generation);
         const offsets: number[] = [];
         while (offsets.length < CANDIDATE_PAGE_SIZE) {
           // Refill only a branch that ran dry, so a candidate fetched once is never fetched again.
@@ -1499,7 +1705,7 @@ async function readActive(
   path: string,
   query: UsageFilterIndexQuery,
 ): Promise<UsageFilterCandidateRead> {
-  const refreshed = await refreshUsageFilterIndex(dir, path);
+  const refreshed = await refreshUsageFilterIndex(dir, path, query.extendOnly === true);
   testHooks?.afterRefresh?.({ dbPath: path });
   const db = openIndexForRead(path);
   try {
@@ -1507,7 +1713,8 @@ async function readActive(
     try {
       const meta = readMeta(db);
       if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION
-        || meta.generation !== refreshed.generation) {
+        || meta.generation !== refreshed.generation
+        || !generationValidated(db, path, meta)) {
         throw new UsageLedgerRebuildRequiredError("content_changed");
       }
       const snapshot: UsageFilterIndexSnapshot = {
@@ -1522,12 +1729,13 @@ async function readActive(
         requestUsageFilterIndexRebuild();
         throw new UsageLedgerRebuildRequiredError("content_changed");
       }
-      const pager = candidatePager(db, snapshot, query);
+      const pager = candidatePager(db, path, snapshot, query);
       db.exec("COMMIT");
       return {
         snapshot,
         get candidateRows() { return pager.candidateRows; },
         nextPage: () => pager.nextPage(),
+        nextIndexedRows: indexedRowPager(db, path, snapshot, query),
         close: () => db.close(),
       };
     } catch (error) {
@@ -1559,7 +1767,7 @@ export async function readUsageFilterCandidates(
     try {
       return await readActive(dir, path, query);
     } catch (error) {
-      if (error instanceof UsageFilterIndexSourceError) throw error;
+      if (error instanceof UsageFilterIndexSourceError || error instanceof UsageFilterIndexRebuildNeededError) throw error;
       // A changed home never heals on a re-check; every later open targets the new directory.
       if (error instanceof UsageFilterIndexHomeChangedError) {
         return null;
@@ -1608,6 +1816,12 @@ export async function readUsageFilterCandidatesPassive(
 ): Promise<UsageFilterCandidateRead | null> {
   const path = indexPathForCurrentHome();
   if (!existsSync(path)) return null;
+  // Writes nothing: a destructive change seen here declines the generation in this process only,
+  // and the next writer-owned refresh records it for every process.
+  if (usageRevisionIsDestructive(currentUsageLogRevision())) {
+    pendingInvalidations.set(path, { ticket: ++invalidationTicket, home: getConfigDir() });
+    return null;
+  }
   let db: Database;
   try {
     db = new Database(path, { readonly: true });
@@ -1627,7 +1841,8 @@ export async function readUsageFilterCandidatesPassive(
     try {
       const meta = readMeta(db);
       const revision = currentUsageLogRevision();
-      if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || !meta.generation) {
+      if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || !meta.generation
+        || !generationValidated(db, path, meta)) {
         throw new UsageLedgerRebuildRequiredError("content_changed");
       }
       if (usageLogIdentityKey(meta.revision) !== usageLogIdentityKey(revision)
@@ -1652,12 +1867,13 @@ export async function readUsageFilterCandidatesPassive(
         // be reported as a complete zero.
         throw new UsageLedgerRebuildRequiredError("content_changed");
       }
-      const pager = candidatePager(db, snapshot, query);
+      const pager = candidatePager(db, path, snapshot, query);
       db.exec("COMMIT");
       return {
         snapshot,
         get candidateRows() { return pager.candidateRows; },
         nextPage: () => pager.nextPage(),
+        nextIndexedRows: indexedRowPager(db, path, snapshot, query),
         close: () => db.close(),
       };
     } catch (error) {
@@ -1668,6 +1884,60 @@ export async function readUsageFilterCandidatesPassive(
     try { db.exec("ROLLBACK"); } catch { /* transaction may not have started */ }
     db.close();
     return null;
+  }
+}
+
+/**
+ * Whether the index publishing a valid `generation` can answer `revision` by ingesting appended rows
+ * only, from metadata alone: the same file, at least as long as indexed (an equal length must be the
+ * identical revision), no rebuild requested and no ingest running.
+ */
+export function usageFilterIndexExtendable(generation: string, revision: UsageLogRevision | null): boolean {
+  const path = indexPathForCurrentHome();
+  if (rebuildRequestedPaths.has(path) || ingestFlight?.path === path || !existsSync(path)) return false;
+  let db: Database;
+  try {
+    db = new Database(path, { readonly: true });
+  } catch {
+    return false;
+  }
+  try {
+    const meta = readMeta(db);
+    if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || meta.generation !== generation) return false;
+    if (usageLogIdentityKey(meta.revision) !== usageLogIdentityKey(revision)) return false;
+    if (!generationValidated(db, path, meta)) return false;
+    const recorded = meta.revision?.size ?? 0;
+    const size = revision?.size ?? 0;
+    return size > recorded || (size === recorded && usageLogRevisionKey(meta.revision) === usageLogRevisionKey(revision));
+  } catch {
+    return false;
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * The generation the index currently publishes, from its metadata alone (no ingest, no row read), or
+ * null when there is no usable index. A cached answer tagged with another generation is stale.
+ */
+export function publishedUsageFilterIndexGeneration(): string | null {
+  const path = indexPathForCurrentHome();
+  if (!existsSync(path)) return null;
+  let db: Database;
+  try {
+    db = new Database(path, { readonly: true });
+  } catch {
+    return null;
+  }
+  try {
+    // One read transaction: the generation and the counts that validate it come from one snapshot.
+    db.exec("BEGIN");
+    const meta = readMeta(db);
+    return meta.schemaVersion === USAGE_FILTER_INDEX_SCHEMA_VERSION && generationValidated(db, path, meta) ? meta.generation || null : null;
+  } catch {
+    return null;
+  } finally {
+    db.close();
   }
 }
 
@@ -1717,6 +1987,9 @@ export function requestUsageFilterIndexRebuild(): void {
 /** Test-only process-state reset for isolated harnesses. */
 export function resetUsageFilterIndexForTests(): void {
   ingestFlight = null;
+  reclaimRun = null;
+  reclaimAgain = false;
+  pendingInvalidations.clear();
   ingestPassesByPath.clear();
   rebuildRequestedPaths.clear();
   sidecarOwnershipChecked.clear();

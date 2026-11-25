@@ -7,6 +7,7 @@
  * backup-and-defaults repair path), and settable alone via PUT (legacy
  * codexAutoStart-only PUTs keep working).
  */
+import { settledUsageResponse } from "../helpers/usage-cold-read";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
@@ -497,7 +498,7 @@ describe("usage summary retained-store accounting", () => {
   test("accounts cached summaries and centralized oldest eviction exactly", async () => {
     for (const range of ["30d", "7d"]) {
       const req = new Request(`http://127.0.0.1:10100/api/usage?range=${range}`);
-      expect((await handleManagementAPI(req, new URL(req.url), baseConfig()))!.status).toBe(200);
+      expect((await settledUsageResponse(() => handleManagementAPI(req, new URL(req.url), baseConfig()))).status).toBe(200);
     }
     // Derived, not hardcoded: one usage request warms the whole
     // range x surface cross-product, so a literal here turns any future range
@@ -516,7 +517,7 @@ describe("usage summary retained-store accounting", () => {
   test("oldest eviction follows revision read completion order, not generatedAt", async () => {
     for (const range of ["30d", "7d"]) {
       const req = new Request(`http://127.0.0.1:10100/api/usage?range=${range}`);
-      expect((await handleManagementAPI(req, new URL(req.url), baseConfig()))!.status).toBe(200);
+      expect((await settledUsageResponse(() => handleManagementAPI(req, new URL(req.url), baseConfig()))).status).toBe(200);
     }
     const seed = getUsageSummaryCacheEntry("30d:all");
     expect(seed).toBeDefined();
@@ -530,7 +531,7 @@ describe("usage summary retained-store accounting", () => {
       timeZone: seed!.timeZone,
       expiresAt: Date.now() + 60_000,
       freshUntil: Date.now() + 60_000,
-      lastSeenSize: 0,
+      observed: { identityKey: "slow-read", size: 0, revisionKey: "slow-read" },
       revisionReadAt: Date.now() + 10_000,
       summary: { ...seed!.summary, generatedAt: 1 },
     });
@@ -1157,7 +1158,8 @@ describe("usageLedgerMaxBytes settings", () => {
         usageLedgerRetention?: { maxBytes?: number; currentBytes: number };
       };
       expect(initial.usageLedgerMaxBytes).toBeNull();
-      expect(initial.usageLedgerRetention).toEqual({ currentBytes: 0 });
+      expect(initial.usageLedgerRetention).toMatchObject({ currentBytes: 0 });
+      expect(initial.usageLedgerRetention).not.toHaveProperty("enforcement");
 
       mkdirSync(TEST_DIR, { recursive: true });
       const oversizedRow = `${JSON.stringify({ requestId: "seed", pad: "x".repeat(16 * 1024) })}\n`;
@@ -1170,7 +1172,7 @@ describe("usageLedgerMaxBytes settings", () => {
         usageLedgerRetention?: { maxBytes?: number; currentBytes: number; enforcement?: "suspended" };
       };
       expect(saved.usageLedgerMaxBytes).toBe(MIN_USAGE_LEDGER_MAX_BYTES);
-      expect(saved.usageLedgerRetention).toEqual({
+      expect(saved.usageLedgerRetention).toMatchObject({
         maxBytes: MIN_USAGE_LEDGER_MAX_BYTES, currentBytes: oversizedRow.length * 100, enforcement: "suspended",
       });
       expect(loadConfig().usageLedgerMaxBytes).toBe(MIN_USAGE_LEDGER_MAX_BYTES);

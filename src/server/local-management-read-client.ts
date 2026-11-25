@@ -34,6 +34,8 @@ export interface LocalManagementReadDeps {
 
 export interface LocalManagementReadRequestDeps extends LocalManagementReadDeps {
   timeoutMs?: number;
+  /** The caller's own cancellation, combined with `timeoutMs`. */
+  signal?: AbortSignal;
   /**
    * Require the response to carry the server's attestation over this request's nonce. The
    * capability authenticates the request to the real server; only this proof tells the caller
@@ -97,7 +99,7 @@ export async function fetchBoundLocalManagementRead(
         [LOCAL_MANAGEMENT_CAPABILITY_EXPIRES_AT_HEADER]: String(expiresAt),
         [LOCAL_MANAGEMENT_CAPABILITY_HEADER]: capability,
       },
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: deps.signal ? AbortSignal.any([deps.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
     };
     const response = deps.fetchImpl
       ? await deps.fetchImpl(url, init)

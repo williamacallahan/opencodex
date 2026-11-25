@@ -2,6 +2,8 @@ import { remoteChildHttpArgv, REMOTE_CURL_PREFLIGHT } from "../../src/link/remot
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { appendFileSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { settledUsageResponse } from "../helpers/usage-cold-read";
+import { resetUsageColdRebuildForTests, settleUsageColdRebuildForTests } from "../../src/usage/cold-rebuild-slot";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleManagementAPI } from "../../src/server/management-api";
@@ -136,6 +138,9 @@ async function call(path: string, method: string, body: unknown, deps: Managemen
   return response;
 }
 
+/** A usage read retried, like the dashboard does, once a pending whole-ledger rebuild has finished. */
+const settledCall = (...args: Parameters<typeof call>) => settledUsageResponse(() => call(...args));
+
 /** No isPaired stub: the principal, issuance and session control come from the real auth code. */
 async function sessionCall(url: string, headers: Record<string, string>, state: ManagementAuthState, cfg: OcxConfig, deps: ManagementApiDeps, trustedLoopback: boolean, method = "GET", body?: unknown) {
   const req = new Request(url, { method, headers: { "content-type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -172,124 +177,77 @@ afterEach(() => {
 });
 
 describe("link management routes", () => {
-  test.each([["facets", true], ["facets", false], ["report", true], ["report", false]] as const)("a %s scan failure rechecks the session (revoked=%s)", async (kind, revoked) => {
+  test.each([["facets", true], ["facets", false], ["report", true], ["report", false]] as const)("a %s read answers pending at once, and its retry after a failed scan rechecks the session (revoked=%s)", async (kind, revoked) => {
     temp = mkdtempSync(join(tmpdir(), "ocx-revoked-failed-scan-"));
     const previousHome = process.env.OPENCODEX_HOME;
     process.env.OPENCODEX_HOME = temp;
     resetUsageAggregateCacheForTests();
+    resetUsageColdRebuildForTests();
     const h = harness();
     let paired = true;
-    let release!: () => void;
-    let started!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const scanning = new Promise<void>(resolve => { started = resolve; });
     const spy = spyOn(usageLedgerScanner, "scanUsageLedgerCooperatively").mockImplementation(async () => {
-      started(); await gate; throw new Error("fixture scan failed");
+      throw new Error("fixture scan failed");
     });
     try {
-      if (kind === "report") {
-        // The candidate index ingests a non-empty ledger, which is the scan this case fails.
-        writeFileSync(join(temp, "usage.jsonl"), `${JSON.stringify({
-          requestId: "fixture",
-          timestamp: Date.now(),
-          provider: "openai",
-          model: "gpt-5.5",
-          status: 200,
-          durationMs: 1,
-          usageStatus: "reported",
-        })}\n`);
-      }
+      // Both read through the candidate index, which ingests a non-empty ledger: the scan this case fails.
+      writeFileSync(join(temp, "usage.jsonl"), `${JSON.stringify({
+        requestId: "fixture", timestamp: Date.now(), provider: "openai", model: "gpt-5.5", status: 200, durationMs: 1, usageStatus: "reported",
+      })}\n`);
       const path = kind === "facets" ? "/api/usage/source-facets?client=all&device=all" : "/api/usage?client=all&device=unconfigured";
       const url = new URL(`http://127.0.0.1${path}`);
-      const pending = handleManagementAPI(new Request(url, { headers: { host: "127.0.0.1" } }), url, h.config, h.deps, "gui-session",
+      const request = () => handleManagementAPI(new Request(url, { headers: { host: "127.0.0.1" } }), url, h.config, h.deps, "gui-session",
         { isPaired: () => paired, isCurrent: () => paired, revokeCurrent: () => true },
         { trustedLoopback: true, guiSessionIssuance: "pairing" });
-      expect(await Promise.race([scanning.then(() => "scanning"), pending.then(response => `early:${response?.status}`)])).toBe("scanning");
-      paired = !revoked; release();
-      const response = await pending;
-      expect(response?.status).toBe(revoked ? 401 : kind === "facets" ? 503 : 500);
+      const pending = await request();
+      expect(pending?.status).toBe(503);
+      expect(spy).not.toHaveBeenCalled(); // the scan starts after the request has answered
+      await settleUsageColdRebuildForTests();
+      expect(spy).toHaveBeenCalled();
+      paired = !revoked;
+      // A session revoked before the retry is refused before anything is read.
+      const response = await request();
+      expect(response?.status).toBe(revoked ? 403 : kind === "facets" ? 503 : 500);
       if (revoked || kind === "facets") expect(response?.headers.get("cache-control")).toBe("no-store");
     } finally {
-      release(); spy.mockRestore(); resetUsageAggregateCacheForTests();
+      spy.mockRestore();
+      await settleUsageColdRebuildForTests();
+      resetUsageColdRebuildForTests();
+      resetUsageAggregateCacheForTests();
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousHome;
     }
   });
 
-  test("a revoked session cannot receive an in-flight unconfigured-key report", async () => {
-    temp = mkdtempSync(join(tmpdir(), "ocx-usage-revocation-"));
+  test.each(["revoked", "inventory"] as const)("a finished facet or unconfigured-key read is withheld when %s changes before the retry", async change => {
+    temp = mkdtempSync(join(tmpdir(), "ocx-facet-revocation-"));
     const previousHome = process.env.OPENCODEX_HOME;
     process.env.OPENCODEX_HOME = temp;
     resetUsageAggregateCacheForTests();
     const h = harness();
     let paired = true;
-    let release!: () => void;
-    let started!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const scanning = new Promise<void>(resolve => { started = resolve; });
-    const original = usageLedgerScanner.scanUsageLedgerCooperatively;
-    const spy = spyOn(usageLedgerScanner, "scanUsageLedgerCooperatively").mockImplementation(async options => {
-      started(); await gate; return original(options);
-    });
     try {
-      // A non-empty ledger makes the candidate index ingest, which is the in-flight read.
       writeFileSync(join(temp, "usage.jsonl"), `${JSON.stringify({
-        requestId: "fixture",
-        timestamp: Date.now(),
-        provider: "openai",
-        model: "gpt-5.5",
-        status: 200,
-        durationMs: 1,
-        usageStatus: "reported",
-        apiKeyId: "former",
-        admissionKind: "configured",
+        requestId: "fixture", timestamp: Date.now(), provider: "openai", model: "gpt-5.5", status: 200, durationMs: 1,
+        usageStatus: "reported", apiKeyId: "former", admissionKind: "configured",
       })}\n`);
-      const url = new URL("http://127.0.0.1/api/usage?client=all&device=unconfigured");
-      const pending = handleManagementAPI(new Request(url, { headers: { host: "127.0.0.1" } }), url, h.config, h.deps, "gui-session",
-        { isPaired: () => paired, isCurrent: () => paired, revokeCurrent: () => true },
-        { trustedLoopback: true, guiSessionIssuance: "pairing" });
-      expect(await Promise.race([scanning.then(() => "scanning"), pending.then(response => `early:${response?.status}`)])).toBe("scanning");
-      paired = false; release();
-      const response = await pending;
-      expect(response?.status).toBe(401);
-      expect(response?.headers.get("cache-control")).toBe("no-store");
+      for (const path of ["/api/usage/source-facets?client=all&device=all", "/api/usage?client=all&device=unconfigured"]) {
+        const url = new URL(`http://127.0.0.1${path}`);
+        const request = () => handleManagementAPI(new Request(url, { headers: { host: "127.0.0.1" } }), url, h.config, h.deps, "gui-session",
+          { isPaired: () => paired, isCurrent: () => paired, revokeCurrent: () => true },
+          { trustedLoopback: true, guiSessionIssuance: "pairing" });
+        expect((await request())?.status).toBe(503);
+        await settleUsageColdRebuildForTests();
+        if (change === "revoked") paired = false;
+        else h.config.apiKeys = [{ id: "new-key", name: "new", key: "fixture", createdAt: "2026-01-01T00:00:00Z" }];
+        const response = await request();
+        expect(response?.status).toBe(change === "revoked" ? 403 : 503);
+        expect(response?.headers.get("cache-control")).toBe("no-store");
+        paired = true;
+        h.config.apiKeys = [];
+      }
     } finally {
-      release(); spy.mockRestore(); resetUsageAggregateCacheForTests();
-      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-      else process.env.OPENCODEX_HOME = previousHome;
-    }
-  });
-
-  test.each(["revoked", "inventory"] as const)("a facet scan fails closed when %s changes mid-read", async change => {
-    temp = mkdtempSync(join(tmpdir(), "ocx-facet-revocation-"));
-    const previousHome = process.env.OPENCODEX_HOME;
-    process.env.OPENCODEX_HOME = temp;
-    const h = harness();
-    let paired = true;
-    let release!: () => void;
-    let started!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const scanning = new Promise<void>(resolve => { started = resolve; });
-    const original = usageLedgerScanner.scanUsageLedgerCooperatively;
-    const spy = spyOn(usageLedgerScanner, "scanUsageLedgerCooperatively").mockImplementation(async options => {
-      started();
-      await gate;
-      return original(options);
-    });
-    try {
-      const url = new URL("http://127.0.0.1/api/usage/source-facets?client=all&device=all");
-      const pending = handleManagementAPI(new Request(url, { headers: { host: "127.0.0.1", "content-type": "application/json" } }), url, h.config, h.deps, "gui-session",
-        { isPaired: () => paired, isCurrent: () => paired, revokeCurrent: () => true },
-        { trustedLoopback: true, guiSessionIssuance: "pairing" });
-      const outcome = await Promise.race([scanning.then(() => "scanning"), pending.then(response => `early:${response?.status}`)]);
-      expect(outcome).toBe("scanning");
-      if (change === "revoked") paired = false;
-      else h.config.apiKeys = [{ id: "new-key", name: "new", key: "fixture", createdAt: "2026-01-01T00:00:00Z" }];
-      release();
-      expect((await pending)?.status).toBe(change === "revoked" ? 401 : 503);
-    } finally {
-      release();
-      spy.mockRestore();
+      await settleUsageColdRebuildForTests();
+      resetUsageAggregateCacheForTests();
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousHome;
     }
@@ -308,28 +266,28 @@ describe("link management routes", () => {
     ].map(value => JSON.stringify(value)).join("\n") + "\n");
     const path = "/api/usage/source-facets?client=codex&device=key&apiKeyId=active";
     try {
-      expect((await call(path, "GET", undefined, h.deps, "admin-token", true, null, true, h.config))?.status).toBe(403);
-      expect((await call(path, "GET", undefined, h.deps, "gui-session", true, "tailscale-identity", true, h.config))?.status).toBe(403);
-      const response = await call(path, "GET", undefined, h.deps, "gui-session", true, "pairing", true, h.config);
+      expect((await settledCall(path, "GET", undefined, h.deps, "admin-token", true, null, true, h.config))?.status).toBe(403);
+      expect((await settledCall(path, "GET", undefined, h.deps, "gui-session", true, "tailscale-identity", true, h.config))?.status).toBe(403);
+      const response = await settledCall(path, "GET", undefined, h.deps, "gui-session", true, "pairing", true, h.config);
       expect(response?.status).toBe(200);
       expect(response?.headers.get("cache-control")).toBe("no-store");
       const body = await response!.json() as { apps: Record<string, number>; sourceFilter: unknown };
       expect(body.apps.codex).toBe(1);
       expect(body.sourceFilter).toEqual({ client: "codex", device: { kind: "key", id: "active" } });
-      const group = await call("/api/usage?client=codex&device=unconfigured", "GET", undefined, h.deps, "gui-session", true, "pairing", true, h.config);
+      const group = await settledCall("/api/usage?client=codex&device=unconfigured", "GET", undefined, h.deps, "gui-session", true, "pairing", true, h.config);
       expect(group?.status).toBe(200);
       expect(group?.headers.get("cache-control")).toBe("no-store");
       expect((await group!.json() as { summary: { requests: number } }).summary.requests).toBe(1);
       appendFileSync(join(temp, "usage.jsonl"), "{invalid}\n");
-      const partial = await call("/api/usage?client=codex&device=unconfigured", "GET", undefined, h.deps, "gui-session", true, "pairing", true, h.config);
+      const partial = await settledCall("/api/usage?client=codex&device=unconfigured", "GET", undefined, h.deps, "gui-session", true, "pairing", true, h.config);
       const partialBody = await partial!.json() as { usageIncomplete?: boolean; usageIncompleteReason?: string };
       expect(partialBody.usageIncomplete).toBe(true);
       expect(partialBody.usageIncompleteReason).toBeUndefined();
-      expect((await call(`${path}&client=all`, "GET", undefined, h.deps, "gui-session", true, "pairing", true, h.config))?.status).toBe(400);
-      expect((await call("/api/usage/source-facets?client=codex&device=key&apiKeyId=foreign", "GET", undefined, h.deps, "gui-session", true, "pairing", true, h.config))?.status).toBe(400);
+      expect((await settledCall(`${path}&client=all`, "GET", undefined, h.deps, "gui-session", true, "pairing", true, h.config))?.status).toBe(400);
+      expect((await settledCall("/api/usage/source-facets?client=codex&device=key&apiKeyId=foreign", "GET", undefined, h.deps, "gui-session", true, "pairing", true, h.config))?.status).toBe(400);
       h.config.apiKeys = [{ id: "x".repeat(257), name: "long", key: "fixture-key", createdAt: "2026-01-01T00:00:00Z" }];
-      expect((await call("/api/usage/source-facets?client=all&device=all", "GET", undefined, h.deps, "gui-session", true, "pairing", true, h.config))?.status).toBe(503);
-      expect((await call("/api/usage?client=all&device=unconfigured", "GET", undefined, h.deps, "gui-session", true, "pairing", true, h.config))?.status).toBe(503);
+      expect((await settledCall("/api/usage/source-facets?client=all&device=all", "GET", undefined, h.deps, "gui-session", true, "pairing", true, h.config))?.status).toBe(503);
+      expect((await settledCall("/api/usage?client=all&device=unconfigured", "GET", undefined, h.deps, "gui-session", true, "pairing", true, h.config))?.status).toBe(503);
     } finally {
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousHome;

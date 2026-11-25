@@ -26,6 +26,9 @@ const CONSENT_DIALOG_SELECTOR = "dialog.telemetry-consent-overlay";
  * (Escape or backdrop) records nothing so the prompt returns on the next app start while
  * undecided; only Continue records the checkbox decision and notice via PUT /api/telemetry.
  */
+/** How long the open consent dialog waits before asking again for a preview the server is still building. */
+const PREVIEW_PENDING_REFRESH_MS = 5_000;
+
 export function TelemetryConsentCard({
   apiBase,
   enabled,
@@ -76,6 +79,31 @@ export function TelemetryConsentCard({
     enabled && !closed && status && shouldShowTelemetryConsentPrompt(status),
   );
   const blockedByOtherModal = wantsOpen && hasOtherOpenModalDialog(CONSENT_DIALOG_SELECTOR);
+
+  // While the dialog is open and the server is still building the preview, read the status again
+  // after a few seconds. Only the snapshot is replaced; the checkbox lives in the dialog and keeps
+  // whatever the person chose. Cancelled when the dialog closes or the card unmounts.
+  const previewPending = wantsOpen && status?.previewStatus === "pending";
+  const [previewAttempt, setPreviewAttempt] = useState(0);
+  useEffect(() => {
+    if (!previewPending) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void fetchTelemetryStatus(apiBase, controller.signal)
+        .then(snapshot => {
+          if (controller.signal.aborted || !shouldShowTelemetryConsentPrompt(snapshot)) return;
+          setStatus(snapshot);
+        })
+        .catch(() => {
+          // A failed read keeps the pending notice and tries again after the same delay.
+          if (!controller.signal.aborted) setPreviewAttempt(attempt => attempt + 1);
+        });
+    }, PREVIEW_PENDING_REFRESH_MS);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [apiBase, previewPending, status, previewAttempt]);
 
   useEffect(() => {
     if (!wantsOpen) return;
@@ -245,7 +273,11 @@ function TelemetryConsentDialog({
                 {t("proxyV2.telemetryPreviewIneligible")}
               </p>
             )}
-            <pre className="log-detail-json telemetry-preview-json">{formatTelemetryPreviewJson(status)}</pre>
+            {formatTelemetryPreviewJson(status) !== null
+              ? <pre className="log-detail-json telemetry-preview-json">{formatTelemetryPreviewJson(status)}</pre>
+              : <p className="telemetry-preview-pending m-0 text-[12px] text-fg-muted" role="status">
+                  {t(status.previewStatus === "unavailable" ? "proxyV2.telemetryPreviewUnavailable" : "proxyV2.telemetryPreviewPending")}
+                </p>}
           </div>
         </details>
         {saveError && (

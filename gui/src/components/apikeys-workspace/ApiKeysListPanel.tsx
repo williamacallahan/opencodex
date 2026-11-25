@@ -30,6 +30,7 @@ export default function ApiKeysListPanel({
   keysLoadFailed,
   attributionSince,
   usageMetadata,
+  usageAsOf,
   localeTag,
   apiBase,
   active = true,
@@ -45,6 +46,8 @@ export default function ApiKeysListPanel({
   /** Absent means nothing is attributable yet — different from a counter reading zero. */
   attributionSince?: string;
   usageMetadata?: UsageReadMetadata;
+  /** Set when the counts are dated: the time they were read. */
+  usageAsOf?: string;
   localeTag?: string;
   /** Management API origin a reveal denial pairs this dashboard against. */
   apiBase: string;
@@ -305,7 +308,12 @@ export default function ApiKeysListPanel({
                         ? t("api.attribution.unavailable")
                         : k.usage.ambiguous
                           ? t("api.attribution.railAmbiguous")
-                          : k.usage.requests7d.toLocaleString(localeTag)}
+                          : usageAsOf
+                            ? <span title={`${t("lab.col.asOf")} ${new Date(usageAsOf).toLocaleString(localeTag)}`}>
+                              {k.usage.requests7d.toLocaleString(localeTag)}{" "}
+                              <span className="awi-usage-as-of muted">({t("lab.col.asOf")} {new Date(usageAsOf).toLocaleString(localeTag)})</span>
+                            </span>
+                            : k.usage.requests7d.toLocaleString(localeTag)}
                     </td>
                     <td>
                       {!k.usage || !attributionSince || k.usage.ambiguous

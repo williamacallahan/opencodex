@@ -567,7 +567,9 @@ returns once the proxy can publish the archived rows and the shorter ledger in o
 Meanwhile, when `usage.jsonl` is larger than `usageLedgerMaxBytes` (checked when the limit is
 installed and after an append crosses it), the proxy logs one `[usage-retention]` warning per run, and
 `usageLedgerRetention` in `GET /api/settings` carries `enforcement: "suspended"` for as long as the
-ledger stays over the limit. The minimum
+ledger stays over the limit. It also reports `disk.availableBytes`, the free space on the filesystem
+holding the live ledger with the time it was sampled (`null` with a reason when it cannot be read),
+and `appendFailures`, how many usage rows could not be written since the proxy started. The minimum
 accepted value is 1 MiB; a smaller number, or one that is not a safe integer, is rejected at the
 write boundary and ignored if read from a hand-edited file.
 

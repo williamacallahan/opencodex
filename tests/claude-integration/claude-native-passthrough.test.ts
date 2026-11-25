@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { settledUsageResponse } from "../helpers/usage-cold-read";
 import { managementFetch as fetch } from "../helpers/management-auth";
 import { logsFromApiBody } from "../helpers/logs-api";
 import { mkdtempSync } from "node:fs";
@@ -166,7 +167,7 @@ test("unmapped claude model + sk-ant credential passes through verbatim", async 
     expect(row.usage.outputTokens).toBe(42);
     expect(row.usage.cacheReadInputTokens).toBe(690000);
 
-    const claudeUsage = await fetch(new URL("/api/usage?range=all&surface=claude", server.url)).then(response => response.json()) as {
+    const claudeUsage = await settledUsageResponse(() => fetch(new URL("/api/usage?range=all&surface=claude", server.url))).then(response => response.json()) as {
       surface: string;
       summary: { requests: number; totalTokens: number };
       models: Array<{ provider: string; model: string }>;
@@ -175,7 +176,7 @@ test("unmapped claude model + sk-ant credential passes through verbatim", async 
     expect(claudeUsage.summary).toMatchObject({ requests: 1, totalTokens: 1391042 });
     expect(claudeUsage.models).toEqual([expect.objectContaining({ provider: "anthropic-native", model: "claude-fable-5" })]);
 
-    const codexUsage = await fetch(new URL("/api/usage?range=all&surface=codex", server.url)).then(response => response.json()) as {
+    const codexUsage = await settledUsageResponse(() => fetch(new URL("/api/usage?range=all&surface=codex", server.url))).then(response => response.json()) as {
       surface: string;
       summary: { requests: number };
     };

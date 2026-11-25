@@ -236,3 +236,43 @@ test("successful key delete keeps last-good keys visible when follow-up refresh 
     testWindow.close();
   }
 });
+
+test("dated key counts show the time they were read beside them", async () => {
+  const testWindow = new Window({ url: "http://localhost/" });
+  const container = testWindow.document.createElement("div");
+  testWindow.document.body.appendChild(container);
+  Object.defineProperties(globalThis, {
+    document: { configurable: true, value: testWindow.document },
+    window: { configurable: true, value: testWindow },
+    localStorage: { configurable: true, value: testWindow.localStorage },
+    IS_REACT_ACT_ENVIRONMENT: { configurable: true, value: true },
+  });
+  const asOf = "2026-07-30T12:34:00.000Z";
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/v1/models")) return Response.json({ data: [] });
+    if (url.endsWith("/api/keys")) {
+      const minimal = new Headers(init?.headers).get("prefer") === "return=minimal";
+      return Response.json(minimal
+        ? { ...KEYS_OK, keys: [{ ...EXISTING_KEY, usage: undefined }], usageIncluded: false, attributionSince: undefined }
+        : { ...KEYS_OK, usageAsOf: asOf, usageDated: true });
+    }
+    return new Response(null, { status: 404 });
+  }) as typeof fetch;
+  const { createRoot } = await import("react-dom/client");
+  let root!: Root;
+  try {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<LanguageProvider><ApiKeys apiBase="http://localhost" /></LanguageProvider>);
+    });
+    for (let turn = 0; turn < 3; turn += 1) {
+      await act(async () => { await new Promise<void>(resolve => testWindow.setTimeout(resolve, 0)); });
+    }
+    expect(container.textContent).toContain("existing-key");
+    expect(container.querySelector(".awi-usage-as-of")?.textContent).toContain(new Date(asOf).toLocaleString("en-US"));
+  } finally {
+    await act(async () => root.unmount());
+    testWindow.close();
+  }
+});

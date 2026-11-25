@@ -134,9 +134,9 @@ without re-reading the ledger.
 
 Rows belong to a generation; a small registry lists every generation and meta names the one
 published. A rebuild stages a fresh generation under a writer lease and publishes it in one short
-transaction fenced on the generation and cursor it started from. A successful publish prunes every
-retired generation by equality; a generation whose writer is still alive is left alone, so that
-writer's own publish fails the fence and retries, and a reader only ever sees one complete
+transaction fenced on the generation and cursor it started from. That transaction switches the
+generation and ends the writer's lease and deletes no rows: the replaced generation's registry row,
+now without a lease, is its durable retirement record, and a reader only ever sees one complete
 generation. A
 crash before publish leaves the previously published generation complete. An append writes into the
 published generation and publishes its cursor, digest, counts and span in the same transaction,
@@ -146,17 +146,55 @@ the per-page recheck described with the paging contract above. A published
 generation that claims rows it no longer holds is rebuilt rather than served as a complete zero, in
 both the active and the passive read.
 
+The index judges an append from its own recorded size and boundary digest, so it cannot see a
+shrink another cache observed if the file then grows past the indexed size again. Whether the
+published generation may be extended or served is therefore recorded in the index database, so a
+restarted process, a peer process and a passive reader reach the same verdict. A writer-owned path
+that observes a destructive change (`src/usage/revision-observation.ts`) increments
+`source_invalidations` in the index of that ledger's own home; a full ingest records the count it
+started under as the generation's `validated_invalidations` inside its publish transaction, which
+is refused, and the staging retired for a retry, if the count moved or the live file changed
+identity. A generation is valid while the two counts are equal: any process adopts it, and only an
+invalid one is replaced. An invalid generation is never extended or served: the active refresh
+ingests in full, the active reader and every candidate or projected-row page re-check the counts in
+their own read transaction (a page of an invalidated generation throws rather than return partial
+counts), the published-generation lookup behind cached filtered and picker answers returns no
+generation, an extend-only refresh and `usageFilterIndexExtendable` refuse, and the passive read
+returns no answer. A passive read (a Remote Link request, and the background work it starts)
+writes nothing to the index: a destructive change it observes, in the passive index read or in any
+usage cache lookup, is only marked in memory, which declines the generation in that process, and the
+next writer-owned index refresh records the mark in the database. Until its
+increment commits (the write uses busy timeout 0 and retries with backoff), the observing process
+also declines the generation itself.
+
+Rewriting the live `usage.jsonl` in place is unsupported. Nothing in the product does it: one
+appender writes the ledger, and the trim that could shorten it is suspended. Truncation and
+replacement by a different file are detected from the file's identity and size wherever they are
+read. An in-place rewrite that keeps the same file and the index's boundary digest is detected only
+on a best-effort basis, and only by a process that saw the larger file first: an increment that
+process could not commit before it exited is lost, and another process's retained answers do not
+learn of it. The usage archive catalog's generations (slice 3) replace the live file instead of
+rewriting it, which removes this case.
+
 A staging generation registers itself and its writer pid before its first row. A failed attempt
-discards its own generation in a finally; a process that dies without running it leaves a lease
-whose pid is no longer alive, and the next refresh reclaims that generation. A generation whose
-writer is alive is never reclaimed. The registry is the complete set of generations, so reclamation
-and pruning delete by equality instead of scanning the row table under the write lock. The registry
-row and the lease commit together, and reclamation re-reads the published generation and the lease
-inside its own write transaction before deleting, so a generation that registered while the
-pre-check was running is never treated as abandoned. A retired generation's dead writer record is
-removed with it; a live writer keeps its registry row and lease, so another writer's prune leaves
-its staging alone and its own publish fails the fence and retries. A lease whose generation is no
-longer registered cannot belong to a live writer and is pruned.
+ends its own lease in a finally; a process that dies without running it leaves a lease whose pid is
+no longer alive. Retired, failed and abandoned generations are all removed by one background
+reclaimer (`scheduleRetiredGenerationReclaim` in `src/usage/filter-index.ts`), scheduled after a
+publish or a failed attempt and whenever a refresh notices a leftover; neither publication nor a
+refresh deletes rows itself. Deleting a whole generation in one write transaction stalled the event
+loop for seconds (1.7 s, 1.3 s and a 1.3 s commit on a 725,946-row index), so the reclaimer removes
+at most 2,000 rows per table per transaction in primary-key order (for attributions the whole
+`(byte_offset, provider, model)` key, since one ledger row can carry thousands), commits, and yields a
+timer turn before the next batch; the registry and lease rows go with the last batch. Another
+writer's lock fails the reclaimer at once, from its first schema read on (it opens the index with
+busy timeout 0, so the event loop never waits on it); the
+reclaimer closes its connection and tries again after a backoff from 50 ms capped at 2 s, so the
+backlog drains after the lock is released without another index read. A generation whose writer
+is alive is never reclaimed. The registry row and the lease commit together, and every batch re-reads
+the published generation and the lease inside its own write transaction before deleting, so a
+generation that registered, or was published, after the candidate check is never treated as retired;
+a live writer's staging is left alone and its own publish fails the fence and retries. A lease whose
+generation is no longer registered cannot belong to a live writer and is pruned.
 
 Opening the projection is safe against a concurrent first open. The busy timeout is set before the
 first read, and a classification that meets another writer's lock rethrows the busy error into the
@@ -212,7 +250,18 @@ snapshot is included in filtered-cache identity. `src/usage/source-facets.ts` fo
 its legacy count is the unclassified subset of the Codex app option for the selected device.
 Unselectable padded IDs remain in the configured membership set but are omitted from individual
 rows and counted separately, so they neither hide valid choices nor become unconfigured traffic.
-`src/server/management/usage-source-facets.ts` bounds concurrent scans. The session-only facets
+`src/server/management/usage-source-facets.ts` folds them from the candidate index's own columns
+(`usage_rows`: timestamp, client, surface, admission kind, key id) in pages of at most 2,000 physical
+rows by offset against one published generation (`nextIndexedRows` in `src/usage/filter-index.ts`),
+re-checking it between pages, applying the window in the accumulator, yielding after every page even
+one with no row in the window, and reading no JSONL row, since ingest already validated those rows. It keeps at
+most four completed answers for 15 seconds, keyed by home, filter, key inventory and time zone and
+tagged with the index generation, the last observed ledger revision and the captured window; a hit
+checks the published generation from index metadata alone, the revision (growth reuses, a shrink or
+same-length rewrite never does) and that local midnight has not moved the window start. A request
+never folds: it answers from that cache or registers the fold in the cold-rebuild slot
+(`src/usage/cold-rebuild-slot.ts`) and answers 503 with `Retry-After` at once, as it does when the
+index is unusable. The session-only facets
 route rechecks session and inventory after scanning, fails closed on changes and sets no-store.
 Expiration after an authorized scan starts returns 401 so the dashboard clears session-scoped
 results; an initial credential lacking the required dashboard scope still receives 403.

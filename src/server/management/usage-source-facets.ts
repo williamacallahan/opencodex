@@ -1,38 +1,99 @@
-import { scanUsageLedgerCooperatively } from "../../usage/ledger-scanner";
-import { currentUsageLogRevision, usageLogIdentityKey, usageLogRevisionKey } from "../../usage/log";
+import { getConfigDir } from "../../config/paths";
+import { requestUsageColdRebuild } from "../../usage/cold-rebuild-slot";
+import { publishedUsageFilterIndexGeneration, readUsageFilterCandidates } from "../../usage/filter-index";
+import { currentUsageLogRevision } from "../../usage/log";
+import { noteUsageRevision, observedUsageRevision, observeUsageRevision, usageRevisionEpoch, type ObservedUsageRevision } from "../../usage/revision-observation";
 import { createSourceFacetAccumulator } from "../../usage/source-facets";
 import { snapshotConfiguredKeyIds, type UsageSourceFilter } from "../../usage/source-filter";
 import { rangeWindow } from "../../usage/summary";
 
-const MAX_FLIGHTS = 4;
-const flights = new Map<string, Promise<SourceFacets>>();
+/** The derived index cannot answer right now; the route reports it unavailable while the index refreshes. */
+export class SourceFacetsUnavailableError extends Error {}
 
-export class SourceFacetsBusyError extends Error {}
 type SourceFacets = ReturnType<ReturnType<typeof createSourceFacetAccumulator>["snapshot"]> & {
   sourceFilter: UsageSourceFilter;
   window: { since: number; until: number; timeZone: string };
   usageIncomplete: boolean;
 };
 
-/** Single-flight identical requests; never retain arbitrary historical key IDs. */
-export async function getUsageSourceFacets(filter: UsageSourceFilter, configuredIds: readonly string[]): Promise<SourceFacets> {
+/**
+ * A picker reopened within this long reuses the completed counts, so it reads no ledger byte and no
+ * index row. Rows appended meanwhile wait for expiry. A replaced, shrunk or rewritten ledger, a newly
+ * published index generation, another home, key inventory or time zone, and local midnight (which
+ * moves the 30-day window's start) never reuse an answer.
+ */
+const COMPLETED_FACETS_MS = 15_000;
+const MAX_COMPLETED_FACETS = 4;
+const completedFacets = new Map<string, { at: number; facets: SourceFacets; generation: string; observed: ObservedUsageRevision }>();
+
+export function resetUsageSourceFacetsForTests(): void {
+  completedFacets.clear();
+}
+
+function reusableFacets(key: string, now: number): SourceFacets | null {
+  const hit = completedFacets.get(key);
+  if (!hit) return null;
+  const valid = now - hit.at >= 0 && now - hit.at < COMPLETED_FACETS_MS
+    && rangeWindow("30d", now).since === hit.facets.window.since
+    && observeUsageRevision(hit.observed, currentUsageLogRevision()) !== "rewritten"
+    && publishedUsageFilterIndexGeneration() === hit.generation;
+  if (!valid) completedFacets.delete(key);
+  return valid ? hit.facets : null;
+}
+
+/**
+ * The 30-day app and key counts for the source picker. A request answers from a completed result or
+ * registers one build in the cold-rebuild slot and answers pending (a 503 at the route) at once; it
+ * never reads the ledger or the index itself.
+ */
+export function getUsageSourceFacets(filter: UsageSourceFilter, configuredIds: readonly string[]): SourceFacets {
   const ids = snapshotConfiguredKeyIds(configuredIds);
   const captured: UsageSourceFilter = { client: filter.client, device: { ...filter.device } };
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const revision = currentUsageLogRevision();
-  const key = JSON.stringify([captured, ids, timeZone, usageLogIdentityKey(revision), usageLogRevisionKey(revision)]);
-  const existing = flights.get(key);
-  if (existing) return existing;
-  if (flights.size >= MAX_FLIGHTS) throw new SourceFacetsBusyError("usage facets busy");
-  const flight = (async () => {
-    const until = Date.now();
-    const since = rangeWindow("30d", until).since!;
-    const accumulator = createSourceFacetAccumulator(captured, ids, { since, until });
-    const scan = await scanUsageLedgerCooperatively({ onEntry: row => accumulator.add(row) });
-    if (Intl.DateTimeFormat().resolvedOptions().timeZone !== timeZone) throw new Error("time zone changed");
-    return { ...accumulator.snapshot(), sourceFilter: captured, window: { since, until, timeZone },
-      usageIncomplete: scan.oversizedRows > 0 || scan.invalidRows > 0 };
-  })();
-  flights.set(key, flight);
-  try { return await flight; } finally { if (flights.get(key) === flight) flights.delete(key); }
+  const key = JSON.stringify([getConfigDir(), captured, ids, timeZone]);
+  const reused = reusableFacets(key, Date.now());
+  if (reused) return reused;
+  return requestUsageColdRebuild(`facets:${key}`, async () => {
+    const built = await foldFacetsFromIndex(captured, ids, timeZone);
+    completedFacets.delete(key);
+    completedFacets.set(key, { at: Date.now(), ...built });
+    while (completedFacets.size > MAX_COMPLETED_FACETS) completedFacets.delete(completedFacets.keys().next().value!);
+  });
+}
+
+/**
+ * Folds the window's rows from the index's own columns (`usage_rows`) in bounded pages against one
+ * published generation, each page re-checking it; ingest has already validated those rows against
+ * the ledger, so no JSONL row is read here.
+ */
+async function foldFacetsFromIndex(captured: UsageSourceFilter, ids: readonly string[], timeZone: string) {
+  const until = Date.now();
+  const since = rangeWindow("30d", until).since!;
+  const epoch = noteUsageRevision(currentUsageLogRevision());
+  const read = await readUsageFilterCandidates({ provider: null, model: null, apiKeyId: null, window: { since, until } });
+  if (!read) throw new SourceFacetsUnavailableError("usage filter index unavailable");
+  const accumulator = createSourceFacetAccumulator(captured, ids, { since, until });
+  try {
+    // Every page yields, even one with no row in the window; only the pager's `done` ends the fold.
+    for (;;) {
+      const page = read.nextIndexedRows();
+      for (const row of page.rows) accumulator.add(row);
+      if (page.done) break;
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+    }
+  } finally {
+    read.close();
+  }
+  if (Intl.DateTimeFormat().resolvedOptions().timeZone !== timeZone) throw new Error("time zone changed");
+  if (usageRevisionEpoch(read.snapshot.revision) !== epoch) throw new Error("the usage log was rewritten during the picker read");
+  return {
+    generation: read.snapshot.generation,
+    observed: observedUsageRevision(read.snapshot.revision, epoch),
+    facets: {
+      ...accumulator.snapshot(),
+      sourceFilter: captured,
+      window: { since, until, timeZone },
+      usageIncomplete: read.snapshot.oversizedRows > 0 || read.snapshot.invalidRows > 0,
+    } satisfies SourceFacets,
+  };
 }

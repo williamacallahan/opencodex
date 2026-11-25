@@ -10,6 +10,10 @@ import * as aggregates from "../../src/server/management/usage-aggregate-cache";
 import { ensureQuotaPoolIdentity } from "../../src/quota-pool/identity";
 import { setProviderQuotaReportCache } from "../../src/providers/quota/report-cache";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { settledUsageResponse } from "../helpers/usage-cold-read";
+
+/** A client read that retries once a pending whole-ledger rebuild has finished. */
+const usageFetch = (input: URL, init?: RequestInit) => settledUsageResponse(() => fetch(input, init));
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 
 const KEYS = ["usage-client-A", "usage-client-B"];
@@ -56,7 +60,7 @@ test("loopback hub reads only the explicitly authenticated key and strips accoun
   expect(unscoped.accumulator.summarize("all", Date.now(), "codex").accounts.map(row => row.accountLogLabel)).toContain("oabcdef");
   server = startServer(0);
   for (let i = 0; i < KEYS.length; i++) {
-    const response = await fetch(new URL("/v1/usage?range=all", server.url), { headers: { "x-opencodex-api-key": KEYS[i]! } });
+    const response = await usageFetch(new URL("/v1/usage?range=all", server.url), { headers: { "x-opencodex-api-key": KEYS[i]! } });
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body).toMatchObject({ source: "hub", scope: "client", summary: { requests: 1, totalTokens: 3 } });
@@ -84,7 +88,7 @@ test("loopback hub reads only the explicitly authenticated key and strips accoun
 test("absent, environment, admin and unknown credentials cannot obtain usage on loopback", async () => {
   server = startServer(0);
   for (const key of ["", "usage-environment-key", process.env.OPENCODEX_ADMIN_AUTH_TOKEN!, "bad-key"]) {
-    const response = await fetch(new URL("/v1/usage", server.url), { headers: { "x-opencodex-api-key": key } });
+    const response = await usageFetch(new URL("/v1/usage", server.url), { headers: { "x-opencodex-api-key": key } });
     expect(response.status).toBe(401);
     await response.body?.cancel();
   }
@@ -97,7 +101,7 @@ test("a linked client's client=unknown includes the newer clients its report sho
   writeFileSync(join(home, "usage.jsonl"), ["unknown", "pi", "amp", "antigravity_cli", "claude_code"].map(client => row(`r-${client}`, client)).join("\n") + "\n");
   server = startServer(0);
   const read = async (client: string) => {
-    const response = await fetch(new URL(`/v1/usage?range=all&surface=all&client=${client}`, server!.url), { headers: { "x-opencodex-api-key": KEYS[0]! } });
+    const response = await usageFetch(new URL(`/v1/usage?range=all&surface=all&client=${client}`, server!.url), { headers: { "x-opencodex-api-key": KEYS[0]! } });
     expect(response.status).toBe(200);
     return await response.json() as { summary: { requests: number }; apps?: Array<{ client: string; requests: number }> };
   };
@@ -112,7 +116,7 @@ test("a linked client's client=unknown includes the newer clients its report sho
 
 test("client-filtered hub usage retains the authenticated key and safe echo", async () => {
   server = startServer(0);
-  const response = await fetch(new URL("/v1/usage?range=all&surface=all&client=codex", server.url), {
+  const response = await usageFetch(new URL("/v1/usage?range=all&surface=all&client=codex", server.url), {
     headers: { "x-opencodex-api-key": KEYS[0]! },
   });
   expect(response.status).toBe(200);
@@ -121,7 +125,7 @@ test("client-filtered hub usage retains the authenticated key and safe echo", as
     sourceFilter: { client: "codex", scope: "authenticated-key" } });
   expect(JSON.stringify(body.sourceFilter)).not.toContain("client-0");
   for (const query of ["client=codex&device=all", "client=codex&apiKeyId=client-1", "client=codex&surface=claude", "client=codex&client=all"]) {
-    const rejected = await fetch(new URL(`/v1/usage?${query}`, server.url), { headers: { "x-opencodex-api-key": KEYS[0]! } });
+    const rejected = await usageFetch(new URL(`/v1/usage?${query}`, server.url), { headers: { "x-opencodex-api-key": KEYS[0]! } });
     expect(rejected.status).toBe(400);
   }
 });
@@ -129,7 +133,7 @@ test("client-filtered hub usage retains the authenticated key and safe echo", as
 test("caller-selected identity, unknown or duplicate options and invalid bounds are rejected", async () => {
   server = startServer(0);
   for (const query of ["apiKeyId=client-1", "other=1", "range=all&range=today", "range=bad", "surface=bad", "since=10", "since=20&until=10"]) {
-    const response = await fetch(new URL(`/v1/usage?${query}`, server.url), { headers: { "x-opencodex-api-key": KEYS[0]! } });
+    const response = await usageFetch(new URL(`/v1/usage?${query}`, server.url), { headers: { "x-opencodex-api-key": KEYS[0]! } });
     expect(response.status).toBe(400);
     await response.body?.cancel();
   }
@@ -139,7 +143,7 @@ test("custom bounds and provider/model filters preserve the authenticated scope"
   server = startServer(0);
   const until = Date.now() + 1000;
   const query = `range=all&surface=codex&provider=fixture&model=model-1&since=0&until=${until}`;
-  const response = await fetch(new URL(`/v1/usage?${query}`, server.url), { headers: { "x-opencodex-api-key": KEYS[0]! } });
+  const response = await usageFetch(new URL(`/v1/usage?${query}`, server.url), { headers: { "x-opencodex-api-key": KEYS[0]! } });
   const body = await response.json();
   expect(response.status).toBe(200);
   expect(body).toMatchObject({ customWindow: true, since: 0, until, summary: { requests: 0 }, filter: { matched: false } });
@@ -164,20 +168,20 @@ test.each(["revoked", "scope-narrowed"] as const)("a key %s while aggregation is
 test("padded authenticated IDs cannot be normalized into another key's filter", async () => {
   const current = config();
   current.apiKeys[0]!.id = " client-1 ";
-  const response = await handleHubUsage(new Request("http://127.0.0.1/v1/usage", { headers: { "x-opencodex-api-key": KEYS[0]! } }), current, current);
+  const response = await settledUsageResponse(() => handleHubUsage(new Request("http://127.0.0.1/v1/usage", { headers: { "x-opencodex-api-key": KEYS[0]! } }), current, current));
   expect(response.status).toBe(403);
 });
 
 test("a standalone gateway accepts the same bearer key as inference without a loopback bypass", async () => {
   const current = { ...config(), runtimeRole: "standalone" as const };
-  const response = await handleHubUsage(new Request("http://127.0.0.1/v1/usage?range=all", {
+  const response = await settledUsageResponse(() => handleHubUsage(new Request("http://127.0.0.1/v1/usage?range=all", {
     headers: { authorization: `Bearer ${KEYS[0]}` },
-  }), current, current);
+  }), current, current));
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({ scope: "client", summary: { requests: 1, totalTokens: 3 } });
-  const conflict = await handleHubUsage(new Request("http://127.0.0.1/v1/usage", {
+  const conflict = await settledUsageResponse(() => handleHubUsage(new Request("http://127.0.0.1/v1/usage", {
     headers: { "x-opencodex-api-key": "invalid", authorization: `Bearer ${KEYS[0]}` },
-  }), current, current);
+  }), current, current));
   expect(conflict.status).toBe(401);
 });
 
@@ -199,9 +203,9 @@ test("capacity reads expose only explicitly scoped provider windows without acco
   ] } });
   const network = spyOn(globalThis, "fetch").mockImplementation(() => { throw new Error("capacity must be passive"); });
   try {
-    const response = await handleHubUsage(new Request("http://127.0.0.1/v1/usage?include=capacity", {
+    const response = await settledUsageResponse(() => handleHubUsage(new Request("http://127.0.0.1/v1/usage?include=capacity", {
       headers: { authorization: `Bearer ${KEYS[0]}` },
-    }), current, current);
+    }), current, current));
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.capacity.providers.map((row: { provider: string }) => row.provider)).toEqual(["permitted"]);
@@ -217,9 +221,9 @@ test("capacity reads expose only explicitly scoped provider windows without acco
 test("a model-only scope cannot reveal unrelated provider capacity", async () => {
   const current = config();
   Object.assign(current.apiKeys[0]!, { allowedModels: ["model-a"] });
-  const response = await handleHubUsage(new Request("http://127.0.0.1/v1/usage?include=capacity", {
+  const response = await settledUsageResponse(() => handleHubUsage(new Request("http://127.0.0.1/v1/usage?include=capacity", {
     headers: { authorization: `Bearer ${KEYS[0]}` },
-  }), current, current);
+  }), current, current));
   expect(response.status).toBe(200);
   expect((await response.json()).capacity).toEqual({ available: false, reason: "provider_scope_required" });
 });

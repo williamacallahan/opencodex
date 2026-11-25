@@ -75,7 +75,7 @@ export async function readLinkHomeJson(
   path: string,
   deps: LinkHomeDeps = {},
   init: { signal?: AbortSignal } = {},
-): Promise<{ status: number; body: unknown }> {
+): Promise<{ status: number; body: unknown; retryAfterSeconds?: number }> {
   const token = readServiceApiTokenState();
   if (token.kind !== "present" || token.fingerprint !== context.connection.tokenFingerprint) {
     throw new Error(`The enrolled link key for ${context.homePhrase} is missing or changed; re-link this machine from the Home.`);
@@ -104,5 +104,7 @@ export async function readLinkHomeJson(
   if (response.status === 404 && unknownEndpoint) {
     return { status: 503, body: { error: `${context.homePhrase} does not serve Remote Link management reads; upgrade the Home.` } };
   }
-  return { status: response.status, body };
+  // Kept for a pending usage read the Home is still building, which the caller may retry.
+  const retryAfter = Number(response.headers.get("retry-after"));
+  return { status: response.status, body, ...(Number.isFinite(retryAfter) && retryAfter > 0 ? { retryAfterSeconds: retryAfter } : {}) };
 }

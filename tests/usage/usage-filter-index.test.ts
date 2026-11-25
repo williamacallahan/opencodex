@@ -43,6 +43,7 @@ import {
   usageFilterIndexPath,
   UsageFilterIndexPageError,
 } from "../../src/usage/filter-index";
+import { settleUsageFilterIndexReclaimForTests } from "../../src/usage/filter-index";
 import * as filterIndexModule from "../../src/usage/filter-index";
 import {
   currentUsageLogRevision,
@@ -641,6 +642,7 @@ describe("filtered usage index crash and multi-writer safety", () => {
     } finally {
       setUsageFilterIndexTestHooksForTests(null);
     }
+    await settleUsageFilterIndexReclaimForTests();
     expect(indexGenerations()).toHaveLength(1);
   });
 
@@ -676,6 +678,7 @@ console.log(JSON.stringify({ requests: summary.summary.requests, candidates: res
       const line = output.out.trim().split("\n").at(-1) ?? "";
       expect(JSON.parse(line)).toEqual({ requests: expected, candidates: expected });
     }
+    await settleUsageFilterIndexReclaimForTests();
     expect(indexGenerations()).toHaveLength(1);
     expect(indexRowCount(publishedGeneration())).toBe(rows.length);
     // Two processes contend on one 30k-row rebuild; the loser's busy-retry backoff plus the
@@ -730,6 +733,7 @@ console.log(JSON.stringify({ requests: summary.summary.requests, candidates: res
       }
       appendRows([{ ...syntheticRow(9_000 + attempt), requestId: `append-${attempt}` }]);
       await getFilteredUsageAggregate({ provider: "kimi" });
+      await settleUsageFilterIndexReclaimForTests();
       expect(totalIndexRows()).toBe(ledgerRowCount());
     }
 
@@ -748,6 +752,7 @@ console.log(JSON.stringify({ requests: summary.summary.requests, candidates: res
     expect(totalIndexRows()).toBe(ledgerRowCount() + 1);
 
     await getFilteredUsageAggregate({ provider: "kimi" });
+    await settleUsageFilterIndexReclaimForTests();
     expect(totalIndexRows()).toBe(ledgerRowCount());
     expect(indexGenerations()).toHaveLength(1);
   });
@@ -1008,6 +1013,7 @@ console.log(JSON.stringify({ requests: summary.summary.requests, candidates: res
     try {
       appendRows([syntheticRow(900)]);
       await getFilteredUsageAggregate({ provider: "kimi" });
+      await settleUsageFilterIndexReclaimForTests();
     } finally {
       setUsageFilterIndexTestHooksForTests(null);
     }
@@ -1033,6 +1039,7 @@ console.log(JSON.stringify({ requests: summary.summary.requests, candidates: res
 
     appendRows([syntheticRow(900)]);
     await getFilteredUsageAggregate({ provider: "kimi" });
+    await settleUsageFilterIndexReclaimForTests();
 
     const probe = new Database(usageFilterIndexPath(testDir), { readonly: true });
     try {
@@ -1421,6 +1428,7 @@ describe("filtered usage index availability", () => {
       nextPage() {
         throw new UsageFilterIndexPageError(new Error("SQLITE_CORRUPT"));
       },
+      nextIndexedRows: () => ({ rows: [], done: true }),
       close() {},
     }));
     try {
@@ -1490,6 +1498,7 @@ describe("filtered usage index availability", () => {
       nextPage() {
         throw new UsageFilterIndexPageError(new Error("SQLITE_CORRUPT"));
       },
+      nextIndexedRows: () => ({ rows: [], done: true }),
       close() {},
     }));
     const realScan = ledgerScannerModule.scanUsageLedgerCooperatively;
@@ -1535,6 +1544,7 @@ describe("filtered usage index availability", () => {
       nextPage() {
         throw new UsageFilterIndexPageError(new Error("SQLITE_CORRUPT"));
       },
+      nextIndexedRows: () => ({ rows: [], done: true }),
       close() {},
     }));
     const realScan = ledgerScannerModule.scanUsageLedgerCooperatively;

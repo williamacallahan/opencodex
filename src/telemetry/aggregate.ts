@@ -1,6 +1,6 @@
 import type { OcxUsage } from "../types";
 import { normalizeCostTokens } from "../usage/cost";
-import { scanUsageLedgerCooperatively } from "../usage/ledger-scanner";
+import { scanUsageLedgerCooperatively, type UsageLedgerScanResult } from "../usage/ledger-scanner";
 import { isKnownRequestFailureCause, type PersistedUsageEntry } from "../usage/log";
 import { classifyRequestOutcome } from "../usage/request-outcome";
 import { usageDisplayTotalTokens } from "../usage/totals";
@@ -337,12 +337,22 @@ export function aggregateTelemetryEntriesForDay(
 
 export async function aggregateTelemetryForDay(
   day: string,
-  options: { signal?: AbortSignal } = {},
+  options: {
+    signal?: AbortSignal;
+    /** Read this ledger file, refusing it unless it is still `expectedIdentityKey`'s file. */
+    path?: string;
+    expectedIdentityKey?: string;
+    /** Receives the revision the scan read through, so a caller can tell a later shrink or rewrite. */
+    observeRevision?: (revision: UsageLedgerScanResult["revision"]) => void;
+  } = {},
 ): Promise<DailyTelemetryAggregate> {
   const accumulator = createDailyTelemetryAccumulator(day);
-  await scanUsageLedgerCooperatively({
+  const scan = await scanUsageLedgerCooperatively({
     signal: options.signal,
+    ...(options.path !== undefined ? { path: options.path } : {}),
+    ...(options.expectedIdentityKey !== undefined ? { expectedIdentityKey: options.expectedIdentityKey } : {}),
     onEntry: accumulator.onEntry,
   });
+  options.observeRevision?.(scan.revision);
   return accumulator.finalize();
 }

@@ -42,6 +42,10 @@ export interface ApiKeysWorkspaceProps {
   attributionSince?: string;
   historyTruncated?: boolean;
   usageMetadata?: UsageReadMetadata;
+  /** Why there are no counts: still being read (asked again shortly) or a failed read. */
+  usageState?: "pending" | "unavailable";
+  /** Set when the counts are dated: the time they were read, shown beside them. */
+  usageAsOf?: string;
   authMatrix: ApiAuthMatrixRow[];
   keysLoading: boolean;
   keysLoadFailed: boolean;
@@ -102,6 +106,8 @@ export default function ApiKeysWorkspace({
   attributionSince,
   historyTruncated,
   usageMetadata,
+  usageState,
+  usageAsOf,
   authMatrix,
   keysLoading,
   keysLoadFailed,
@@ -472,7 +478,7 @@ export default function ApiKeysWorkspace({
                       requests under a live dataset really was used zero times,
                       which is not the same as having nothing to attribute. */}
                   {!selected.usage ? (
-                    <p className="muted">{t("api.attribution.unavailable")}</p>
+                    <p className="muted" role="status">{t(usageState === "pending" ? "common.loading" : "api.attribution.unavailable")}</p>
                   ) : !attributionSince ? (
                     <p className="muted">{t("api.attribution.unavailableDetail")}</p>
                   ) : selected.usage.ambiguous ? (
@@ -497,6 +503,12 @@ export default function ApiKeysWorkspace({
                         <dt>{historyTruncated || usageMetadata?.usageIncomplete ? t("api.attribution.sinceAvailable") : t("api.attribution.since")}</dt>
                         <dd>{formatCreatedDate(attributionSince, localeTag)}</dd>
                       </div>
+                      {usageAsOf && (
+                        <div className="awi-kv-row awi-usage-as-of">
+                          <dt>{t("lab.col.asOf")}</dt>
+                          <dd>{new Date(usageAsOf).toLocaleString(localeTag)}</dd>
+                        </div>
+                      )}
                     </dl>
                   )}
                 </div>
@@ -539,6 +551,7 @@ export default function ApiKeysWorkspace({
                     keysLoadFailed={keysLoadFailed}
                     attributionSince={attributionSince}
                     usageMetadata={usageMetadata}
+                    usageAsOf={usageAsOf}
                     localeTag={localeTag}
                     apiBase={apiBase}
                     active={active}

@@ -304,7 +304,11 @@ export function TelemetrySettingsPanel({
                 {t("proxyV2.telemetryPreviewIneligible")}
               </p>
             )}
-            <pre className="log-detail-json telemetry-preview-json">{formatTelemetryPreviewJson(status)}</pre>
+            {formatTelemetryPreviewJson(status) !== null
+              ? <pre className="log-detail-json telemetry-preview-json">{formatTelemetryPreviewJson(status)}</pre>
+              : <p className="telemetry-preview-pending m-0 text-[12px] text-fg-muted" role="status">
+                  {t(status.previewStatus === "unavailable" ? "proxyV2.telemetryPreviewUnavailable" : "proxyV2.telemetryPreviewPending")}
+                </p>}
             <div className="modal-actions">
               <button
                 ref={previewCloseBtnRef}

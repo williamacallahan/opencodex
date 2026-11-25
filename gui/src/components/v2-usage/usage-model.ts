@@ -139,6 +139,8 @@ export interface UsageResponse extends UsageReadMetadata {
   // Optional because a dashboard can talk to a proxy that predates these fields.
   snapshotWindowStart?: number | null;
   snapshotWindowEnd?: number | null;
+  /** Present on a dated report: the time it was read, while the proxy rebuilds it in the background. */
+  snapshotAt?: string;
   error?: string;
 }
 

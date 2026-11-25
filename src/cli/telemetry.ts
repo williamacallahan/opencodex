@@ -167,10 +167,16 @@ function formatStatusLines(snapshot: TelemetryStatusSnapshot): string[] {
       ? ["Sending paused: telemetry-state.json cannot be read. Choosing again (ocx telemetry enable or disable) rebuilds it."]
       : []),
     `Preview eligible: ${snapshot.previewEligible ? "yes" : "no"}`,
-    snapshot.previewEligible
-      ? `Preview (${snapshot.preview.day}, next eligible send):`
-      : `Preview (${snapshot.preview.day}, sample only — not eligible to send):`,
-    JSON.stringify(snapshot.preview, null, 2),
+    ...(snapshot.preview === null
+      ? [snapshot.previewStatus === "unavailable"
+        ? "Preview: the running proxy could not build it from the usage log; nothing is sent without a complete day."
+        : "Preview: the running proxy is still building it from the usage log; run this again in a minute."]
+      : [
+        snapshot.previewEligible
+          ? `Preview (${snapshot.preview.day}, next eligible send):`
+          : `Preview (${snapshot.preview.day}, sample only — not eligible to send):`,
+        JSON.stringify(snapshot.preview, null, 2),
+      ]),
   ];
 }
 

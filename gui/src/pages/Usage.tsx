@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ChartHistogramIcon } from "@hugeicons/core-free-icons";
 import { useI18n, type TFn, type Locale } from "../i18n/shared";
-import { UsageReadFailedError } from "../usage-summary-resource";
+import { UsageReadFailedError, UsageRebuildingError } from "../usage-summary-resource";
 import { UsageIncompleteNotice } from "../components/usage-incomplete-notice";
 import { Notice } from "../ui";
 import { IconAlert } from "../icons";
@@ -249,7 +249,7 @@ export default function Usage({ apiBase, connected = false, apiKeyId, topology =
         )}
       </section>
 
-      {state.showSkeleton && !data ? (
+      {(state.showSkeleton && !data) || (state.error instanceof UsageRebuildingError && !data) ? (
         <DataSurfaceSkeleton label={t("usage.loading")} rows={6} className="usage-v2-skeleton" />
       ) : state.kind === "failed-cold" ? (
         <div className="ui-v2 flex flex-col items-center gap-3 rounded-[12px] bg-surface px-6 py-12 text-center ring-1 ring-line" role="alert">
@@ -264,12 +264,18 @@ export default function Usage({ apiBase, connected = false, apiKeyId, topology =
         </div>
       ) : (
         <>
-          {state.showError && (
+          {/* A report still being rebuilt keeps the last valid one on screen without an error. */}
+          {state.showError && !(state.error instanceof UsageRebuildingError) && (
             <Notice tone="err">
               {t(connected && !(state.error instanceof UsageReadFailedError) ? "usage.hubOffline" : "usage.loadError")}
             </Notice>
           )}
           <UsageIncompleteNotice data={data} />
+          {typeof data?.snapshotAt === "string" && Number.isFinite(Date.parse(data.snapshotAt)) && (
+            <p className="usage-as-of m-0 text-fg-muted text-[13px]" role="status">
+              {t("lab.col.asOf")} {new Date(data.snapshotAt).toLocaleString(locale)}
+            </p>
+          )}
           {(client === "grok" || client === "aside" || client === "other") && <p className="text-fg-muted text-[13px]" role="status">{t("usageV2.clientUnverified")}</p>}
           {client === "codex" && typeof data?.legacyUnclassifiedRequests === "number" && <p className="text-fg-muted text-[13px]" role="status">{t("usageV2.legacy", { count: data.legacyUnclassifiedRequests })}</p>}
           {data?.historyTruncated && (

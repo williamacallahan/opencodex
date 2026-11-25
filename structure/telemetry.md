@@ -41,8 +41,25 @@ Casual-path consent guards require human interaction before transitioning an und
 - `GET /api/telemetry` (`buildTelemetryStatusSnapshot` in `src/telemetry/routes.ts`) builds `preview`
   for the same completed UTC day the scheduler would send next (oldest eligible unsent day, with
   `previewEligible: true`), or previews the latest completed UTC day with `previewEligible: false`
-  when no day is eligible to be sent. It reads consent from `config.json` on disk, like the scheduler,
-  and reuses a day's aggregate for `TELEMETRY_PREVIEW_CACHE_MS` because the dashboard polls it.
+  when no day is eligible to be sent. It reads consent from `config.json` on disk, like the scheduler.
+  A day's aggregate scans `usage.jsonl` from its first byte, so the GET and PUT routes (and the
+  profile routes) never await it: `telemetryPreviewAggregate` in `src/telemetry/preview-aggregate.ts`
+  keeps two entries (the telemetry panel and the profile card), keyed by home, ledger path, file
+  identity and UTC day. A new key's build is registered at once and its scan starts on the next timer
+  turn, because the scanner reads its first chunk before it yields; it reads `usageLogPath(home)` and
+  refuses any other file than the one keyed. A completed answer is served for
+  `TELEMETRY_PREVIEW_FRESH_MS` (10 minutes) counted from completion, then served while a rebuild picks
+  up late appends. Each entry keeps the ledger revision last observed by a lookup or a completed scan
+  (`src/usage/revision-observation.ts`) and drops its answer when the file shrinks below it or changes
+  without growing. A completed scan may only advance that observation, never pull it back to the
+  smaller size it opened at; an epoch counter stops a build that started before a rewrite from
+  publishing, or imposing its failure backoff, after it. A running build is
+  never evicted: with both entries building, another key answers `pending` without scanning, and
+  admitting a key evicts the least recently used settled entry. Until a build completes the snapshot
+  carries `preview: null` with `previewStatus: "pending"`, or `"unavailable"` while a failed build
+  waits out its one-minute backoff; never an empty object. The CLI's local fallback and every send
+  build a complete aggregate of their own. `tests/server/server-telemetry-routes.test.ts` counts
+  `node:fs` read bytes to show a cold request reads none.
 - `ocx telemetry enable` in `src/cli/telemetry.ts` requires an interactive human terminal (`isatty`
   on both stdin and stdout, not `OCX_SERVICE`, and not `isAgentDriven()`), prints the full
   disclosure block, asks a `[Y/n]` confirmation prompt (default yes), and records `accepted`;

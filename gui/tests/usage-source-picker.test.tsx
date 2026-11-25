@@ -1026,3 +1026,27 @@ test.each([false, true])("a rejected detached recovery reports unavailable only 
   expect(usageSessionSnapshot().blocked).toBe(!superseded);
   if (superseded) expect(host.textContent).toContain("No usage recorded yet");
 });
+
+test("a report the proxy is still rebuilding shows the loading state and is asked for once more after Retry-After", async () => {
+  let rebuilding = true;
+  const served = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (rebuilding && url.includes("/api/usage?")) {
+      calls.push({ url, init });
+      return Response.json({ error: "usage_rebuilding" }, { status: 503, headers: { "retry-after": "1", "cache-control": "no-store" } });
+    }
+    return served(input, init);
+  }) as typeof fetch;
+  await mount();
+  const reportCalls = () => calls.filter(call => call.url.includes("/api/usage?")).length;
+  expect(reportCalls()).toBeGreaterThan(0);
+  expect(document.body.textContent).not.toContain("Hub usage is unavailable");
+  expect(document.body.textContent).not.toContain("Could not load usage data");
+  expect(document.body.textContent).toContain("Loading usage data");
+  const before = reportCalls();
+  rebuilding = false;
+  await act(async () => { await Bun.sleep(1_150); }); // the 1-second Retry-After
+  expect(reportCalls()).toBe(before + 1);
+  expect(document.body.textContent).not.toContain("Loading usage data");
+});

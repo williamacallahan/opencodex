@@ -182,6 +182,39 @@ function responseMessage(body: unknown, status: number, integrationRoute = false
   return [parts.join("\n").slice(0, 1200), ...recovery].join("\n");
 }
 
+/** About a minute at the proxy's five-second Retry-After: longer than a cold read of a 5 GB ledger. */
+const USAGE_REBUILD_MAX_ROUNDS = 12;
+
+/**
+ * A usage read the proxy (or the Home over Remote Link) is still building in the background: a
+ * command waits for it at the proxy's own Retry-After, for a bounded number of rounds, rather than
+ * reporting a failure. Returns whether to ask again.
+ */
+async function waitForUsageRebuild(
+  status: number,
+  body: unknown,
+  retryAfterSeconds: number | undefined,
+  method: string,
+  attempt: number,
+  signal: AbortSignal | null | undefined,
+): Promise<boolean> {
+  const rebuilding = status === 503 && method.toUpperCase() === "GET"
+    && typeof body === "object" && body !== null && (body as { error?: unknown }).error === "usage_rebuilding";
+  if (!rebuilding || attempt + 1 >= USAGE_REBUILD_MAX_ROUNDS || signal?.aborted) return false;
+  const seconds = retryAfterSeconds !== undefined && Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds : 5;
+  // The caller's abort ends the wait at once, not after the Retry-After interval.
+  await new Promise<void>(resolve => {
+    const timer = setTimeout(done, seconds * 1_000);
+    function done(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+    signal?.addEventListener("abort", done, { once: true });
+  });
+  return !signal?.aborted;
+}
+
 export async function runtimeRequest<T = unknown>(
   path: string,
   init: RequestInit = {},
@@ -202,28 +235,36 @@ export async function runtimeRequest<T = unknown>(
     if (!linkChildReadable(method, path)) {
       throw new RuntimeApiError(linkChildRefusal(link, `${method} ${pathname}`), 503, null, "link_child_management_unavailable");
     }
-    const { status, body } = await readLinkHomeJson(link, path, deps.linkHome, init.signal ? { signal: init.signal } : {});
-    if (status < 200 || status >= 300) throw new RuntimeApiError(responseMessage(body, status), status, body);
-    return body as T;
+    for (let attempt = 0; ; attempt += 1) {
+      const { status, body, retryAfterSeconds } = await readLinkHomeJson(link, path, deps.linkHome, init.signal ? { signal: init.signal } : {});
+      if (await waitForUsageRebuild(status, body, retryAfterSeconds, method, attempt, init.signal)) continue;
+      if (status < 200 || status >= 300) throw new RuntimeApiError(responseMessage(body, status), status, body);
+      return body as T;
+    }
   }
   const headers = runningProxyUpdateHeaders();
   for (const [key, value] of new Headers(init.headers).entries()) headers.set(key, value);
   const fetchImpl = deps.fetchImpl ?? fetch;
   let response: Response;
-  try {
-    response = await fetchImpl(`${baseUrl}${path.startsWith("/") ? path : `/${path}`}`, { ...init, headers });
-  } catch (error) {
-    throw new RuntimeApiError(
-      `Management API is unreachable: ${error instanceof Error ? error.message : String(error)}`,
-      503,
-      null,
-    );
-  }
-  const text = await response.text();
   let body: unknown = null;
-  if (text) {
-    try { body = JSON.parse(text); }
-    catch { body = text; }
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      response = await fetchImpl(`${baseUrl}${path.startsWith("/") ? path : `/${path}`}`, { ...init, headers });
+    } catch (error) {
+      throw new RuntimeApiError(
+        `Management API is unreachable: ${error instanceof Error ? error.message : String(error)}`,
+        503,
+        null,
+      );
+    }
+    const text = await response.text();
+    body = null;
+    if (text) {
+      try { body = JSON.parse(text); }
+      catch { body = text; }
+    }
+    const retryAfter = Number(response.headers.get("retry-after"));
+    if (!await waitForUsageRebuild(response.status, body, retryAfter, init.method ?? "GET", attempt, init.signal)) break;
   }
   if (!response.ok) {
     throw new RuntimeApiError(responseMessage(body, response.status, isIntegrationRoute(path, response)), response.status, body);

@@ -1,6 +1,5 @@
-import type { PersistedUsageEntry } from "./log";
 import { isLegacyCodexUsage, matchesUsageSource, snapshotConfiguredKeyIds, USAGE_SOURCE_CLIENTS,
-  type UsageDeviceFilter, type UsageSourceClient, type UsageSourceFilter } from "./source-filter";
+  type UsageDeviceFilter, type UsageSourceClient, type UsageSourceFields, type UsageSourceFilter } from "./source-filter";
 import type { UsageTimeWindow } from "./time-range";
 
 /** Fold request rows once. Only currently configured IDs get individual counters. */
@@ -17,10 +16,10 @@ export function createSourceFacetAccumulator(filter: UsageSourceFilter, ids: rea
   let unconfigured = 0;
   let legacyUnclassifiedRequests = 0;
   const selectedDevice = { ...filter.device };
-  const matches = (entry: PersistedUsageEntry, client: UsageSourceClient, device: UsageDeviceFilter) =>
+  const matches = (entry: UsageSourceFields, client: UsageSourceClient, device: UsageDeviceFilter) =>
     matchesUsageSource(entry, { client, device }, configured);
   return {
-    add(entry: PersistedUsageEntry) {
+    add(entry: UsageSourceFields) {
       if (!Number.isFinite(entry.timestamp) || entry.timestamp < window.since || entry.timestamp > window.until) return;
       for (const client of USAGE_SOURCE_CLIENTS) {
         if (matches(entry, client, selectedDevice)) apps[client] += 1;

@@ -343,9 +343,9 @@ timing method unknown)** and a visible explanation of the timing method when a r
 | `GET /api/debug/usage-logs` | Read bounded usage-debug entries | — |
 | `GET /api/debug/injection-logs` | Read bounded guidance-injection debug entries | — |
 | `GET /api/claude/inbound-debug` | Read Claude inbound debug state and entries | — |
-| `GET /api/usage` | Scan the usage ledger into compact aggregates of readable rows, then incrementally fold verified appends; summarize by preset or inclusive custom window and client surface, with a Codex `accounts` breakdown keyed by stable non-PII log labels | 400 invalid custom bounds; 500 `{ "error": "read_failed" }` if storage cannot be read |
+| `GET /api/usage` | Scan the usage ledger into compact aggregates of readable rows, then incrementally fold verified appends; summarize by preset or inclusive custom window and client surface, with a Codex `accounts` breakdown keyed by stable non-PII log labels | 400 invalid custom bounds; 503 `{ "error": "usage_rebuilding" }` with `Retry-After` while a whole-ledger rebuild (first read after a start, a replaced ledger, or a filter the candidate index cannot serve) runs in the background; 500 `{ "error": "read_failed" }` if storage cannot be read |
 | `GET /api/usage/devices` | List current Remote Link key IDs and aliases for an authorized dashboard session | 403 without the required dashboard session; 503 if the link store cannot be read |
-| `GET /api/usage/source-facets` | Count recent app and device choices for an authorized dashboard session | 400 for invalid filters; 403 without the required session; 503 if the scan or inventory is unavailable |
+| `GET /api/usage/source-facets` | Count recent app and device choices for an authorized dashboard session | 400 for invalid filters; 403 without the required session; 503 with `Retry-After` while the counts are still being read or the usage index or inventory is unavailable; a picker reopened within 15 seconds reuses the last counts |
 | `GET /api/usage?jev=1` | Project persisted JEV decisions and their physical target sends. Optional `comboId` selects one Combo; `range` accepts `7d`, `30d`, or `all` (default `30d`). | 400 invalid `comboId`; 500 `{ "error": "read_failed" }` if the ledger cannot be read |
 | `GET /api/usage/timeline` | Bucketed usage by model/account; accepts `hours`, `bucketMinutes`, `metric`, `aggregation`, `grouping`, comma-separated `models` and repeated `hiddenProvider` filters | 400 invalid query or limits |
 | `GET /api/usage/archive` | Usage totals for a window of the 31-day usage archive, from precomputed hourly totals; see [Archived usage](#archived-usage) | 400 `invalid_window` or `invalid_parameter` |
@@ -391,6 +391,12 @@ speed; it is distinct from the reasoning-effort `effort_downgrade` class. `rate_
 `policy` and `ciphertext` are separate because the operator response
 differs: wait out the limit, move to another account, change the prompt, or drop stale encrypted
 state. A rejected opaque reasoning blob counts as `ciphertext` rather than `payload`.
+
+`GET /api/keys` never waits for the usage log either: until a per-key rollup has been read it lists
+the keys without `usage`, with `usageIncluded: false` and `usagePending: true` (ask again after a few
+seconds), or `usageUnavailable: true` when the last read failed. A served rollup carries `usageAsOf`,
+the time it was completed, and `usageDated: true` when the log has changed since. A key is reported
+unused only from a completed rollup.
 
 If a scanned row exceeds the existing parser size limit, `GET /api/usage` and `GET /api/keys`
 keep the readable-row aggregates and add `usageIncomplete: true` with

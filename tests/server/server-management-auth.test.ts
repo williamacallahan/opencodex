@@ -325,7 +325,7 @@ describe("management and data-plane credential separation", () => {
 
       // The query is signed: a bare-path grant cannot replay against a query URL (above), and a grant naming the exact query admits only that query.
       const usagePath = `${LOCAL_MANAGEMENT_READ_PATHS.usage}?range=7d`;
-      const usage = await fetch(new URL(usagePath, server.url), { headers: headersFor(usagePath, server.port, "E2".repeat(22).slice(0, 43)) });
+      const usage = await (await import("../../src/server/management/usage-aggregate-cache")).getUsageAggregate().then(() => fetch(new URL(usagePath, server.url), { headers: headersFor(usagePath, server.port, "E2".repeat(22).slice(0, 43)) }));
       expect(usage.status).toBe(200);
       const otherRange = await fetch(new URL(`${LOCAL_MANAGEMENT_READ_PATHS.usage}?range=today`, server.url),
         { headers: headersFor(usagePath, server.port, "E3".repeat(22).slice(0, 43)) });

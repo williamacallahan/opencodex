@@ -5,8 +5,8 @@ import { dirname, join } from "node:path";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { enforceUsageLedgerSizeLimit } from "../../src/usage/ledger-retention";
 import { MIN_USAGE_LEDGER_MAX_BYTES } from "../../src/usage/retention-contract";
-import { appendUsageEntry, usageLogPath } from "../../src/usage/log";
-import { setUsageLedgerRetention } from "../../src/server/usage-ledger-retention";
+import { appendUsageEntry, resetUsageLedgerAppendFailuresForTests, usageLogPath } from "../../src/usage/log";
+import { resetUsageLedgerDiskSampleForTests, setUsageLedgerRetention, usageLedgerRetentionStatus } from "../../src/server/usage-ledger-retention";
 
 let home: string;
 let previousHome: string | undefined;
@@ -118,5 +118,41 @@ describe("usage ledger retention while the trim is suspended", () => {
     expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES - 1).kind).toBe("disabled");
     expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("unchanged");
     expect(readFileSync(usageLogPath(), "utf-8")).toBe(before);
+  });
+
+  test("status samples free space where the live ledger lives and says unknown when it cannot", () => {
+    resetUsageLedgerDiskSampleForTests();
+    writeRows(2, 64);
+    const known = usageLedgerRetentionStatus(undefined).disk;
+    expect(typeof known.availableBytes).toBe("number");
+    expect(known.availableBytes).toBeGreaterThan(0);
+    expect(Number.isNaN(Date.parse(known.sampledAt))).toBe(false);
+
+    resetUsageLedgerDiskSampleForTests();
+    process.env.OPENCODEX_HOME = join(home, "missing", "home");
+    try {
+      expect(usageLedgerRetentionStatus(undefined).disk).toMatchObject({ availableBytes: null, unknownReason: "ENOENT" });
+    } finally {
+      process.env.OPENCODEX_HOME = home;
+      resetUsageLedgerDiskSampleForTests();
+    }
+  });
+
+  test("a failed append is counted and logged once per interval, without the row", () => {
+    resetUsageLedgerAppendFailuresForTests();
+    mkdirSync(usageLogPath(), { recursive: true });
+    const error = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const row = { requestId: "secret-request-id", timestamp: FIRST_ROW_AT, provider: "openai", model: "m", status: 200 };
+      expect(() => appendUsageEntry(row as Parameters<typeof appendUsageEntry>[0])).toThrow();
+      expect(() => appendUsageEntry(row as Parameters<typeof appendUsageEntry>[0])).toThrow();
+      expect(usageLedgerRetentionStatus(undefined).appendFailures).toMatchObject({ count: 2, lastCode: "EISDIR" });
+      expect(error.mock.calls).toHaveLength(1);
+      expect(String(error.mock.calls[0]![0])).toContain("EISDIR");
+      expect(String(error.mock.calls[0]![0])).not.toContain("secret-request-id");
+    } finally {
+      error.mockRestore();
+      resetUsageLedgerAppendFailuresForTests();
+    }
   });
 });

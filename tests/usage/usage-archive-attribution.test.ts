@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { settledUsageResponse } from "../helpers/usage-cold-read";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -44,8 +45,8 @@ const ROWS = [
 
 async function get<T>(path: string): Promise<T> {
   const req = new ManagementRequest(`http://localhost${path}`, { method: "GET" });
-  const response = await handleManagementAPI(req, new URL(req.url), config, { refreshCodexCatalog: async () => {} });
-  if (!response || response.status !== 200) throw new Error(`GET ${path} answered ${response?.status}`);
+  const response = await settledUsageResponse(() => handleManagementAPI(req, new URL(req.url), config, { refreshCodexCatalog: async () => {} }));
+  if (response.status !== 200) throw new Error(`GET ${path} answered ${response?.status}`);
   return await response.json() as T;
 }
 

@@ -1226,18 +1226,48 @@ export function appendUsageEntry(entry: PersistedUsageEntry): void {
     }
   };
   try {
-    doAppend();
-  } catch (error: any) {
-    if (error?.code === "ENOENT") {
+    try {
+      doAppend();
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") throw error;
       ensuredUsageLogDir = null;
       ensuredUsageLogFile = null;
       doAppend();
-      afterUsageLedgerAppend?.();
-      return;
     }
+  } catch (error) {
+    recordUsageLedgerAppendFailure(error, now);
     throw error;
   }
   afterUsageLedgerAppend?.();
+}
+
+/** One error line per this interval at most: a full disk fails every request's append. */
+const USAGE_APPEND_FAILURE_LOG_INTERVAL_MS = 60_000;
+let usageAppendFailures: { count: number; lastAt?: number; lastCode?: string; loggedAt?: number; unlogged: number } = { count: 0, unlogged: 0 };
+
+function recordUsageLedgerAppendFailure(error: unknown, now: number): void {
+  const code = typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : "unknown";
+  const state = usageAppendFailures;
+  state.count += 1;
+  state.lastAt = now;
+  state.lastCode = code;
+  if (state.loggedAt !== undefined && now - state.loggedAt >= 0 && now - state.loggedAt < USAGE_APPEND_FAILURE_LOG_INTERVAL_MS) {
+    state.unlogged += 1;
+    return;
+  }
+  // The code and counts only: the row and the error message can carry request content and paths.
+  console.error(`[usage-ledger] a usage row could not be appended (${code}); ${state.count} append(s) failed since start${state.unlogged > 0 ? `, ${state.unlogged} not logged individually` : ""}`);
+  state.loggedAt = now;
+  state.unlogged = 0;
+}
+
+export function usageLedgerAppendFailureStats(): { count: number; lastAt?: string; lastCode?: string } {
+  const { count, lastAt, lastCode } = usageAppendFailures;
+  return { count, ...(lastAt !== undefined ? { lastAt: new Date(lastAt).toISOString() } : {}), ...(lastCode ? { lastCode } : {}) };
+}
+
+export function resetUsageLedgerAppendFailuresForTests(): void {
+  usageAppendFailures = { count: 0, unlogged: 0 };
 }
 
 export type UsageLogRevision = {

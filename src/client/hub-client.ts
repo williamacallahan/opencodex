@@ -55,6 +55,8 @@ export interface StartedClientKeyRotation extends IssuedClientKey {
 }
 
 export class HubClientError extends Error {
+  /** Set when the hub answered pending with a Retry-After interval. */
+  retryAfterSeconds?: number;
   constructor(
     readonly code: string,
     message: string,
@@ -93,7 +95,10 @@ async function fetchBounded(
     const response = await fetchImpl(url, {
       ...init,
       redirect: "manual",
-      signal: headerDeadline?.signal ?? AbortSignal.timeout(timeout),
+      // The caller's own signal, when it passed one, ends the request with the timeout.
+      signal: init.signal
+        ? AbortSignal.any([init.signal, headerDeadline?.signal ?? AbortSignal.timeout(timeout)])
+        : headerDeadline?.signal ?? AbortSignal.timeout(timeout),
     });
     headerDeadline?.clear();
     if (response.status >= 300 && response.status < 400 && response.status !== 304) {
@@ -485,7 +490,7 @@ export async function fetchHubUsage(
   serverUrl: string,
   admissionToken: string,
   query: URLSearchParams,
-  options: { timeoutMs?: number; fetchImpl?: typeof fetch; peer?: "hub" | "Home" } = {},
+  options: { timeoutMs?: number; fetchImpl?: typeof fetch; peer?: "hub" | "Home"; signal?: AbortSignal } = {},
 ): Promise<HubUsageReport> {
   const origin = normalizeHubOrigin(serverUrl);
   if (!isHubTransportPermitted(origin)) {
@@ -495,6 +500,7 @@ export async function fetchHubUsage(
     method: "GET",
     cache: "no-store",
     headers: new Headers({ Accept: "application/json", "x-opencodex-api-key": admissionToken }),
+    ...(options.signal ? { signal: options.signal } : {}),
   }, options.timeoutMs);
   if (!response.ok) {
     try { await response.body?.cancel(); } catch { /* best effort */ }
@@ -504,13 +510,19 @@ export async function fetchHubUsage(
     const message = response.status === 404 ? `${Peer} does not support client usage; upgrade the ${peer}`
       : response.status === 401 || response.status === 403 ? `${Peer} rejected this ${peer === "Home" ? "Child's link key" : "client's usage credential"}`
       : `${Peer} usage request failed (${response.status})`;
-    throw new HubClientError(`hub_usage_http_${response.status}`, message, response.status);
+    const error = new HubClientError(`hub_usage_http_${response.status}`, message, response.status);
+    // A 503 with Retry-After is the hub still building the report: the caller may ask again then.
+    const retryAfter = Number(response.headers.get("retry-after"));
+    if (response.status === 503 && Number.isFinite(retryAfter) && retryAfter > 0) error.retryAfterSeconds = retryAfter;
+    throw error;
   }
   if (!jsonCompatibleContentType(response)) {
     try { await response.body?.cancel(); } catch { /* best effort */ }
     throw new HubClientError("hub_usage_invalid", "Hub usage response was not JSON");
   }
-  const text = await boundedText(response, MAX_HUB_USAGE_BYTES, { inactivityTimeoutMs: safeTimeout(options.timeoutMs) });
+  const text = await boundedText(response, MAX_HUB_USAGE_BYTES, {
+    inactivityTimeoutMs: safeTimeout(options.timeoutMs), ...(options.signal ? { signal: options.signal } : {}),
+  });
   const report = parseHubUsage(parseJson(text, "hub_usage_invalid"));
   if (!report) throw new HubClientError("hub_usage_invalid", "Hub usage response was invalid");
   const requestedClient = query.get("client");
