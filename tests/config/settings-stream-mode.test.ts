@@ -1157,7 +1157,8 @@ describe("usageLedgerMaxBytes settings", () => {
         usageLedgerRetention?: { maxBytes?: number; currentBytes: number };
       };
       expect(initial.usageLedgerMaxBytes).toBeNull();
-      expect(initial.usageLedgerRetention).toEqual({ currentBytes: 0 });
+      expect(initial.usageLedgerRetention).toMatchObject({ currentBytes: 0 });
+      expect(initial.usageLedgerRetention).not.toHaveProperty("enforcement");
 
       mkdirSync(TEST_DIR, { recursive: true });
       const oversizedRow = `${JSON.stringify({ requestId: "seed", pad: "x".repeat(16 * 1024) })}\n`;
@@ -1170,7 +1171,7 @@ describe("usageLedgerMaxBytes settings", () => {
         usageLedgerRetention?: { maxBytes?: number; currentBytes: number; enforcement?: "suspended" };
       };
       expect(saved.usageLedgerMaxBytes).toBe(MIN_USAGE_LEDGER_MAX_BYTES);
-      expect(saved.usageLedgerRetention).toEqual({
+      expect(saved.usageLedgerRetention).toMatchObject({
         maxBytes: MIN_USAGE_LEDGER_MAX_BYTES, currentBytes: oversizedRow.length * 100, enforcement: "suspended",
       });
       expect(loadConfig().usageLedgerMaxBytes).toBe(MIN_USAGE_LEDGER_MAX_BYTES);

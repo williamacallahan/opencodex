@@ -102,7 +102,7 @@ describe("the legacy usage archive is never written or deleted while its trim is
 
   test("the retention status says enforcement is suspended rather than that the ledger is under its limit", () => {
     const ledger = writeLedger();
-    expect(usageLedgerRetentionStatus(MIN_USAGE_LEDGER_MAX_BYTES)).toEqual({
+    expect(usageLedgerRetentionStatus(MIN_USAGE_LEDGER_MAX_BYTES)).toMatchObject({
       maxBytes: MIN_USAGE_LEDGER_MAX_BYTES, currentBytes: ledger.byteLength, enforcement: "suspended",
     });
   });

@@ -7,9 +7,11 @@
  * still schedules one check off the request's turn, which warns once per process that the ledger is
  * being kept whole. Nothing is trimmed, so no ledger reader needs invalidating.
  */
-import { currentUsageLogRevision, setUsageLedgerAppendHook } from "../usage/log";
+import { statfsSync } from "node:fs";
+import { dirname } from "node:path";
+import { currentUsageLogRevision, setUsageLedgerAppendHook, usageLedgerAppendFailureStats, usageLogPath } from "../usage/log";
 import { enforceUsageLedgerSizeLimit, usageLedgerLimitApplies } from "../usage/ledger-retention";
-import type { UsageLedgerRetentionStatus } from "../usage/retention-contract";
+import type { UsageLedgerDiskSample, UsageLedgerRetentionStatus } from "../usage/retention-contract";
 
 let configuredMaxBytes: number | undefined;
 let scheduledEnforcement: ReturnType<typeof setTimeout> | null = null;
@@ -117,6 +119,35 @@ export function configuredUsageLedgerMaxBytes(): number | undefined {
   return configuredMaxBytes;
 }
 
+/** The settings panel polls; one statfs per this interval is plenty for a quantity that moves by MB/minute. */
+const DISK_SAMPLE_MAX_AGE_MS = 30_000;
+let diskSample: { directory: string; at: number; sample: UsageLedgerDiskSample } | null = null;
+
+/** Free space where the live ledger is appended, not where the config or archive lives. */
+function sampleLiveLedgerDisk(now = Date.now()): UsageLedgerDiskSample {
+  const directory = dirname(usageLogPath());
+  const cached = diskSample;
+  if (cached && cached.directory === directory && now - cached.at >= 0 && now - cached.at < DISK_SAMPLE_MAX_AGE_MS) return cached.sample;
+  const sampledAt = new Date(now).toISOString();
+  let sample: UsageLedgerDiskSample;
+  try {
+    const stats = statfsSync(directory);
+    const available = Number(stats.bavail) * Number(stats.bsize);
+    sample = Number.isSafeInteger(available) && available >= 0
+      ? { availableBytes: available, sampledAt }
+      : { availableBytes: null, sampledAt, unknownReason: "invalid-statfs" };
+  } catch (error) {
+    const code = (error as { code?: unknown })?.code;
+    sample = { availableBytes: null, sampledAt, unknownReason: typeof code === "string" ? code : "statfs-failed" };
+  }
+  diskSample = { directory, at: now, sample };
+  return sample;
+}
+
+export function resetUsageLedgerDiskSampleForTests(): void {
+  diskSample = null;
+}
+
 /** `enforcement: "suspended"` when the ledger is over an applicable limit that the suspended trim does not enforce. */
 export function usageLedgerRetentionStatus(maxBytes: number | undefined = configuredMaxBytes): UsageLedgerRetentionStatus {
   const currentBytes = safeCurrentUsageLogBytes();
@@ -124,5 +155,7 @@ export function usageLedgerRetentionStatus(maxBytes: number | undefined = config
     ...(maxBytes !== undefined ? { maxBytes } : {}),
     currentBytes,
     ...(usageLedgerLimitApplies(maxBytes) && currentBytes > maxBytes ? { enforcement: "suspended" as const } : {}),
+    disk: sampleLiveLedgerDisk(),
+    appendFailures: usageLedgerAppendFailureStats(),
   };
 }

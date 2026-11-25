@@ -30,4 +30,16 @@ export interface UsageLedgerRetentionStatus {
   currentBytes: number;
   /** Present when the ledger is over its limit and the trim is suspended, so the limit is not enforced. */
   enforcement?: "suspended";
+  /**
+   * Free space on the filesystem holding the live ledger, sampled at `sampledAt`. While the trim is
+   * suspended this is what bounds the ledger. `availableBytes: null` means the sample failed: unknown,
+   * never zero and never "plenty".
+   */
+  disk: UsageLedgerDiskSample;
+  /** Appends that threw since this process started. The request that wrote the row never sees it. */
+  appendFailures: { count: number; lastAt?: string; lastCode?: string };
 }
+
+export type UsageLedgerDiskSample =
+  | { availableBytes: number; sampledAt: string }
+  | { availableBytes: null; sampledAt: string; unknownReason: string };
