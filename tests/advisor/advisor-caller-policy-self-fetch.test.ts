@@ -105,8 +105,8 @@ function harness(config: Omit<OcxConfig, "providers" | "advisor"> & { advisorMod
   return h;
 }
 
-const publicServer = { timeout() {} };
-const loopbackServer = { timeout() {} };
+const publicServer = { timeout() {}, requestIP: () => null };
+const loopbackServer = { timeout() {}, requestIP: () => null };
 type ServerArg = Parameters<ReturnType<typeof createServeOptions>["fetch"]>[1];
 
 function listener(config: OcxConfig) {

@@ -265,7 +265,7 @@ function sendWithSpendLedger(config: OcxConfig) {
   } as unknown as Parameters<typeof createServeOptions>[0]);
   return options.fetch(new Request("http://localhost/v1/responses", { method: "POST",
     headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "chain/overload", input: "hello", stream: true, max_output_tokens: 32 }),
-  }), { timeout() {} } as unknown as Parameters<typeof options.fetch>[1]);
+  }), { timeout() {}, requestIP: () => null } as unknown as Parameters<typeof options.fetch>[1]);
 }
 
 function strictReserveConfig() {

@@ -43,7 +43,7 @@ function publicFetch(config: ReturnType<typeof keyProviderConfig>) {
     packageTreeIntegrity: { status: () => ({ ok: true }) },
     runAdmittedHttpTurn: (_req: Request, _policy: unknown, work: () => Promise<Response>) => work(),
   } as unknown as Parameters<typeof createServeOptions>[0]);
-  const server = { timeout() {} } as unknown as Parameters<typeof options.fetch>[1];
+  const server = { timeout() {}, requestIP: () => null } as unknown as Parameters<typeof options.fetch>[1];
   return (req: Request) => options.fetch(req, server);
 }
 

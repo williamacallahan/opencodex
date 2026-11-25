@@ -60,7 +60,7 @@ for (const wire of ["responses", "chat/completions", "messages", "responses/comp
       });
       const holder = raised ? await inboundBodyBudget.acquire(inboundBodyBudget.capacity(), request.signal, 0) : null;
       try {
-        const requestServer = { timeout() {} } as unknown as Parameters<typeof serve.fetch>[1];
+        const requestServer = { timeout() {}, requestIP: () => null } as unknown as Parameters<typeof serve.fetch>[1];
         const pending = serve.fetch(request, requestServer);
         if (raised) expect(inboundBodyBudget.snapshot().queuedRequests).toBe(1);
         cfg.apiKeys![0]!.allowMeteredComboTargets = true;
