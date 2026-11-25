@@ -3,7 +3,7 @@
  *
  * It logs the shape of the body, never its content: key names that look like identifiers (anything else is
  * `<other>`), the JSON type of three named values with a length and a closed class for strings, the
- * `requestType` mode name when it is enum-like, and the body size rounded up to a power of two. Values, the
+ * `requestType` mode name when it is enum-like, the character-class pattern of the top-level `requestId` (no character of it survives), and the body size rounded up to a power of two. Values, the
  * project, request ids, prompt text and headers are never read into the line. It is bounded for life: one
  * line per distinct shape, 20 lines, 64 remembered shapes, and nothing is computed once either cap is reached.
  */
@@ -88,6 +88,63 @@ function describeValue(bytes: Uint8Array, member: Member | undefined, scan: Json
   return "number";
 }
 
+const MAX_PATTERN_SOURCE_BYTES = 200;
+
+/**
+ * The character-class pattern of a string, so that no character of it survives: a run of hex digits and `a`-`f`
+ * is `h<count>` (`d<count>` when all are decimal digits), any other ASCII letter run is `a<count>`, each of
+ * `/ - _ . :` stays itself, and any other character is `?`.
+ */
+export function characterClassPattern(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length;) {
+    const ch = text.charCodeAt(i);
+    const digit = ch >= 0x30 && ch <= 0x39;
+    const hexLetter = (ch >= 0x61 && ch <= 0x66) || (ch >= 0x41 && ch <= 0x46);
+    const letter = hexLetter || (ch >= 0x61 && ch <= 0x7A) || (ch >= 0x41 && ch <= 0x5A);
+    if (digit || hexLetter) {
+      let end = i;
+      let allDigits = true;
+      for (; end < text.length; end += 1) {
+        const c = text.charCodeAt(end);
+        const isDigit = c >= 0x30 && c <= 0x39;
+        if (!isDigit && !((c >= 0x61 && c <= 0x66) || (c >= 0x41 && c <= 0x46))) break;
+        if (!isDigit) allDigits = false;
+      }
+      out += `${allDigits ? "d" : "h"}${end - i}`;
+      i = end;
+    } else if (letter) {
+      let end = i;
+      for (; end < text.length; end += 1) {
+        const c = text.charCodeAt(end);
+        const hex = (c >= 0x30 && c <= 0x39) || (c >= 0x61 && c <= 0x66) || (c >= 0x41 && c <= 0x46);
+        if (hex || !((c >= 0x61 && c <= 0x7A) || (c >= 0x41 && c <= 0x5A))) break;
+      }
+      out += `a${end - i}`;
+      i = end;
+    } else {
+      out += "/-_.:".includes(text[i]!) ? text[i]! : "?";
+      i += 1;
+    }
+  }
+  return out;
+}
+
+function requestIdPattern(bytes: Uint8Array, member: Member | undefined, scan: JsonScanners): string {
+  if (!member || bytes[member.valueStart] !== 0x22) return "absent";
+  const token = scan.scanStr(bytes, member.valueStart);
+  if (!token) return "absent";
+  if (token.end - (member.valueStart + 1) > MAX_PATTERN_SOURCE_BYTES) return "toolong";
+  // Decoded as JSON so an escape is classed by the character it stands for, never by its spelling.
+  try {
+    const value: unknown = JSON.parse(decoder.decode(bytes.subarray(member.valueStart, token.end + 1)));
+    if (typeof value !== "string") return "absent";
+    return value.length > MAX_PATTERN_SOURCE_BYTES ? "toolong" : characterClassPattern(value);
+  } catch {
+    return "absent";
+  }
+}
+
 const bucket = (bytes: number): number => 2 ** Math.ceil(Math.log2(Math.max(1, bytes)));
 const logfmt = (text: string): string => /^[A-Za-z0-9_.:\-/@]+$/.test(text) ? text : JSON.stringify(text);
 
@@ -118,6 +175,7 @@ export function unlabelledShapeFields(bytes: Uint8Array, scan: JsonScanners): [s
     ["request_type", describeValue(bytes, requestType, scan)],
     ["request_type_value", mode],
     ["trajectory_id", describeValue(bytes, labels ? first(labels, "trajectory_id") : undefined, scan)],
+    ["request_id_pattern", requestIdPattern(bytes, first(top, "requestId"), scan)],
     ["body_bytes_bucket", String(bucket(bytes.byteLength))],
   ];
 }

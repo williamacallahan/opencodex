@@ -26,7 +26,7 @@ describe("unlabelled generate shape", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toBe('[opencodex] level=info event=agy.unlabelled_generate_shape top_keys="project,model,requestType,requestId,request" '
       + 'request_keys="contents,sessionId,labels" label_keys="request_id,cascade_id" session_id=number request_type=string/5/other '
-      + 'request_type_value=agent trajectory_id=absent body_bytes_bucket=512');
+      + 'request_type_value=agent trajectory_id=absent request_id_pattern=a2-a1h2a1h1a1-a1h1a2h1a1-d4 body_bytes_bucket=512');
   });
 
   test("string classes", () => {
@@ -46,6 +46,25 @@ describe("unlabelled generate shape", () => {
     expect(lines[0]).not.toContain(MARKER);
     expect(lines[0]).toContain("<other>");
     expect(lines[0]).toContain("request_type_value=absent");
+  });
+
+  test("the request id is logged only as a character-class pattern", () => {
+    const pattern = (requestId: unknown) => { resetUnlabelledShapeLogForTests(); lines.length = 0; log({ requestId, request: { contents: [] } }); return JSON.parse(lines[0]!.match(/request_id_pattern=("[^"]*"|\S+)/)![1]!.replace(/^([^"].*)$/, '"$1"')) as string; };
+    expect(pattern("3f0b6c1e-8d2a-4b7e-9c51-2a6d8e4f1b07")).toBe("h8-h4-h4-h4-h12");
+    expect(pattern("agent/1234:5678_x.é")).toBe("h1a1h1a2/d4:d4_a1.?");
+    expect(pattern(`${MARKER}`)).toBe("a2-a1h2a1h1a1-a1h1a2h1a1-d4");
+    expect(lines.join("\n")).not.toContain(MARKER);
+    expect(pattern("x".repeat(201))).toBe("toolong");
+    expect(pattern(12345)).toBe("absent");
+    expect(pattern(null)).toBe("absent");
+    expect(pattern(undefined)).toBe("absent");
+  });
+
+  test("a different request id pattern is a different shape", () => {
+    log({ requestId: "ab-12", request: { a: 1 } });
+    log({ requestId: "ab-12", request: { a: 1 } });
+    log({ requestId: "ab/12", request: { a: 1 } });
+    expect(lines).toHaveLength(2);
   });
 
   test("one line per shape, at most 20 lines, and nothing is computed after the cap", () => {

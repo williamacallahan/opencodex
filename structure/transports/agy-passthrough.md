@@ -118,7 +118,7 @@ line describing the body's shape and nothing in it: the top-level, `request` and
 order (identifier-shaped names only, else `<other>`, 40 at most), the JSON type of `request.sessionId`,
 top-level `requestType` and `request.labels.trajectory_id` (strings add their byte length and one class of
 `uuid`, `signed-digits`, `digits`, `hex`, `empty`, `other`), `requestType` itself when it matches
-`^[A-Za-z_-]{1,24}$`, and the body size rounded up to a power of two. Values, the project, request ids, prompt
+`^[A-Za-z_-]{1,24}$`, the character-class pattern of the top-level `requestId` (`request_id_pattern`: hex-digit runs `h<n>`, all-decimal runs `d<n>`, other letter runs `a<n>`, `/ - _ . :` kept, anything else `?`, `toolong` over 200 characters, `absent` when not a string; no character of the value survives and the pattern is part of the shape signature), and the body size rounded up to a power of two. Values, the project, request ids, prompt
 text and headers are never read into it. It is bounded for the process lifetime (one line per distinct shape,
 20 lines, 64 remembered shapes, nothing computed afterwards), runs one extra walk of the top level and of
 `request`'s direct members only when no session was found, never throws, and leaves the forwarded bytes
