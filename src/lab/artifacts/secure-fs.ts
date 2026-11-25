@@ -1,23 +1,22 @@
 /**
  * Descriptor/handle-bound, no-follow artifact I/O for the Compatibility Lab store.
  *
- * POSIX runtimes use directory-relative `dir` opens. Windows uses the same pinned
- * directory identity checks as other reviewed OpenCodex bounded readers, because
- * directory-relative child opens are not durable there.
+ * Every runtime uses verified-path mode: a pinned directory descriptor, revalidated before each
+ * operation, plus an identity check that the opened path is the file the descriptor reached. Bun
+ * (the bundled runtime) and Node accept no descriptor-relative `dir` option on openSync,
+ * renameSync or unlinkSync and silently resolve such a name against the process cwd, so there is
+ * no directory-relative mode to probe for.
  */
 import {
   closeSync,
   constants as fsConstants,
-  existsSync,
   fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   openSync,
   readSync,
   renameSync,
-  rmSync,
   unlinkSync,
   writeSync,
   type Stats,
@@ -51,9 +50,7 @@ const O_EXCL = fsConstants.O_EXCL;
 const O_NOFOLLOW = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW;
 const O_DIRECTORY = (fsConstants as { O_DIRECTORY?: number }).O_DIRECTORY;
 
-type ArtifactIoMode = "dirfd" | "win32_pinned";
 
-let artifactIoMode: ArtifactIoMode | null = null;
 
 export function assertDigestName(digest: string): string {
   if (!isSha256Hex(digest)) harnessFailure("artifact digest must be lowercase sha256 hex");
@@ -115,59 +112,6 @@ export interface TrustedArtifactDir {
   identity: string;
 }
 
-type OpenSyncWithDir = (
-  path: string,
-  flags: number,
-  mode: number,
-  options: { dir: number },
-) => number;
-
-type RenameSyncWithDir = (from: string, to: string, options: { dir: number }) => void;
-type UnlinkSyncWithDir = (path: string, options: { dir: number }) => void;
-
-function detectArtifactIoMode(dir: TrustedArtifactDir): ArtifactIoMode {
-  if (artifactIoMode !== null) return artifactIoMode;
-  if (process.platform === "win32") {
-    artifactIoMode = "win32_pinned";
-    return artifactIoMode;
-  }
-  // The probe runs in a fresh owner-only directory this call creates beneath the trusted artifact
-  // directory, through that directory's own descriptor, so no other entry can collide with its
-  // names and cleanup removes only what this call made. A runtime that ignores `dir` (Bun 1.4.4
-  // does) resolves the relative names against the process cwd, where the probe never creates
-  // anything: the file is created by absolute path, then opened, renamed and unlinked relatively.
-  artifactIoMode = "win32_pinned";
-  const name = ".ocx-dirfd-probe";
-  const finalName = `${name}.ok`;
-  let scratch: string | undefined;
-  let scratchFd: number | undefined;
-  try {
-    scratch = mkdtempSync(join(dir.path, ".dirfd-probe-"));
-    scratchFd = openSync(scratch, openFlags(O_RDONLY | (O_DIRECTORY ?? 0), true));
-    const scratchStats = fstatSync(scratchFd);
-    if (!scratchStats.isDirectory() || (scratchStats.mode & 0o077) !== 0
-      || (typeof process.getuid === "function" && scratchStats.uid !== process.getuid())) return artifactIoMode;
-    const created = openSync(join(scratch, name), O_CREAT | O_EXCL | O_RDWR, 0o600);
-    let createdIdentity: BigIntStats;
-    try { createdIdentity = fstatSync(created, { bigint: true }); } finally { closeSync(created); }
-    const opened = (openSync as unknown as OpenSyncWithDir)(name, O_RDONLY, 0, { dir: scratchFd });
-    const sameFile = sameFileIdentity(fstatSync(opened, { bigint: true }), createdIdentity);
-    closeSync(opened);
-    if (!sameFile) return artifactIoMode;
-    (renameSync as unknown as RenameSyncWithDir)(name, finalName, { dir: scratchFd });
-    if (!existsSync(join(scratch, finalName))) return artifactIoMode;
-    (unlinkSync as unknown as UnlinkSyncWithDir)(finalName, { dir: scratchFd });
-    if (!existsSync(join(scratch, finalName))) artifactIoMode = "dirfd";
-  } catch {
-    // An ignored or unsupported `dir`, or a scratch directory that cannot be established, keeps
-    // the verified-path mode.
-  } finally {
-    if (scratchFd !== undefined) closeSync(scratchFd);
-    if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
-  }
-  return artifactIoMode;
-}
-
 function childPath(dir: TrustedArtifactDir, name: string): string {
   revalidateDir(dir);
   assertRelativeName(name);
@@ -175,7 +119,6 @@ function childPath(dir: TrustedArtifactDir, name: string): string {
 }
 
 function assertOpenedPathMatchesDescriptor(dir: TrustedArtifactDir, name: string, fd: number): void {
-  if (detectArtifactIoMode(dir) !== "win32_pinned") return;
   const opened = fstatSync(fd, { bigint: true });
   assertRegularFileStats(opened, "artifact fd");
   const pathEntry = lstatSync(childPath(dir, name), { bigint: true });
@@ -192,10 +135,6 @@ function assertOpenedPathMatchesDescriptor(dir: TrustedArtifactDir, name: string
 function openAtDir(dir: TrustedArtifactDir, name: string, flags: number, mode = 0): number {
   revalidateDir(dir);
   assertRelativeName(name);
-  const mode_ = detectArtifactIoMode(dir);
-  if (mode_ === "dirfd") {
-    return (openSync as unknown as OpenSyncWithDir)(name, flags, mode, { dir: dir.fd });
-  }
   const fd = openSync(childPath(dir, name), flags, mode);
   assertOpenedPathMatchesDescriptor(dir, name, fd);
   return fd;
@@ -205,20 +144,12 @@ function renameAtDir(dir: TrustedArtifactDir, from: string, to: string): void {
   revalidateDir(dir);
   assertRelativeName(from);
   assertRelativeName(to);
-  if (detectArtifactIoMode(dir) === "dirfd") {
-    (renameSync as unknown as RenameSyncWithDir)(from, to, { dir: dir.fd });
-    return;
-  }
   renameSync(childPath(dir, from), childPath(dir, to));
 }
 
 function unlinkAtDir(dir: TrustedArtifactDir, name: string): void {
   revalidateDir(dir);
   assertRelativeName(name);
-  if (detectArtifactIoMode(dir) === "dirfd") {
-    (unlinkSync as unknown as UnlinkSyncWithDir)(name, { dir: dir.fd });
-    return;
-  }
   unlinkSync(childPath(dir, name));
 }
 
@@ -246,11 +177,14 @@ export function openTrustedArtifactDir(artifactsDir: string): TrustedArtifactDir
     fd = openSync(abs, O_RDONLY);
   }
 
-  const stats = fstatSync(fd, { bigint: true });
-  assertDirectoryStats(stats, "artifacts dir");
-  const trusted = { path: abs, fd, identity: identityOf(stats) };
-  detectArtifactIoMode(trusted);
-  return trusted;
+  try {
+    const stats = fstatSync(fd, { bigint: true });
+    assertDirectoryStats(stats, "artifacts dir");
+    return { path: abs, fd, identity: identityOf(stats) };
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
 }
 
 export function closeTrustedArtifactDir(dir: TrustedArtifactDir): void {

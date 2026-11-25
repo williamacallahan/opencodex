@@ -408,31 +408,16 @@ test("artifact I/O mode detection leaves no probe in the process cwd or the arti
   expect(fs.readdirSync(artifacts)).toEqual([]);
 });
 
-test.each([
-  ["source", ""],
-  ["destination", ".ok"],
-])("artifact I/O mode detection leaves a foreign %s-name probe entry in place", (_role, suffix) => {
-  // A stale or foreign file can already hold either probe name. Each is pre-created alone, with
-  // the child's pid, so a check on one name cannot short-circuit the other.
-  const root = fs.mkdtempSync(join(tmpdir(), "ocx-lab-dirfd-collision-"));
+test.skipIf(process.platform === "win32")("an artifact directory that fails initialization closes its descriptor", () => {
+  const root = fs.mkdtempSync(join(tmpdir(), "ocx-lab-dir-init-failure-"));
   HOMES.push(root);
-  const cwd = join(root, "cwd");
-  const artifacts = join(root, "artifacts");
-  mkdirSync(cwd);
-  mkdirSync(artifacts, { mode: 0o700 });
-  const script = `
-    const { writeFileSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    writeFileSync(join(${JSON.stringify(artifacts)}, ".dirfd-probe-" + process.pid + ${JSON.stringify(suffix)}), "foreign", { mode: 0o600 });
-    const { openTrustedArtifactDir, closeTrustedArtifactDir } = await import(${JSON.stringify(repoPath("src/lab/artifacts/secure-fs.ts"))});
-    closeTrustedArtifactDir(openTrustedArtifactDir(${JSON.stringify(artifacts)}));
-  `;
-  const child = Bun.spawnSync([process.execPath, "-e", script], { cwd, stdout: "pipe", stderr: "pipe" });
-  expect(child.stderr.toString()).toBe("");
-  expect(child.exitCode).toBe(0);
-  expect(fs.readdirSync(cwd)).toEqual([]);
-  const left = fs.readdirSync(artifacts);
-  expect(left).toHaveLength(1);
-  expect(left[0]).toMatch(suffix ? /^\.dirfd-probe-\d+\.ok$/ : /^\.dirfd-probe-\d+$/);
-  expect(fs.readFileSync(join(artifacts, left[0]!), "utf8")).toBe("foreign");
+  const openDescriptors = () => fs.readdirSync("/dev/fd").length;
+  const before = openDescriptors();
+  const fstat = spyOn(fs, "fstatSync").mockImplementationOnce(() => { throw new Error("fixture fstat failure"); });
+  try {
+    expect(() => openTrustedArtifactDir(join(root, "artifacts"))).toThrow("fixture fstat failure");
+  } finally {
+    fstat.mockRestore();
+  }
+  expect(openDescriptors()).toBe(before);
 });
