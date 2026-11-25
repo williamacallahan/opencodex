@@ -94,12 +94,11 @@ describe("owned config uninstall", () => {
     }
   });
 
-  (process.platform === "win32" ? test.skip : test)("keeps the usage ledger and every recorded archive path, twice, and still removes other owned state (file links require POSIX)", () => {
+  test("keeps the usage ledger and every recorded archive path, twice, and still removes other owned state", () => {
     const parent = mkdtempSync(join(tmpdir(), "ocx-config-usage-history-"));
     const dir = join(parent, "config");
     const archive = join(dir, "usage-archive");
     const segment = join(archive, "2026-11-01T08-30-00.000Z_123-456.jsonl");
-    const target = join(parent, "outside.txt");
     try {
       // A manifest an older build wrote: the archive directory itself and one of its children are listed.
       for (const path of [join(dir, "config.json"), archive, segment, join(archive, "nested", "child.txt")]) {
@@ -117,11 +116,10 @@ describe("owned config uninstall", () => {
         [join(archive, "nested", "child.txt")]: "child",
       };
       for (const [path, bytes] of Object.entries(files)) writeFileSync(path, bytes);
-      writeFileSync(target, "target");
-      symlinkSync(target, join(archive, "link.jsonl"));
 
       const first = removeOwnedConfigState(dir);
       expect(first.status).toBe("partial");
+      expect(first.reason).toContain("usage ledger and usage archive were kept");
       expect(first.residualPaths).toEqual(expect.arrayContaining([join(dir, "usage.jsonl"), archive]));
       expect(existsSync(join(dir, "config.json"))).toBe(false);
       const second = removeOwnedConfigState(dir);
@@ -129,8 +127,66 @@ describe("owned config uninstall", () => {
 
       expect(readFileSync(join(dir, "usage.jsonl"), "utf8")).toBe("{\"requestId\":\"recent\"}\n");
       for (const [path, bytes] of Object.entries(files)) expect(readFileSync(path, "utf8")).toBe(bytes);
-      expect(readlinkSync(join(archive, "link.jsonl"))).toBe(target);
-      expect(readFileSync(target, "utf8")).toBe("target");
+    } finally {
+      removeTreeWithRetry(parent);
+    }
+  });
+
+  test("keeps the usage history under any recorded spelling of its names, top-level or child-only", () => {
+    const parent = mkdtempSync(join(tmpdir(), "ocx-config-usage-alias-"));
+    const dir = join(parent, "config");
+    try {
+      // On a case-insensitive volume each spelling names the real entry; on a case-sensitive one they
+      // are separate files, which are kept too rather than told apart by name.
+      for (const name of ["Usage-Archive", "USAGE-ARCHIVE/2026-11-01T08-30-00.000Z_1-2.jsonl", "Usage.JSONL", "config.json"]) {
+        expect(recordOwnedConfigPath(dir, join(dir, ...name.split("/")))).toBe(true);
+      }
+      writeFileSync(join(dir, "config.json"), "owned");
+      writeFileSync(join(dir, "usage.jsonl"), "recent\n");
+      mkdirSync(join(dir, "usage-archive"));
+      writeFileSync(join(dir, "usage-archive", "2026-11-01T08-30-00.000Z_1-2.jsonl"), "old\n");
+
+      const result = removeOwnedConfigState(dir);
+      expect(result.status).toBe("partial");
+      expect(result.reason).toContain("usage ledger and usage archive were kept");
+      expect(existsSync(join(dir, "config.json"))).toBe(false);
+      expect(readFileSync(join(dir, "usage.jsonl"), "utf8")).toBe("recent\n");
+      expect(readFileSync(join(dir, "usage-archive", "2026-11-01T08-30-00.000Z_1-2.jsonl"), "utf8")).toBe("old\n");
+    } finally {
+      removeTreeWithRetry(parent);
+    }
+  });
+
+  (process.platform === "win32" ? test.skip : test)("a linked archive keeps its link, the link's target and the target's recorded entries, and other state is still removed (links require POSIX)", () => {
+    const parent = mkdtempSync(join(tmpdir(), "ocx-config-usage-link-"));
+    const dir = join(parent, "config");
+    const store = join(dir, "data", "archive-store");
+    const outside = join(parent, "outside.txt");
+    try {
+      // Recorded before config.json, so a refusal that ended the run early would leave config.json behind.
+      for (const path of [join(dir, "data"), join(store, "seg.jsonl"), join(dir, "usage-archive", "child.jsonl"), join(dir, "config.json")]) {
+        expect(recordOwnedConfigPath(dir, path)).toBe(true);
+      }
+      mkdirSync(store, { recursive: true });
+      writeFileSync(join(store, "seg.jsonl"), "old\n");
+      writeFileSync(join(store, "child.jsonl"), "child\n");
+      writeFileSync(join(dir, "data", "other.txt"), "owned");
+      writeFileSync(join(dir, "config.json"), "owned");
+      symlinkSync(store, join(dir, "usage-archive"), "dir");
+      writeFileSync(outside, "target");
+      symlinkSync(outside, join(store, "link.jsonl"));
+
+      for (let run = 0; run < 2; run += 1) {
+        const result = removeOwnedConfigState(dir);
+        expect(result.status).not.toBe("removed");
+      }
+      expect(existsSync(join(dir, "config.json"))).toBe(false);
+      expect(existsSync(join(dir, "data", "other.txt"))).toBe(false);
+      expect(readlinkSync(join(dir, "usage-archive"))).toBe(store);
+      expect(readFileSync(join(store, "seg.jsonl"), "utf8")).toBe("old\n");
+      expect(readFileSync(join(store, "child.jsonl"), "utf8")).toBe("child\n");
+      expect(readlinkSync(join(store, "link.jsonl"))).toBe(outside);
+      expect(readFileSync(outside, "utf8")).toBe("target");
     } finally {
       removeTreeWithRetry(parent);
     }

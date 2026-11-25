@@ -644,6 +644,10 @@ The answer comes only from precomputed hourly totals, never from the rows themse
   `coverage.foldedRows`, and `coverage.overlapRowsDropped` (multi-attempt requests whose
   once-only count could not be recorded), because a filtered or per-dimension figure may then
   undercount or count such a request twice.
+- `complete` is `false` when an archive file that may hold rows in the window has no usable totals
+  (it is listed in `coverage.pendingSegments` or `coverage.failed`). Its rows are then uncounted, so
+  `summary`, `byHour`, and every breakdown are `null` instead of numbers that would look exact.
+  An archive file whose totals have not been read yet counts as possibly in the window.
 - `byHour` is a time series: one entry (`key`, the hour's ISO start, plus the same sums) for every
   UTC hour in the window that has rows, oldest first, never capped.
 - `byProvider`, `byModel`, `byHarness`, `byWorkloadLauncher`, `byWorkloadSource`, `byClientHost`,

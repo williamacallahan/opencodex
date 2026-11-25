@@ -39,6 +39,7 @@ interface TotalsBody {
   byHarness: BreakdownBody;
   byClientHost: BreakdownBody;
   byAccount: BreakdownBody;
+  complete?: boolean;
   error?: { code: string; message: string };
 }
 
@@ -137,25 +138,28 @@ describe("GET /api/usage/archive", () => {
     // Coverage comes from the segment's name and mtime until its totals exist, and says so.
     expect(first.body.coverage).toMatchObject({ earliestRowAt: iso(ARCHIVE_FIRST_ROW_AT), approximate: true });
     expect(Date.parse(first.body.coverage.latestRowAt!)).toBeGreaterThanOrEqual(rows.at(-1)!.timestamp);
-    expect(first.body.summary.requests).toBe(0);
+    // Its rows are uncounted, so the answer carries no numbers rather than an exact-looking zero.
+    expect(first.body).toMatchObject({ complete: false, summary: null, byHour: null, byProvider: null });
     // The read queued a build, which is refused while the archive trim is suspended and writes nothing.
     const refused = await archiveGet(query);
     expect(refused.body.coverage).toMatchObject({
       pending: false, pendingSegments: [], failed: [{ segment: path.split("/").at(-1), reason: "publishing-suspended" }],
     });
+    expect(refused.body).toMatchObject({ complete: false, summary: null });
     expect(readdirSync(archiveDirectory())).toEqual([path.split("/").at(-1)]);
     await writeArchiveTotals(path);
     const second = await archiveGet(query);
     expect(second.body.coverage.pending).toBe(false);
     expect(second.body.coverage).toMatchObject({ latestRowAt: iso(rows.at(-1)!.timestamp) });
     expect(second.body.coverage).not.toHaveProperty("approximate");
+    expect(second.body.complete).toBe(true);
     expect(second.body.summary).toMatchObject(plainSummary(rows));
 
     // A totals file from an older format is never served; its rebuild stays refused.
     writeFileSync(archiveTotalsPath(path), JSON.stringify({ version: ARCHIVE_TOTALS_FORMAT_VERSION - 1, bytes: statSync(path).size }));
     noteArchiveChanged();
     const stale = await archiveGet(query);
-    expect(stale.body.summary.requests).toBe(0);
+    expect(stale.body).toMatchObject({ complete: false, summary: null });
     expect(stale.body.coverage.failed).toEqual([{ segment: path.split("/").at(-1)!, reason: "publishing-suspended" }]);
   });
 
@@ -208,7 +212,7 @@ describe("GET /api/usage/archive", () => {
     expect(body.coverage).toMatchObject({ segments: 1, duplicateSegments: 1, liveLedgerSince: iso(rows[8]!.timestamp) });
   });
 
-  test("only totals files of segments that may overlap the window are read", async () => {
+  test("a segment's mtime never drops it from a window: its totals are read once for its span, and a window it cannot reach skips it after that", async () => {
     const early = await builtSegment("509", archiveRows(5), "2026-11-01T08-30-00.000Z");
     const late = archiveRows(5, undefined, 0).map(row => ({ ...row, timestamp: row.timestamp + 10 * 24 * HOUR }));
     await builtSegment("510", late, iso(late[0]!.timestamp).replaceAll(":", "-"));
@@ -217,9 +221,14 @@ describe("GET /api/usage/archive", () => {
     utimesSync(early, trimmedAt, trimmedAt);
     noteArchiveChanged();
     const before = archiveTotalsReads.count;
-    const { body } = await archiveGet(window(late[0]!.timestamp, late[0]!.timestamp + 6 * HOUR));
-    expect(archiveTotalsReads.count - before).toBe(1);
+    const query = window(late[0]!.timestamp, late[0]!.timestamp + 6 * HOUR);
+    const { body } = await archiveGet(query);
+    expect(archiveTotalsReads.count - before).toBe(2);
+    expect(body).toMatchObject({ complete: true });
     expect(body.summary.requests).toBe(5);
+    const again = archiveTotalsReads.count;
+    expect((await archiveGet(query)).body.summary.requests).toBe(5);
+    expect(archiveTotalsReads.count - again).toBe(0);
   });
 
   test("a row stamped beyond what a Date holds is unparsable and never turns the answer into a 500", async () => {

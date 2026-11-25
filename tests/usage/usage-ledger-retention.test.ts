@@ -51,11 +51,17 @@ afterEach(() => {
 
 describe("usage ledger retention while the trim is suspended", () => {
   test("the append that crosses the limit returns before the check, which warns once on its own turn and keeps every row", async () => {
-    writeRows(200, 16 * 1024);
+    // Just under the limit, so installing it schedules nothing and only the crossing append can.
+    writeRows(70, 16 * 1024);
+    const limit = statSync(usageLogPath()).size + 16;
+    expect(limit).toBeGreaterThan(MIN_USAGE_LEDGER_MAX_BYTES);
     const warn = spyOn(console, "warn").mockImplementation(() => {});
     try {
-      setUsageLedgerRetention(MIN_USAGE_LEDGER_MAX_BYTES);
+      setUsageLedgerRetention(limit);
+      await Bun.sleep(1_200);
+      expect(warn.mock.calls).toHaveLength(0);
       appendUsageEntry({ requestId: "crossing", timestamp: 1, provider: "a", model: "m", status: 200, durationMs: 1 });
+      expect(statSync(usageLogPath()).size).toBeGreaterThan(limit);
       expect(warn.mock.calls).toHaveLength(0);
       await waitForWarning(warn);
       appendUsageEntry({ requestId: "next", timestamp: 2, provider: "a", model: "m", status: 200, durationMs: 1 });
@@ -63,7 +69,7 @@ describe("usage ledger retention while the trim is suspended", () => {
       expect(warn.mock.calls).toHaveLength(1);
       expect(String(warn.mock.calls[0]![0])).toContain("trimming is suspended");
       const ledger = readFileSync(usageLogPath(), "utf-8");
-      for (const id of ["req-0", "req-199", "crossing", "next"]) expect(ledger).toContain(`"requestId":"${id}"`);
+      for (const id of ["req-0", "req-69", "crossing", "next"]) expect(ledger).toContain(`"requestId":"${id}"`);
       expect(readdirSync(archiveDirectory())).toEqual([]);
     } finally {
       warn.mockRestore();

@@ -25,7 +25,10 @@ interface RowsBody {
   endedBy: string;
   truncated: boolean;
   incomplete: boolean;
-  coverage: { segments: Array<{ segment: string; fromByte: number; endedBy: string }>; pending: boolean; pendingSegments: string[] };
+  coverage: {
+    segments: Array<{ segment: string; fromByte: number; endedBy: string }>; pending: boolean; pendingSegments: string[];
+    failed: Array<{ segment: string; reason: string }>;
+  };
   error?: { code: string };
 }
 
@@ -110,7 +113,13 @@ describe("GET /api/usage/archive/rows", () => {
     expect(body).toMatchObject({ entries: [], incomplete: true, coverage: { segments: [], pending: true, pendingSegments: [path.split("/").at(-1)] } });
     // The read asked for a build, which is refused while the archive trim is suspended.
     const again = await rowsGet(query);
-    expect(again.body).toMatchObject({ entries: [], incomplete: true });
+    expect(again.body).toMatchObject({
+      entries: [], incomplete: true,
+      coverage: { pending: false, pendingSegments: [], failed: [{ segment: path.split("/").at(-1), reason: "publishing-suspended" }] },
+    });
+    // The refusal is remembered: a later read reports it again without asking for another build.
+    const third = await rowsGet(query);
+    expect(third.body.coverage.failed).toEqual(again.body.coverage.failed);
     expect(readdirSync(archiveDirectory())).toEqual([path.split("/").at(-1)]);
     await writeArchiveTotals(path);
     expect((await rowsGet(query)).body.entries).toHaveLength(9);

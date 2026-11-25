@@ -564,14 +564,19 @@ keeps every row and grows past the ceiling. Earlier releases trimmed by moving t
 the `usage-archive` directory beside `usage.jsonl` and deleting archive files by age, and that
 cleanup could delete rows that were meant to be kept, or files the proxy never wrote. Trimming
 returns once the proxy can publish the archived rows and the shorter ledger in one safe step.
-Meanwhile the proxy logs one `[usage-retention]` warning per run when the ledger is over the limit,
-and `usageLedgerRetention` in `GET /api/settings` carries `enforcement: "suspended"`. The minimum
+Meanwhile, when `usage.jsonl` is larger than `usageLedgerMaxBytes` (checked when the limit is
+installed and after an append crosses it), the proxy logs one `[usage-retention]` warning per run, and
+`usageLedgerRetention` in `GET /api/settings` carries `enforcement: "suspended"` for as long as the
+ledger stays over the limit. The minimum
 accepted value is 1 MiB; a smaller number, or one that is not a safe integer, is rejected at the
 write boundary and ignored if read from a hand-edited file.
 
 The proxy writes, renames, and deletes nothing in `usage-archive`. Archive files and their
-`.hourly.json` totals that an earlier release wrote are still read by `GET /api/usage/archive`; an
-archive file without a current totals file is reported in `coverage.failed` instead of being built.
+`.hourly.json` totals that an earlier release wrote are still read by `GET /api/usage/archive`. An
+archive file without a current totals file is listed under `coverage.pendingSegments` on the first
+read after the proxy starts and under `coverage.failed` (`publishing-suspended`) from then on, instead
+of being built; while any such file may overlap the window the answer has `complete: false` and no
+totals.
 `ocx uninstall` keeps `usage.jsonl` and the `usage-archive` directory, lists them among the files
 that remain, and removes the rest of the proxy's owned files; delete them yourself once you no
 longer need the history.

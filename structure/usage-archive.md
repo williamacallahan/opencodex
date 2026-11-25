@@ -65,7 +65,8 @@ counted, `unparsableRows`, `firstRowAt`/`lastRowAt`, `buckets`, `overlaps`, `ove
 dimension, and `foldedRows`. A row is unparsable when it fails to parse or normalize, exceeds the
 1 MiB row ceiling, is a torn final row, has no integer timestamp in `[0, 8.64e15]`, has a non-string
 dimension, or contributes a non-finite or negative sum. A reader serves the file only when the
-version is current and `bytes` equals the segment's length; anything else is rebuilt.
+version is current and `bytes` equals the segment's length. Anything else is not served, and while
+the trim is suspended it is not rebuilt either: the segment is reported failed (`publishing-suspended`).
 
 `buildArchiveTotals` reads the segment through `scanUsageLedgerCooperatively` in
 `src/usage/ledger-scanner.ts` with its `path` option, so archive reads share the live ledger's chunked
@@ -111,12 +112,12 @@ are read-side rules only: nothing deletes a duplicate or leftover segment any mo
 
 `readArchiveListing` lists the directory asynchronously and caches it for 5 seconds; after that it
 re-lists only when the directory's mtime moved, at least every 60 seconds, and at once after any
-in-process archive write. A segment may overlap a window by its exact span once its totals have been
-read; before that, by the first-row time in its name less `ARCHIVE_APPEND_SLACK_MS` and its mtime.
-The slack is one hour: a row is stamped when its request starts and appended when it completes, and
-no hub setting bounds a request's total duration (streams are bounded by idle and connect timeouts
-such as `DEFAULT_CONNECT_TIMEOUT_MS` in `src/stall-timeout.ts`, not wall clock), so one hour matches
-the row reads' own slack.
+in-process archive write. `entryMayOverlap` decides whether a segment may overlap a window by its
+exact span once its totals have been read, and otherwise always answers yes: a name's first-row label
+and a file's mtime are not a trustworthy span (a row is stamped when its request starts and appended
+when it completes, no hub setting bounds a request's total duration, and an mtime can be changed), so
+a segment is never dropped by them. Its totals file is read once to learn its span, which is then
+cached by totals mtime, or, without usable totals, it is reported pending or failed.
 
 `answerArchiveTotals` in `src/usage/archive-answer.ts` loads, folds and drops one segment's totals at
 a time, keeping only its span and hour index, so a request never holds more than one segment's
@@ -142,7 +143,10 @@ Requests count each row once in every total, through the overlap records. `byHou
 rows in chronological order; every other breakdown keeps its 200 top keys and reports the rest as
 `truncated`. `coverage` sums `overflowRows`, `foldedRows` and `overlapRowsDropped` over the window's
 segments and sets `capped` when any is positive, because a filtered or per-dimension figure may then
-undercount. A segment without current totals is listed as pending and queued; one whose build failed
+undercount. When any segment that may overlap the window has no usable totals, the answer sets
+`complete: false` and carries `summary`, `byHour` and every breakdown as `null`, because those rows are
+uncounted and a number would look exact; otherwise it sets `complete: true`. A segment without
+current totals is listed as pending and queued; one whose build failed
 or was refused (`publishing-suspended`) is listed in `coverage.failed`. `coverage.earliestRowAt`/`latestRowAt` are approximate
 (`coverage.approximate`) while some totals file has not been read. `tests/usage/usage-archive-route.test.ts`
 and `tests/usage/usage-archive-leftovers.test.ts` cover the route and the counting rule.

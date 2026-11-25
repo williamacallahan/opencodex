@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync, rmdirSync, unlinkSync, type Stats } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync, rmdirSync, statSync, unlinkSync, type Stats } from "node:fs";
 import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
 import { isWindowsReparsePoint, nativeReparseProbeApplies } from "./private-sqlite-path";
 import { isCurrentWindowsProcessElevated } from "./windows-elevation";
@@ -277,43 +277,102 @@ export interface OwnedRemovalOptions {
   elevatedUid?: number;
   /** The root's identity when it was resolved; every check also requires the root to still be it. */
   rootIdentity?: RootIdentity;
+  /** The run's usage-history guard, read once; without it each call reads its own. */
+  usageHistory?: UsageHistoryGuard;
 }
 
 /**
  * The usage ledger and its archive outlive uninstall: the operator's order keeps identified request
  * records at least 30 days, and older manifests list `usage-archive` (and possibly its children) as
- * disposable. Such an entry is left in place, before any link or directory branch can touch it, and
- * the caller reports it among the files that remain.
+ * disposable. {@link usageHistoryGuard} decides which manifest entries those are; the caller reports
+ * what it kept among the files that remain.
  */
 export const PRESERVED_USAGE_HISTORY = ["usage.jsonl", "usage-archive"] as const;
 
-function isPreservedUsageHistory(parts: readonly string[]): boolean {
-  const [first] = parts;
-  if (first === undefined) return false;
-  if (samePath(first, "usage-archive")) return true;
-  return parts.length === 1 && samePath(first, "usage.jsonl");
+export interface UsageHistoryGuard {
+  /** Whether removing the entry `parts` could remove usage history; it is then left in place. */
+  protects(parts: readonly string[]): boolean;
+}
+
+type FileIdentity = { dev: bigint; ino: bigint };
+
+function identityOf(path: string, follow: boolean): FileIdentity | undefined {
+  try {
+    const entry = follow ? statSync(path, { bigint: true }) : lstatSync(path, { bigint: true });
+    return { dev: entry.dev, ino: entry.ino };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Case-folded and NFC-normalized, so a case- or normalization-insensitive volume's aliases compare equal. */
+const folded = (name: string): string => name.normalize("NFC").toLowerCase();
+
+/**
+ * Recognize every spelling of the usage history below `rootPath`, read once at the start of a run:
+ * a first component that names `usage-archive` (any depth) or `usage.jsonl` (top level) under case
+ * and Unicode folding, a first component that is the same file as either (an alias spelling on a
+ * case-insensitive volume, or a hard link), and an entry at or inside the physical location either
+ * resolves to (`usage-archive` may be a link to a directory elsewhere in the root). Name matches are
+ * decided before any filesystem lookup, so a child entry below a linked archive never reaches the
+ * link checks. Folding on a case-sensitive volume can keep a file whose name differs only in case;
+ * that file is reported as remaining, never removed by mistake.
+ */
+export function usageHistoryGuard(rootPath: string): UsageHistoryGuard {
+  const identities: FileIdentity[] = [];
+  const physical: string[] = [];
+  for (const name of PRESERVED_USAGE_HISTORY) {
+    const path = join(rootPath, name);
+    for (const identity of [identityOf(path, false), identityOf(path, true)]) if (identity) identities.push(identity);
+    try {
+      physical.push(folded(realpathSync.native(path)));
+    } catch { /* absent or dangling: nothing to overlap */ }
+  }
+  const sameFile = (identity: FileIdentity | undefined): boolean =>
+    identity !== undefined && identities.some(known => known.dev === identity.dev && known.ino === identity.ino);
+  return {
+    protects(parts) {
+      const [first] = parts;
+      if (first === undefined) return false;
+      if (folded(first) === "usage-archive" || (parts.length === 1 && folded(first) === "usage.jsonl")) return true;
+      if (sameFile(identityOf(join(rootPath, first), false))) return true;
+      const path = join(rootPath, ...parts);
+      if (sameFile(identityOf(path, false))) return true;
+      let location: string;
+      try {
+        location = folded(join(realpathSync.native(dirname(path)), basename(path)));
+      } catch {
+        return false;
+      }
+      return physical.some(target => location === target || location.startsWith(target + sep));
+    },
+  };
 }
 
 /**
  * Remove the recorded entry `parts` below the canonical `rootPath`. A final-component link is
  * unlinked itself, never its target; a directory is emptied and removed with the chain rechecked for
- * every child and before the rmdir.
+ * every child and before the rmdir. An entry the guard protects is left in place, and so is every
+ * directory above it, which keeps the rest of the run going: returns false when anything was kept.
  */
-export function removeOwnedEntry(rootPath: string, parts: readonly string[], options: OwnedRemovalOptions = {}): void {
-  if (isPreservedUsageHistory(parts)) return;
+export function removeOwnedEntry(rootPath: string, parts: readonly string[], options: OwnedRemovalOptions = {}): boolean {
+  if ((options.usageHistory ?? usageHistoryGuard(rootPath)).protects(parts)) return false;
   assertRealDirectoryChain(rootPath, parts.slice(0, -1), options);
   const path = join(rootPath, ...parts);
   const entry = lstatSync(path);
   if (entry.isSymbolicLink() || !entry.isDirectory()) {
     unlinkSync(path);
-    return;
+    return true;
   }
   assertRealDirectoryChain(rootPath, parts, options);
   const names = readdirSync(path);
   directoryListedHookForTests?.(path);
-  for (const name of names) removeOwnedEntry(rootPath, [...parts, name], options);
+  let removedAll = true;
+  for (const name of names) if (!removeOwnedEntry(rootPath, [...parts, name], options)) removedAll = false;
+  if (!removedAll) return false;
   assertRealDirectoryChain(rootPath, parts, options);
   rmdirSync(path);
+  return true;
 }
 
 /**

@@ -102,8 +102,11 @@ describe("usage archive hourly totals", () => {
   test("the startup pass over segments without totals is refused and writes nothing into the archive", async () => {
     const path = writeSegment(archiveDirectory(), "4246", jsonl(archiveRows(5)));
     const warn = spyOn(console, "warn").mockImplementation(() => {});
-    scheduleArchiveTotalsStartupBuild(50);
+    scheduleArchiveTotalsStartupBuild(200);
     try {
+      // Nothing is asked for before the pass is due.
+      await Bun.sleep(50);
+      expect(archiveTotalsBuildFailure(path)).toBeUndefined();
       expect(await waitFor(() => archiveTotalsBuildFailure(path))).toEqual({ reason: "publishing-suspended" });
       expect(readdirSync(archiveDirectory())).toEqual([path.split("/").at(-1)]);
     } finally {

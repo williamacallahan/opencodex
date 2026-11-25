@@ -190,17 +190,16 @@ export function knownSpan(entry: ArchiveSegmentEntry): { firstRowAt: number | nu
 }
 
 /**
- * Whether a segment may hold rows in `[since, until)`, from what is known without reading its
- * buckets: the exact span once its totals have been read; otherwise the first-row time in its name
- * less {@link ARCHIVE_APPEND_SLACK_MS} (an untimed name gives no lower bound), and its mtime, the trim
- * time, as the last row's upper bound.
+ * Whether a segment may hold rows in `[since, until)`: decided by its exact span once its totals have
+ * been read, and otherwise always yes. A name's first-row label and a file's mtime are not a
+ * trustworthy span (a request stamped before the label can be appended after it, and an mtime can be
+ * changed), so a segment without read totals is never dropped by them; its totals are read, or it is
+ * reported pending or failed so the answer says it is incomplete.
  */
 export function entryMayOverlap(entry: ArchiveSegmentEntry, since: number, until: number): boolean {
   const span = knownSpan(entry);
   if (span) return span.firstRowAt !== null && span.lastRowAt !== null && span.firstRowAt < until && span.lastRowAt >= since;
-  const labelled = archiveLabelTime(entry.label);
-  const lowerBound = labelled === undefined ? Number.NEGATIVE_INFINITY : labelled - ARCHIVE_APPEND_SLACK_MS;
-  return lowerBound < until && entry.mtimeMs >= since;
+  return true;
 }
 
 export function segmentOverlaps(state: ArchiveSegmentState, since: number, until: number): boolean {

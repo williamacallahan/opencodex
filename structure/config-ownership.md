@@ -107,17 +107,43 @@ before the tombstone can still create its file afterwards; see the last item bel
 ## Usage history survives uninstall
 
 The operator's order keeps identified request records at least 30 days, so uninstall never removes
-the usage ledger or its archive. `removeOwnedEntry` in `src/lib/config-ownership-removal.ts` returns
-without touching an entry named `usage.jsonl` at the root, or `usage-archive` or anything below it
-(`PRESERVED_USAGE_HISTORY`), before its link or directory branches run, so neither the directory, a
-recorded child, a link inside it, nor the link's target is touched. This covers every manifest an
-older build wrote: `usage.jsonl` is still in every new manifest's initial names, and earlier trims
-registered `usage-archive` itself; the trim no longer registers it. The run then deletes the ownership
-metadata as usual and ends `partial`, listing both paths among the residual paths with a reason that
-says the usage history was kept, and a second uninstall finds no metadata and refuses the home
-untouched. `tests/config/config-ownership-uninstall.test.ts` runs uninstall twice over a legacy manifest
-listing the archive and two of its children, with a segment, a totals name, a temp-style name, an
-operator file and a link, and checks every byte survives while other owned state is removed.
+the usage ledger or its archive. `usageHistoryGuard` in `src/lib/config-ownership-removal.ts`, read
+once per run, decides which manifest entries those are (`PRESERVED_USAGE_HISTORY`):
+
+- a first component that names `usage-archive` (at any depth) or `usage.jsonl` (top level), compared
+  case-folded and NFC-normalized, so an alternate spelling a case- or normalization-insensitive volume
+  resolves to the same entry is caught before any lookup. On a case-sensitive volume a file whose name
+  differs only in case is kept as well and reported as remaining;
+- a first component, or the entry itself, that is the same file (device and inode) as either entry
+  or as the archive link's target;
+- an entry at or inside the physical location either entry resolves to, so when `usage-archive` is a
+  link to a directory elsewhere in the root, a separately recorded target, or a recorded directory
+  above it, cannot tear the target down.
+
+The removal loop skips a protected entry before `ownedEntryPresent`, so a child entry below a linked
+archive never fails the link check and ends every rerun at the same entry. `removeOwnedEntry` applies
+the same guard to each child it recurses into and leaves a directory above a protected entry in place
+while still removing its other children, so the rest of the run goes on; the elevated-run and
+real-directory checks are unchanged for every entry it does remove. The run then deletes the
+ownership metadata as usual and ends `partial`, listing the kept paths among the residual paths with a
+reason that says the usage history was kept (the same guard classifies the residual paths), and a
+second uninstall finds no metadata and refuses the home untouched.
+
+This covers every manifest an older build wrote: `usage.jsonl` is still in every new manifest's
+initial names, and earlier trims registered `usage-archive` itself; the trim no longer registers it.
+
+A home left holding only the kept history is a root with files and no ownership metadata, so a later
+install does not claim it: registrations record nothing there, as for any unowned home, and a later
+`ocx uninstall` refuses it untouched until the operator moves or deletes the history. That is the
+intended trade (history is never adopted as disposable state again), not a code path this change
+handles.
+
+`tests/config/config-ownership-uninstall.test.ts` runs uninstall twice over a legacy manifest listing
+the archive and two of its children, with a segment, a totals name, a temp-style name and an operator
+file; over alternate spellings of both names, top-level and child-only; and (POSIX, where it may
+create links) over a linked archive whose target directory and a child below the link are recorded,
+with a file link inside it. Every kept byte, the links and their targets survive while other owned
+state is removed.
 
 ## Removal stays inside the root
 
