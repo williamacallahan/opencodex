@@ -26,6 +26,11 @@ const MAX_SCAN_SLICE_MS = 8;
 export interface ScanUsageLedgerOptions {
   signal?: AbortSignal;
   /**
+   * Another file of ledger rows, such as an archive segment; defaults to the live `usage.jsonl`. With
+   * it, `startAtBytes` may be any row start without the append-scan identity and digest.
+   */
+  path?: string;
+  /**
    * Receives each complete row and the absolute byte offset it starts at, so a derived
    * index can address the same row later without re-reading the whole ledger.
    */
@@ -84,6 +89,21 @@ function revisionFromStat(
     mtimeMs: Number(stat.mtimeMs),
     ctimeMs: Number(stat.ctimeMs),
   };
+}
+
+function revisionAtPath(path: string): UsageLogRevision | null {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch (error) {
+    if (isMissingFileError(error)) return null;
+    throw error;
+  }
+  try {
+    return revisionFromStat(path, fd, fstatSync(fd));
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
@@ -248,7 +268,9 @@ export async function scanUsageLedgerCooperatively(
   if (!Number.isSafeInteger(startAtBytes) || startAtBytes < 0) {
     throw new RangeError("usage ledger start offset must be a non-negative safe integer");
   }
-  if (startAtBytes > 0
+  // A live-ledger append scan must prove the prefix it skips is unchanged. A `path` file is an archive
+  // segment, immutable once published, so a seek into it needs only the LF boundary check below.
+  if (startAtBytes > 0 && options.path === undefined
     && (options.expectedIdentityKey === undefined
       || options.expectedProcessedThroughDigest === undefined)) {
     throw new TypeError(
@@ -257,7 +279,8 @@ export async function scanUsageLedgerCooperatively(
   }
   throwIfAborted(options.signal);
 
-  const path = usageLogPath();
+  const path = options.path ?? usageLogPath();
+  const currentPathRevision = (): UsageLogRevision | null => options.path === undefined ? currentUsageLogRevision() : revisionAtPath(path);
   let fd: number;
   try {
     fd = openSync(path, "r");
@@ -434,7 +457,7 @@ export async function scanUsageLedgerCooperatively(
       throw rebuildRequired("identity_mismatch");
     }
     if (endingRevision.size < scanEnd) throw rebuildRequired("shrink");
-    const pathRevision = currentUsageLogRevision();
+    const pathRevision = currentPathRevision();
     if (!pathRevision || usageLogIdentityKey(pathRevision) !== openedIdentityKey) {
       throw rebuildRequired("identity_mismatch");
     }
@@ -456,7 +479,7 @@ export async function scanUsageLedgerCooperatively(
         options.signal,
       );
       const verifiedFdRevision = revisionFromStat(path, fd, fstatSync(fd));
-      const verifiedPathRevision = currentUsageLogRevision();
+      const verifiedPathRevision = currentPathRevision();
       if (capturedDigest !== verifiedDigest) throw rebuildRequired("content_changed");
       if (!verifiedPathRevision
         || usageLogIdentityKey(verifiedFdRevision) !== openedIdentityKey

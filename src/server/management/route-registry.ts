@@ -293,6 +293,9 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "GET", path: "/api/usage/source-facets", module: "server/management/logs-usage-routes", mutates: false, exempt: { reason: "session-only", why: "Usage source facets require a current dashboard session and refuse raw admin and data keys." } },
   // server/management/usage-timeline-routes
   { method: "GET", path: "/api/usage/timeline", module: "server/management/usage-timeline-routes", mutates: false },
+  // server/management/usage-archive-routes
+  { method: "GET", path: "/api/usage/archive", module: "server/management/usage-archive-routes", mutates: false, exempt: { reason: "deferred-verb", why: "Archive usage totals are an operator forensic read with no CLI verb yet; the HTTP route is the whole contract for now.", owner: "usage archive reads", ownerDoc: "structure/usage-archive.md" } },
+  { method: "GET", path: "/api/usage/archive/rows", module: "server/management/usage-archive-routes", mutates: false, exempt: { reason: "deferred-verb", why: "Archived row reads are an operator forensic read with no CLI verb yet; the HTTP route is the whole contract for now.", owner: "usage archive reads", ownerDoc: "structure/usage-archive.md" } },
   // server/management/advisor-routes
   { method: "GET", path: "/api/advisor/settings", module: "server/management/advisor-routes", mutates: false },
   { method: "GET", path: "/api/advisor/activity", module: "server/management/advisor-routes", mutates: false },

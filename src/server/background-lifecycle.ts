@@ -15,6 +15,7 @@ import {
   stopStorageCleanupScheduler,
 } from "../storage/policy-scheduler";
 import { startQuotaResetPoller, stopQuotaResetPoller } from "../quota/reset-poller";
+import { scheduleArchiveTotalsStartupBuild, stopArchiveTotalsStartupBuild } from "./usage-ledger-retention";
 import {
   setCatalogAutoRefreshClientFanout,
   startCatalogAutoRefresh,
@@ -214,6 +215,7 @@ function stopProcessLoops(): void {
   loops?.memoryWatchdog.stop();
   loops?.stateStoreSweeper.stop();
   stopStorageCleanupScheduler();
+  stopArchiveTotalsStartupBuild();
   stopQuotaResetPoller();
   stopCatalogAutoRefresh();
   setCatalogAutoRefreshClientFanout(null);
@@ -313,6 +315,7 @@ export function acquireServerBackgroundLifecycle(
     scheduleStartupRun() {
       if (owners.some(candidate => candidate.token === owner.token)) {
         scheduleStorageCleanupStartupRun();
+        scheduleArchiveTotalsStartupBuild();
       }
     },
     release() {

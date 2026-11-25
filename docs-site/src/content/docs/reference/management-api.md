@@ -348,6 +348,8 @@ timing method unknown)** and a visible explanation of the timing method when a r
 | `GET /api/usage/source-facets` | Count recent app and device choices for an authorized dashboard session | 400 for invalid filters; 403 without the required session; 503 if the scan or inventory is unavailable |
 | `GET /api/usage?jev=1` | Project persisted JEV decisions and their physical target sends. Optional `comboId` selects one Combo; `range` accepts `7d`, `30d`, or `all` (default `30d`). | 400 invalid `comboId`; 500 `{ "error": "read_failed" }` if the ledger cannot be read |
 | `GET /api/usage/timeline` | Bucketed usage by model/account; accepts `hours`, `bucketMinutes`, `metric`, `aggregation`, `grouping`, comma-separated `models` and repeated `hiddenProvider` filters | 400 invalid query or limits |
+| `GET /api/usage/archive` | Usage totals for a window of the 31-day usage archive, from precomputed hourly totals; see [Archived usage](#archived-usage) | 400 `invalid_window` or `invalid_parameter` |
+| `GET /api/usage/archive/rows` | Archived request rows of a window of at most six hours, in the request-history row shape; see [Archived usage](#archived-usage) | 400 `invalid_window`, `invalid_limit`, or `invalid_parameter`; 503 `archive_rows_busy` while another row read runs |
 | `GET /api/metrics` | Return process-local Prometheus text metrics for requests and cached Kiro quota. Kiro accounts use bounded opaque digest labels; raw account and credential identifiers are never exported. | 404 when `metricsExport.enabled` was not true at startup; ordinary management authentication is required and data-plane credentials grant no access |
 | `GET /api/storage` | Scan Codex storage usage by bucket | Returns an `error: "scan_failed"` payload on scan failure |
 | `POST /api/storage/cleanup/preview` | Preview archived-session cleanup and return a binding digest | 400 `invalid_json` or `invalid_percent` |
@@ -605,6 +607,72 @@ tokens served from the provider's prompt cache, clamped to `[0, 1]`. It is `null
 when the provider reported no cache telemetry or the row has no input tokens, because "no cache
 data" and "a genuine 0% hit rate" are different facts and a chart that renders them alike is
 misleading.
+
+#### Archived usage
+
+With `usageLedgerMaxBytes` set, a trim moves the oldest rows of `usage.jsonl` into the
+`usage-archive` directory for 31 days (see the server configuration reference). `/api/usage`
+reads only the live ledger; `GET /api/usage/archive` answers for the archived part.
+
+`since` and `until` are required, as a full ISO datetime with timezone or epoch milliseconds;
+`until` must be after `since`, at most 32 days later. The window widens outward to whole UTC
+hours, and the response's `since` and `until` state the effective bounds, `until` exclusive.
+Optional exact-match filters are `provider`, `model`, `harness` (the recorded client),
+`workloadLauncher` (the workload before its first `:`), `workloadSource`, `clientHost`,
+`clientAddress`, and `account` (the account log label). `harness` and `clientAddress` are
+normalized the same way as the `/api/usage` filters, and values are trimmed. An empty value, such as
+`harness=`, selects rows that never recorded that dimension. An unknown or repeated parameter
+answers 400 `invalid_parameter`; a bad window answers 400 `invalid_window`.
+
+The answer comes only from precomputed hourly totals, never from the rows themselves:
+
+- `attribution` is `"final-attempt"`: a request that made several attempts, such as a retry or a
+  combo, is counted under its final attempt's provider, model, and account. `/api/usage` instead
+  attributes each attempt to its own provider and model, so those breakdowns can differ for such
+  requests; the request and token totals do not.
+- `summary` holds `requests`, `inputTokens`, `outputTokens`, `cacheReadInputTokens`,
+  `cacheCreationInputTokens`, `totalTokens`, and `estimatedCostUsd` with its `pricedRequests`,
+  `unpricedRequests`, and `unmeteredRequests`, computed with the same rules as `/api/usage`.
+- Per archive file, each dimension keeps its first 1,000 distinct values and counts later ones as
+  `(other)`, like `/api/usage`, and a file keeps at most 5,000 combinations, counting further ones
+  in an all-`(other)` entry for their hour. Totals stay exact; only the breakdown keys fold.
+- `byHour` is a time series: one entry (`key`, the hour's ISO start, plus the same sums) for every
+  UTC hour in the window that has rows, oldest first, never capped.
+- `byProvider`, `byModel`, `byHarness`, `byWorkloadLauncher`, `byWorkloadSource`, `byClientHost`,
+  `byClientAddress`, and `byAccount` each hold `rows` (`key` plus the same sums, most requests
+  first, at most 200) and `truncated`, the number of keys left out.
+- `coverage` gives `earliestRowAt` and `latestRowAt` of the whole archive, `segments` (archive
+  files in the window), `unparsableRows` in them, and `liveLedgerSince`, the first row still in
+  `usage.jsonl`. Rows from that time on are not in this answer; add `/api/usage` for them. While
+  some archive file has no totals yet, its first row comes from its file name and its last row from
+  its modification time, and `coverage.approximate` is `true`.
+- `coverage.pending` is `true` when an archive file in the window has no totals yet, and
+  `pendingSegments` names them. The request starts their build in the background and answers with
+  what is available, so a pending answer is incomplete; ask again shortly. The proxy also builds
+  missing totals in the background about a minute after it starts.
+- `coverage.failed` lists archive files in the window whose totals build failed since the proxy
+  started, each as `{ segment, reason }` with `reason` `segment-changed`, `io-error` (with `code`),
+  or `build-error`. They are not retried until the proxy restarts, so their rows are missing from
+  this answer.
+- `coverage.duplicateSegments` counts leftover archive files skipped because their rows are
+  already counted from another file or are still in `usage.jsonl`, so no row is counted twice.
+
+`GET /api/usage/archive/rows` returns the archived rows themselves, for questions such as which
+requests one workload sent. It takes the same `since`, `until`, and filters, plus an exact
+`workload` and `limit` (1 to 100, default 100, the `/api/request-history` page size). The window is
+not widened, `until` is exclusive, and it may span at most six hours. One row read runs at a time; a
+request that waits more than five seconds for its turn answers 503 `archive_rows_busy` with
+`Retry-After: 1`. `entries` holds the rows oldest first, in the same shape and
+with the same redaction as `GET /api/request-history`. Each archive file is read from the first
+row of the hour before `since`, using the offsets its totals record, and up to an hour past
+`until`, so a row logged slightly out of order is still found; every row is then filtered by its
+own time. An archive file whose totals are not built yet is not read: it is listed in
+`coverage.pendingSegments` with `coverage.pending: true` and its build starts in the background.
+`coverage.segments` lists each file read with the byte offset it started from (`fromByte`) and why
+its read ended (`endedBy`: `window-end`, `segment-end`, `limit`, or `deadline`). The top-level
+`endedBy` is `window-end` when every file was read through the window, `limit` when more rows
+matched than were returned, or `deadline` when the read stopped after five seconds with the rows it
+had; `truncated` is `true` for the last two.
 
 :::caution
 Storage cleanup endpoints can move or permanently remove archived session data. Always preview

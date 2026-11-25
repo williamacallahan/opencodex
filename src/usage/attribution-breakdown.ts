@@ -25,8 +25,8 @@ export type UsageAttributionCounts = { [dimension in UsageAttributionDimension]:
 const REPORTED_ROWS = 50;
 // A day partition keeps at most this many distinct keys per dimension, so a burst of distinct
 // client addresses cannot grow the retained summary without bound; later keys fold into one row.
-const RETAINED_KEYS = 1_000;
-const OVERFLOW_KEY = "(other)";
+export const RETAINED_KEYS = 1_000;
+export const OVERFLOW_KEY = "(other)";
 
 export function blankAttributionCounts(): UsageAttributionCounts {
   return { byHarness: new Map(), byWorkloadSource: new Map(), byWorkload: new Map(), byClientHost: new Map(), byClientAddress: new Map() };

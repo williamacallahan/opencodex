@@ -48,6 +48,33 @@ function invalidateLedgerReaders(): void {
   try { rehydrateRequestLogsAfterLedgerReplacement(); } catch { /* the ring refills as rows arrive */ }
 }
 
+/** Builds the hourly totals of a segment a trim just published. */
+type SegmentPublishedHook = (segmentPath: string) => unknown;
+
+const scheduleSegmentTotals: SegmentPublishedHook = async segmentPath => {
+  const { scheduleArchiveTotalsBuild } = await import("../usage/archive-totals");
+  await scheduleArchiveTotalsBuild(segmentPath);
+};
+let onSegmentPublished: SegmentPublishedHook = scheduleSegmentTotals;
+
+/**
+ * Runs from a timer after the trim's turn has ended, never in its tail: the ledger is already
+ * published, so a totals build that fails costs only a lazy rebuild when the archive is next read.
+ */
+function buildTotalsAfterTrim(segmentPath: string): void {
+  const hook = onSegmentPublished;
+  const timer = setTimeout(() => {
+    void (async () => {
+      try {
+        await hook(segmentPath);
+      } catch (error) {
+        console.warn(`[usage-retention] the ledger was trimmed but the archive segment's hourly totals could not be built: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    })();
+  }, 0);
+  timer.unref?.();
+}
+
 function enforceNow(): void {
   // Re-entrancy guard, not a lock. The compaction's own publication writes nothing through
   // appendUsageEntry -- this exists so a future caller cannot start a second pass over a file
@@ -56,7 +83,10 @@ function enforceNow(): void {
   enforcing = true;
   try {
     const result = enforceUsageLedgerSizeLimit(configuredMaxBytes);
-    if (result.kind === "replaced") invalidateLedgerReaders();
+    if (result.kind === "replaced") {
+      invalidateLedgerReaders();
+      buildTotalsAfterTrim(result.archivePath);
+    }
   } catch (error) {
     // Never fail a request because history could not be trimmed. The limit is not enforced and
     // says so; the next append tries again from a fresh revision.
@@ -86,15 +116,47 @@ function scheduleEnforcement(): void {
   scheduledEnforcement.unref?.();
 }
 
-/** Install or update the policy. `undefined` removes the hook entirely. */
-export function setUsageLedgerRetention(maxBytes: number | undefined): void {
+/**
+ * Install or update the policy. `undefined` removes the hook entirely. `onSegmentPublished` replaces
+ * the totals build that follows each trim; only a test that needs that build to fail passes it.
+ */
+export function setUsageLedgerRetention(maxBytes: number | undefined, options: { onSegmentPublished?: SegmentPublishedHook } = {}): void {
   configuredMaxBytes = maxBytes;
+  onSegmentPublished = options.onSegmentPublished ?? scheduleSegmentTotals;
   if (scheduledEnforcement !== null) {
     clearTimeout(scheduledEnforcement);
     scheduledEnforcement = null;
   }
   setUsageLedgerAppendHook(maxBytes === undefined ? null : scheduleEnforcement);
   if (maxBytes !== undefined) scheduleEnforcement();
+}
+
+/** The first minute after listen belongs to startup work and the first requests, not a segment scan. */
+const ARCHIVE_TOTALS_STARTUP_DELAY_MS = 60_000;
+let archiveTotalsStartupTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Build totals for segments that have none (written before totals existed, a crash, a format bump),
+ * once, a minute after the server starts serving, so the first archive read after a restart is not
+ * all `pending`. Scheduled from the background lifecycle's startup run, beside the storage policy's;
+ * the timer is unref'd and the work itself is a dynamic import, so startup pays one timer.
+ */
+export function scheduleArchiveTotalsStartupBuild(delayMs = ARCHIVE_TOTALS_STARTUP_DELAY_MS): void {
+  if (archiveTotalsStartupTimer) return;
+  archiveTotalsStartupTimer = setTimeout(() => {
+    archiveTotalsStartupTimer = null;
+    void import("../usage/archive-query")
+      .then(({ buildMissingArchiveTotals }) => buildMissingArchiveTotals())
+      .catch(error => {
+        console.warn(`[usage-archive] hourly totals for existing segments could not be built: ${error instanceof Error ? error.message : String(error)}`);
+      });
+  }, delayMs);
+  archiveTotalsStartupTimer.unref?.();
+}
+
+export function stopArchiveTotalsStartupBuild(): void {
+  if (archiveTotalsStartupTimer) clearTimeout(archiveTotalsStartupTimer);
+  archiveTotalsStartupTimer = null;
 }
 
 export function configuredUsageLedgerMaxBytes(): number | undefined {
