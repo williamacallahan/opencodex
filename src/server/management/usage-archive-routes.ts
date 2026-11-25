@@ -110,7 +110,8 @@ async function archiveTotalsResponse(ctx: ManagementContext): Promise<Response> 
   const until = Math.ceil(window.until / HOUR_MS) * HOUR_MS;
   const listing = await readArchiveListing();
   const answer = await answerArchiveTotals(listing, since, until, filter);
-  queueMissingTotals(answer.windowSegments);
+  // An abandoned request starts no builds: the reader that wanted them is gone.
+  if (!ctx.req.signal.aborted) queueMissingTotals(answer.windowSegments);
   const ambiguous = [...await ambiguousWindowSegments(listing, since, until), ...answer.liveDuplicateSegments];
   const missing = await missingWindowSegments(listing, since, until);
   const complete = answer.pendingSegments.length === 0 && answer.failedSegments.length === 0 && answer.inexactSegments.length === 0

@@ -8,6 +8,7 @@ import { handleManagementAPI } from "../../src/server/management-api";
 import { knownSpan, loadTotals, loadWindowSegments, readArchiveListing, segmentMayOverlapNow } from "../../src/usage/archive-query";
 import { noteArchiveChanged } from "../../src/usage/archive-segments";
 import { inArchiveRowsReadQueue, readArchivedRows } from "../../src/usage/archive-rows";
+import { archiveTotalsBuildFailure } from "../../src/usage/archive-totals";
 import { usageFilterIndexPath } from "../../src/usage/filter-index";
 import * as ledgerScannerModule from "../../src/usage/ledger-scanner";
 import { resetUsageReadCacheForTests, usageLogPath } from "../../src/usage/log";
@@ -221,6 +222,38 @@ describe("GET /api/usage/archive/rows", () => {
     expect(ledgerScans).toBe(0);
     // Its valid totals were not queued as missing: the next read finds them, not a refused build.
     expect((await rowsGet(query)).body.coverage.failed).toEqual([]);
+  });
+
+  test("a totals request abandoned during its last sidecar stat queues no build and starts no index work", async () => {
+    const built = await builtSegment("610", archiveRows(4, 60_000));
+    const totalsPath = built.replace(/\.jsonl$/, ".hourly.json");
+    // A second segment in the window whose sidecar was never written.
+    const unbuilt = writeSegment(archiveDirectory(), "611", jsonl(archiveRows(3, 60_000, 10)), iso(ARCHIVE_FIRST_ROW_AT + 20 * 60_000).replaceAll(":", "-"));
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), jsonl(archiveRows(50, 60_000, 100).map(row => ({ ...row, timestamp: row.timestamp + 24 * HOUR }))));
+    const query = `/api/usage/archive?${window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR)}`;
+    const request = new AbortController();
+    const realStat = fsPromises.stat;
+    let totalsStats = 0;
+    const stats = spyOn(fsPromises, "stat").mockImplementation((async (...args: Parameters<typeof fsPromises.stat>) => {
+      const result = await realStat(...args);
+      if (String(args[0]) === totalsPath && ++totalsStats === 2) request.abort();
+      return result;
+    }) as typeof fsPromises.stat);
+    try {
+      const req = new ManagementRequest(`http://localhost${query}`, { method: "GET", signal: request.signal });
+      await handleManagementAPI(req, new URL(req.url), config, {});
+      await Bun.sleep(300);
+    } finally {
+      stats.mockRestore();
+    }
+    expect(request.signal.aborted).toBe(true);
+    expect(existsSync(usageFilterIndexPath(home))).toBe(false);
+    expect(archiveTotalsBuildFailure(unbuilt)).toBeUndefined();
+    // A request that stays queues the build as usual; publishing is suspended, so it is refused.
+    const { body } = await managementGet<{ coverage: { failed: Array<{ segment: string; reason: string }> } }>(query);
+    expect(archiveTotalsBuildFailure(unbuilt)).toEqual({ reason: "publishing-suspended" });
+    expect(body.coverage.failed.map(entry => entry.segment)).not.toContain(basename(built));
   });
 
   test("a totals window no archive segment reaches starts no index work", async () => {
