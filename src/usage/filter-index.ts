@@ -1942,6 +1942,87 @@ export function publishedUsageFilterIndexGeneration(): string | null {
 }
 
 /**
+ * What the index can say about the earliest timed row of the live ledger as it is now:
+ * `verified` when its validated published generation was ingested from exactly the current ledger
+ * revision; `behind` with the bytes still to ingest when only an ingest stands between it and that
+ * (an append to the same file, or no usable index); `unavailable` when no usage ledger exists or the
+ * index cannot be read. A read never writes.
+ */
+export type UsageLedgerMinimum =
+  | { state: "verified"; minTimestamp: number | null }
+  | { state: "behind"; bytesToIngest: number; appendOnly: boolean }
+  | { state: "unavailable" };
+
+function readUsageLedgerMinimum(): UsageLedgerMinimum {
+  const revision = currentUsageLogRevision();
+  if (!revision) return { state: "unavailable" };
+  const path = indexPathForCurrentHome();
+  if (!existsSync(path)) return { state: "behind", bytesToIngest: revision.size, appendOnly: false };
+  let db: Database;
+  try {
+    db = new Database(path, { readonly: true });
+  } catch {
+    return { state: "unavailable" };
+  }
+  try {
+    // One read transaction: the minimum, the revision it covers and the counts that validate it.
+    db.exec("BEGIN");
+    const meta = readMeta(db);
+    const usable = meta.schemaVersion === USAGE_FILTER_INDEX_SCHEMA_VERSION && meta.generation !== ""
+      && generationValidated(db, path, meta) && !rebuildRequestedPaths.has(path);
+    if (!usable || usageLogIdentityKey(meta.revision) !== usageLogIdentityKey(revision)) {
+      return { state: "behind", bytesToIngest: revision.size, appendOnly: false };
+    }
+    if (usageLogRevisionKey(meta.revision) === usageLogRevisionKey(revision)) {
+      // The publish that recorded this revision wrote the minimum of its finite row timestamps.
+      return meta.indexedRows > 0 && !hasPublishedRows(db, meta.generation)
+        ? { state: "behind", bytesToIngest: revision.size, appendOnly: false }
+        : { state: "verified", minTimestamp: meta.minTimestamp };
+    }
+    const recorded = meta.revision?.size ?? 0;
+    return revision.size > recorded
+      ? { state: "behind", bytesToIngest: revision.size - recorded, appendOnly: true }
+      : { state: "behind", bytesToIngest: revision.size, appendOnly: false };
+  } catch {
+    return { state: "unavailable" };
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * The live ledger's earliest finite row timestamp, verified against the exact current ledger
+ * revision by the filter index's validated published generation, or undefined when it cannot be
+ * verified now. When the index is at most `ingestBytes` behind, an active read brings it current
+ * first; a larger ingest is started in the background, so a later call can verify. A passive read
+ * starts nothing.
+ */
+export async function verifiedUsageLedgerMinimum(options: { ingestBytes: number }): Promise<number | null | undefined> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const known = readUsageLedgerMinimum();
+    if (known.state === "verified") return known.minTimestamp;
+    if (known.state === "unavailable" || isPassiveRead()) return undefined;
+    const dir = getConfigDir();
+    const path = usageFilterIndexPath(dir);
+    // An ingest already running may be a full rebuild: never wait on it here.
+    if (ingestFlight?.path === path) return undefined;
+    if (known.bytesToIngest > options.ingestBytes) {
+      void refreshUsageFilterIndex(dir, path).catch(() => { /* a later call retries */ });
+      return undefined;
+    }
+    try {
+      // An append that turns out to need a rebuild is not done here either: that rebuild reads the whole file.
+      await refreshUsageFilterIndex(dir, path, known.appendOnly);
+    } catch (error) {
+      if (error instanceof UsageFilterIndexRebuildNeededError) void refreshUsageFilterIndex(dir, path).catch(() => { /* a later call retries */ });
+      return undefined;
+    }
+    // A request appended after the refresh moves the revision again; the next pass ingests it.
+  }
+  return undefined;
+}
+
+/**
  * Test seam: the SQLite plan for one filter's candidate statements, one labeled block per branch.
  * `paged` explains the statement the pager actually runs, including its keyset bound and `LIMIT`;
  * the unpaged form is the same branch without the cursor. Neither form may sort: an index-ordered

@@ -35,6 +35,7 @@ import {
   type ArchiveHourOffset,
   type ArchiveTotalsFile,
 } from "./archive-totals";
+import { verifiedUsageLedgerMinimum } from "./filter-index";
 import { exactFileIdentity, usageLogPath } from "./log";
 
 /** A listing this young is served without looking at the directory again. */
@@ -43,6 +44,11 @@ const LISTING_TTL_MS = 5_000;
 const LISTING_MAX_AGE_MS = 60_000;
 /** Parsed buckets kept across requests: twenty segments at their bucket cap, a few tens of MB of heap. */
 export const TOTALS_CACHE_MAX_BUCKETS = 100_000;
+/**
+ * The most live-ledger bytes a read ingests into the usage filter index to verify the ledger's
+ * minimum timestamp before answering; a larger ingest runs in the background and the read withholds.
+ */
+export const LIVE_MINIMUM_INGEST_BYTES = 8 * 1024 * 1024;
 
 export const yieldToEventLoop = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0));
 
@@ -65,10 +71,17 @@ export interface ArchiveListing {
   ambiguous: ArchiveSegmentEntry[];
   /** Totals files whose segment is gone: their rows are missing from the archive, not absent from it. */
   missing: ArchiveMissingSegment[];
-  /** The live ledger's first timed row, where the archive's coverage ends. */
+  /**
+   * The live ledger's earliest row timestamp, where the archive's coverage ends: verified by the usage
+   * filter index for the current ledger revision (`liveLedgerVerified`), and null when the live ledger
+   * holds no timed row or the minimum is not verified. Its first row is not this bound: a restored or
+   * reordered ledger can hold earlier rows after it.
+   */
   liveLedgerSince: number | null;
-  /** Whether a live ledger exists; with no timed head row it cannot show where the archive ends. */
+  /** Whether a live ledger exists. */
   liveLedgerPresent: boolean;
+  /** Whether `liveLedgerSince` is verified; until it is, every segment of a present live ledger may be a copy. */
+  liveLedgerVerified: boolean;
 }
 
 /** A totals file left without its segment, by the segment name it describes. */
@@ -213,19 +226,21 @@ export async function readArchiveListing(configDir = getConfigDir(), signal?: Ab
       if (signal?.aborted) throw error;
       if (!isMissing(error)) throw error;
       listingCache = null;
-      return { segments: [], ambiguous: [], missing: [], liveLedgerSince: live?.since ?? null, liveLedgerPresent: live !== null };
+      return { segments: [], ambiguous: [], missing: [], liveLedgerSince: null, liveLedgerPresent: live !== null, liveLedgerVerified: false };
     }
     if (cache && cache.directoryMtimeMs === directoryMtimeMs && now - cache.listedAt < LISTING_MAX_AGE_MS) cache.checkedAt = now;
     else cache = await listDirectory(directory, directoryMtimeMs, now, signal);
     signal?.throwIfAborted();
     listingCache = cache;
   }
+  const minimum = live ? await verifiedUsageLedgerMinimum({ ingestBytes: LIVE_MINIMUM_INGEST_BYTES }) : undefined;
+  signal?.throwIfAborted();
   const { counted, ambiguous } = countedArchiveSegments(cache.entries, live?.head ?? null);
   const byLabelTime = (left: ArchiveSegmentEntry, right: ArchiveSegmentEntry): number =>
     (archiveLabelTime(left.label) ?? Number.NEGATIVE_INFINITY) - (archiveLabelTime(right.label) ?? Number.NEGATIVE_INFINITY);
   return {
     segments: counted.sort(byLabelTime), ambiguous: ambiguous.sort(byLabelTime), missing: cache.missing,
-    liveLedgerSince: live?.since ?? null, liveLedgerPresent: live !== null,
+    liveLedgerSince: minimum ?? null, liveLedgerPresent: live !== null, liveLedgerVerified: minimum !== undefined,
   };
 }
 
@@ -297,13 +312,15 @@ export function segmentOverlaps(state: ArchiveSegmentState, since: number, until
 
 /**
  * Whether a counted segment may hold rows the live ledger also holds. A published segment's rows all
- * precede the live ledger's first row, so one whose rows reach that row or later (or whose span is not
- * known, or a live ledger with no timed head to compare) may be a copy a restore put back: its
- * disjointness from the live ledger is not established, whatever its label says.
+ * precede every live row, so one whose rows reach the live ledger's verified earliest timestamp or
+ * later (or whose span is not known, or any segment while that minimum is unverified) may be a copy a
+ * restore put back: its disjointness from the live ledger is not established, whatever its label says.
+ * A live ledger verified to hold no timed row cannot hold a counted row's copy.
  */
 export function mayDuplicateLiveLedger(state: ArchiveSegmentState, listing: ArchiveListing): boolean {
   if (!listing.liveLedgerPresent) return false;
-  if (listing.liveLedgerSince === null || !state.built) return true;
+  if (!listing.liveLedgerVerified || !state.built) return true;
+  if (listing.liveLedgerSince === null) return false;
   const span = rowCoverage(state.built);
   return span === null || span.lastRowAt === null || span.lastRowAt >= listing.liveLedgerSince;
 }
@@ -443,7 +460,9 @@ export async function loadWindowSegments(listing: ArchiveListing, since: number,
     // A caller past its deadline stops here; its reader reports the deadline.
     if (signal?.aborted) break;
     if (!await segmentMayOverlapNow(entry, since, until)) continue;
-    states.push(segmentState(entry, await loadTotals(entry, signal)));
+    const state = segmentState(entry, await loadTotals(entry, signal));
+    // The span its totals now give decides, as it does for a later read that knew it before loading.
+    if (segmentOverlaps(state, since, until)) states.push(state);
     await yieldToEventLoop();
   }
   return states;

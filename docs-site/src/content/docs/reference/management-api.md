@@ -672,8 +672,14 @@ The answer comes only from precomputed hourly totals, never from the rows themse
   `byClientAddress`, and `byAccount` each hold `rows` (`key` plus the same sums, most requests
   first, at most 200) and `truncated`, the number of keys left out.
 - `coverage` gives `earliestRowAt` and `latestRowAt` of the whole archive, `segments` (archive
-  files in the window), `unparsableRows` in them, and `liveLedgerSince`, the first row still in
-  `usage.jsonl`. Rows from that time on are not in this answer; add `/api/usage` for them. While
+  files in the window), `unparsableRows` in them, and `liveLedgerSince`, the earliest row time
+  still in `usage.jsonl`. Rows from that time on are not in this answer; add `/api/usage` for them.
+  That time comes from the usage filter index for the exact current `usage.jsonl`, not from its
+  first row, since a restored `usage.jsonl` can hold earlier rows after it. A read brings an index
+  at most 8 MiB behind up to date first; when the index is further behind, missing, or invalid,
+  `liveLedgerSince` is `null`, every archive file in the window is listed in
+  `coverage.ambiguousSegments`, and the answer is incomplete. The index then catches up in the
+  background, and a later read answers without any other action. While
   some archive file has no totals yet, its first row comes from its file name and its last row from
   its modification time, and `coverage.approximate` is `true`.
 - `coverage.pending` is `true` when an archive file in the window has no totals yet and no build
@@ -691,14 +697,16 @@ The answer comes only from precomputed hourly totals, never from the rows themse
   copy of other rows: several files cut from the same ledger, or one that may be a prefix of the
   current `usage.jsonl` (cut from the same file, starting with the same first row, which a restored
   ledger keeps, or untimed while `usage.jsonl` has no timed first row to compare), or one whose rows
-  reach the first row of `usage.jsonl` or later, which a restored `usage.jsonl` may hold again. Older releases could leave a copy behind that is byte-identical to the
+  reach the earliest row time in `usage.jsonl` (`liveLedgerSince`) or later, which a restored
+  `usage.jsonl` may hold again. Older releases could leave a copy behind that is byte-identical to the
   published file, so these files are neither counted nor skipped, and the answer is incomplete.
   They are only read, never moved or deleted.
 - `coverage.missingSegments` names archive files whose hourly totals remain but whose rows are
   gone; a window they may reach is incomplete, never an empty archive.
 - `coverage.duplicateSegments` is deprecated and kept for existing callers: it is the number of
-  such files in the whole archive, not only in the window, and it no longer decides what is
-  counted. Earlier releases counted the newest of each group and reported the files they skipped
+  files in the whole archive, not only in the window, that share a source ledger with another file
+  or may be a prefix of `usage.jsonl`. It does not count files withheld because `usage.jsonl` may
+  hold their rows, and it no longer decides what is counted. Earlier releases counted the newest of each group and reported the files they skipped
   here; read `coverage.ambiguousSegments` and `complete` instead.
 
 `GET /api/usage/archive/rows` returns the archived rows themselves, for questions such as which

@@ -200,7 +200,7 @@ async function archiveRowsResponse(ctx: ManagementContext): Promise<Response> {
     } catch (error) {
       if (!deadline.aborted) throw error;
       // The listing ran out of time: nothing was read, which the reader reports as the deadline.
-      listing = { segments: [], ambiguous: [], missing: [], liveLedgerSince: null, liveLedgerPresent: false };
+      listing = { segments: [], ambiguous: [], missing: [], liveLedgerSince: null, liveLedgerPresent: false, liveLedgerVerified: false };
     }
     const loaded = await loadWindowSegments(listing, query.since, query.until, deadline);
     queueMissingTotals(loaded);

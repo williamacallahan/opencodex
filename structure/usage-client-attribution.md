@@ -88,6 +88,14 @@ observed during a row read re-verifies the selected bytes before publishing them
 offset that no longer frames a complete row drops the projection instead of serving a partial
 answer. `usage.jsonl` stays authoritative and is never truncated or rewritten.
 
+The archive reads use the same projection for one more fact: the live ledger's earliest finite row
+timestamp (`verifiedUsageLedgerMinimum`), which bounds where the archive's coverage ends. It is the
+published generation's `min_timestamp` meta, accepted only when `generationValidated` holds and the
+recorded ledger revision is exactly the current one; reading it writes nothing. An active archive read
+first ingests up to 8 MiB to bring the index current, and starts a larger ingest in the background
+without waiting for it. It also never waits on an ingest already running, which may be a full rebuild
+(`structure/usage-archive.md`).
+
 Each candidate page is one keyset statement per branch, and every branch index is ordered
 `(generation, <equality prefix>, byte_offset, ...)` so its own `ORDER BY byte_offset LIMIT` is
 served by the index walk. This is why the window filter uses `idx_usage_rows_window` rather than a

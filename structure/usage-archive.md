@@ -142,11 +142,22 @@ publish renames a new ledger into place), one whose label is the live head's (a 
 a new inode keeps its head, so a different inode is no evidence), and, while the live head has no
 timed row among its first 64, any untimed one. Only a different first row is evidence of
 disjointness from another segment. A restore can also put archived rows back into the live ledger
-under any label, so a counted segment whose rows reach the live ledger's first row or later (or whose
-span is unknown, or a live ledger with no timed head to compare) is withheld as well
-(`mayDuplicateLiveLedger`): a published segment's rows all precede the live ledger's first row. Ambiguous segments are read only to
+under any label, so a counted segment whose rows reach the live ledger's earliest timestamp or later
+(or whose span is unknown) is withheld as well (`mayDuplicateLiveLedger`): a published segment's rows
+all precede every live row. The live ledger's first row is not that bound, since a restore can put an
+earlier row after it. The bound is `meta.min_timestamp` of the usage filter index's published
+generation, accepted only when the generation passes `generationValidated` and its recorded ledger
+revision is exactly the current one (`verifiedUsageLedgerMinimum`); the publish that records the
+revision writes the minimum in the same transaction. A `MIN(timestamp)` over `usage_rows` gives the
+same value but scans the generation (47 ms warm and 873 ms cold for 653,415 rows on a 968 MB
+ledger), since no index leads with `(generation, timestamp)`. An active read ingests at most
+`LIVE_MINIMUM_INGEST_BYTES` (8 MiB) to bring the index current. A larger ingest, or any rebuild
+of an append, starts in the background, and until then every counted segment in the window is withheld. A
+passive read only reads. Segments are filtered by their loaded span before this check, so a read
+that learns a span agrees with one that knew it already. Ambiguous segments are read only to
 learn their span and are reported: a window one may reach lists it in `coverage.ambiguousSegments`
-(the deprecated `coverage.duplicateSegments` keeps the archive-wide count for existing callers)
+(the deprecated `coverage.duplicateSegments` is the archive-wide count of the name and inode
+groups and live-prefix copies above only, not of segments withheld here)
 and answers `complete: false` with no numbers (the rows route answers `incomplete: true` and does not
 read it). They are never counted, skipped silently, adopted, or deleted. The live head is cached by
 the same identity `usageLogIdentityKey` uses (device, inode, birth time) and dropped on every

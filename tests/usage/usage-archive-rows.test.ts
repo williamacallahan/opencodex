@@ -140,6 +140,18 @@ describe("GET /api/usage/archive/rows", () => {
     expect(archived.body.entries).toEqual(live.body.entries);
   });
 
+  test("a segment outside the window is not reported ambiguous on a cold read when a warm one skips it", async () => {
+    await builtSegment("606", archiveRows(5));
+    // The live ledger starts before the segment's last row, so the segment would be withheld in a window it reaches.
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), jsonl([{ ...archiveRow(0), requestId: "live-0", timestamp: ARCHIVE_FIRST_ROW_AT - 30 * 60_000 }]));
+    const query = window(ARCHIVE_FIRST_ROW_AT + 48 * HOUR, ARCHIVE_FIRST_ROW_AT + 49 * HOUR);
+    const cold = (await rowsGet(query)).body;
+    const warm = (await rowsGet(query)).body;
+    expect(cold.coverage.ambiguousSegments).toEqual([]);
+    expect({ incomplete: cold.incomplete, ambiguous: cold.coverage.ambiguousSegments }).toEqual({ incomplete: warm.incomplete, ambiguous: warm.coverage.ambiguousSegments });
+  });
+
   test("a limit returns that many rows and says more matched", async () => {
     await builtSegment("604", archiveRows(30, 60_000));
     const { body } = await rowsGet(`${window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR)}&limit=5`);

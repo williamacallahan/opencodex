@@ -486,6 +486,41 @@ describe("GET /api/usage/archive", () => {
     expect(body.coverage.ambiguousSegments).toContain(basename(segmentB));
   });
 
+  test("a live ledger restored out of time order is bounded by its earliest row, not its first, so a segment it repeats is withheld", async () => {
+    const day = Date.UTC(2026, 10, 9);
+    const hourRows = (hour: number, from: number) => archiveRows(3, 60_000, from).map(row => ({ ...row, timestamp: day + hour * HOUR + (row.timestamp - ARCHIVE_FIRST_ROW_AT) }));
+    const [a, b, c] = [hourRows(8, 0), hourRows(1, 10), hourRows(12, 20)];
+    const segmentB = await builtSegment("531", b, iso(b[0]!.timestamp).replaceAll(":", "-"));
+    // Restored as A, B, C: its first row is A at 08:00, but B at 01:00 is in it too.
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), jsonl([...a, ...b, ...c]));
+    noteArchiveChanged();
+    const { body } = await archiveGet(window(day + HOUR, day + 2 * HOUR));
+    expect(body).toMatchObject({ complete: false, summary: null });
+    expect(body.coverage.ambiguousSegments).toEqual([basename(segmentB)]);
+    expect(body.coverage.liveLedgerSince).toBe(iso(b[0]!.timestamp));
+  });
+
+  test("while the live ledger's earliest row is unverified the archive withholds, and once the index catches up the same window answers exactly", async () => {
+    // The 2026-11-24 window from the archive, while usage.jsonl holds 2026-11-25 onward and is too
+    // large for a read to index before answering.
+    const archived = archiveRows(4, 60_000).map(row => ({ ...row, timestamp: Date.UTC(2026, 10, 24, 10) + (row.timestamp - ARCHIVE_FIRST_ROW_AT) }));
+    const segment = await builtSegment("532", archived, iso(archived[0]!.timestamp).replaceAll(":", "-"));
+    const padding = "x".repeat(2_000);
+    const live = archiveRows(4_500, 1_000, 100).map(row => ({ ...row, timestamp: Date.UTC(2026, 10, 25) + (row.timestamp - ARCHIVE_FIRST_ROW_AT), padding }));
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), jsonl(live));
+    expect(statSync(usageLogPath()).size).toBeGreaterThan(8 * 1024 * 1024);
+    const day = window(Date.UTC(2026, 10, 24), Date.UTC(2026, 10, 25));
+    const cold = (await archiveGet(day)).body;
+    expect(cold).toMatchObject({ complete: false, summary: null, coverage: { liveLedgerSince: null } });
+    expect(cold.coverage.ambiguousSegments).toEqual([basename(segment)]);
+    let warm = cold;
+    for (const started = Date.now(); !warm.complete && Date.now() - started < 60_000; warm = (await archiveGet(day)).body) await Bun.sleep(50);
+    expect(warm).toMatchObject({ complete: true, coverage: { ambiguousSegments: [], liveLedgerSince: iso(live[0]!.timestamp) } });
+    expect(warm.summary).toEqual(expect.objectContaining(plainSummary(archived)));
+  }, 90_000);
+
   test.each([
     ["names another segment", (totals: Record<string, unknown>) => ({ ...totals, segment: "2026-01-01T00-00-00.000Z_1-1.jsonl" })],
     ["is an unsupported version", (totals: Record<string, unknown>) => ({ ...totals, version: 3 })],
