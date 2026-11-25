@@ -112,32 +112,33 @@ identity headers. The strict Claude lane and the `/agy` lane share it.
 
 ## Unlabelled generate diagnostic
 
-When the body scan finds no session for a `streamGenerateContent` or `generateContent` request,
-`src/server/agy-unlabelled-shape.ts` logs one `[opencodex] level=info event=agy.unlabelled_generate_shape`
+When the body scan finds no session for a `streamGenerateContent` or `generateContent` request that is not a
+monitoring call (below), `src/server/agy-unlabelled-shape.ts` logs one `[opencodex] level=info event=agy.unlabelled_generate_shape`
 line describing the body's shape and nothing in it: the top-level, `request` and `request.labels` key names in
 order (only names from closed lists of the envelope's, the Gemini request's and agy's label fields, else `other`, 40 at most), the JSON type of `request.sessionId`,
 top-level `requestType` and `request.labels.trajectory_id` (strings add their byte length and one class of
 `uuid`, `signed-digits`, `digits`, `hex`, `empty`, `other`), `requestType` itself when it is `agent` or
 `agent_monitoring` (another string is `other`), a closed format label for the top-level `requestId` (`request_id_pattern`: `uuid`, `word/uuid`, `word-uuid`, `digits`, `hex`, `empty`, `other`, `toolong` over 200 characters, `absent` when not a string; no character of the value survives and the label is not part of the shape signature), and the body size rounded up to a power of two. Values, the project, request ids, prompt
 text, headers, and any key name or mode the caller chose outside those lists are never copied into it. It is bounded for the process lifetime (one line per distinct shape,
-8 lines, 64 remembered shapes, 64 body walks in all, the body untouched afterwards), runs one extra walk (for a call still unlabelled after the monitoring lookup) of the top level and of
+8 lines, 64 remembered shapes, 64 body walks in all, the body untouched afterwards), runs one extra walk of the top level and of
 `request`'s direct members only when no session was found, never throws, and leaves the forwarded bytes
 untouched. `tests/server/agy-unlabelled-shape.test.ts` covers it.
 
-## Monitoring calls and session identities
+## Calls that name no session
 
-agy's `agent_monitoring` generate calls carry no labels and no `sessionId`; their top-level `requestId` is
-`<mode>/<UUID>`. `src/server/agy-monitoring-session.ts` keeps, per caller key (the one-way hash the account
-chooser uses), the canonical `trajectory_id`, `cascade_id` and `root_cascade_id` UUIDs of each request the scan
-labelled, each mapped to that trajectory (4,096 entries, least recently used, six hours after last use,
-compared lowercase; a trajectory id outranks a cascade id, which outranks a root id, so a subagent naming the same root never takes it from the root agent; ids are remembered only once the account choice succeeded). An unlabelled generate call whose `requestId` matches `^[A-Za-z_]{1,32}/<UUID>$` and whose
-UUID is in the caller's map takes that trajectory as its session through `withBodyHarnessSession`; another
-caller never matches. The `requestId` is read by the same single walk (`scanAgyBody` wants the key only for a
-generate call, and its early stop waits for it only while no session is found, so a labelled call stops where it
-did) and is never stored or logged. The only log is `event=agy.monitoring_session_match`, cumulative counts
-(`matched_trajectory`, `matched_cascade`, `matched_root_cascade`, `unmatched`, `no_request_id_uuid`,
-`map_size`), at most every ten minutes and only when they changed. The shape diagnostic below runs only for a call
-that stayed unlabelled after this lookup. `tests/server/agy-monitoring-session.test.ts` covers it.
+agy 1.5.16 sends its `agent_monitoring` generate calls with no labels and no `sessionId`, and builds their
+top-level `requestId` as `<mode>/<random UUID>`, which names no session either, so the hub cannot attribute
+them to one; only agy can. The same single walk (`scanAgyBody`) reads the top-level `requestType` of a generate
+call that names no session, and `agent_monitoring` marks it a monitoring call. A monitoring call that does carry
+`request.labels.trajectory_id` is attributed through the labelled path above like any other generate call.
+
+Every call that names no session keeps the hub-sourced workload, with a fixed operation in place of
+`via-opencodex` (`withHubWorkloadOperation` in `src/server/request-attribution.ts`), so each class can be
+filtered on its own: `antigravity:monitoring` for a monitoring call; `antigravity:account` for
+`loadCodeAssist`, `onboardUser` and `fetchUserInfo`; `antigravity:quota` for `retrieveUserQuotaSummary`;
+`antigravity:models` for `fetchAvailableModels`; `antigravity:analytics` for `recordTrajectoryAnalytics`. Any
+other sessionless call, and a generate call that is neither labelled nor a monitoring call, keeps
+`antigravity:via-opencodex`. The harness, client host and address are unchanged. `tests/server/agy-passthrough.test.ts` covers it.
 
 ## Physical send
 

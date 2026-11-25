@@ -108,6 +108,16 @@ export function withBodyHarnessSession(attribution: RequestAttribution, session:
 }
 
 /**
+ * The hub's own label with a fixed operation in place of `via-opencodex` (`antigravity:quota`), so a class of
+ * calls that names no session can be filtered on its own. Only a hub-sourced workload changes; a declared or
+ * harness workload, and every other field, stay as they are.
+ */
+export function withHubWorkloadOperation(attribution: RequestAttribution, operation: string | undefined): RequestAttribution {
+  if (operation === undefined || attribution.workloadSource !== "hub" || attribution.workload === undefined) return attribution;
+  return { ...attribution, workload: `${attribution.workload.split(":", 1)[0]}:${operation}` };
+}
+
+/**
  * The workload an internal hop carries for its caller: the admitted attribution's, else the same rule
  * applied to the caller's own request. The hop's rebuilt headers lose the caller's User-Agent and
  * native session, so neither may be derived from them.

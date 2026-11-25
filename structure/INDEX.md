@@ -448,7 +448,6 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/server/admission-model-scope.ts` | [`data-planes/error-detail.md`](data-planes/error-detail.md) |
 | `src/server/admitted-http-turn.ts` | [`data-planes/ollama-inbound.md`](data-planes/ollama-inbound.md) |
 | `src/server/advisor-admission-scope.ts` | [`advisor.md`](advisor.md) |
-| `src/server/agy-monitoring-session.ts` | [`transports/agy-passthrough.md`](transports/agy-passthrough.md) |
 | `src/server/agy-passthrough-accounts.ts` | [`transports/agy-passthrough.md`](transports/agy-passthrough.md) |
 | `src/server/agy-passthrough.ts` | [`transports/agy-passthrough.md`](transports/agy-passthrough.md) |
 | `src/server/agy-unlabelled-shape.ts` | [`transports/agy-passthrough.md`](transports/agy-passthrough.md) |

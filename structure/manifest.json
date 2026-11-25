@@ -611,7 +611,7 @@
       "tier": 3,
       "title": "Antigravity CLI Pass-through and Native Harness Accounts",
       "scope": "The /agy byte-preserving Cloud Code lane, its pooled account choice, and the nativeHarnessOnly subscription-account boundary.",
-      "documents": ["src/server/agy-passthrough.ts", "src/server/agy-passthrough-accounts.ts", "src/server/agy-unlabelled-shape.ts", "src/server/agy-monitoring-session.ts", "src/lib/native-harness.ts"]
+      "documents": ["src/server/agy-passthrough.ts", "src/server/agy-passthrough-accounts.ts", "src/server/agy-unlabelled-shape.ts", "src/lib/native-harness.ts"]
     },
     {
       "path": "transports/vibe-passthrough.md",

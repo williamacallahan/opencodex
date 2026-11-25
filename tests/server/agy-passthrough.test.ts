@@ -10,7 +10,6 @@ import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { agyMonitoringStateForTests, resetAgyMonitoringStateForTests } from "../../src/server/agy-monitoring-session";
 import { resetUnlabelledShapeLogForTests } from "../../src/server/agy-unlabelled-shape";
 import { gzipSync } from "node:zlib";
 import { saveConfig } from "../../src/config";
@@ -246,52 +245,46 @@ describe("agy pass-through public HTTP lane", () => {
       }
     });
 
-    describe("a monitoring call takes the session its request id names", () => {
-      const monitoring = (uuid: string) => JSON.stringify({
-        project: "synthetic-project-two", requestId: `agent_monitoring/${uuid}`, model: "gemini-3.8-flash-low", requestType: "agent_monitoring",
-        request: { contents: [{ role: "user", parts: [{ text: "zz-marker-prompt" }] }], generationConfig: {} },
-      });
-      const labelled = (caller: string) => recorded("streamGenerateContent?alt=sse",
-        generation({ labels: { trajectory_id: trajectory, cascade_id: cascade, root_cascade_id: root } }), { authorization: `Bearer ${caller}` });
-
-      for (const [kind, id] of [["trajectory", trajectory], ["cascade", cascade], ["root cascade", root]] as const) {
-        test(`the ${kind} id labels it with the trajectory, for the same caller only`, async () => {
-          await launch();
-          resetAgyMonitoringStateForTests();
-          await labelled("caller-a");
-          const same = await recorded("streamGenerateContent?alt=sse", monitoring(id.toUpperCase()), { authorization: "Bearer caller-a" });
-          expect(same).toMatchObject({ harnessSessionId: trajectory, workload: `antigravity:${trajectory}`, workloadSource: "harness" });
-          const other = await recorded("streamGenerateContent?alt=sse", monitoring(id), { authorization: "Bearer caller-b" });
-          expect(other).not.toHaveProperty("harnessSessionId");
-        });
-      }
-
-      test("a labelled call refused for a missing project remembers nothing", async () => {
-        await launch();
-        resetAgyMonitoringStateForTests();
-        const refused = await post("streamGenerateContent?alt=sse", JSON.stringify({
-          request: { labels: { trajectory_id: trajectory, cascade_id: cascade, root_cascade_id: root } } }), { authorization: "Bearer caller-a" });
-        expect(refused.status).toBe(400);
-        expect(agyMonitoringStateForTests().size).toBe(0);
-        await labelled("caller-a");
-        expect(agyMonitoringStateForTests().size).toBe(3);
+    describe("a call that names no session gets its class's own workload", () => {
+      // agy builds a monitoring call's requestId as `<mode>/<random UUID>` and sets no labels on it.
+      const monitoring = (request: Record<string, unknown> = {}) => JSON.stringify({
+        project: "synthetic-project-two", requestId: "agent_monitoring/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", model: "gemini-3.8-flash-low",
+        userAgent: "antigravity", requestType: "agent_monitoring",
+        request: { contents: [{ role: "user", parts: [{ text: "zz-marker-prompt" }] }], generationConfig: {}, ...request },
       });
 
-      test("an unknown id is not labelled, and no log line carries the request id, the caller or a prompt", async () => {
+      test("a monitoring call is antigravity:monitoring, with the harness and address of any other call, and logs no shape", async () => {
         await launch();
-        resetAgyMonitoringStateForTests();
         resetUnlabelledShapeLogForTests();
         const info = spyOn(console, "info").mockImplementation(() => {});
         try {
-          await labelled("caller-a");
-          const unknown = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
-          const row = await recorded("streamGenerateContent?alt=sse", monitoring(unknown), { authorization: "Bearer caller-a" });
+          const generate = await recorded("streamGenerateContent?alt=sse", generation({ labels: { trajectory_id: trajectory } }));
+          const row = await recorded("streamGenerateContent?alt=sse", monitoring());
+          expect(row).toMatchObject({ client: "antigravity_cli", workload: "antigravity:monitoring", workloadSource: "hub" });
           expect(row).not.toHaveProperty("harnessSessionId");
-          const logged = info.mock.calls.map(call => String(call[0])).join("\n");
-          expect(logged).toContain("event=agy.monitoring_session_match");
-          for (const secret of [unknown, "caller-a", "zz-marker-prompt", trajectory, "synthetic-project-two"]) expect(logged).not.toContain(secret);
+          expect(row.clientAddress).toBe(generate.clientAddress);
+          expect(row.userAgent).toBe(generate.userAgent);
+          expect(info.mock.calls.map(call => String(call[0])).join("\n")).not.toContain("agy.unlabelled_generate_shape");
         } finally {
           info.mockRestore();
+        }
+      });
+
+      test("a monitoring call that carries a trajectory label is attributed to it, with no hub change", async () => {
+        await launch();
+        const row = await recorded("streamGenerateContent?alt=sse", monitoring({ labels: { trajectory_id: trajectory } }));
+        expect(row).toMatchObject({ harnessSessionId: trajectory, workload: `antigravity:${trajectory}`, workloadSource: "harness" });
+      });
+
+      test("account, quota, model-list and analytics calls each have a fixed workload; any other method keeps the hub's label", async () => {
+        await launch();
+        for (const [method, workload] of [
+          ["loadCodeAssist", "antigravity:account"], ["fetchUserInfo", "antigravity:account"], ["onboardUser", "antigravity:account"],
+          ["retrieveUserQuotaSummary", "antigravity:quota"], ["fetchAvailableModels", "antigravity:models"],
+          ["recordTrajectoryAnalytics", "antigravity:analytics"], ["listExperiments", "antigravity:via-opencodex"],
+        ] as const) {
+          const row = await recorded(method, JSON.stringify({ project: "synthetic-project-two" }));
+          expect([method, row.workload, row.workloadSource, row.client]).toEqual([method, workload, "hub", "antigravity_cli"]);
         }
       });
     });
@@ -301,7 +294,7 @@ describe("agy pass-through public HTTP lane", () => {
       const malformed = await recorded("streamGenerateContent?alt=sse", generation({ labels: { trajectory_id: "not-a-uuid" }, sessionId: "12ab" }));
       expect(malformed).toMatchObject({ workload: "antigravity:via-opencodex", workloadSource: "hub" });
       expect(malformed).not.toHaveProperty("harnessSessionId");
-      const nonJson = await recorded("loadCodeAssist", "not json at all");
+      const nonJson = await recorded("listExperiments", "not json at all");
       expect(nonJson).toMatchObject({ client: "antigravity_cli", workload: "antigravity:via-opencodex", workloadSource: "hub" });
       expect(nonJson).not.toHaveProperty("harnessSessionId");
     });

@@ -38,7 +38,9 @@ and `project` and the per-request ids are never recorded. `metadata.user_id`,
 `x-codex-installation-id` and the agy body's `project` are never read for this. The row's
 `workload` is the declared `X-User-ID` (`workloadSource: "declared"`), else
 `<client with hyphens>:<harnessSessionId>` (`harness`), else the hub's `<product>:via-opencodex`
-(`hub`). `tests/usage/request-attribution.test.ts` covers each harness's header set.
+(`hub`); a sessionless agy call carries a fixed per-class operation in that label instead
+(`antigravity:monitoring`, `:account`, `:quota`, `:models`, `:analytics`; see the
+[agy pass-through](transports/agy-passthrough.md#calls-that-name-no-session)). `tests/usage/request-attribution.test.ts` covers each harness's header set.
 A provider row whose `forwardClientHeaders` lists `x-user-id` or `x-lgw-cache-key` is an LLM gateway row:
 `forwardableClientHeaders` in `src/lib/provider-client-headers.ts` sends it that admitted attribution's
 `workload`, its declared `conversationKey`, its validated `clientHost` and the `clientAddress` the hub
