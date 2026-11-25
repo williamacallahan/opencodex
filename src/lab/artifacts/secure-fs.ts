@@ -13,10 +13,11 @@ import {
   fsyncSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readSync,
-  realpathSync,
   renameSync,
+  rmSync,
   unlinkSync,
   writeSync,
   type Stats,
@@ -130,55 +131,41 @@ function detectArtifactIoMode(dir: TrustedArtifactDir): ArtifactIoMode {
     artifactIoMode = "win32_pinned";
     return artifactIoMode;
   }
-  // A runtime that ignores `dir` resolves the relative name against the process cwd (Bun 1.4.4
-  // does), so the probe never creates through the `dir` calls: it creates by absolute path inside
-  // the artifact directory, then only opens, renames and unlinks that existing name relative to
-  // the descriptor. An ignored `dir` meets an absent cwd entry and fails without writing there.
-  const probe = `.dirfd-probe-${process.pid}`;
-  const finalName = `${probe}.ok`;
-  const probePath = join(dir.path, probe);
-  const finalPath = join(dir.path, finalName);
+  // The probe runs in a fresh owner-only directory this call creates beneath the trusted artifact
+  // directory, through that directory's own descriptor, so no other entry can collide with its
+  // names and cleanup removes only what this call made. A runtime that ignores `dir` (Bun 1.4.4
+  // does) resolves the relative names against the process cwd, where the probe never creates
+  // anything: the file is created by absolute path, then opened, renamed and unlinked relatively.
   artifactIoMode = "win32_pinned";
-  // Cleanup removes only the file this call created, recognized by identity under either name; a
-  // stale or foreign entry already holding a probe name is never touched.
-  let createdIdentity: BigIntStats | undefined;
+  const name = ".ocx-dirfd-probe";
+  const finalName = `${name}.ok`;
+  let scratch: string | undefined;
+  let scratchFd: number | undefined;
   try {
-    // With cwd at the artifact directory an ignored `dir` resolves to the same file: undecidable.
-    if (realpathSync(process.cwd()) === realpathSync(dir.path)) return artifactIoMode;
-    // The relative rename would replace an existing final name, so a collision keeps pinned mode.
-    if (pathEntryExists(finalPath)) return artifactIoMode;
-    const created = openSync(probePath, O_CREAT | O_EXCL | O_RDWR, 0o600);
+    scratch = mkdtempSync(join(dir.path, ".dirfd-probe-"));
+    scratchFd = openSync(scratch, openFlags(O_RDONLY | (O_DIRECTORY ?? 0), true));
+    const scratchStats = fstatSync(scratchFd);
+    if (!scratchStats.isDirectory() || (scratchStats.mode & 0o077) !== 0
+      || (typeof process.getuid === "function" && scratchStats.uid !== process.getuid())) return artifactIoMode;
+    const created = openSync(join(scratch, name), O_CREAT | O_EXCL | O_RDWR, 0o600);
+    let createdIdentity: BigIntStats;
     try { createdIdentity = fstatSync(created, { bigint: true }); } finally { closeSync(created); }
-    const opened = (openSync as unknown as OpenSyncWithDir)(probe, O_RDONLY, 0, { dir: dir.fd });
+    const opened = (openSync as unknown as OpenSyncWithDir)(name, O_RDONLY, 0, { dir: scratchFd });
     const sameFile = sameFileIdentity(fstatSync(opened, { bigint: true }), createdIdentity);
     closeSync(opened);
     if (!sameFile) return artifactIoMode;
-    (renameSync as unknown as RenameSyncWithDir)(probe, finalName, { dir: dir.fd });
-    if (!existsSync(finalPath)) return artifactIoMode;
-    (unlinkSync as unknown as UnlinkSyncWithDir)(finalName, { dir: dir.fd });
-    if (!existsSync(finalPath)) artifactIoMode = "dirfd";
+    (renameSync as unknown as RenameSyncWithDir)(name, finalName, { dir: scratchFd });
+    if (!existsSync(join(scratch, finalName))) return artifactIoMode;
+    (unlinkSync as unknown as UnlinkSyncWithDir)(finalName, { dir: scratchFd });
+    if (!existsSync(join(scratch, finalName))) artifactIoMode = "dirfd";
   } catch {
-    // An ignored or unsupported `dir` lands here; pinned mode is the verified-path fallback.
+    // An ignored or unsupported `dir`, or a scratch directory that cannot be established, keeps
+    // the verified-path mode.
   } finally {
-    if (createdIdentity) {
-      for (const leftover of [probePath, finalPath]) {
-        try {
-          const entry = lstatSync(leftover, { bigint: true });
-          if (entry.isFile() && sameFileIdentity(entry, createdIdentity)) unlinkSync(leftover);
-        } catch { /* absent: nothing was left behind */ }
-      }
-    }
+    if (scratchFd !== undefined) closeSync(scratchFd);
+    if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
   }
   return artifactIoMode;
-}
-
-function pathEntryExists(path: string): boolean {
-  try {
-    lstatSync(path);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function childPath(dir: TrustedArtifactDir, name: string): string {
