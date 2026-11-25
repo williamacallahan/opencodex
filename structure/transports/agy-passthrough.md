@@ -117,7 +117,7 @@ identity headers. The strict Claude lane and the `/agy` lane share it.
 no redirect, reuses a bounded LIFO HTTP/HTTPS agent pool (`AGENT_OPTIONS`) with idle-only 20-second
 keep-alive socket eviction (`DEFAULT_AGY_IDLE_SOCKET_TIMEOUT_MS`), enforces separate 15-second connect and
 200-second response-header deadlines (`AgyUpstreamSendError`), and decodes nothing. Compressed ingress payloads
-for project lookup (`extractTopLevelJsonStringField`, zero-AST UTF-8 byte scan) and relayed quota
+for the one-pass body scan (`scanAgyBody`: routing project and agy session, zero-AST UTF-8 byte walk; the trajectory UUID is preferred and the decimal `request.sessionId` is used only when no trajectory id is present) and relayed quota
 answers decode asynchronously via promisified `node:zlib` helpers. Caught transport errors on send and mid-stream body reads emit a single-line JSON redacted
 `[agy-passthrough] upstream failure` warning (recording `phase`, `code`, `syscall`, sanitized
 `message`, `reusedSocket`, and `elapsedMs`, omitting clean client-aborted streams); non-cancelled pre-header

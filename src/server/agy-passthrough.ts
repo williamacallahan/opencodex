@@ -169,6 +169,8 @@ function skipVal(bytes: Uint8Array, start: number): number {
   while (pos < bytes.length) {
     const ch = bytes[pos]!;
     if (ch === 0x20 || ch === 0x09 || ch === 0x0A || ch === 0x0D || ch === 0x2C || ch === 0x7D || ch === 0x5D) break;
+    // A quote, bracket or colon inside a bare value is malformed JSON; a member walk must not take it for a value end.
+    if (ch === 0x22 || ch === 0x7B || ch === 0x5B || ch === 0x3A) return -1;
     pos += 1;
   }
   return pos > start ? pos : -1;
@@ -280,7 +282,8 @@ const LABEL_KEYS = wantKeys("trajectory_id", "cascade_id", "root_cascade_id");
 /**
  * One walk over the decoded body, which stops once everything this call needs is found: the `project` it names
  * for account routing, and the agy session for the hub's own log row, which agy sends no header for. The session
- * is the trajectory id in `request.labels`, else the decimal `request.sessionId`, else a `writeTrajectoryAcls`
+ * is the trajectory id in `request.labels`, else the decimal `request.sessionId` (the trajectory UUID is preferred;
+ * the decimal id is used only when no trajectory id is present), else a `writeTrajectoryAcls`
  * call's top-level `trajectoryId`; the cascade id is the agent only when the root cascade is another UUID.
  * The first occurrence of each key wins. Request ids are never read, and nothing is copied out of the body
  * but the few short values returned.
@@ -309,6 +312,7 @@ export function scanAgyBody(plain: Uint8Array, method: string): { project?: stri
     }
     return captured.end;
   };
+  let halted = false;
   const visitRequest = (index: number, valueStart: number): number => {
     let end: number;
     if (index === 0 && !labelsSeen) {
@@ -330,7 +334,10 @@ export function scanAgyBody(plain: Uint8Array, method: string): { project?: stri
     if (end < 0) return -1;
     if (labelsSeen && (sessionIdSeen || matching(CANONICAL_UUID, labelValues[0]))) {
       requestDone = true;
-      if (satisfied()) return -1;
+      if (satisfied()) {
+        halted = true;
+        return -1;
+      }
     }
     return end;
   };
@@ -345,6 +352,16 @@ export function scanAgyBody(plain: Uint8Array, method: string): { project?: stri
       requestSeen = true;
       if (plain[valueStart] === 0x7B) {
         end = walkMembers(plain, valueStart, REQUEST_KEYS, visitRequest);
+        if (end < 0 && !halted) {
+          // Malformed request content: skip it by bracket depth, as the project lookup always did, and read no session from it.
+          const skipped = skipVal(plain, valueStart);
+          if (skipped >= 0) {
+            labelsRead = false;
+            sessionId = undefined;
+            labelValues.fill(undefined);
+            end = skipped;
+          }
+        }
         requestDone = true;
       } else {
         end = skipVal(plain, valueStart);
