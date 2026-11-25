@@ -202,7 +202,16 @@ async function waitForUsageRebuild(
     && typeof body === "object" && body !== null && (body as { error?: unknown }).error === "usage_rebuilding";
   if (!rebuilding || attempt + 1 >= USAGE_REBUILD_MAX_ROUNDS || signal?.aborted) return false;
   const seconds = retryAfterSeconds !== undefined && Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds : 5;
-  await new Promise(resolve => setTimeout(resolve, seconds * 1_000));
+  // The caller's abort ends the wait at once, not after the Retry-After interval.
+  await new Promise<void>(resolve => {
+    const timer = setTimeout(done, seconds * 1_000);
+    function done(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+    signal?.addEventListener("abort", done, { once: true });
+  });
   return !signal?.aborted;
 }
 

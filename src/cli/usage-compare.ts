@@ -208,7 +208,24 @@ function captureUsageOwner() {
 }
 type UsageOwner = ReturnType<typeof captureUsageOwner>;
 
-function pinUsageRuntime(deps: UsageCompareDeps, owner: UsageOwner): (suffix: string) => Promise<ScopedUsage> {
+/**
+ * One comparison's end-to-end limit: every attempt in both windows is capped by the time left, and
+ * the signal aborts any wait the moment the deadline passes.
+ */
+interface CompareBudget {
+  deadline: number;
+  signal: AbortSignal;
+}
+
+function remainingMs(budget: CompareBudget): number {
+  const left = budget.deadline - Date.now();
+  if (left <= 0 || budget.signal.aborted) {
+    throw new RuntimeApiError("The usage reports were not ready within the comparison's time limit; no comparison was produced. Retry shortly.", 503, null);
+  }
+  return left;
+}
+
+function pinUsageRuntime(deps: UsageCompareDeps, owner: UsageOwner): (suffix: string, budget: CompareBudget) => Promise<ScopedUsage> {
   const readRuntime = deps.readRuntime ?? readRuntimePort;
   const initial = readRuntimePortForComparison();
   const pinned = { ...initial };
@@ -228,7 +245,7 @@ function pinUsageRuntime(deps: UsageCompareDeps, owner: UsageOwner): (suffix: st
     }
     return current;
   }
-  return async suffix => {
+  return async (suffix, budget) => {
     assertRuntime();
     const live = await (deps.findLiveProxy ?? findLiveProxy)();
     assertRuntime();
@@ -243,7 +260,7 @@ function pinUsageRuntime(deps: UsageCompareDeps, owner: UsageOwner): (suffix: st
     liveIdentity = identity;
     const read = await fetchBoundLocalManagementRead(live, `/api/usage?${suffix.replace(/^\?/, "")}`, {
       fetchImpl: deps.fetchImpl, directFetch: deps.directFetch, readRuntime: assertRuntime,
-      timeoutMs: 60_000, requireResponseProof: true,
+      timeoutMs: Math.min(60_000, remainingMs(budget)), requireResponseProof: true,
     });
     assertRuntime();
     if (read.kind === "unavailable") {
@@ -279,22 +296,37 @@ const USAGE_COMPARE_PENDING_DEADLINE_MS = 120_000;
  * until the comparison's total deadline. Every attempt is a whole read: a local one rechecks the
  * runtime and owner and mints a fresh single-use grant, so no grant is ever replayed.
  */
-async function readUsageWhilePending(read: () => Promise<ScopedUsage>, deadline: number): Promise<ScopedUsage> {
+async function readUsageWhilePending(read: () => Promise<ScopedUsage>, budget: CompareBudget): Promise<ScopedUsage> {
   for (;;) {
+    remainingMs(budget);
     try {
       return await read();
     } catch (error) {
       const retryAfter = error instanceof UsagePendingError ? error.retryAfterSeconds
         : error instanceof HubClientError && error.status === 503 ? error.retryAfterSeconds : undefined;
-      if (retryAfter === undefined || Date.now() + retryAfter * 1_000 > deadline) {
+      if (retryAfter === undefined || Date.now() + retryAfter * 1_000 > budget.deadline) {
         if (error instanceof UsagePendingError) {
           throw new RuntimeApiError("The usage report is still being built from the usage log; no comparison was produced. Retry shortly.", 503, null);
         }
         throw error;
       }
-      await new Promise(resolve => setTimeout(resolve, retryAfter * 1_000));
+      await abortableSleep(retryAfter * 1_000, budget.signal);
     }
   }
+}
+
+/** Sleeps `ms`, ending at once when `signal` aborts. */
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    if (signal.aborted) return resolve();
+    const timer = setTimeout(done, ms);
+    function done(): void {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+    signal.addEventListener("abort", done, { once: true });
+  });
 }
 
 function assertUsageOwner(owner: UsageOwner): void {
@@ -320,7 +352,8 @@ async function readUsage(
   apiKeyId: string | undefined,
   deps: RuntimeApiDeps,
   owner: UsageOwner,
-  localRead?: (suffix: string) => Promise<ScopedUsage>,
+  localRead: ((suffix: string, budget: CompareBudget) => Promise<ScopedUsage>) | undefined,
+  budget: CompareBudget,
 ): Promise<ScopedUsage> {
   assertUsageOwner(owner);
   const { connection, token } = owner;
@@ -336,11 +369,11 @@ async function readUsage(
     const peerFetch = deps.fetchImpl
       ?? (link ? (await import("../client/link-home")).linkBoundFetch(connection.value, token.token) : undefined);
     result = await fetchHubUsage(connection.value.serverUrl, token.token, new URLSearchParams(suffix.replace(/^\?/, "")), {
-      fetchImpl: peerFetch, timeoutMs: 60_000, ...(link ? { peer: "Home" as const } : {}),
+      fetchImpl: peerFetch, timeoutMs: Math.min(60_000, remainingMs(budget)), ...(link ? { peer: "Home" as const } : {}),
     });
   } else {
     try {
-      result = await localRead!(suffix);
+      result = await localRead!(suffix, budget);
     } catch (error) {
       if (apiKeyId === undefined || error instanceof UsagePendingError) throw error;
       if (error instanceof RuntimeApiError) throw error;
@@ -382,9 +415,18 @@ export async function handleUsageCompareCommand(argv: string[], deps: UsageCompa
   const owner = captureUsageOwner();
   const localRead = owner.connection.kind === "disconnected" ? pinUsageRuntime(deps, owner) : undefined;
   // Both windows stay frozen across retries, so a pending report is retried for the same bounds.
-  const deadline = Date.now() + USAGE_COMPARE_PENDING_DEADLINE_MS;
-  const currentReport = await readUsageWhilePending(() => readUsage(query({ ...filters, since: windows.current.since, until: windows.current.until }), windows.current, apiKeyId, deps, owner, localRead), deadline);
-  const previousReport = await readUsageWhilePending(() => readUsage(query({ ...filters, since: windows.previous.since, until: windows.previous.until }), windows.previous, apiKeyId, deps, owner, localRead), deadline);
+  // One deadline for the whole comparison: both windows, every attempt, and every wait between them.
+  const controller = new AbortController();
+  const budget: CompareBudget = { deadline: Date.now() + USAGE_COMPARE_PENDING_DEADLINE_MS, signal: controller.signal };
+  const expiry = setTimeout(() => controller.abort(), USAGE_COMPARE_PENDING_DEADLINE_MS);
+  let currentReport: ScopedUsage;
+  let previousReport: ScopedUsage;
+  try {
+    currentReport = await readUsageWhilePending(() => readUsage(query({ ...filters, since: windows.current.since, until: windows.current.until }), windows.current, apiKeyId, deps, owner, localRead, budget), budget);
+    previousReport = await readUsageWhilePending(() => readUsage(query({ ...filters, since: windows.previous.since, until: windows.previous.until }), windows.previous, apiKeyId, deps, owner, localRead, budget), budget);
+  } finally {
+    clearTimeout(expiry);
+  }
   const current = totalsOf(currentReport);
   const previous = totalsOf(previousReport);
   const deltaTotals: Totals = {};

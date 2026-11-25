@@ -1,7 +1,7 @@
 /**
  * `ocx usage compare` reads the named range, then the previous equal window.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -424,6 +424,52 @@ test("usage comparison uses the bounded direct transport with its 60 second dead
   }
 });
 
+
+test("one deadline spans both windows: an attempt after a long wait gets only the time left", async () => {
+  const runtime = { ...LOCAL, port: 0 };
+  let calls = 0;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
+    calls += 1;
+    const headers = { [LOCAL_ATTESTATION_PROOF_HEADER]: createLocalAttestationProof(runtime.attestationSecret,
+      req.headers.get(LOCAL_MANAGEMENT_NONCE_HEADER)!, runtime.pid, runtime.port)! };
+    if (calls === 1) return Response.json({ error: "usage_rebuilding" }, { status: 503, headers: { ...headers, "retry-after": "1" } });
+    return Response.json(report(new URL(req.url), 1), { headers });
+  } });
+  runtime.port = server.port!;
+  const realNow = Date.now;
+  let elapsed = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => realNow() + elapsed);
+  const timeouts: number[] = [];
+  const deps: UsageCompareDeps = {
+    now: () => NOW, baseUrl: "http://untrusted.test",
+    readRuntime: () => ({ ...runtime }), findLiveProxy: async () => ({ ...runtime, source: "runtime" }),
+    directFetch: async (input, init, io) => {
+      timeouts.push(io?.timeoutMs ?? -1);
+      // The first read takes 118 of the comparison's 120 seconds.
+      if (timeouts.length === 1) elapsed = 118_000;
+      return directLocalHttpFetch(input, init, io);
+    },
+  };
+  const original = console.log;
+  console.log = () => {};
+  try {
+    expect(await handleObserveCommand(["usage", "compare", "--json"], deps)).toBe(0);
+    expect(timeouts[0]).toBe(60_000);
+    for (const later of timeouts.slice(1)) expect(later).toBeLessThanOrEqual(1_000);
+  } finally {
+    console.log = original;
+    clock.mockRestore();
+    await server.stop(true);
+  }
+});
+
+test("a pending runtime read's retry wait ends when the caller aborts", async () => {
+  const { runtimeRequest } = await import("../../src/cli/runtime-api");
+  const fetchImpl = (async () => Response.json({ error: "usage_rebuilding" }, { status: 503, headers: { "retry-after": "5" } })) as unknown as typeof fetch;
+  const started = Date.now();
+  await runtimeRequest("/api/usage", { signal: AbortSignal.timeout(25) }, { baseUrl: "http://127.0.0.1:1", fetchImpl }).catch(() => undefined);
+  expect(Date.now() - started).toBeLessThan(500);
+});
 
 test.each(["stable-local", "stable-hub", "connect", "disconnect", "account", "credential", "admin", "transport", "runtime"])(
   "usage comparison keeps one owner across both windows (%s)", scenario => {
