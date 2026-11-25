@@ -276,7 +276,11 @@ describe("usage ledger archive", () => {
     return path;
   }
 
+  /** Root reads any file whatever its mode, and Windows does not map POSIX modes, so an unreadable file is not real there. */
+  const unreadableFilesUnsupported = (): boolean => process.platform === "win32" || process.getuid?.() === 0;
+
   test("a leftover the cleanup cannot read leaves the published trim published, and says which file and why", () => {
+    if (unreadableFilesUnsupported()) return;
     writeRows(200, 16 * 1024);
     const leftover = writeUnreadableLeftover();
     const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -294,6 +298,7 @@ describe("usage ledger archive", () => {
   });
 
   test("the Logs ring is rebuilt from the trimmed ledger even when the superseded-segment cleanup throws", async () => {
+    if (unreadableFilesUnsupported()) return;
     writeRows(200, 16 * 1024, { provider: "example", model: "m", status: 200, durationMs: 1 });
     clearRequestLogsForTests();
     hydrateRequestLogsFromDisk();
@@ -323,6 +328,69 @@ describe("usage ledger archive", () => {
     writeFileSync(inFlight, head.subarray(0, head.indexOf(0x0a) + 1));
     expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
     expect(readdirSync(archiveDirectory())).toContain(inFlight.slice(archiveDirectory().length + 1));
+  });
+
+  test("a crashed writer's temp copy of a leftover older than five minutes is deleted by the next trim", () => {
+    writeRows(200, 16 * 1024);
+    const ino = statSync(usageLogPath(), { bigint: true }).ino.toString();
+    const head = readFileSync(usageLogPath());
+    const prefix = head.subarray(0, head.indexOf(0x0a) + 1);
+    const crashed = `2026-11-01T08-30-15.250Z_${ino}-${prefix.byteLength}.jsonl.ocx.4242.1.tmp`;
+    const writing = `2026-11-01T08-30-15.250Z_${ino}-${prefix.byteLength}.jsonl.ocx.4343.1.tmp`;
+    for (const name of [crashed, writing]) writeFileSync(join(archiveDirectory(), name), prefix);
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60_000);
+    utimesSync(join(archiveDirectory(), crashed), tenMinutesAgo, tenMinutesAgo);
+    expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
+    const names = readdirSync(archiveDirectory());
+    expect(names).not.toContain(crashed);
+    expect(names).toContain(writing);
+  });
+
+  /** An old leftover of an earlier trim of this ledger, a prefix of it, which the cleanup before a trim deletes. */
+  function writeOldLeftover(label: string, readable: boolean): string {
+    const ino = statSync(usageLogPath(), { bigint: true }).ino.toString();
+    const head = readFileSync(usageLogPath());
+    const prefix = head.subarray(0, head.indexOf(0x0a) + 1);
+    const path = join(archiveDirectory(), `${label}_${ino}-${prefix.byteLength}.jsonl`);
+    writeFileSync(path, prefix);
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60_000);
+    utimesSync(path, tenMinutesAgo, tenMinutesAgo);
+    if (!readable) chmodSync(path, 0o000);
+    return path;
+  }
+
+  test("an unreadable leftover before the trim is reported by name and no longer stops the trim", () => {
+    if (unreadableFilesUnsupported()) return;
+    writeRows(200, 16 * 1024);
+    const leftover = writeOldLeftover("2026-10-05T00-00-00.000Z", false);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
+      expect(statSync(usageLogPath()).size).toBeLessThanOrEqual(MIN_USAGE_LEDGER_MAX_BYTES);
+      const [message] = warn.mock.calls.map(call => String(call[0])).filter(text => text.includes("unpublished archive leftover"));
+      expect(message).toContain(leftover);
+      expect(message).toContain("EACCES");
+    } finally {
+      warn.mockRestore();
+      chmodSync(leftover, 0o600);
+    }
+  });
+
+  test("with two leftovers before the trim, an unreadable first one does not keep the second from being cleaned up", () => {
+    if (unreadableFilesUnsupported()) return;
+    writeRows(200, 16 * 1024);
+    const unreadable = writeOldLeftover("2026-10-05T00-00-00.000Z", false);
+    const readable = writeOldLeftover("2026-10-06T00-00-00.000Z", true);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
+      const names = readdirSync(archiveDirectory());
+      expect(names).not.toContain(readable.slice(archiveDirectory().length + 1));
+      expect(names).toContain(unreadable.slice(archiveDirectory().length + 1));
+    } finally {
+      warn.mockRestore();
+      chmodSync(unreadable, 0o600);
+    }
   });
 
   test("a trim whose ledger was replaced by something else keeps its segment, which may be the only copy of those rows", () => {

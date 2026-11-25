@@ -10,7 +10,7 @@
  * segment named with the live ledger's inode and first row is a trim that never published, whose
  * rows are still at the head of `usage.jsonl`. {@link countedArchiveSegments} applies that rule.
  */
-import { readdirSync, readSync, rmSync } from "node:fs";
+import { readSync } from "node:fs";
 import { join } from "node:path";
 import { getConfigDir } from "../config";
 
@@ -54,7 +54,8 @@ export function archiveTotalsName(segmentName: string): string {
   return `${segmentName.slice(0, -SEGMENT_SUFFIX.length)}${TOTALS_SUFFIX}`;
 }
 
-function segmentNameOfTotals(name: string): string | undefined {
+/** The segment a totals file belongs to, or undefined when the name is not a totals file. */
+export function segmentNameOfTotals(name: string): string | undefined {
   return name.endsWith(TOTALS_SUFFIX) ? `${name.slice(0, -TOTALS_SUFFIX.length)}${SEGMENT_SUFFIX}` : undefined;
 }
 
@@ -139,21 +140,6 @@ export function segmentTimeLabel(fd: number, end: number, now: Date): string {
 export function ledgerHeadLabel(fd: number, size: number): string | undefined {
   const at = firstTimedRow(fd, size);
   return at ? timeLabel(at) : undefined;
-}
-
-/** Delete a segment together with its totals file; a totals file outliving its segment is never read. */
-export function removeArchiveSegment(directory: string, segmentName: string): void {
-  rmSync(join(directory, segmentName), { force: true });
-  rmSync(join(directory, archiveTotalsName(segmentName)), { force: true });
-}
-
-/** Delete every totals file whose segment is gone. */
-export function removeOrphanArchiveTotals(directory: string): void {
-  const names = new Set(readdirSync(directory));
-  for (const name of names) {
-    const segment = segmentNameOfTotals(name);
-    if (segment !== undefined && !names.has(segment)) rmSync(join(directory, name), { force: true });
-  }
 }
 
 /** The live ledger's inode and head label, which identify a segment of it that never published. */

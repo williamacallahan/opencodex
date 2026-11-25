@@ -29,10 +29,10 @@ import { atomicWriteFileStreamed } from "../config/atomic-write";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
 import {
   archiveSegmentName,
+  archiveTotalsName,
   firstRowBoundary,
   parseArchiveSegmentName,
-  removeArchiveSegment,
-  removeOrphanArchiveTotals,
+  segmentNameOfTotals,
   segmentTimeLabel,
   usageArchiveDirectory,
 } from "./archive-segments";
@@ -83,11 +83,48 @@ function copyRange(sourceFd: number, targetFd: number, from: number, to: number)
 /** A segment this young may belong to a trim still running in another process, short of its rename. */
 const UNPUBLISHED_SEGMENT_MIN_AGE_MS = 5 * 60 * 1000;
 
-/** Segments of the ledger file with this inode; another writer's in-flight `.tmp` and totals files never match. */
-function segmentsOf(directory: string, ino: string): string[] {
-  return readdirSync(directory, { withFileTypes: true })
-    .filter(entry => entry.isFile() && parseArchiveSegmentName(entry.name)?.ino === ino)
-    .map(entry => entry.name);
+/** The temp name `atomicWriteFileStreamed` gives a segment while it copies: `<segment>.ocx.<pid>.<sequence>.tmp`. */
+const SEGMENT_TEMP = /^(.+\.jsonl)\.ocx\.\d+\.\d+\.tmp$/;
+
+interface Leftover {
+  name: string;
+  /** A crashed writer's temp file, which has no totals file of its own. */
+  temp: boolean;
+}
+
+/** Segments of the ledger file with this inode, and with `temps` their writers' temp files; totals files never match. */
+function leftoversOf(directory: string, ino: string, temps: boolean): Leftover[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry): Leftover[] => {
+    if (!entry.isFile()) return [];
+    if (parseArchiveSegmentName(entry.name)?.ino === ino) return [{ name: entry.name, temp: false }];
+    const segment = temps ? SEGMENT_TEMP.exec(entry.name)?.[1] : undefined;
+    return segment !== undefined && parseArchiveSegmentName(segment)?.ino === ino ? [{ name: entry.name, temp: true }] : [];
+  });
+}
+
+function errorCode(error: unknown): string {
+  const detail = error instanceof Error ? error : undefined;
+  return detail && "code" in detail && typeof detail.code === "string" ? detail.code : detail?.name ?? "unknown";
+}
+
+/**
+ * Run one entry's step; a failure warns once with the entry's path and error code and lets the loop go
+ * on, so one unreadable or vanished file never stops the cleanup of the others or the trim itself.
+ */
+function eachEntry(path: string, what: string, step: () => void): void {
+  try {
+    step();
+  } catch (error) {
+    console.warn(`[usage-retention] ${what} could not be removed (${errorCode(error)}): ${path}`);
+  }
+}
+
+/** Delete a leftover, then its totals file in its own step, so a totals file that will not go never keeps the segment. */
+function removeLeftover(directory: string, leftover: Leftover, what: string): void {
+  unlinkSync(join(directory, leftover.name));
+  if (leftover.temp) return;
+  const totals = join(directory, archiveTotalsName(leftover.name));
+  eachEntry(totals, `the hourly totals of ${what}`, () => rmSync(totals, { force: true }));
 }
 
 /**
@@ -97,14 +134,17 @@ function segmentsOf(directory: string, ino: string): string[] {
  * the coming segment archives them again. The inode alone is not proof, since a filesystem may
  * reuse a retired ledger's inode for a later one, so a segment is deleted only when its bytes are
  * still the ledger's own prefix, and never while it is young enough to be another process's trim
- * that has not reached its rename yet.
+ * that has not reached its rename yet. A crashed writer's `.tmp` copy of such a segment goes by the
+ * same rule: the age check is what spares a temp another process is still writing.
  */
 function removeUnpublishedSegments(directory: string, sourceFd: number, sourceIno: string, sourceSize: number, now: number): void {
-  for (const name of segmentsOf(directory, sourceIno)) {
-    const path = join(directory, name);
-    const stat = statSync(path);
-    if (stat.size > sourceSize || now - stat.mtimeMs < UNPUBLISHED_SEGMENT_MIN_AGE_MS) continue;
-    if (isPrefixOf(path, stat.size, sourceFd)) removeArchiveSegment(directory, name);
+  for (const leftover of leftoversOf(directory, sourceIno, true)) {
+    const path = join(directory, leftover.name);
+    eachEntry(path, "an unpublished archive leftover", () => {
+      const stat = statSync(path);
+      if (stat.size > sourceSize || now - stat.mtimeMs < UNPUBLISHED_SEGMENT_MIN_AGE_MS) return;
+      if (isPrefixOf(path, stat.size, sourceFd)) removeLeftover(directory, leftover, "an unpublished archive leftover");
+    });
   }
 }
 
@@ -112,18 +152,21 @@ function removeUnpublishedSegments(directory: string, sourceFd: number, sourceIn
  * After a publish, delete every other segment named with the replaced ledger's inode whose bytes are a
  * prefix of the segment just written: it is the leftover of an earlier trim of that same file that never
  * published, and every row it holds is now in the new segment. A young leftover goes too: once this trim
- * replaced the file, no trim of the old file can publish any more.
+ * replaced the file, no trim of the old file can publish any more. Temp files are left alone here:
+ * a young one may still be another writer's, and the next trim's age rule removes a crashed one.
  */
 function removeSupersededSegments(archivePath: string, sourceIno: string): void {
   const directory = dirname(archivePath);
   const archiveFd = openSync(archivePath, "r");
   try {
     const archiveSize = Number(fstatSync(archiveFd).size);
-    for (const name of segmentsOf(directory, sourceIno)) {
-      const path = join(directory, name);
+    for (const leftover of leftoversOf(directory, sourceIno, false)) {
+      const path = join(directory, leftover.name);
       if (path === archivePath) continue;
-      const size = statSync(path).size;
-      if (size <= archiveSize && isPrefixOf(path, size, archiveFd)) removeArchiveSegment(directory, name);
+      eachEntry(path, "a superseded archive segment", () => {
+        const size = statSync(path).size;
+        if (size <= archiveSize && isPrefixOf(path, size, archiveFd)) removeLeftover(directory, leftover, "a superseded archive segment");
+      });
     }
   } finally {
     closeSync(archiveFd);
@@ -163,9 +206,17 @@ function pruneUsageArchive(directory: string, now: number): void {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     if (!entry.isFile()) continue;
     const path = join(directory, entry.name);
-    if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
+    eachEntry(path, "an expired archive file", () => {
+      if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
+    });
   }
-  removeOrphanArchiveTotals(directory);
+  const names = new Set(readdirSync(directory));
+  for (const name of names) {
+    const segment = segmentNameOfTotals(name);
+    if (segment === undefined || names.has(segment)) continue;
+    const path = join(directory, name);
+    eachEntry(path, "the hourly totals of a removed archive segment", () => rmSync(path, { force: true }));
+  }
 }
 
 /**
@@ -279,14 +330,12 @@ export function enforceUsageLedgerSizeLimit(
       throw error;
     }
     // The ledger is already replaced, so a leftover this cannot delete is only a stale duplicate row range: the
-    // trim stays published and the caller still invalidates its readers.
+    // trim stays published and the caller still invalidates its readers. Each leftover warns on its own; this
+    // catches only the new segment itself failing to open or list its directory.
     try {
       removeSupersededSegments(archivePath, captured.ino);
     } catch (error) {
-      const detail = error instanceof Error ? error : undefined;
-      const code = detail && "code" in detail && typeof detail.code === "string" ? detail.code : detail?.name ?? "unknown";
-      const failedPath = detail && "path" in detail && typeof detail.path === "string" ? detail.path : archivePath;
-      console.warn(`[usage-retention] the ledger was trimmed but a superseded archive segment could not be removed (${code}): ${failedPath}`);
+      console.warn(`[usage-retention] the ledger was trimmed but its superseded archive segments could not be listed (${errorCode(error)}): ${archivePath}`);
     }
     return { kind: "replaced", currentBytes: captured.size - start, removedBytes: start, archivePath };
   } catch (error) {

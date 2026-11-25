@@ -47,8 +47,11 @@ timer and awaits nothing, and when it fires `buildMissingArchiveTotals` in
 time. A segment that fails logs one `[usage-archive]` warning and waits for the next read; nothing
 retries in a loop. Releasing the last background lifecycle lease cancels a timer that has not fired.
 
-Every place that deletes a segment deletes its totals file with it (`removeArchiveSegment`), and the
-31-day prune also deletes any totals file whose segment is gone. A totals file is written after its
+Every place that deletes a segment deletes its totals file with it, as a separate step, and the
+31-day prune also deletes any totals file whose segment is gone (`segmentNameOfTotals`). Each of
+those deletions is isolated like the leftover cleanups in [Dashboard Surfaces And
+Usage](dashboard-and-usage.md#usage-accounting): a totals file that cannot be removed logs one
+warning and never stops a segment's cleanup or the trim. A totals file is written after its
 segment, so its own mtime is never the retention clock.
 
 `tests/usage/usage-archive-totals.test.ts` covers the trim-time build against a plain sum, the lazy
