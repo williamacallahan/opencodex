@@ -1,20 +1,25 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { clearComboSelectionState, clearComboTargetCooldowns, coolComboTarget, isComboTargetInCooldown } from "../../src/combos";
 import { handleResponses } from "../../src/server/responses";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import type { OcxConfig } from "../../src/types";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { createTempHome } from "../helpers/temp-home";
 
 let now: number;
-let cleanup: () => void;
+let cleanup: (() => Promise<void>) | undefined;
 let calls: string[];
 let relayUrl: string;
 let relay: (request: Request, body: { model: string }) => Response | Promise<Response>;
 let metered: () => Response;
 
 function sse(model: string, _frames: "ok"): Response {
-  const response = { id: "resp_1", object: "response", status: "completed", model, output: [], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } };
-  return new Response(`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response })}\n\n`,
+  const created = { type: "response.created", response: { id: "resp_1", object: "response", status: "in_progress", model, output: [] } };
+  const delta = { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: "hi" };
+  const completed = { type: "response.completed", response: { ...created.response, status: "completed", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    output: [{ id: "msg_1", type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "hi", annotations: [] }] }] } };
+  return new Response([created, delta, completed].map(frame => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(""),
     { headers: { "content-type": "text/event-stream" } });
 }
 
@@ -39,10 +44,27 @@ async function post(cfg: OcxConfig, extra: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   const temp = createTempHome();
-  const release = acquireOwnedSpendHome();
+  let release: (() => void) | undefined;
+  let restoreClock: (() => void) | undefined;
+  let restoreFetch: (() => void) | undefined;
+  cleanup = async () => {
+    restoreFetch?.(); restoreClock?.();
+    try {
+      clearComboSelectionState(); clearComboTargetCooldowns();
+      release?.();
+      await flushConfigDirHardeningForTests();
+    } finally {
+      setIcaclsRunnerForTests(null); setAsyncIcaclsRunnerForTests(null);
+      temp.remove();
+    }
+  };
+  const acl = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+  setIcaclsRunnerForTests(() => acl); setAsyncIcaclsRunnerForTests(async () => acl);
+  release = acquireOwnedSpendHome();
   clearComboSelectionState(); clearComboTargetCooldowns();
   now = Date.now();
   const clock = spyOn(Date, "now").mockImplementation(() => now);
+  restoreClock = () => clock.mockRestore();
   calls = [];
   relayUrl = "https://relay.example.test/backend-api/codex/v1/responses";
   relay = () => sse("gpt-6-luna", "ok");
@@ -54,9 +76,13 @@ beforeEach(() => {
     if (request.url === "https://metered.example.test/v1/responses") { calls.push(`metered:${body.model}`); return metered(); }
     throw new Error(`unexpected upstream ${request.url}`);
   }, { preconnect() {} }));
-  cleanup = () => { upstream.mockRestore(); clock.mockRestore(); clearComboSelectionState(); clearComboTargetCooldowns(); release(); temp.remove(); };
+  restoreFetch = () => upstream.mockRestore();
 });
-afterEach(() => cleanup());
+afterEach(async () => {
+  const dispose = cleanup;
+  cleanup = undefined;
+  await dispose?.();
+});
 
 describe("Luna relay cooldown", () => {
   test.each([
