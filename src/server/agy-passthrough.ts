@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { brotliDecompress, gunzip, inflate, zstdDecompress } from "node:zlib";
 import { admissionFields, resolveDataPlaneAdmissionSecret, withRequestAttribution, type DataPlaneAdmission } from "./auth-cors";
+import { logUnlabelledGenerateShape, type JsonScanners } from "./agy-unlabelled-shape";
 import { withBodyHarnessSession } from "./request-attribution";
 import { readBoundedRequestBytes } from "./index/bounded-request";
 import { isDraining, tryAdmitTurn } from "./lifecycle";
@@ -61,6 +62,8 @@ function agyLogin(accountId: string): string | undefined {
 const CLOUD_CODE_METHOD = /^\/v1internal:[A-Za-z]+$/;
 /** Generation calls always carry their account's project; refusing a project-less one keeps them off rotation. */
 const PROJECT_REQUIRED = /^\/v1internal:(?:streamGenerateContent|generateContent|countTokens)$/;
+/** The generation calls whose body should name an agy session. */
+const GENERATE_METHOD = /^\/v1internal:(?:streamGenerateContent|generateContent)$/;
 const AGY_USER_AGENT = /^antigravity\/cli\//;
 const REGISTRY_ORIGIN = new URL(PROVIDER_REGISTRY.find(entry => entry.id === ANTIGRAVITY_OAUTH_STORE_KEY)!.baseUrl).origin;
 
@@ -175,6 +178,9 @@ function skipVal(bytes: Uint8Array, start: number): number {
   }
   return pos > start ? pos : -1;
 }
+
+/** The byte-level JSON skippers, shared with the unlabelled-shape diagnostic. */
+export const AGY_JSON_SCANNERS: JsonScanners = { skipWs, scanStr, skipVal };
 
 interface WantedKeys {
   readonly names: readonly string[];
@@ -415,7 +421,10 @@ export async function decodeBoundedPayload(bytes: Uint8Array, contentEncoding: s
 async function agyBodyView(bytes: Uint8Array, contentEncoding: string | null, method: string): Promise<{ project?: string; session?: string; agent?: string } | null> {
   const plain = await decodeBoundedPayload(bytes, contentEncoding);
   if (plain === null) return null;
-  return plain.byteLength === 0 ? {} : scanAgyBody(plain, method);
+  if (plain.byteLength === 0) return {};
+  const scanned = scanAgyBody(plain, method);
+  if (scanned.session === undefined && GENERATE_METHOD.test(method)) logUnlabelledGenerateShape(plain, AGY_JSON_SCANNERS);
+  return scanned;
 }
 
 /**

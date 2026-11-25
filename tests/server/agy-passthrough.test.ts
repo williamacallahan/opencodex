@@ -10,6 +10,7 @@ import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resetUnlabelledShapeLogForTests } from "../../src/server/agy-unlabelled-shape";
 import { gzipSync } from "node:zlib";
 import { saveConfig } from "../../src/config";
 import { clearGenericFailoverHealth } from "../../src/oauth/generic-account-failover";
@@ -222,6 +223,25 @@ describe("agy pass-through public HTTP lane", () => {
       await launch();
       const row = await recorded("writeTrajectoryAcls", JSON.stringify({ trajectoryId: trajectory, acls: [] }));
       expect(row).toMatchObject({ harnessSessionId: trajectory, workload: `antigravity:${trajectory}` });
+    });
+
+    test("a generate request with no session logs its shape once and Google receives the same bytes", async () => {
+      await launch();
+      resetUnlabelledShapeLogForTests();
+      const info = spyOn(console, "info").mockImplementation(() => {});
+      try {
+        const body = generation({ extra: "zz-marker-77" });
+        await recorded("streamGenerateContent?alt=sse", body);
+        await recorded("streamGenerateContent?alt=sse", body);
+        await recorded("streamGenerateContent?alt=sse", generation({ sessionId: "5" }));
+        const shapes = info.mock.calls.map(call => String(call[0])).filter(line => line.includes("agy.unlabelled_generate_shape"));
+        expect(shapes).toHaveLength(1);
+        expect(shapes[0]).toContain("request_keys=\"contents,extra\"");
+        expect(shapes[0]).not.toContain("zz-marker-77");
+        expect(shapes[0]).not.toContain("synthetic-project-two");
+      } finally {
+        info.mockRestore();
+      }
     });
 
     test("a malformed, label-less or non-JSON body keeps the hub's label", async () => {

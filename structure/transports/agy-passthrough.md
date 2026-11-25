@@ -110,6 +110,20 @@ fallback. `tests/server/agy-passthrough.test.ts` and
 `Forwarded`, `X-Real-IP`, `X-Forwarded-*`, Envoy's `X-Request-Id` and `X-Envoy-*`, and Tailscale
 identity headers. The strict Claude lane and the `/agy` lane share it.
 
+## Unlabelled generate diagnostic
+
+When the body scan finds no session for a `streamGenerateContent` or `generateContent` request,
+`src/server/agy-unlabelled-shape.ts` logs one `[opencodex] level=info event=agy.unlabelled_generate_shape`
+line describing the body's shape and nothing in it: the top-level, `request` and `request.labels` key names in
+order (identifier-shaped names only, else `<other>`, 40 at most), the JSON type of `request.sessionId`,
+top-level `requestType` and `request.labels.trajectory_id` (strings add their byte length and one class of
+`uuid`, `signed-digits`, `digits`, `hex`, `empty`, `other`), `requestType` itself when it matches
+`^[A-Za-z_-]{1,24}$`, and the body size rounded up to a power of two. Values, the project, request ids, prompt
+text and headers are never read into it. It is bounded for the process lifetime (one line per distinct shape,
+20 lines, 64 remembered shapes, nothing computed afterwards), runs one extra walk of the top level and of
+`request`'s direct members only when no session was found, never throws, and leaves the forwarded bytes
+untouched. `tests/server/agy-unlabelled-shape.test.ts` covers it.
+
 ## Physical send
 
 `src/server/agy-passthrough-send.ts` sends with the Node HTTP client because `fetch` adds a wildcard

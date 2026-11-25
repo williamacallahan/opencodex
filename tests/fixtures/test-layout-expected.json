@@ -914,6 +914,7 @@
   "server-generic-oauth-affinity.test.ts": "server",
   "agy-body-scan.test.ts": "server",
   "agy-passthrough.test.ts": "server",
+  "agy-unlabelled-shape.test.ts": "server",
   "devin-passthrough.test.ts": "server",
   "vibe-passthrough.test.ts": "server",
   "vibe-passthrough-resilience.test.ts": "server",

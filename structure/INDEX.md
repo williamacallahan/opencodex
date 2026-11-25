@@ -450,6 +450,7 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/server/advisor-admission-scope.ts` | [`advisor.md`](advisor.md) |
 | `src/server/agy-passthrough-accounts.ts` | [`transports/agy-passthrough.md`](transports/agy-passthrough.md) |
 | `src/server/agy-passthrough.ts` | [`transports/agy-passthrough.md`](transports/agy-passthrough.md) |
+| `src/server/agy-unlabelled-shape.ts` | [`transports/agy-passthrough.md`](transports/agy-passthrough.md) |
 | `src/server/anthropic-rate-limit-headers.ts` | [`data-planes/error-detail.md`](data-planes/error-detail.md) |
 | `src/server/audio-dictation.ts` | [`providers/codex-installation-identity.md`](providers/codex-installation-identity.md) |
 | `src/server/audio-live.ts` | [`providers/codex-installation-identity.md`](providers/codex-installation-identity.md) |
