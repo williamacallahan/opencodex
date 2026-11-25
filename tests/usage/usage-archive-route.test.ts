@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { handleManagementAPI } from "../../src/server/management-api";
@@ -34,6 +34,7 @@ interface TotalsBody {
     inexact?: Array<{ segment: string; reason: string }>;
     ambiguousSegments?: string[];
     duplicateSegments?: number;
+    missingSegments?: string[];
   };
   summary: ArchiveSumsBody;
   byHour: Array<{ key: string } & ArchiveSumsBody>;
@@ -68,8 +69,10 @@ function olderThanNow(path: string, ageMs: number): void {
   noteArchiveChanged();
 }
 
-async function builtSegment(ino: string, rows: readonly unknown[], label?: string): Promise<string> {
+/** Write a segment and its totals; `ageMs` back-dates the segment first, as an older trim's would be. */
+async function builtSegment(ino: string, rows: readonly unknown[], label?: string, ageMs?: number): Promise<string> {
   const path = writeSegment(archiveDirectory(), ino, jsonl(rows), label);
+  if (ageMs !== undefined) olderThanNow(path, ageMs);
   await writeArchiveTotals(path);
   return path;
 }
@@ -218,7 +221,7 @@ describe("GET /api/usage/archive", () => {
     const rows = archiveRows(30);
     await builtSegment("505", rows);
     // An earlier trim of the same ledger file that never published: same inode, same first row, shorter, older.
-    olderThanNow(await builtSegment("505", rows.slice(0, 12)), 10 * 60_000);
+    await builtSegment("505", rows.slice(0, 12), undefined, 10 * 60_000);
     // A trim of the live ledger stopped before its rename: those rows are still in usage.jsonl.
     const live = archiveRows(10, undefined, 100);
     mkdirSync(dirname(usageLogPath()), { recursive: true });
@@ -242,7 +245,7 @@ describe("GET /api/usage/archive", () => {
     // A trim was killed before its rename (long, older); the limit was raised; the next trim of the same
     // file cut less and published (short, newer). The leftover's extra rows are in the live ledger now.
     const rows = archiveRows(30);
-    olderThanNow(await builtSegment("508", rows.slice(0, 20)), 10 * 60_000);
+    await builtSegment("508", rows.slice(0, 20), undefined, 10 * 60_000);
     await builtSegment("508", rows.slice(0, 8));
     mkdirSync(dirname(usageLogPath()), { recursive: true });
     writeFileSync(usageLogPath(), jsonl(rows.slice(8)));
@@ -252,13 +255,13 @@ describe("GET /api/usage/archive", () => {
   });
 
   test("a segment's mtime never drops it from a window: its totals are read once for its span, and a window it cannot reach skips it after that", async () => {
-    const early = await builtSegment("509", archiveRows(5), "2026-11-01T08-30-00.000Z");
-    const late = archiveRows(5, undefined, 0).map(row => ({ ...row, timestamp: row.timestamp + 10 * 24 * HOUR }));
-    await builtSegment("510", late, iso(late[0]!.timestamp).replaceAll(":", "-"));
     // The early segment was trimmed on Nov 2, so its rows cannot reach a window that starts on Nov 11.
+    const early = writeSegment(archiveDirectory(), "509", jsonl(archiveRows(5)), "2026-11-01T08-30-00.000Z");
     const trimmedAt = new Date(Date.UTC(2026, 10, 2));
     utimesSync(early, trimmedAt, trimmedAt);
-    noteArchiveChanged();
+    await writeArchiveTotals(early);
+    const late = archiveRows(5, undefined, 0).map(row => ({ ...row, timestamp: row.timestamp + 10 * 24 * HOUR }));
+    await builtSegment("510", late, iso(late[0]!.timestamp).replaceAll(":", "-"));
     const before = archiveTotalsReads.count;
     const query = window(late[0]!.timestamp, late[0]!.timestamp + 6 * HOUR);
     const { body } = await archiveGet(query);
@@ -424,6 +427,48 @@ describe("GET /api/usage/archive", () => {
     const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 6 * HOUR));
     expect(body).toMatchObject({ complete: false, summary: null });
     expect(body.coverage.ambiguousSegments).toEqual([basename(segment)]);
+  });
+
+  test("a cached span is never proof once the segment changed: an earlier-hour row appended later is not answered as zero", async () => {
+    const day = Date.UTC(2026, 10, 6);
+    const late = [{ ...archiveRow(0), timestamp: day + 10 * HOUR }];
+    const path = await builtSegment("523", late, iso(day + 10 * HOUR).replaceAll(":", "-"));
+    expect((await archiveGet(window(day + 10 * HOUR, day + 11 * HOUR))).body.summary.requests).toBe(1);
+    appendFileSync(path, jsonl([{ ...archiveRow(1), timestamp: day + 2 * HOUR }]));
+    noteArchiveChanged();
+    const early = await archiveGet(window(day + 2 * HOUR, day + 3 * HOUR));
+    expect(early.body).toMatchObject({ complete: false, summary: null });
+  });
+
+  test("a segment that grew since it was listed is not served its old count, even before the listing is refreshed", async () => {
+    const rows = archiveRows(4);
+    const path = await builtSegment("524", rows);
+    const all = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 6 * HOUR);
+    expect((await archiveGet(all)).body.summary.requests).toBe(4);
+    // No in-process notice: the listing is still within its time to live.
+    appendFileSync(path, jsonl([{ ...archiveRow(9), timestamp: rows[0]!.timestamp + 60_000 }]));
+    expect((await archiveGet(all)).body).toMatchObject({ complete: false, summary: null });
+  });
+
+  test("totals copied from another segment of the same length are not served", async () => {
+    const rows = archiveRows(3);
+    const one = await builtSegment("525", rows);
+    const other = writeSegment(archiveDirectory(), "526", jsonl(rows.map(row => ({ ...row, provider: row.provider === "alpha" ? "omega" : "zeta" }))));
+    expect(statSync(other).size).toBe(statSync(one).size);
+    writeFileSync(archiveTotalsPath(other), readFileSync(archiveTotalsPath(one)));
+    noteArchiveChanged();
+    const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 6 * HOUR));
+    expect(body).toMatchObject({ complete: false, summary: null });
+  });
+
+  test("a totals file whose segment is gone is a missing source, not an empty archive", async () => {
+    const rows = archiveRows(3);
+    const path = await builtSegment("527", rows);
+    rmSync(path);
+    noteArchiveChanged();
+    const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 6 * HOUR));
+    expect(body).toMatchObject({ complete: false, summary: null });
+    expect(body.coverage.missingSegments).toEqual([basename(path)]);
   });
 
   test("coverage reports the per-segment caps, so a caller knows a breakdown may fold keys", async () => {

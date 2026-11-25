@@ -6,6 +6,7 @@ import { basename, dirname, join } from "node:path";
 import { closeRequestHistoryIndex } from "../../src/routing/history/indexer";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { loadWindowSegments, readArchiveListing } from "../../src/usage/archive-query";
+import { noteArchiveChanged } from "../../src/usage/archive-segments";
 import { inArchiveRowsReadQueue, readArchivedRows } from "../../src/usage/archive-rows";
 import { resetUsageReadCacheForTests, usageLogPath } from "../../src/usage/log";
 import type { OcxConfig } from "../../src/types";
@@ -263,6 +264,19 @@ describe("GET /api/usage/archive/rows", () => {
       slowListing.mockRestore();
       shortDeadline.mockRestore();
     }
+  });
+
+  test("a segment replaced by different bytes of the same length is not read at its old offsets", async () => {
+    const day = Date.UTC(2026, 10, 7);
+    // Rows of equal length, so the reordered file has the same size and the same row boundaries.
+    const rows: ArchiveFixtureRow[] = [0, 1, 2, 3].map(hour => ({ ...archiveRow(0), requestId: `hour-${hour}`, timestamp: day + hour * HOUR }));
+    const path = await builtSegment("619", rows, iso(day).replaceAll(":", "-"));
+    expect((await rowsGet(window(day + 3 * HOUR, day + 4 * HOUR))).body.entries.map(entry => entry.requestId)).toEqual(["hour-3"]);
+    // The same bytes in another order: the window's row now sits before the offset the totals recorded.
+    writeFileSync(path, jsonl([rows[3], rows[0], rows[1], rows[2]]));
+    noteArchiveChanged();
+    const { body } = await rowsGet(window(day + 3 * HOUR, day + 4 * HOUR));
+    expect(body.entries.map(entry => entry.requestId).length === 1 || body.incomplete).toBe(true);
   });
 
   test("an in-window row appended after rows hours later is still returned", async () => {

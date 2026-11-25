@@ -27,6 +27,13 @@ its target, and the ledger are unchanged.
 ## Known gaps
 
 - Uninstall still removes `usage.jsonl` and `usage-archive` (catalog-owned removal lands with slice 3/4).
+- The design's catalog-backed listing is deferred, a deliberate deviation: its reader lands with the
+  first catalog writer, before cutover is enabled. Until then only the legacy listing exists, and it
+  tells an absent segment from an ambiguous or missing one and declines exactness when it cannot.
+- Before new totals are published again, they must record each hour's last exclusive row end as
+  observed while building, so a rows read can stop where the window's rows end. Until then a rows
+  read runs to the segment's end (Rows route); legacy or unknown coverage keeps that fallback, and the
+  inferred stop at a later hour's first row is never restored.
 - The first read after a restart reads every segment's totals file once, with no budget on that cold
   pass.
 
@@ -144,9 +151,16 @@ exact span once its totals have been read, and otherwise always answers yes: a n
 and a file's mtime are not a trustworthy span (a row is stamped when its request starts and appended
 when it completes, no hub setting bounds a request's total duration, and an mtime can be changed), so
 a segment is never dropped by them. Its totals file is read once to learn its span, which is then
-cached by the totals file's revision (device, inode, size, mtime, ctime), or, without usable totals,
-it is reported pending or failed. A totals file is matched against the segment's actual length, not
-the length in its name, so a segment that grew or shrank is never described by its old totals.
+cached by both files' revisions (`archiveFileRevision`: device, inode, size, nanosecond mtime and
+ctime), or, without usable totals, it is reported pending or failed. A span only rules a segment out
+while both files are still those revisions (`segmentMayOverlapNow` checks them), and `loadTotals`
+judges a totals file against the files as they are now, before and after reading it; a change drops
+the cached listing so the next read relists. A totals file must name its own segment (`segment`) and
+match its actual length, and a version-5 file must record the segment it was built from (`source`:
+device, inode, size, nanosecond mtime); for a version-4 file, which records none, the first segment
+identity seen with it in this process stands in, and any other is a replacement it cannot verify. A
+totals file left without its segment is a missing source: `missingWindowSegments` reads only the
+span it records, and a window it may reach lists it in `coverage.missingSegments` and is incomplete.
 
 `answerArchiveTotals` in `src/usage/archive-answer.ts` loads, folds and drops one segment's totals at
 a time, keeping only its span and hour index, so a request never holds more than one segment's

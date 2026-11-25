@@ -12,7 +12,7 @@
  */
 import { ATTRIBUTION_DIMENSIONS } from "./archive-row-attribution";
 import {
-  archiveSpan, entryMayOverlap, loadTotals, segmentOverlaps, segmentState, uncountedMayOverlap, yieldToEventLoop,
+  archiveSpan, loadTotals, segmentMayOverlapNow, segmentOverlaps, segmentState, uncountedMayOverlap, yieldToEventLoop,
   type ArchiveListing, type ArchiveSegmentEntry, type ArchiveSegmentState,
 } from "./archive-query";
 import {
@@ -217,7 +217,7 @@ export async function answerArchiveTotals(
   };
 
   for (const entry of listing.segments) {
-    if (!entryMayOverlap(entry, since, until)) continue;
+    if (!await segmentMayOverlapNow(entry, since, until)) continue;
     answer.windowSegments.push(await foldSegment(entry));
     await yieldToEventLoop();
   }

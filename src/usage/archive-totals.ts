@@ -22,6 +22,7 @@
  * bucket for its hour, across at most {@link MAX_HOURS_PER_SEGMENT} hours, and at most
  * {@link MAX_OVERLAPS_PER_SEGMENT} overlap records.
  */
+import { statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { archiveTotalsName } from "./archive-segments";
@@ -130,6 +131,11 @@ export interface ArchiveTotalsFile {
    * never read; a torn final row, an uncommitted write, is not one.
    */
   malformedRows?: number;
+  /**
+   * Version 5 only: the segment the totals were built from, as device, inode, size and nanosecond
+   * mtime. Offsets and counts describe that file and no other, even one of the same length.
+   */
+  source?: string;
 }
 
 export interface ArchiveHourOffset {
@@ -247,6 +253,9 @@ export async function buildArchiveTotals(segmentPath: string, options: ArchiveTo
     },
   });
   if (!scan.revision) return null;
+  const built = statSync(segmentPath, { bigint: true });
+  // The file must still be the one scanned; another file at the path is not what these totals describe.
+  if (Number(built.size) !== scan.revision.size) return null;
   const totals: ArchiveTotalsFile = {
     version: ARCHIVE_TOTALS_FORMAT_VERSION,
     segment: basename(segmentPath),
@@ -264,6 +273,7 @@ export async function buildArchiveTotals(segmentPath: string, options: ArchiveTo
     uncounted,
     oversizedRows: scan.oversizedRows,
     malformedRows: scan.invalidRows - (scan.tornSuffix ? 1 : 0),
+    source: `${built.dev}:${built.ino}:${built.size}:${built.mtimeNs}`,
   };
   return totals;
 }
@@ -350,8 +360,10 @@ export async function readArchiveTotals(segmentPath: string, segmentBytes: numbe
   }
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const file = parsed as Record<string, unknown>;
+  // A totals file names the segment it was built for; one copied beside another segment is not its own.
+  if (file.segment !== basename(segmentPath)) return undefined;
   if (file.version === ARCHIVE_TOTALS_FORMAT_VERSION
-    && (!isUncounted(file.uncounted) || !isCount(file.oversizedRows) || !isCount(file.malformedRows))) return undefined;
+    && (!isUncounted(file.uncounted) || !isCount(file.oversizedRows) || !isCount(file.malformedRows) || typeof file.source !== "string")) return undefined;
   if ((file.version !== ARCHIVE_TOTALS_FORMAT_VERSION && file.version !== ARCHIVE_TOTALS_LEGACY_VERSION) || file.bytes !== segmentBytes
     || !isCount(file.rows) || !isCount(file.unparsableRows) || !isInstant(file.firstRowAt) || !isInstant(file.lastRowAt)
     || !Array.isArray(file.buckets) || !file.buckets.every(isBucket)
