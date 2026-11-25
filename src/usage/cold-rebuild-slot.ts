@@ -71,6 +71,11 @@ export function usageColdRebuildFailedRecently(key: string): boolean {
   return rememberedFailure(key) !== undefined;
 }
 
+/** The failure of `key`'s last build within one retry interval, for a caller to report as such. */
+export function usageColdRebuildFailure(key: string): unknown {
+  return rememberedFailure(key);
+}
+
 /**
  * Register the rebuild and throw the pending answer a request returns instead of waiting, or the
  * failure of the same key's build that just finished, which the route reports as a failed read.

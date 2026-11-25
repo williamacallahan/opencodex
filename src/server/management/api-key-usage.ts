@@ -6,7 +6,7 @@ import {
 } from "../../usage/log";
 import { scanUsageLedgerCooperatively } from "../../usage/ledger-scanner";
 import { startUsageColdRebuild, usageColdRebuildFailedRecently } from "../../usage/cold-rebuild-slot";
-import { observedUsageRevision, observeUsageRevision, type ObservedUsageRevision } from "../../usage/revision-observation";
+import { noteUsageRevision, observedUsageRevision, observeUsageRevision, usageRevisionEpoch, type ObservedUsageRevision } from "../../usage/revision-observation";
 
 /**
  * Per-key usage as the API tab renders it.
@@ -176,10 +176,13 @@ export function cacheApiKeyUsageFromRollup(
   revision: UsageLogRevision | null,
   maxReadBytes: number | undefined,
   now: number = Date.now(),
+  epoch: number = usageRevisionEpoch(revision),
 ): ApiKeyUsageSnapshot {
+  // A pass that started before a destructive change observed since publishes nothing.
+  if (usageRevisionEpoch(revision) !== epoch) return snapshot;
   rollupCache = {
     idsKey: JSON.stringify([configuredIds, maxReadBytes]),
-    observed: observedUsageRevision(revision),
+    observed: observedUsageRevision(revision, epoch),
     builtRevisionKey: usageLogRevisionKey(revision),
     expiresAt: now + ROLLUP_CACHE_TTL_MS,
     builtAt: now,
@@ -222,8 +225,10 @@ export async function readApiKeyUsageRollup(
     if (existing) return existing;
     const flight = (async (): Promise<ApiKeyUsageSnapshot> => {
       const builtAt = Date.now();
+      const epoch = noteUsageRevision(currentUsageLogRevision());
       const accumulator = createApiKeyUsageAccumulator(configuredIds, builtAt);
       const scan = await scanUsageLedgerCooperatively({ onEntry: entry => accumulator.add(entry) });
+      if (usageRevisionEpoch(scan.revision) !== epoch) throw new Error("the usage log was rewritten during the key usage read");
       return cacheApiKeyUsageFromRollup(
         {
           ...accumulator.snapshot(),
@@ -233,6 +238,7 @@ export async function readApiKeyUsageRollup(
         scan.revision,
         maxReadBytes,
         builtAt,
+        epoch,
       );
     })().finally(() => {
       if (rollupFlights.get(idsKey) === flight) rollupFlights.delete(idsKey);

@@ -1,6 +1,6 @@
 import { revisionAtPath } from "../usage/ledger-scanner";
 import { usageLogIdentityKey, usageLogPath, type UsageLogRevision } from "../usage/log";
-import { observedUsageRevision, observeUsageRevision, type ObservedUsageRevision } from "../usage/revision-observation";
+import { advanceObservedUsageRevision, noteUsageRevision, observedUsageRevision, observeUsageRevision, type ObservedUsageRevision } from "../usage/revision-observation";
 import { aggregateTelemetryForDay, type DailyTelemetryAggregate } from "./aggregate";
 
 /**
@@ -60,7 +60,7 @@ function launch(entry: PreviewEntry): void {
         // The answer covers the prefix the scan read. Its revision may only advance the observation:
         // a scan that opened at 166 bytes must not pull back an observation of 498, or a later
         // rewrite to 332 bytes would look like growth.
-        observeUsageRevision(entry.observed, revision);
+        advanceObservedUsageRevision(entry.observed, revision);
         entry.completed = { at: Date.now(), aggregate };
         delete entry.failedAt;
       },
@@ -98,7 +98,7 @@ export function telemetryPreviewAggregate(day: string, configDir: string, now: n
   let entry = entries.get(key);
   if (!entry) {
     if (!admit()) return { status: "pending" };
-    entry = { path, identityKey, day, running: false, lastUsedAt: now, observed: observedUsageRevision(revision), epoch: 0 };
+    entry = { path, identityKey, day, running: false, lastUsedAt: now, observed: observedUsageRevision(revision, noteUsageRevision(revision)), epoch: 0 };
     entries.set(key, entry);
     launch(entry);
     return { status: "pending" };

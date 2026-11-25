@@ -414,7 +414,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
               timeZone: aggregate.timeZone,
               expiresAt: usageSummaryExpiresAt(nextRange, nextSurface, at),
               freshUntil: at + 60_000,
-              observed: observedUsageRevision(aggregate.revision),
+              observed: observedUsageRevision(aggregate.revision, aggregate.epoch),
               revisionReadAt,
               summary: nextRange === range && nextSurface === surface
                 ? requestedSummary

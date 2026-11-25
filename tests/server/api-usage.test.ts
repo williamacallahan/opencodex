@@ -428,6 +428,38 @@ describe("GET /api/usage", () => {
     }
   });
 
+  test("a rewrite below the largest observed size invalidates the accumulator, not only its summaries", async () => {
+    const path = join(testDir, "usage.jsonl");
+    // Rows far past 64 KiB, so the early rewrite leaves the last 64 KiB of the built prefix intact.
+    const row = (requestId: string, provider: string, apiKeyId: string) => `${JSON.stringify({ requestId, timestamp: Date.now() - 1_000, provider, model: "m",
+      status: 200, durationMs: 1, usageStatus: "reported", usage: { inputTokens: 1, outputTokens: 1 }, admissionKind: "configured", apiKeyId, pad: "x".repeat(400) })}\n`;
+    const filler = Array.from({ length: 400 }, (_, index) => row(`f-${index}`, "anthropic", "key-f")).join("");
+    writeFileSync(path, row("r-0", "openai", "key-a") + filler);
+    const providers = (body: { providers: Array<{ provider: string; requests: number }> }) =>
+      Object.fromEntries(body.providers.map(entry => [entry.provider, entry.requests]));
+    const server = startServer(0);
+    try {
+      expect(providers(await (await usageFetch(new URL("/api/usage?range=30d", server.url))).json())).toMatchObject({ openai: 1 });
+      // The route observes growth by four rows (served from its fresh summary).
+      appendFileSync(path, ["a1", "a2", "a3", "a4"].map(id => row(id, "anthropic", "key-f")).join(""));
+      expect((await fetch(new URL("/api/usage?range=30d", server.url))).status).toBe(200);
+      // Shortened to one appended row, with the first row's provider and key rewritten in place.
+      writeFileSync(path, row("r-0", "google", "key-b") + filler + row("a1", "anthropic", "key-f"));
+      const pending = await fetch(new URL("/api/usage?range=30d", server.url));
+      expect(pending.status).toBe(503);
+      const rebuilt = await (await usageFetch(new URL("/api/usage?range=30d", server.url))).json();
+      expect(providers(rebuilt)).toMatchObject({ google: 1 });
+      expect(providers(rebuilt)).not.toHaveProperty("openai");
+      const keyed = await (await usageFetch(new URL("/api/usage?range=30d&apiKeyId=key-b", server.url))).json();
+      expect(keyed.summary.requests).toBe(1);
+      const formerKey = await (await usageFetch(new URL("/api/usage?range=30d&apiKeyId=key-a", server.url))).json();
+      expect(formerKey.summary.requests).toBe(0);
+    } finally {
+      await settleUsageColdRebuildForTests();
+      await server.stop(true);
+    }
+  });
+
   test("returns documented shape with summary, days, models, providers, and accounts", async () => {
     writeFixture(Date.now());
     const server = startServer(0);

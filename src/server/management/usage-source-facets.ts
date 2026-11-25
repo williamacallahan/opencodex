@@ -2,7 +2,7 @@ import { getConfigDir } from "../../config/paths";
 import { requestUsageColdRebuild } from "../../usage/cold-rebuild-slot";
 import { publishedUsageFilterIndexGeneration, readUsageFilterCandidates } from "../../usage/filter-index";
 import { currentUsageLogRevision } from "../../usage/log";
-import { observedUsageRevision, observeUsageRevision, type ObservedUsageRevision } from "../../usage/revision-observation";
+import { noteUsageRevision, observedUsageRevision, observeUsageRevision, usageRevisionEpoch, type ObservedUsageRevision } from "../../usage/revision-observation";
 import { createSourceFacetAccumulator } from "../../usage/source-facets";
 import { snapshotConfiguredKeyIds, type UsageSourceFilter } from "../../usage/source-filter";
 import { rangeWindow } from "../../usage/summary";
@@ -69,6 +69,7 @@ export function getUsageSourceFacets(filter: UsageSourceFilter, configuredIds: r
 async function foldFacetsFromIndex(captured: UsageSourceFilter, ids: readonly string[], timeZone: string) {
   const until = Date.now();
   const since = rangeWindow("30d", until).since!;
+  const epoch = noteUsageRevision(currentUsageLogRevision());
   const read = await readUsageFilterCandidates({ provider: null, model: null, apiKeyId: null, window: { since, until } });
   if (!read) throw new SourceFacetsUnavailableError("usage filter index unavailable");
   const accumulator = createSourceFacetAccumulator(captured, ids, { since, until });
@@ -84,9 +85,10 @@ async function foldFacetsFromIndex(captured: UsageSourceFilter, ids: readonly st
     read.close();
   }
   if (Intl.DateTimeFormat().resolvedOptions().timeZone !== timeZone) throw new Error("time zone changed");
+  if (usageRevisionEpoch(read.snapshot.revision) !== epoch) throw new Error("the usage log was rewritten during the picker read");
   return {
     generation: read.snapshot.generation,
-    observed: observedUsageRevision(read.snapshot.revision),
+    observed: observedUsageRevision(read.snapshot.revision, epoch),
     facets: {
       ...accumulator.snapshot(),
       sourceFilter: captured,

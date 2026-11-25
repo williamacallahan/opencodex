@@ -37,8 +37,8 @@ import {
   type JevStatsAccumulator,
 } from "../../usage/jev-stats";
 
-import { requestUsageColdRebuild, startUsageColdRebuild, UsageColdReadPendingError } from "../../usage/cold-rebuild-slot";
-import { observedUsageRevision, observeUsageRevision, type ObservedUsageRevision } from "../../usage/revision-observation";
+import { requestUsageColdRebuild, startUsageColdRebuild, usageColdRebuildFailure, UsageColdReadPendingError } from "../../usage/cold-rebuild-slot";
+import { noteUsageRevision, observedUsageRevision, observeUsageRevision, usageRevisionEpoch, type ObservedUsageRevision } from "../../usage/revision-observation";
 import {
   cacheApiKeyUsageFromRollup,
   createApiKeyUsageAccumulator,
@@ -46,6 +46,8 @@ import {
 
 interface RetainedUsageAggregate {
   accumulator: UsageSummaryAccumulator;
+  /** The ledger's destructive epoch the build started under (`src/usage/revision-observation.ts`). */
+  epoch: number;
   usageIncomplete: boolean;
   usageInvalidRows: boolean;
   revision: UsageLogRevision | null;
@@ -73,6 +75,8 @@ type RetainedAggregateState = RetainedUsageAggregate | RetainedJevStatsAggregate
 
 export interface UsageAggregateResult {
   accumulator: UsageSummaryAccumulator;
+  /** The ledger's destructive epoch the answer was built under; derived caches record it. */
+  epoch: number;
   usageIncomplete: boolean;
   usageInvalidRows: boolean;
   revision: UsageLogRevision | null;
@@ -149,6 +153,7 @@ function resultFrom(
 ): UsageAggregateResult {
   return {
     accumulator: state.accumulator,
+    epoch: state.epoch,
     usageIncomplete: state.usageIncomplete,
     usageInvalidRows: state.usageInvalidRows,
     revision: state.revision,
@@ -172,9 +177,11 @@ function makeRetainedAggregate(
   scan: Awaited<ReturnType<typeof scanUsageLedgerCooperatively>>,
   overlayVersion: number,
   timeZone: string,
+  epoch: number,
 ): RetainedUsageAggregate {
   return {
     accumulator,
+    epoch,
     usageIncomplete: scan.oversizedRows > 0,
     usageInvalidRows: scan.invalidRows > 0,
     revision: scan.revision,
@@ -193,6 +200,7 @@ async function rebuildAggregate(options: UsageAggregateOptions): Promise<UsageAg
   for (let attempt = 0; attempt < MAX_REBUILD_ATTEMPTS; attempt += 1) {
     const overlayVersion = userCostOverlayVersion();
     const timeZone = currentTimeZone();
+    const epoch = noteUsageRevision(currentUsageLogRevision());
     const accumulator = createUsageSummaryAccumulator({ mode: "row-unique" });
     const apiKeyAccumulator = options.configuredApiKeyIds
       ? createApiKeyUsageAccumulator(options.configuredApiKeyIds, options.now)
@@ -208,8 +216,13 @@ async function rebuildAggregate(options: UsageAggregateOptions): Promise<UsageAg
         lastError = new Error("usage aggregation inputs changed during rebuild");
         continue;
       }
+      // A destructive change observed while this scan ran: its rows may already be gone or different.
+      if (usageRevisionEpoch(scan.revision) !== epoch) {
+        lastError = new UsageLedgerRebuildRequiredError("content_changed");
+        continue;
+      }
 
-      const state = makeRetainedAggregate(accumulator, scan, overlayVersion, timeZone);
+      const state = makeRetainedAggregate(accumulator, scan, overlayVersion, timeZone, epoch);
       const result = publishRetainedAggregate(state);
       if (apiKeyAccumulator && options.configuredApiKeyIds) {
         cacheApiKeyUsageFromRollup(
@@ -221,6 +234,7 @@ async function rebuildAggregate(options: UsageAggregateOptions): Promise<UsageAg
           state.revision,
           options.managementUsageMaxReadBytes,
           options.now,
+          state.epoch,
         );
       }
       return result;
@@ -315,6 +329,13 @@ async function refreshAggregate(options: UsageAggregateOptions): Promise<UsageAg
   const observed = currentUsageLogRevision();
   const overlayVersion = userCostOverlayVersion();
   const timeZone = currentTimeZone();
+  // A destructive change observed anywhere since this accumulator's build (a shrink below, or a
+  // rewrite at, the largest size seen) invalidates it: an append over it would extend counts of
+  // rows that no longer exist. The next answer is a full rebuild, never the append path.
+  if (state.identityKey === usageLogIdentityKey(observed) && noteUsageRevision(observed) !== state.epoch) {
+    retainedAggregate = null;
+    return rebuildOrPending(options);
+  }
   if (requiresRebuild(state, observed, overlayVersion, timeZone)) {
     retainedAggregate = null;
     return rebuildOrPending(options);
@@ -436,13 +457,33 @@ function pruneDeliverySlots(now: number): void {
   }
 }
 
-/** Reserve `key`'s delivery slot, unless every slot already holds another key's undelivered answer. */
-function reserveDeliverySlot(key: string): boolean {
+/**
+ * Reserve `key`'s delivery slot after pruning expired ones. `created` means this call made the
+ * reservation and must release it if no build ends up owning it; `held` means one already exists
+ * (a running build's, or a published answer's); `full` means every slot holds another key's
+ * undelivered answer.
+ */
+function reserveDeliverySlot(key: string): "created" | "held" | "full" {
   pruneDeliverySlots(Date.now());
-  if (deliverySlots.has(key)) return true;
-  if (deliverySlots.size >= MAX_DELIVERY_SLOTS) return false;
+  if (deliverySlots.has(key)) return "held";
+  if (deliverySlots.size >= MAX_DELIVERY_SLOTS) return "full";
   deliverySlots.set(key, null);
-  return true;
+  return "created";
+}
+
+/** Start `key`'s background build into its reserved slot; a reservation this call made is released if no build owns it. */
+function startFilteredBuild(key: string, build: () => Promise<unknown>): "started" | "running" | "busy" | "full" {
+  const reservation = reserveDeliverySlot(key);
+  if (reservation === "full") return "full";
+  let state: "started" | "running" | "busy";
+  try {
+    state = startUsageColdRebuild(`filtered:${key}`, build);
+  } catch (error) {
+    if (reservation === "created") deliverySlots.delete(key);
+    throw error;
+  }
+  if (state === "busy" && reservation === "created") deliverySlots.delete(key);
+  return state;
 }
 
 function releaseDeliverySlot(key: string): void {
@@ -495,9 +536,11 @@ function filteredStateFrom(
   snapshot: UsageFilterIndexSnapshot,
   overlayVersion: number,
   timeZone: string,
+  epoch: number,
 ): RetainedFilteredAggregate {
   return {
     accumulator,
+    epoch,
     // Diagnostics describe the whole ledger, not the selected candidates: an invalid or
     // oversized row outside the filter still means the report is incomplete.
     usageIncomplete: snapshot.oversizedRows > 0,
@@ -511,7 +554,7 @@ function filteredStateFrom(
     timeZone,
     retainedAt: Date.now(),
     indexGeneration: snapshot.generation,
-    lastObserved: observedUsageRevision(snapshot.revision),
+    lastObserved: observedUsageRevision(snapshot.revision, epoch),
   };
 }
 
@@ -521,9 +564,11 @@ function streamingStateFrom(
   scan: Awaited<ReturnType<typeof scanUsageLedgerCooperatively>>,
   overlayVersion: number,
   timeZone: string,
+  epoch: number,
 ): RetainedFilteredAggregate {
   return {
     accumulator,
+    epoch,
     usageIncomplete: scan.oversizedRows > 0,
     usageInvalidRows: scan.invalidRows > 0,
     revision: scan.revision,
@@ -535,7 +580,7 @@ function streamingStateFrom(
     timeZone,
     retainedAt: Date.now(),
     indexGeneration: null,
-    lastObserved: observedUsageRevision(scan.revision),
+    lastObserved: observedUsageRevision(scan.revision, epoch),
   };
 }
 
@@ -661,6 +706,7 @@ async function rebuildFilteredAggregate(
   cold: UsageAggregateOptions["cold"],
 ): Promise<UsageAggregateResult> {
   if (cold === "background") return admitFilteredBuild(key, filter, window);
+  const epoch = noteUsageRevision(currentUsageLogRevision());
   const read = await readCandidates(filterQuery(filter, window));
   if (!read) return rebuildFilteredAggregateStreaming(key, filter, window, overlayVersion, timeZone);
   const accumulator = createUsageSummaryAccumulator({
@@ -669,12 +715,13 @@ async function rebuildFilteredAggregate(
     ...(window ? { window } : {}),
   });
   await accumulateCandidates(accumulator, read, filter);
-  if (userCostOverlayVersion() !== overlayVersion || currentTimeZone() !== timeZone) {
+  if (userCostOverlayVersion() !== overlayVersion || currentTimeZone() !== timeZone
+    || usageRevisionEpoch(read.snapshot.revision) !== epoch) {
     throw new UsageAggregationInputsChangedError();
   }
   return publishFilteredAggregate(
     key,
-    filteredStateFrom(accumulator, read.snapshot, overlayVersion, timeZone),
+    filteredStateFrom(accumulator, read.snapshot, overlayVersion, timeZone, epoch),
     "rebuild",
     read,
   );
@@ -691,16 +738,12 @@ function admitFilteredBuild(
   window: UsageTimeWindow | undefined,
   onBuilt?: UsageAggregateOptions["onBuilt"],
 ): never {
-  const reservedHere = !deliverySlots.has(key);
-  // Every slot holds an undelivered answer: busy, without starting a scan whose result has no room.
-  if (!reserveDeliverySlot(key)) throw new UsageColdReadPendingError("busy");
-  try {
-    return requestUsageColdRebuild(`filtered:${key}`, () => buildFilteredInBackground(key, filter, window, onBuilt));
-  } catch (error) {
-    // Only a build this call started (or joined) keeps the reservation.
-    if (reservedHere && !(error instanceof UsageColdReadPendingError && error.state !== "busy")) deliverySlots.delete(key);
-    throw error;
-  }
+  // A remembered failure of this key's last build is reported as that failure, as before.
+  const failure = usageColdRebuildFailure(`filtered:${key}`);
+  if (failure !== undefined) throw failure;
+  // Every slot holding an undelivered answer is busy, without starting a scan whose result has no room.
+  const state = startFilteredBuild(key, () => buildFilteredInBackground(key, filter, window, onBuilt));
+  throw new UsageColdReadPendingError(state === "full" ? "busy" : state);
 }
 
 async function buildFilteredInBackground(
@@ -716,7 +759,7 @@ async function buildFilteredInBackground(
     deliverySlots.delete(key);
     throw error;
   }
-  if (deliverySlots.get(key) === null) {
+  if (retainedFilteredAggregates.get(key)?.protectedUntil === undefined) {
     // Published without fitting the slot: say so to the retry rather than scanning the same revision again.
     deliverySlots.delete(key);
     throw new UsageAnswerTooLargeError("the filtered usage answer exceeds its delivery bound");
@@ -754,9 +797,7 @@ function backgroundFilteredAnswer(
   }
   // Exact only when the file is still the revision the accumulator was built from.
   if (usageLogRevisionKey(current) === state.revisionKey) return resultFrom(state, "unchanged");
-  if (reserveDeliverySlot(key) && startUsageColdRebuild(`filtered:${key}`, () => buildFilteredInBackground(key, filter, window, onBuilt)) === "busy") {
-    if (deliverySlots.get(key) === null) deliverySlots.delete(key);
-  }
+  startFilteredBuild(key, () => buildFilteredInBackground(key, filter, window, onBuilt));
   return { ...resultFrom(state, "dated"), snapshotAt: state.retainedAt };
 }
 
@@ -772,13 +813,16 @@ async function rebuildFilteredAggregateStreaming(
     mode: "row-unique",
     ...(window ? { window } : {}),
   });
+  const epoch = noteUsageRevision(currentUsageLogRevision());
   const scan = await scanUsageLedgerCooperatively({ onEntry: entry => accumulator.add(entry) });
-  if (userCostOverlayVersion() !== overlayVersion || currentTimeZone() !== timeZone) {
+  // A destructive change observed during the scan keeps this answer from publishing.
+  if (userCostOverlayVersion() !== overlayVersion || currentTimeZone() !== timeZone
+    || usageRevisionEpoch(scan.revision) !== epoch) {
     throw new UsageAggregationInputsChangedError();
   }
   return publishFilteredAggregate(
     key,
-    streamingStateFrom(accumulator, scan, overlayVersion, timeZone),
+    streamingStateFrom(accumulator, scan, overlayVersion, timeZone, epoch),
     "rebuild",
     null,
   );
@@ -796,12 +840,13 @@ async function appendFilteredAggregate(
   try {
     const candidate = state.accumulator.clone();
     await accumulateCandidates(candidate, read, filter);
-    if (userCostOverlayVersion() !== overlayVersion || currentTimeZone() !== timeZone) {
+    if (userCostOverlayVersion() !== overlayVersion || currentTimeZone() !== timeZone
+      || usageRevisionEpoch(read.snapshot.revision) !== state.epoch) {
       throw new UsageAggregationInputsChangedError();
     }
     return publishFilteredAggregate(
       key,
-      filteredStateFrom(candidate, read.snapshot, overlayVersion, timeZone),
+      filteredStateFrom(candidate, read.snapshot, overlayVersion, timeZone, state.epoch),
       "append",
       read,
     );
