@@ -10,7 +10,7 @@
  * current totals has no offsets, so it is reported pending rather than scanned from its start.
  * Segments are read oldest first under the totals' counting rule, so a row is returned once.
  */
-import { segmentOverlaps, type ArchiveFilter, type ArchiveListing, type ArchiveSegmentState } from "./archive-query";
+import { segmentOverlaps, type ArchiveFilter, type ArchiveSegmentState } from "./archive-query";
 import { ARCHIVE_DIMENSIONS, archiveDimensionValues, type ArchiveTotalsFile } from "./archive-totals";
 import { scanUsageLedgerCooperatively, UsageLedgerRebuildRequiredError } from "./ledger-scanner";
 import type { PersistedUsageEntry } from "./log";
@@ -71,9 +71,37 @@ export function archiveSeekOffset(totals: ArchiveTotalsFile, since: number): num
   return offset;
 }
 
+let rowsReadTail: Promise<void> = Promise.resolve();
+
+/**
+ * Run row reads one at a time. A caller that waits longer than `waitMs` for its turn gets `busy`
+ * without reading; its place in the line is released as soon as the read ahead of it ends.
+ */
+export async function inArchiveRowsReadQueue<T>(waitMs: number, read: () => Promise<T>): Promise<{ kind: "read"; value: T } | { kind: "busy" }> {
+  const ahead = rowsReadTail;
+  let release!: () => void;
+  const mine = new Promise<void>(resolve => { release = resolve; });
+  rowsReadTail = ahead.then(() => mine);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const turn = await Promise.race([
+    ahead.then(() => true),
+    new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), waitMs); }),
+  ]);
+  clearTimeout(timer);
+  if (!turn) {
+    void ahead.then(release);
+    return { kind: "busy" };
+  }
+  try {
+    return { kind: "read", value: await read() };
+  } finally {
+    release();
+  }
+}
+
 /** Read matching rows until `limit` is exceeded, every overlapping segment is read through the window, or `deadline` aborts. */
 export async function readArchivedRows(
-  listing: ArchiveListing,
+  states: readonly ArchiveSegmentState[],
   query: ArchivedRowsQuery,
   deadline: AbortSignal,
   options: { chunkBytes?: number } = {},
@@ -84,7 +112,7 @@ export async function readArchivedRows(
   const full = new AbortController();
   const stopAt = query.until + OUT_OF_ORDER_SLACK_MS;
   let outOfTime = false;
-  for (const state of listing.segments) {
+  for (const state of states) {
     if (!segmentOverlaps(state, query.since, query.until)) continue;
     if (!state.totals) {
       pending.push(state);
@@ -98,7 +126,7 @@ export async function readArchivedRows(
     const fromByte = archiveSeekOffset(state.totals, query.since);
     if (fromByte === undefined) continue;
     const pastWindow = new AbortController();
-    const read: ArchiveSegmentRead = { segment: state.segment.name, fromByte, endedBy: "segment-end" };
+    const read: ArchiveSegmentRead = { segment: state.name, fromByte, endedBy: "segment-end" };
     segments.push(read);
     let stopped = false;
     try {

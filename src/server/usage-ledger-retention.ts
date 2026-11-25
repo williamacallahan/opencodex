@@ -58,18 +58,21 @@ const scheduleSegmentTotals: SegmentPublishedHook = async segmentPath => {
 let onSegmentPublished: SegmentPublishedHook = scheduleSegmentTotals;
 
 /**
- * Runs after the trim returned, in its own async chain: the ledger is already published, so a totals
- * build that fails costs only a lazy rebuild when the archive is next read, never the trim.
+ * Runs from a timer after the trim's turn has ended, never in its tail: the ledger is already
+ * published, so a totals build that fails costs only a lazy rebuild when the archive is next read.
  */
 function buildTotalsAfterTrim(segmentPath: string): void {
   const hook = onSegmentPublished;
-  void (async () => {
-    try {
-      await hook(segmentPath);
-    } catch (error) {
-      console.warn(`[usage-retention] the ledger was trimmed but the archive segment's hourly totals could not be built: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  })();
+  const timer = setTimeout(() => {
+    void (async () => {
+      try {
+        await hook(segmentPath);
+      } catch (error) {
+        console.warn(`[usage-retention] the ledger was trimmed but the archive segment's hourly totals could not be built: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    })();
+  }, 0);
+  timer.unref?.();
 }
 
 function enforceNow(): void {

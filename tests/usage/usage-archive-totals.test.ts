@@ -33,10 +33,10 @@ function writeLedger(content: string): void {
   writeFileSync(usageLogPath(), content, { mode: 0o600 });
 }
 
-async function waitFor<T>(read: () => T | undefined, timeoutMs = 10_000): Promise<T> {
+async function waitFor<T>(read: () => T | undefined | Promise<T | undefined>, timeoutMs = 10_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const found = read();
+    const found = await read();
     if (found !== undefined) return found;
     if (Date.now() > deadline) throw new Error("condition not reached");
     await Bun.sleep(25);
@@ -107,7 +107,7 @@ describe("usage archive hourly totals", () => {
     const path = writeSegment(archiveDirectory(), "4242", jsonl(rows));
     expect(existsSync(archiveTotalsPath(path))).toBe(false);
     await scheduleArchiveTotalsBuild(path);
-    const totals = readArchiveTotals(path, statSync(path).size);
+    const totals = await readArchiveTotals(path, statSync(path).size);
     expect(totals?.rows).toBe(40);
     expect(totalsBy(totals!, bucket => bucket.provider)).toEqual(bruteForce(rows, row => row.provider));
     // Each hour's offset is where its first row starts in the file.
@@ -146,12 +146,12 @@ describe("usage archive hourly totals", () => {
     const path = writeSegment(archiveDirectory(), "4244", jsonl(archiveRows(3)));
     const built = await buildArchiveTotals(path);
     const size = statSync(path).size;
-    expect(readArchiveTotals(path, size)).toEqual(built!);
-    expect(readArchiveTotals(path, size + 1)).toBeUndefined();
+    expect(await readArchiveTotals(path, size)).toEqual(built!);
+    expect(await readArchiveTotals(path, size + 1)).toBeUndefined();
     writeFileSync(archiveTotalsPath(path), JSON.stringify({ ...built, version: ARCHIVE_TOTALS_FORMAT_VERSION - 1 }));
-    expect(readArchiveTotals(path, size)).toBeUndefined();
+    expect(await readArchiveTotals(path, size)).toBeUndefined();
     await scheduleArchiveTotalsBuild(path);
-    expect(readArchiveTotals(path, size)?.version).toBe(ARCHIVE_TOTALS_FORMAT_VERSION);
+    expect((await readArchiveTotals(path, size))?.version).toBe(ARCHIVE_TOTALS_FORMAT_VERSION);
   });
 
   test("the build yields to the event loop between chunks instead of reading the segment in one turn", async () => {
@@ -182,17 +182,30 @@ describe("usage archive hourly totals", () => {
     expect(names).toContain(archiveTotalsPath(kept).split("/").at(-1));
   });
 
-  test("a trim stays published when its totals build throws, and says so once", async () => {
+  test("a trim stays published when its totals build throws, and the build runs from a timer after the trim returned", async () => {
     const warn = spyOn(console, "warn").mockImplementation(() => {});
+    let hookStack = "";
+    let ledgerBytesAtHook = Number.NaN;
     try {
       writeLedger(jsonl(paddedRows(200)));
-      setUsageLedgerRetention(MIN_USAGE_LEDGER_MAX_BYTES, { onSegmentPublished: () => { throw new Error("totals unavailable"); } });
+      setUsageLedgerRetention(MIN_USAGE_LEDGER_MAX_BYTES, {
+        onSegmentPublished: () => {
+          hookStack = new Error("probe").stack ?? "";
+          ledgerBytesAtHook = statSync(usageLogPath()).size;
+          throw new Error("totals unavailable");
+        },
+      });
       const segment = await waitFor(() => segmentsIn(archiveDirectory())[0]);
       await waitFor(() => warn.mock.calls.length > 0 ? true : undefined);
       expect(statSync(usageLogPath()).size).toBeLessThanOrEqual(MIN_USAGE_LEDGER_MAX_BYTES);
       expect(existsSync(join(archiveDirectory(), segment))).toBe(true);
       expect(warn.mock.calls).toHaveLength(1);
       expect(String(warn.mock.calls[0]![0])).toContain("totals unavailable");
+      // The trim's own failure path never saw the throw, and the hook ran outside the trim's stack.
+      expect(String(warn.mock.calls[0]![0])).not.toContain("could not enforce");
+      expect(hookStack).not.toContain("enforceNow");
+      expect(hookStack).not.toContain("enforceUsageLedgerSizeLimit");
+      expect(ledgerBytesAtHook).toBeLessThanOrEqual(MIN_USAGE_LEDGER_MAX_BYTES);
     } finally {
       warn.mockRestore();
     }

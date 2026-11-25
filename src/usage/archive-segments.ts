@@ -6,9 +6,9 @@
  * ledger file that inode named. A completed trim publishes the new ledger through a rename, so every
  * published segment comes from a different file and covers rows no other published segment holds.
  * The only overlaps are the leftovers `src/usage/ledger-retention.ts` cleans up and can fail to:
- * a segment of the same file and the same first row is a byte prefix of the larger one, and a
- * segment named with the live ledger's inode and first row is a trim that never published, whose
- * rows are still at the head of `usage.jsonl`. {@link countedArchiveSegments} applies that rule.
+ * segments of the same file and the same first row, of which the published one is the newest, and a
+ * segment named with the live ledger's inode and first row, a trim that never published, whose rows
+ * are still at the head of `usage.jsonl`. {@link countedArchiveSegments} applies that rule.
  */
 import { readSync } from "node:fs";
 import { join } from "node:path";
@@ -32,6 +32,21 @@ export interface ArchiveSegmentName {
   ino: string;
   /** The cut offset, which is also the segment's byte length. */
   bytes: number;
+}
+
+let archiveGeneration = 0;
+
+/**
+ * Called after every in-process write to the archive (a segment, a totals file, a deletion), so a
+ * cached listing is never staler than this process's own writes; another process's writes are seen
+ * once the listing's short time-to-live expires.
+ */
+export function noteArchiveChanged(): void {
+  archiveGeneration += 1;
+}
+
+export function archiveChangeGeneration(): number {
+  return archiveGeneration;
 }
 
 export function usageArchiveDirectory(configDir = getConfigDir()): string {
@@ -151,28 +166,32 @@ export interface LiveLedgerHead {
 /**
  * Which segments to count so every archived row is counted once.
  *
- * Segments of the same ledger file (inode) that start at the same row (label) are prefixes of one
- * another, so only the longest counts. A segment carrying the live ledger's inode and head label is a
- * trim that stopped before its rename: its rows are still in `usage.jsonl`, so it is not counted.
+ * Segments of the same ledger file (inode) that start at the same row (label) all copy that file from
+ * byte 0, so they overlap. Only the trim that published replaced the file, and no trim of a replaced
+ * file can write a segment, so the published one is the most recently written: that one counts (the
+ * longer on a tie) and the others are skipped. An older, shorter leftover holds only rows the published
+ * segment also holds; an older, longer one (a trim killed before its rename, then a smaller cut after a
+ * limit change) also holds rows the published ledger now has. A segment carrying the live ledger's
+ * inode and head label is a trim that stopped before its rename: its rows are still in `usage.jsonl`.
  */
-export function countedArchiveSegments(
-  segments: readonly ArchiveSegmentName[],
+export function countedArchiveSegments<T extends ArchiveSegmentName & { mtimeMs: number }>(
+  segments: readonly T[],
   live: LiveLedgerHead | null,
-): { counted: ArchiveSegmentName[]; skipped: ArchiveSegmentName[] } {
-  const longest = new Map<string, ArchiveSegmentName>();
-  const skipped: ArchiveSegmentName[] = [];
+): { counted: T[]; skipped: T[] } {
+  const newest = new Map<string, T>();
+  const skipped: T[] = [];
   for (const segment of segments) {
     if (live && live.label !== undefined && segment.ino === live.ino && segment.label === live.label) {
       skipped.push(segment);
       continue;
     }
     const key = `${segment.ino}\0${segment.label}`;
-    const current = longest.get(key);
-    if (!current) longest.set(key, segment);
-    else if (segment.bytes > current.bytes) {
+    const current = newest.get(key);
+    if (!current) newest.set(key, segment);
+    else if (segment.mtimeMs > current.mtimeMs || (segment.mtimeMs === current.mtimeMs && segment.bytes > current.bytes)) {
       skipped.push(current);
-      longest.set(key, segment);
+      newest.set(key, segment);
     } else skipped.push(segment);
   }
-  return { counted: [...longest.values()], skipped };
+  return { counted: [...newest.values()], skipped };
 }

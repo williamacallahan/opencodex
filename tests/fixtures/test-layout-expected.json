@@ -1533,7 +1533,7 @@
   "usage-debug.test.ts": "usage", "usage-failure-fingerprint.test.ts": "usage",
   "usage-filter-index.test.ts": "usage", "usage-filter-paging.test.ts": "usage",
   "usage-failure-persistence.test.ts": "usage", "usage-failure-projection.test.ts": "usage",
-  "usage-ledger-retention.test.ts": "usage", "usage-ledger-scanner.test.ts": "usage", "usage-archive-totals.test.ts": "usage", "usage-archive-route.test.ts": "usage", "usage-archive-rows.test.ts": "usage", "usage-archive-leftovers.test.ts": "usage",
+  "usage-ledger-retention.test.ts": "usage", "usage-ledger-scanner.test.ts": "usage", "usage-archive-totals.test.ts": "usage", "usage-archive-route.test.ts": "usage", "usage-archive-rows.test.ts": "usage", "usage-archive-totals-bounds.test.ts": "usage", "usage-archive-leftovers.test.ts": "usage",
   "usage-log-ws-stage.test.ts": "usage", "usage-log.test.ts": "usage",
   "usage-provider-label.test.ts": "usage", "usage-shape-extraction.test.ts": "usage",
   "usage-spend-cache-provenance.test.ts": "usage", "usage-summary.test.ts": "usage",

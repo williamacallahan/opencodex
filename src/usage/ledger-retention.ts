@@ -31,6 +31,7 @@ import {
   archiveSegmentName,
   archiveTotalsName,
   firstRowBoundary,
+  noteArchiveChanged,
   parseArchiveSegmentName,
   segmentNameOfTotals,
   segmentTimeLabel,
@@ -242,6 +243,7 @@ function archiveTrimmedSpan(sourceFd: number, start: number, source: UsageLogRev
     // every segment; one entry per segment would fill the capped manifest in about a year.
     recordOwnedConfigPath(configDir, directory);
     atomicWriteFileStreamed(path, descriptor => copyRange(sourceFd, descriptor, 0, start), {}, { recordOwnership: false });
+    noteArchiveChanged();
     return path;
   } catch (cause) {
     throw new Error(
@@ -338,6 +340,7 @@ export function enforceUsageLedgerSizeLimit(
     // catches only the new segment itself failing to open or list its directory.
     try {
       removeSupersededSegments(archivePath, captured.ino);
+      noteArchiveChanged();
     } catch (error) {
       console.warn(`[usage-retention] the ledger was trimmed but its superseded archive segments could not be listed (${errorCode(error)}): ${archivePath}`);
     }

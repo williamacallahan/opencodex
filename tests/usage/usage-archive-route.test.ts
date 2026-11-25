@@ -1,8 +1,10 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { chmodSync, mkdirSync, mkdtempSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { handleManagementAPI } from "../../src/server/management-api";
+import { archiveTotalsReads } from "../../src/usage/archive-query";
+import { noteArchiveChanged } from "../../src/usage/archive-segments";
 import { ARCHIVE_TOTALS_FORMAT_VERSION, archiveTotalsPath, scheduleArchiveTotalsBuild } from "../../src/usage/archive-totals";
 import { usageLogPath } from "../../src/usage/log";
 import type { OcxConfig } from "../../src/types";
@@ -25,7 +27,11 @@ interface BreakdownBody { rows: Array<{ key: string } & ArchiveSumsBody>; trunca
 interface TotalsBody {
   since: string;
   until: string;
-  coverage: { segments: number; pending: boolean; pendingSegments: string[]; duplicateSegments: number; unparsableRows: number; earliestRowAt: string | null; latestRowAt: string | null; liveLedgerSince: string | null };
+  attribution: string;
+  coverage: {
+    segments: number; pending: boolean; pendingSegments: string[]; failed: Array<{ segment: string; reason: string; code?: string }>;
+    duplicateSegments: number; unparsableRows: number; earliestRowAt: string | null; latestRowAt: string | null; liveLedgerSince: string | null;
+  };
   summary: ArchiveSumsBody;
   byHour: Array<{ key: string } & ArchiveSumsBody>;
   byProvider: BreakdownBody;
@@ -48,6 +54,13 @@ const window = (since: number, until: number, extra = ""): string =>
 /** The plain-sum totals the route must report, without the per-bucket cost fields. */
 function plainSummary(rows: readonly ArchiveFixtureRow[]): ArchiveSumsBody {
   return bruteForce(rows, () => "all").get("all") ?? { requests: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, totalTokens: 0 };
+}
+
+/** Back-date a file's mtime, as an older trim's segment would have. */
+function olderThanNow(path: string, ageMs: number): void {
+  const at = new Date(Date.now() - ageMs);
+  utimesSync(path, at, at);
+  noteArchiveChanged();
 }
 
 async function builtSegment(ino: string, rows: readonly unknown[], label?: string): Promise<string> {
@@ -133,6 +146,7 @@ describe("GET /api/usage/archive", () => {
 
     // A totals file from an older format is pending again and rebuilt by the read.
     writeFileSync(archiveTotalsPath(path), JSON.stringify({ version: ARCHIVE_TOTALS_FORMAT_VERSION - 1, bytes: statSync(path).size }));
+    noteArchiveChanged();
     expect((await archiveGet(query)).body.coverage.pending).toBe(true);
     await scheduleArchiveTotalsBuild(path);
     expect((await archiveGet(query)).body.summary).toMatchObject(plainSummary(rows));
@@ -159,8 +173,8 @@ describe("GET /api/usage/archive", () => {
   test("a leftover prefix of a segment and an unpublished trim of the live ledger are not counted again", async () => {
     const rows = archiveRows(30);
     await builtSegment("505", rows);
-    // An earlier trim of the same ledger file that never published: same inode, same first row, shorter.
-    await builtSegment("505", rows.slice(0, 12));
+    // An earlier trim of the same ledger file that never published: same inode, same first row, shorter, older.
+    olderThanNow(await builtSegment("505", rows.slice(0, 12)), 10 * 60_000);
     // A trim of the live ledger stopped before its rename: those rows are still in usage.jsonl.
     const live = archiveRows(10, undefined, 100);
     mkdirSync(dirname(usageLogPath()), { recursive: true });
@@ -172,5 +186,68 @@ describe("GET /api/usage/archive", () => {
     const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 24 * HOUR));
     expect(body.summary).toMatchObject(plainSummary(rows));
     expect(body.coverage).toMatchObject({ segments: 1, duplicateSegments: 2, liveLedgerSince: iso(live[0]!.timestamp) });
+  });
+
+  test("after a limit change, the newer shorter segment counts and an older longer leftover of the same file does not", async () => {
+    // A trim was killed before its rename (long, older); the limit was raised; the next trim of the same
+    // file cut less and published (short, newer). The leftover's extra rows are in the live ledger now.
+    const rows = archiveRows(30);
+    olderThanNow(await builtSegment("508", rows.slice(0, 20)), 10 * 60_000);
+    await builtSegment("508", rows.slice(0, 8));
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), jsonl(rows.slice(8)));
+    const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 24 * HOUR));
+    expect(body.summary).toMatchObject(plainSummary(rows.slice(0, 8)));
+    expect(body.coverage).toMatchObject({ segments: 1, duplicateSegments: 1, liveLedgerSince: iso(rows[8]!.timestamp) });
+  });
+
+  test("only totals files of segments that may overlap the window are read", async () => {
+    const early = await builtSegment("509", archiveRows(5), "2026-11-01T08-30-00.000Z");
+    const late = archiveRows(5, undefined, 0).map(row => ({ ...row, timestamp: row.timestamp + 10 * 24 * HOUR }));
+    await builtSegment("510", late, iso(late[0]!.timestamp).replaceAll(":", "-"));
+    // The early segment was trimmed on Nov 2, so its rows cannot reach a window that starts on Nov 11.
+    const trimmedAt = new Date(Date.UTC(2026, 10, 2));
+    utimesSync(early, trimmedAt, trimmedAt);
+    noteArchiveChanged();
+    const before = archiveTotalsReads.count;
+    const { body } = await archiveGet(window(late[0]!.timestamp, late[0]!.timestamp + 6 * HOUR));
+    expect(archiveTotalsReads.count - before).toBe(1);
+    expect(body.summary.requests).toBe(5);
+  });
+
+  test("a segment whose build failed is reported failed with its reason, apart from pending, and not rebuilt", async () => {
+    if (process.platform === "win32" || process.getuid?.() === 0) return;
+    const path = writeSegment(archiveDirectory(), "511", jsonl(archiveRows(5)));
+    chmodSync(path, 0o000);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await scheduleArchiveTotalsBuild(path).catch(() => undefined);
+      const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 6 * HOUR));
+      expect(body.coverage).toMatchObject({
+        pending: false, pendingSegments: [], failed: [{ segment: path.split("/").at(-1), reason: "io-error", code: "EACCES" }],
+      });
+    } finally {
+      warn.mockRestore();
+      chmodSync(path, 0o600);
+    }
+  });
+
+  test("a row stamped beyond what a Date holds is unparsable and never turns the answer into a 500", async () => {
+    const rows = archiveRows(5);
+    await builtSegment("512", [...rows, { ...archiveRow(6), timestamp: 1e17 }]);
+    const { status, body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 6 * HOUR));
+    expect(status).toBe(200);
+    expect(body.summary).toMatchObject(plainSummary(rows));
+    expect(body.coverage.unparsableRows).toBe(1);
+  });
+
+  test("harness and clientAddress filters normalize like the live filters, and the answer names its attribution", async () => {
+    const rows = archiveRows(30);
+    await builtSegment("513", rows);
+    const all = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 12 * HOUR);
+    const { body } = await archiveGet(`${all}&clientAddress=${encodeURIComponent("::ffff:192.0.2.10")}&harness=${encodeURIComponent(" claude_code ")}`);
+    expect(body.summary.requests).toBe(rows.filter(row => row.clientAddress === "192.0.2.10" && row.client === "claude_code").length);
+    expect(body.summary.requests).toBeGreaterThan(0);
+    expect(body.attribution).toBe("final-attempt");
   });
 });

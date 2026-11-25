@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { closeRequestHistoryIndex } from "../../src/routing/history/indexer";
 import { handleManagementAPI } from "../../src/server/management-api";
-import { readArchiveListing } from "../../src/usage/archive-query";
-import { readArchivedRows } from "../../src/usage/archive-rows";
+import { loadWindowSegments, readArchiveListing } from "../../src/usage/archive-query";
+import { inArchiveRowsReadQueue, readArchivedRows } from "../../src/usage/archive-rows";
 import { readArchiveTotals, scheduleArchiveTotalsBuild } from "../../src/usage/archive-totals";
 import { resetUsageReadCacheForTests, usageLogPath } from "../../src/usage/log";
 import type { OcxConfig } from "../../src/types";
@@ -109,7 +109,7 @@ describe("GET /api/usage/archive/rows", () => {
     expect(body).toMatchObject({ entries: [], coverage: { segments: [], pending: true, pendingSegments: [path.split("/").at(-1)] } });
     // The request queued the build itself; nothing here starts one.
     const deadline = Date.now() + 5_000;
-    while (!readArchiveTotals(path, statSync(path).size) && Date.now() < deadline) await Bun.sleep(20);
+    while (!(await readArchiveTotals(path, statSync(path).size)) && Date.now() < deadline) await Bun.sleep(20);
     expect((await rowsGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR))).body.entries).toHaveLength(9);
   });
 
@@ -131,19 +131,36 @@ describe("GET /api/usage/archive/rows", () => {
     expect(body).toMatchObject({ endedBy: "limit", truncated: true });
   });
 
-  test("a read past its deadline returns what it has and says it stopped", async () => {
-    await builtSegment("605", archiveRows(30, 60_000));
-    const result = await readArchivedRows(readArchiveListing(), {
-      since: ARCHIVE_FIRST_ROW_AT, until: ARCHIVE_FIRST_ROW_AT + HOUR, filter: {}, limit: 100,
-    }, AbortSignal.abort());
-    expect(result).toMatchObject({ rows: [], endedBy: "deadline" });
+  test("a deadline that passes in the middle of a scan returns the rows read so far and says it stopped", async () => {
+    // 3,000 rows a second apart; the scanner yields after its first thousand, when the deadline fires.
+    await builtSegment("605", archiveRows(3_000, 1_000));
+    const since = ARCHIVE_FIRST_ROW_AT;
+    const until = ARCHIVE_FIRST_ROW_AT + HOUR;
+    const states = await loadWindowSegments(await readArchiveListing(), since, until);
+    const deadline = new AbortController();
+    setTimeout(() => deadline.abort(), 0);
+    const result = await readArchivedRows(states, { since, until, filter: {}, limit: 5_000 }, deadline.signal, { chunkBytes: 4096 });
+    expect(result.endedBy).toBe("deadline");
+    expect(result.segments).toEqual([expect.objectContaining({ endedBy: "deadline" })]);
+    expect(result.rows.length).toBeGreaterThan(0);
+    expect(result.rows.length).toBeLessThan(3_000);
+  });
+
+  test("row reads run one at a time, and a caller that waits past its deadline is told the reader is busy", async () => {
+    let finishFirst!: () => void;
+    const first = inArchiveRowsReadQueue(1_000, () => new Promise<string>(resolve => { finishFirst = () => resolve("first"); }));
+    const second = await inArchiveRowsReadQueue(20, async () => "second");
+    expect(second).toEqual({ kind: "busy" });
+    finishFirst();
+    expect(await first).toEqual({ kind: "read", value: "first" });
+    expect(await inArchiveRowsReadQueue(20, async () => "third")).toEqual({ kind: "read", value: "third" });
   });
 
   test.each([
     ["since=2026-11-01T00:00:00Z&until=2026-11-01T06:00:01Z", "invalid_window"],
     ["since=2026-11-01T00:00:00Z", "invalid_window"],
     ["since=2026-11-01T00:00:00Z&until=2026-11-01T01:00:00Z&limit=0", "invalid_limit"],
-    ["since=2026-11-01T00:00:00Z&until=2026-11-01T01:00:00Z&limit=501", "invalid_limit"],
+    ["since=2026-11-01T00:00:00Z&until=2026-11-01T01:00:00Z&limit=101", "invalid_limit"],
     ["since=2026-11-01T00:00:00Z&until=2026-11-01T01:00:00Z&limit=ten", "invalid_limit"],
     ["since=2026-11-01T00:00:00Z&until=2026-11-01T01:00:00Z&prompt=x", "invalid_parameter"],
   ])("%s answers 400 %s", async (query, code) => {
