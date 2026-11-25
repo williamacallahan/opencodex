@@ -28,6 +28,16 @@ describe("agy session identities", () => {
     expect(agyMonitoringStateForTests().counts).toEqual({ matched_trajectory: 2, matched_cascade: 1, matched_root_cascade: 1, unmatched: 2, no_request_id_uuid: 0 });
   });
 
+  test("a subagent naming the same root does not take the root agent's id over", () => {
+    const sub = "5b1d9e3f-2a4c-4d6e-8f01-7a3b5c9d1e2f";
+    const otherTrajectory = "0d2f4a6c-8e1b-4c3d-9a5f-1b7e3d9c5a20";
+    rememberAgySession("a", { trajectory, cascade: root, root });
+    rememberAgySession("a", { trajectory: otherTrajectory, cascade: sub, root });
+    expect(resolveMonitoringSession("a", asked(root))).toBe(trajectory);
+    expect(resolveMonitoringSession("a", asked(sub))).toBe(otherTrajectory);
+    expect(resolveMonitoringSession("a", asked(otherTrajectory))).toBe(otherTrajectory);
+  });
+
   test("only a request id of the monitoring shape is looked up", () => {
     rememberAgySession("a", { trajectory });
     for (const bad of [undefined, trajectory, `a-b/${trajectory}`, `mode/${trajectory}x`, `${"m".repeat(33)}/${trajectory}`, `mode/${trajectory}/more`]) {

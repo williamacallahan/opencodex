@@ -130,7 +130,7 @@ agy's `agent_monitoring` generate calls carry no labels and no `sessionId`; thei
 `<mode>/<UUID>`. `src/server/agy-monitoring-session.ts` keeps, per caller key (the one-way hash the account
 chooser uses), the canonical `trajectory_id`, `cascade_id` and `root_cascade_id` UUIDs of each request the scan
 labelled, each mapped to that trajectory (4,096 entries, least recently used, six hours after last use,
-compared lowercase). An unlabelled generate call whose `requestId` matches `^[A-Za-z_]{1,32}/<UUID>$` and whose
+compared lowercase; a trajectory id outranks a cascade id, which outranks a root id, so a subagent naming the same root never takes it from the root agent; ids are remembered only once the account choice succeeded). An unlabelled generate call whose `requestId` matches `^[A-Za-z_]{1,32}/<UUID>$` and whose
 UUID is in the caller's map takes that trajectory as its session through `withBodyHarnessSession`; another
 caller never matches. The `requestId` is read by the same single walk (`scanAgyBody` wants the key only for a
 generate call, and its early stop waits for it only while no session is found, so a labelled call stops where it

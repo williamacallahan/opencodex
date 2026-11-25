@@ -435,17 +435,15 @@ export async function decodeBoundedPayload(bytes: Uint8Array, contentEncoding: s
  * Read-only view of the body, decoded once and walked once (`scanAgyBody`). The forwarded bytes stay the
  * originals; null for a content coding this lane does not read.
  */
-async function agyBodyView(bytes: Uint8Array, contentEncoding: string | null, method: string, caller: string): Promise<{ project?: string; session?: string; agent?: string } | null> {
+async function agyBodyView(bytes: Uint8Array, contentEncoding: string | null, method: string, caller: string): Promise<{ project?: string; session?: string; agent?: string; remember?: AgyScanIds } | null> {
   const plain = await decodeBoundedPayload(bytes, contentEncoding);
   if (plain === null) return null;
   if (plain.byteLength === 0) return {};
   const ids: AgyScanIds = {};
   const scanned = scanAgyBody(plain, method, ids);
   if (!GENERATE_METHOD.test(method)) return scanned;
-  if (scanned.session !== undefined) {
-    rememberAgySession(caller, ids);
-    return scanned;
-  }
+  // The ids are remembered by the caller once the request is admitted, so a refused request evicts nothing.
+  if (scanned.session !== undefined) return ids.trajectory === undefined ? scanned : { ...scanned, remember: ids };
   const session = resolveMonitoringSession(caller, ids.requestId);
   if (session !== undefined) return { ...scanned, session };
   // The shape diagnostic walks the body again, so it runs only for a call that stayed unlabelled.
@@ -585,6 +583,7 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
     project, callerKey: caller, mayRotate: parts.method === "/v1internal:loadCodeAssist",
   });
   if (choice.kind !== "account") return choiceRefusal(choice);
+  if (body.remember) rememberAgySession(caller, body.remember);
   // Captured with the account choice: a roster change or another sign-in in the slot fences the quota write.
   const quotaWriterGeneration = captureConfigGeneration();
   const quotaLogin = agyLogin(choice.accountId);

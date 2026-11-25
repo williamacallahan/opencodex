@@ -34,9 +34,19 @@ let lastLoggedKey = "";
 
 const keyFor = (caller: string, uuid: string): string => `${caller}\0${uuid.toLowerCase()}`;
 
+const STRENGTH: Record<MatchKind, number> = { root: 0, cascade: 1, trajectory: 2 };
+
 function put(caller: string, uuid: string | undefined, trajectory: string, kind: MatchKind, now: number): void {
   if (uuid === undefined) return;
   const key = keyFor(caller, uuid);
+  const existing = identities.get(key);
+  // A root agent's id stays with the root agent; a later subagent naming the same root must not take it over.
+  if (existing && STRENGTH[existing.kind] > STRENGTH[kind] && now - existing.lastUsed <= SESSION_IDENTITY_TTL_MS) {
+    existing.lastUsed = now;
+    identities.delete(key);
+    identities.set(key, existing);
+    return;
+  }
   identities.delete(key);
   identities.set(key, { trajectory, kind, lastUsed: now });
   while (identities.size > MAX_SESSION_IDENTITIES) identities.delete(identities.keys().next().value!);
@@ -45,9 +55,13 @@ function put(caller: string, uuid: string | undefined, trajectory: string, kind:
 /** Remember the ids of a request that was labelled with a trajectory. */
 export function rememberAgySession(caller: string, ids: AgyScanIds, now = Date.now()): void {
   if (ids.trajectory === undefined) return;
-  put(caller, ids.root, ids.trajectory, "root", now);
-  put(caller, ids.cascade, ids.trajectory, "cascade", now);
-  put(caller, ids.trajectory, ids.trajectory, "trajectory", now);
+  try {
+    put(caller, ids.root, ids.trajectory, "root", now);
+    put(caller, ids.cascade, ids.trajectory, "cascade", now);
+    put(caller, ids.trajectory, ids.trajectory, "trajectory", now);
+  } catch {
+    // A diagnostic map never fails a request.
+  }
 }
 
 function logCounts(now: number): void {

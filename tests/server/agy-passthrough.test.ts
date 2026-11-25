@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resetAgyMonitoringStateForTests } from "../../src/server/agy-monitoring-session";
+import { agyMonitoringStateForTests, resetAgyMonitoringStateForTests } from "../../src/server/agy-monitoring-session";
 import { resetUnlabelledShapeLogForTests } from "../../src/server/agy-unlabelled-shape";
 import { gzipSync } from "node:zlib";
 import { saveConfig } from "../../src/config";
@@ -264,6 +264,17 @@ describe("agy pass-through public HTTP lane", () => {
           expect(other).not.toHaveProperty("harnessSessionId");
         });
       }
+
+      test("a labelled call refused for a missing project remembers nothing", async () => {
+        await launch();
+        resetAgyMonitoringStateForTests();
+        const refused = await post("streamGenerateContent?alt=sse", JSON.stringify({
+          request: { labels: { trajectory_id: trajectory, cascade_id: cascade, root_cascade_id: root } } }), { authorization: "Bearer caller-a" });
+        expect(refused.status).toBe(400);
+        expect(agyMonitoringStateForTests().size).toBe(0);
+        await labelled("caller-a");
+        expect(agyMonitoringStateForTests().size).toBe(3);
+      });
 
       test("an unknown id is not labelled, and no log line carries the request id, the caller or a prompt", async () => {
         await launch();
