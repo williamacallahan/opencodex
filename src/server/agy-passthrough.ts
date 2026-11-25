@@ -66,7 +66,14 @@ const PROJECT_REQUIRED = /^\/v1internal:(?:streamGenerateContent|generateContent
 const GENERATE_METHOD = /^\/v1internal:(?:streamGenerateContent|generateContent)$/;
 /** agy's mode for a monitoring generate call, which carries no session (agy sets none on it). */
 const MONITORING_REQUEST_TYPE = "agent_monitoring";
-const MAX_REQUEST_TYPE_BYTES = 32;
+/** A `requestType` string token longer than this is not a mode: 32 characters, each possibly spelled `\uXXXX`. */
+const MAX_REQUEST_TYPE_TOKEN_BYTES = 32 * 6;
+/**
+ * How far past the point where project and session are settled the walk looks for `requestType`. agy writes it
+ * after `request` among short scalars (`model`, `userAgent`, `requestId`), so a few hundred bytes reach it; a
+ * `requestType` further out is left unread and the call keeps the hub's own label.
+ */
+export const REQUEST_TYPE_SEARCH_BYTES = 4096;
 /**
  * The workload operation of a background call that names no session, so each class can be filtered on its own:
  * the account and sign-in calls, the quota and model-list reads, and trajectory analytics.
@@ -236,8 +243,18 @@ function wantedIndex(bytes: Uint8Array, keyStart: number, token: { end: number; 
  * position after this object's `}`, or -1 when the object is malformed or `visit` returned -1 to stop early.
  */
 function walkMembers(bytes: Uint8Array, start: number, wanted: WantedKeys, visit: (index: number, valueStart: number) => number): number {
-  if (bytes[start] !== 0x7B) return -1;
-  let pos = start + 1;
+  return bytes[start] === 0x7B ? membersFrom(bytes, start + 1, wanted, visit) : -1;
+}
+
+/** `walkMembers` resumed just after a member value at `pos`: the remaining members of that object, then its end. */
+function continueMembers(bytes: Uint8Array, pos: number, wanted: WantedKeys, visit: (index: number, valueStart: number) => number): number {
+  const next = skipWs(bytes, pos);
+  if (bytes[next] === 0x2C) return membersFrom(bytes, next + 1, wanted, visit);
+  return bytes[next] === 0x7D ? next + 1 : -1;
+}
+
+function membersFrom(bytes: Uint8Array, start: number, wanted: WantedKeys, visit: (index: number, valueStart: number) => number): number {
+  let pos = start;
   while (pos < bytes.length) {
     pos = skipWs(bytes, pos);
     if (bytes[pos] === 0x7D) return pos + 1;
@@ -266,13 +283,18 @@ function captureString(bytes: Uint8Array, start: number): { value?: string; end:
   if (bytes[start] !== 0x22) return { end: skipVal(bytes, start) };
   const token = scanStr(bytes, start);
   if (!token) return { end: -1 };
-  const end = token.end + 1;
-  if (!token.escaped) return token.end === start + 1 ? { end } : { value: utf8Decoder.decode(bytes.subarray(start + 1, token.end)), end };
+  const value = decodeStringToken(bytes, start, token);
+  return value ? { value, end: token.end + 1 } : { end: token.end + 1 };
+}
+
+/** The text of the string token whose opening quote is at `start`, JSON escapes decoded; undefined for a bad escape. */
+function decodeStringToken(bytes: Uint8Array, start: number, token: { end: number; escaped: boolean }): string | undefined {
+  if (!token.escaped) return utf8Decoder.decode(bytes.subarray(start + 1, token.end));
   try {
-    const value: unknown = JSON.parse(utf8Decoder.decode(bytes.subarray(start, end)));
-    return typeof value === "string" && value.length > 0 ? { value, end } : { end };
+    const value: unknown = JSON.parse(utf8Decoder.decode(bytes.subarray(start, token.end + 1)));
+    return typeof value === "string" ? value : undefined;
   } catch {
-    return { end };
+    return undefined;
   }
 }
 
@@ -299,6 +321,8 @@ const TOP_KEYS = wantKeys("project", "request", "requestType");
 const TOP_ACL_KEYS = wantKeys("project", "request", "requestType", "trajectoryId");
 const REQUEST_KEYS = wantKeys("labels", "sessionId");
 const LABEL_KEYS = wantKeys("trajectory_id", "cascade_id", "root_cascade_id");
+const NO_KEYS = wantKeys();
+const REQUEST_TYPE_KEY = wantKeys("requestType");
 
 /**
  * One walk over the decoded body, which stops once everything this call needs is found: the `project` it names
@@ -307,8 +331,9 @@ const LABEL_KEYS = wantKeys("trajectory_id", "cascade_id", "root_cascade_id");
  * the decimal id is used only when no trajectory id is present), else a `writeTrajectoryAcls`
  * call's top-level `trajectoryId`; the cascade id is the agent only when the root cascade is another UUID.
  * The first occurrence of each key wins. For a generate call with no session the same walk reads the top-level
- * `requestType`, and `monitoring` says it is agy's `agent_monitoring` mode; the walk stops early only once that
- * call is labelled or has seen `requestType`. Nothing else is copied out of the body.
+ * `requestType`, and `monitoring` says it is agy's `agent_monitoring` mode. Once project and session are settled
+ * the walk reads at most `REQUEST_TYPE_SEARCH_BYTES` further for `requestType`, so a large `contents` after the
+ * session fields is never walked for it. Nothing else is copied out of the body.
  */
 export function scanAgyBody(plain: Uint8Array, method: string): { project?: string; session?: string; agent?: string; monitoring?: true } {
   const acl = method === "/v1internal:writeTrajectoryAcls";
@@ -329,7 +354,25 @@ export function scanAgyBody(plain: Uint8Array, method: string): { project?: stri
   let requestType: string | undefined;
   const sessionResolved = () => (labelsRead && matching(CANONICAL_UUID, labelValues[0]) !== undefined)
     || (sessionId !== undefined && DECIMAL_SESSION.test(sessionId));
-  const satisfied = () => projectSeen && requestDone && (!acl || aclSeen) && (!wantRequestType || requestTypeSeen || sessionResolved());
+  const settled = () => projectSeen && requestDone && (!acl || aclSeen);
+  const satisfied = () => settled() && (!wantRequestType || requestTypeSeen || sessionResolved());
+  // Where the walk stopped with only `requestType` left to find, and whether that point is inside `request`.
+  let resumeAt = -1;
+  let resumeInRequest = false;
+  const pauseForRequestType = (end: number, inRequest: boolean): boolean => {
+    if (!settled() || !wantRequestType || requestTypeSeen || sessionResolved()) return false;
+    resumeAt = end;
+    resumeInRequest = inRequest;
+    return true;
+  };
+  const readRequestType = (bytes: Uint8Array, valueStart: number): number => {
+    requestTypeSeen = true;
+    if (!wantRequestType || bytes[valueStart] !== 0x22) return skipVal(bytes, valueStart);
+    const token = scanStr(bytes, valueStart);
+    if (!token) return -1;
+    if (token.end - valueStart <= MAX_REQUEST_TYPE_TOKEN_BYTES) requestType = decodeStringToken(bytes, valueStart, token);
+    return token.end + 1;
+  };
 
   const visitLabel = (index: number, valueStart: number): number => {
     const captured = captureString(plain, valueStart);
@@ -361,7 +404,7 @@ export function scanAgyBody(plain: Uint8Array, method: string): { project?: stri
     if (end < 0) return -1;
     if (labelsSeen && (sessionIdSeen || matching(CANONICAL_UUID, labelValues[0]))) {
       requestDone = true;
-      if (satisfied()) {
+      if (satisfied() || pauseForRequestType(end, true)) {
         halted = true;
         return -1;
       }
@@ -395,10 +438,7 @@ export function scanAgyBody(plain: Uint8Array, method: string): { project?: stri
         requestDone = true;
       }
     } else if (index === 2 && !requestTypeSeen) {
-      requestTypeSeen = true;
-      const token = wantRequestType && plain[valueStart] === 0x22 ? scanStr(plain, valueStart) : null;
-      if (token && !token.escaped && token.end - valueStart <= MAX_REQUEST_TYPE_BYTES) requestType = utf8Decoder.decode(plain.subarray(valueStart + 1, token.end));
-      end = skipVal(plain, valueStart);
+      end = readRequestType(plain, valueStart);
     } else if (index === 3 && !aclSeen) {
       aclSeen = true;
       const captured = captureString(plain, valueStart);
@@ -407,9 +447,18 @@ export function scanAgyBody(plain: Uint8Array, method: string): { project?: stri
     } else {
       end = skipVal(plain, valueStart);
     }
-    return end < 0 || satisfied() ? -1 : end;
+    return end < 0 || satisfied() || pauseForRequestType(end, false) ? -1 : end;
   };
   walkMembers(plain, skipWs(plain, 0), acl ? TOP_ACL_KEYS : TOP_KEYS, visitTop);
+  if (resumeAt >= 0) {
+    // The rest of the body is read only through this bounded view, which ends the search for `requestType`.
+    const bounded = plain.subarray(0, Math.min(plain.length, resumeAt + REQUEST_TYPE_SEARCH_BYTES));
+    const top = resumeInRequest ? continueMembers(bounded, resumeAt, NO_KEYS, () => -1) : resumeAt;
+    if (top >= 0) continueMembers(bounded, top, REQUEST_TYPE_KEY, (_, valueStart) => {
+      readRequestType(bounded, valueStart);
+      return -1;
+    });
+  }
 
   const trajectory = labelsRead ? matching(CANONICAL_UUID, labelValues[0]) : undefined;
   const decimal = sessionId !== undefined ? DECIMAL_SESSION.exec(sessionId)?.[1] : undefined;

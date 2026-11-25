@@ -129,7 +129,10 @@ untouched. `tests/server/agy-unlabelled-shape.test.ts` covers it.
 agy 1.5.16 sends its `agent_monitoring` generate calls with no labels and no `sessionId`, and builds their
 top-level `requestId` as `<mode>/<random UUID>`, which names no session either, so the hub cannot attribute
 them to one; only agy can. The same single walk (`scanAgyBody`) reads the top-level `requestType` of a generate
-call that names no session, and `agent_monitoring` marks it a monitoring call. A monitoring call that does carry
+call that names no session, and `agent_monitoring` marks it a monitoring call, however its JSON string is
+escaped. agy writes `requestType` after `request` among short scalars, so once the project and the session
+fields are settled the walk reads at most `REQUEST_TYPE_SEARCH_BYTES` (4096) further for it; a large `contents`
+after the session fields is never walked, and a `requestType` beyond that keeps the hub's own label. A monitoring call that does carry
 `request.labels.trajectory_id` is attributed through the labelled path above like any other generate call.
 
 Every call that names no session keeps the hub-sourced workload, with a fixed operation in place of

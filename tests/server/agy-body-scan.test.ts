@@ -3,7 +3,7 @@
  * Fixture ids are made up for these cases.
  */
 import { describe, expect, test } from "bun:test";
-import { scanAgyBody } from "../../src/server/agy-passthrough";
+import { REQUEST_TYPE_SEARCH_BYTES, scanAgyBody } from "../../src/server/agy-passthrough";
 
 const enc = (text: string) => new TextEncoder().encode(text);
 const generate = "/v1internal:streamGenerateContent";
@@ -321,7 +321,7 @@ describe("routing project never differs from the reference", () => {
       try { JSON.parse(body); } catch { malformed += 1; wellFormed = false; }
       const bytes = enc(body);
       let scanned: ReturnType<typeof scanAgyBody>;
-      try { scanned = scanAgyBody(bytes, i % 2 ? acl : generate, {}); } catch (error) { throw new Error(`threw on ${JSON.stringify(body)}: ${String(error)}`); }
+      try { scanned = scanAgyBody(bytes, i % 2 ? acl : generate); } catch (error) { throw new Error(`threw on ${JSON.stringify(body)}: ${String(error)}`); }
       const want = referenceProject(bytes, "project");
       if (wellFormed && want !== undefined) {
         wellFormedWithProject += 1;
@@ -361,5 +361,37 @@ describe("session edge shapes", () => {
   test("a number with an exponent and a pretty-printed body", () => {
     expect(scan('{"request":{"n":1.5e-10,"sessionId":"5"}}').session).toBe("5");
     expect(scan('{\n  "request": {\n    "labels": {\n      "trajectory_id": "' + trajectory + '"\n    }\n  }\n}').session).toBe(trajectory);
+  });
+});
+
+describe("monitoring requestType", () => {
+  const scan = (text: string, method = generate) => scanAgyBody(enc(text), method);
+
+  test("reads escaped spellings of agent_monitoring, only on a generate call", () => {
+    for (const spelled of ["agent_monitoring", "agent\\u005fmonitoring", "\\u0061gent_monitoring"]) {
+      expect(scan(`{"project":"p","request":{},"requestType":"${spelled}"}`)).toEqual({ project: "p", monitoring: true });
+    }
+    expect(scan('{"project":"p","request":{},"requestType":"agent_monitoring"}', acl).monitoring).toBeUndefined();
+    expect(scan('{"project":"p","request":{},"requestType":"agent_monitoringX"}').monitoring).toBeUndefined();
+    expect(scan('{"project":"p","request":{},"requestType":"agent\\x"}').monitoring).toBeUndefined();
+  });
+
+  test("a large contents before the settle point still finds agy's requestType after request", () => {
+    const body = `{"project":"p","requestId":"agent_monitoring/${trajectory}","request":{"contents":[{"parts":[{"text":"${"x".repeat(8 << 20)}"}]}]},`
+      + '"model":"gemini-3.8-flash-low","userAgent":"antigravity","requestType":"agent_monitoring"}';
+    expect(scan(body)).toEqual({ project: "p", monitoring: true });
+  });
+
+  test("after project and session settle, requestType is read only within the search budget", () => {
+    const head = '{"project":"p","request":{"labels":{"trajectory_id":"not-a-uuid"},"sessionId":"s"';
+    const settledAt = enc(head).length;
+    const body = (padding: number) => `${head},"contents":[{"parts":[{"text":"${"x".repeat(padding)}"}]}]},"requestType":"agent_monitoring"}`;
+    // The closing quote of the requestType value is the last byte the scan must read to accept it.
+    const closingQuote = (padding: number) => body(padding).lastIndexOf('"');
+    const inside = REQUEST_TYPE_SEARCH_BYTES - 1 - closingQuote(0) + settledAt;
+    expect(closingQuote(inside)).toBe(settledAt + REQUEST_TYPE_SEARCH_BYTES - 1);
+    expect(scan(body(inside))).toEqual({ project: "p", monitoring: true });
+    expect(scan(body(inside + 1))).toEqual({ project: "p" });
+    expect(scan(body(32 << 20))).toEqual({ project: "p" });
   });
 });
