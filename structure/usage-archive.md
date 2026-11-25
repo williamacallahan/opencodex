@@ -191,7 +191,7 @@ inside the segment. A file with no counted rows has no extrema, buckets, overlap
 other combination is no file a build wrote, and its span cannot say which windows its rows reach.
 The same holds for a version-5 file's excluded rows (`isUncounted`, `unparsableReconciles`). Their
 counts must be whole numbers, with no more untimed rows than rows. Their times must be present and in
-order exactly when a timed row was excluded. `unparsableRows` must equal the excluded, oversized and
+order exactly when a timed row was excluded, and equal when only one was. `unparsableRows` must equal the excluded, oversized and
 malformed rows plus at most one torn final row. Otherwise `uncountedCoverage` could call a file
 `exact` that is not. In every such case the file is unusable: a counted segment's answer is
 incomplete, and a totals file left without

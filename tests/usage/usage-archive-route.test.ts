@@ -587,6 +587,9 @@ describe("GET /api/usage/archive", () => {
           ...totals, uncounted: { rows: 0, untimedRows: 0, firstAt: later, lastAt: later },
         })],
         ["counts unparsable rows that no exclusion explains", totals => ({ ...totals, unparsableRows: 3 })],
+        ["records one timed excluded row at two different times", totals => ({
+          ...totals, unparsableRows: 1, uncounted: { rows: 1, untimedRows: 0, firstAt: later - 3 * HOUR, lastAt: later - 2 * HOUR },
+        })],
         ["counts a fractional excluded row", totals => ({
           ...totals, unparsableRows: 0.5, uncounted: { rows: 0.5, untimedRows: 0, firstAt: later - 2 * HOUR, lastAt: later - 2 * HOUR },
         })],
@@ -606,6 +609,22 @@ describe("GET /api/usage/archive", () => {
     expect(body.coverage.missingSegments).toEqual([basename(path)]);
     const rowsRead = await rowsGet(window(later, later + HOUR));
     expect(rowsRead.body).toMatchObject({ incomplete: true, coverage: { missingSegments: [basename(path)] } });
+  });
+
+  test("a totals file left without its segment whose one excluded row lies outside the window still rules that window out", async () => {
+    const path = await builtSegment("535", archiveRows(3));
+    const totalsPath = archiveTotalsPath(path);
+    const later = ARCHIVE_FIRST_ROW_AT + 5 * 24 * HOUR;
+    const totals = JSON.parse(readFileSync(totalsPath, "utf8")) as Record<string, unknown>;
+    writeFileSync(totalsPath, JSON.stringify({
+      ...totals, unparsableRows: 1, uncounted: { rows: 1, untimedRows: 0, firstAt: later - 2 * HOUR, lastAt: later - 2 * HOUR },
+    }));
+    rmSync(path);
+    noteArchiveChanged();
+    expect((await archiveGet(window(later, later + HOUR))).body.coverage.missingSegments).toEqual([]);
+    expect((await rowsGet(window(later, later + HOUR))).body.coverage.missingSegments).toEqual([]);
+    // The window holding that row is the one it cannot rule out.
+    expect((await archiveGet(window(later - 2 * HOUR, later - HOUR))).body.coverage.missingSegments).toEqual([basename(path)]);
   });
 
   test("a counted segment whose totals place its span outside its bucket hours is not answered from them", async () => {

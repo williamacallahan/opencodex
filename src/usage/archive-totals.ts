@@ -318,16 +318,19 @@ const isRowCount = (value: unknown): value is number => isCount(value) && Number
 
 /**
  * The excluded rows as a build records them: whole counts, no more untimed rows than rows, and times
- * exactly when a timed row was excluded, in order. Any other record cannot say where they lie.
+ * exactly when a timed row was excluded: equal for one, in order for more. Any other record cannot say
+ * where they lie.
  */
 function isUncounted(value: unknown): value is ArchiveUncountedRows {
   if (typeof value !== "object" || value === null) return false;
   const uncounted = value as Record<string, unknown>;
   if (!isRowCount(uncounted.rows) || !isRowCount(uncounted.untimedRows) || uncounted.untimedRows > uncounted.rows) return false;
   const { firstAt, lastAt } = uncounted;
-  if (uncounted.rows === uncounted.untimedRows) return firstAt === null && lastAt === null;
-  return typeof firstAt === "number" && Number.isFinite(firstAt) && typeof lastAt === "number" && Number.isFinite(lastAt)
-    && firstAt <= lastAt;
+  const timed = uncounted.rows - uncounted.untimedRows;
+  if (timed === 0) return firstAt === null && lastAt === null;
+  if (typeof firstAt !== "number" || !Number.isFinite(firstAt) || typeof lastAt !== "number" || !Number.isFinite(lastAt)) return false;
+  // One timed row has one time; two or more span an ordered range.
+  return timed === 1 ? firstAt === lastAt : firstAt <= lastAt;
 }
 
 /**
