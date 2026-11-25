@@ -16,6 +16,7 @@ import { resetUsageRevisionObservationsForTests } from "../../src/usage/revision
 import type { OcxConfig } from "../../src/types";
 import { ManagementRequest } from "../helpers/management-auth";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { helperPath } from "../helpers/repo-root";
 import {
   ARCHIVE_FIRST_ROW_AT, archiveRow, archiveRows, bruteForce, jsonl, writeArchiveTotals, writeSegment, type ArchiveFixtureRow,
 } from "../helpers/usage-archive-rows";
@@ -596,6 +597,76 @@ describe("GET /api/usage/archive", () => {
     expect(body.coverage.liveLedgerSince).toBe(iso(b[1]!.timestamp));
     expect(body).toMatchObject({ complete: false, summary: null, coverage: { ambiguousSegments: [basename(segmentB)] } });
   }, 30_000);
+
+  test.each([
+    ["candidate", "after a successful read"], ["candidate", "as its first read"],
+    ["minimum", "after a successful read"], ["minimum", "as its first read"],
+  ] as const)("another process's passive %s read of a truncation under the index lock, %s, still makes it rebuild after the ledger regrows", async (reader, variant) => {
+    const day = Date.UTC(2026, 10, 13);
+    const at = (hour: number, minute: number) => day + hour * HOUR + minute * 60_000;
+    const b = archiveRows(3, 60_000).map((row, index) => ({ ...row, requestId: `b-${index}`, timestamp: at(1, index) }));
+    const segmentB = await builtSegment("539", b, iso(b[0]!.timestamp).replaceAll(":", "-"));
+    const line = (row: object, length: number): string => {
+      const bare = JSON.stringify({ ...row, padding: "" });
+      return `${JSON.stringify({ ...row, padding: "x".repeat(length - bare.length) })}\n`;
+    };
+    const headA = line({ ...archiveRow(0), requestId: "a-0", timestamp: at(8, 0) }, 800);
+    const headB = line(b[1]!, 800);
+    const tail = archiveRows(400, 60_000, 50).map((row, index) => line({ ...row, timestamp: at(12, 0) + index * 1_000 }, 700)).join("");
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), headA + tail);
+    const query = window(at(1, 0), at(2, 0));
+    expect((await untilLiveLedgerSince(query, iso(at(8, 0)))).coverage.liveLedgerSince).toBe(iso(at(8, 0)));
+
+    // A fresh process, sharing nothing with this one but the files.
+    const worker = Bun.spawn([process.execPath, helperPath("usage-index-reader-worker.ts")], {
+      env: { ...process.env, OPENCODEX_HOME: home }, stdin: "pipe", stdout: "pipe", stderr: "inherit",
+    });
+    const lines = worker.stdout.pipeThrough(new TextDecoderStream()).getReader();
+    let buffered = "";
+    const ask = async <T>(command: string): Promise<T> => {
+      worker.stdin.write(`${command}\n`);
+      await worker.stdin.flush();
+      for (;;) {
+        const newline = buffered.indexOf("\n");
+        if (newline >= 0) {
+          const next = buffered.slice(0, newline);
+          buffered = buffered.slice(newline + 1);
+          if (next.startsWith("@@")) return JSON.parse(next.slice(2)) as T;
+          continue;
+        }
+        const chunk = await lines.read();
+        if (chunk.done) throw new Error(`the worker exited before answering ${command}`);
+        buffered += chunk.value;
+      }
+    };
+    const passive = reader === "candidate" ? "passive-candidate" : `passive-minimum ${query}`;
+    try {
+      if (variant === "after a successful read") {
+        expect(await ask<Record<string, unknown>>(passive)).toEqual(reader === "candidate" ? { read: true } : { liveLedgerSince: iso(at(8, 0)) });
+      }
+      truncateSync(usageLogPath(), 421);
+      const holder = new Database(usageFilterIndexPath(home));
+      holder.exec("PRAGMA locking_mode = EXCLUSIVE");
+      holder.exec("BEGIN EXCLUSIVE");
+      holder.exec("CREATE TABLE IF NOT EXISTS lock_probe (held INTEGER)");
+      holder.exec("COMMIT");
+      try {
+        expect(await ask<Record<string, unknown>>(passive)).toEqual(reader === "candidate" ? { read: false } : { liveLedgerSince: null });
+      } finally {
+        holder.close();
+      }
+      writeFileSync(usageLogPath(), headB + tail + line({ ...archiveRow(0), requestId: "appended", timestamp: at(13, 0) }, 700));
+      expect(await ask<{ candidates: number }>(`count ${at(1, 0)} ${at(2, 0)}`)).toEqual({ candidates: 1 });
+      const body = await ask<TotalsBody>(`archive-until ${query} ${iso(b[1]!.timestamp)}`);
+      expect(body.coverage.liveLedgerSince).toBe(iso(b[1]!.timestamp));
+      expect(body).toMatchObject({ complete: false, summary: null, coverage: { ambiguousSegments: [basename(segmentB)] } });
+    } finally {
+      worker.stdin.write("exit\n");
+      await worker.stdin.end();
+      await worker.exited;
+    }
+  }, 60_000);
 
   test("passive reads of a stable truncated ledger do not keep its rebuild from publishing, and a second truncation during it still does", async () => {
     const rows = archiveRows(40, 60_000).map(row => ({ ...row, timestamp: row.timestamp + 10 * 24 * HOUR }));

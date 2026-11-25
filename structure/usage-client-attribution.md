@@ -94,17 +94,22 @@ published generation's `min_timestamp` meta, accepted only when `generationValid
 recorded ledger revision is exactly the current one; reading it writes nothing. Both it and the
 passive candidate read decline a generation whose ledger is the same file but shorter than before,
 or as long but different. They mark the generation in memory only, with one ticket per change, and
-the next writer-owned refresh records the mark and rebuilds. Each read observes twice. Before any
-SQLite access (`observeLiveRevision`), it compares the live file with what this process already
-observed, so a change survives an index another connection holds locked. After reading the metadata
-(`observeAgainstIndex`), it compares with the persisted source revision, which seeds a process that
-observed no earlier length, and binds an already-ticketed change to that generation without a second
-ticket. `declinedRevisions` keeps the last live revision observed since the change, also after the
-writer records the ticket. The published generation keeps describing the longer file until the
-rebuild publishes, so a fresh ticket from every read meanwhile would fail that rebuild's publication
-fence each time. Growth of the same file therefore advances the observation and issues nothing. A
-shrink below it, or a same-length rewrite, is a new change: it gets a new ticket and retires any
-staging in progress. A regrowth that restores the last 64 KiB before the indexed
+the next writer-owned refresh records the mark and rebuilds. Every read keeps a live observation per
+index path (`liveObservations`), whether or not it issued a ticket. Before any SQLite access
+(`observeLiveRevision`), the first sight of the file sets a baseline, same-file growth advances it,
+and a shrink below it, or a same-length rewrite, issues a ticket at once. A truncation a process
+sees while another connection holds the index locked is therefore kept, even in a process whose
+earlier reads only saw the full file. A sample that no metadata has been compared with stays
+unresolved, and a later, larger EOF never erases it. After a successful metadata read
+(`observeAgainstIndex`, also in `refreshOnce` before it chooses an append), the unresolved sample and
+the live revision are compared with the persisted source revision. A sample shorter than it
+declines that generation, which covers a process whose first read happened under the lock. A ticket
+issued before the metadata read is bound to that generation without a second ticket, and a declined
+generation issues no more. The published generation keeps describing the longer file until its
+rebuild publishes, so a fresh ticket from every read meanwhile would fail that rebuild's
+publication fence each time. Growth during the rebuild therefore issues nothing, while a genuine
+second shrink issues a new ticket and retires the staging. A regrowth that restores the last 64 KiB
+before the indexed
 boundary would otherwise pass the append's boundary digest and keep the old rows and minimum. An
 archive read never ingests to answer. When the minimum is unverified, an active read that finished
 within its deadline, and withheld an archive segment for that reason, calls

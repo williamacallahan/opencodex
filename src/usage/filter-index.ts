@@ -1077,10 +1077,16 @@ function assertHomeUnchanged(dir: string): void {
  */
 const pendingInvalidations = new Map<string, { ticket: number; home?: string }>();
 /**
- * Per index path, the last live revision a no-write read observed since a destructive change, and the
- * generation it declined (null until a read binds it from the metadata).
+ * What this process last saw of the live ledger for one index path: `observed`, the baseline; the
+ * shortest sample no metadata has been compared with yet; and the generation a ticket declined (null
+ * while a ticket issued before any metadata read is unbound, undefined when none was issued).
  */
-const declinedRevisions = new Map<string, { generation: string | null; observed: UsageLogRevision }>();
+interface LiveObservation {
+  observed: UsageLogRevision;
+  unresolved: UsageLogRevision | null;
+  declined: string | null | undefined;
+}
+const liveObservations = new Map<string, LiveObservation>();
 let invalidationTicket = 0;
 
 function sourceInvalidations(db: Database): number {
@@ -1236,6 +1242,11 @@ async function refreshOnce(
   extendOnly = false,
 ): Promise<UsageFilterIndexSnapshot | null> {
   assertHomeUnchanged(dir);
+  // A sample a read could not compare with the metadata (a locked index) is reconciled before an
+  // append is chosen: an append would keep rows a truncation removed.
+  const observedNow = currentUsageLogRevision();
+  observeLiveRevision(path, observedNow);
+  observeAgainstIndex(path, readMeta(db), observedNow);
   // A change only a passive read marked is recorded here: the high-water mark has already moved on.
   const marked = pendingInvalidations.get(path);
   if (marked?.home !== undefined && !isPassiveRead()) {
@@ -1817,51 +1828,67 @@ export async function readUsageFilterCandidates(
  * (`refreshOnce`) before rebuilding instead of extending. A regrowth that restores the last 64 KiB
  * before the indexed boundary would otherwise pass the append's boundary digest.
  *
- * A read observes twice. Before any SQLite access ({@link observeLiveRevision}) it compares the live
- * file with what this process already knows, so a change survives a locked or unreadable index. After
- * reading the metadata ({@link observeAgainstIndex}) it compares with the source revision the index
- * persisted, which seeds a process that has no earlier observation. `declinedRevisions` keeps the last
- * live revision observed since the change and the generation it declined, also after the writer
- * records the ticket. Growth of the same file advances it and issues nothing, so the rebuild of a
- * captured prefix can publish; only a shrink below it or a same-length rewrite is a new change. A
- * fresh ticket from every read would fail the rebuild's publication fence forever.
+ * Every read keeps a live observation per index path (`liveObservations`), whether or not it issued
+ * a ticket. Before any SQLite access ({@link observeLiveRevision}), the first sight of the file sets a
+ * baseline, same-file growth advances it, and a shrink below it (or a same-length rewrite) issues a
+ * ticket at once, so a lock or an unreadable index cannot make a seen change be forgotten. A sample no
+ * metadata has been compared with stays unresolved, and a later, larger EOF never erases it. After a
+ * metadata read ({@link observeAgainstIndex}, also in `refreshOnce` before it chooses an append), the
+ * unresolved sample and the live revision are compared with the source revision the index persisted:
+ * a sample shorter than it declines that generation, which seeds a process that saw no earlier length.
+ * A ticket issued before the metadata was read is bound to the generation without a second one, and a
+ * declined generation issues no more: the published generation keeps describing the longer file until
+ * its rebuild publishes, so a ticket from every read meanwhile would fail that rebuild's publication
+ * fence forever.
  */
 function issueDeclineTicket(path: string): void {
   pendingInvalidations.set(path, { ticket: ++invalidationTicket, home: getConfigDir() });
 }
 
+const shorterOf = (left: UsageLogRevision | null, right: UsageLogRevision): UsageLogRevision =>
+  left !== null && left.size <= right.size ? left : right;
+
 function observeLiveRevision(path: string, revision: UsageLogRevision | null): void {
   if (!revision) return;
-  const declined = declinedRevisions.get(path);
-  if (declined && usageLogIdentityKey(declined.observed) === usageLogIdentityKey(revision)) {
-    if (revision.size > declined.observed.size) declined.observed = revision;
-    if (usageLogRevisionKey(revision) === usageLogRevisionKey(declined.observed)) return;
-    // Shorter than, or as long as but different from, the last observation: a new change, bound to
-    // whichever generation the metadata shows next.
-    declinedRevisions.set(path, { generation: null, observed: revision });
-    issueDeclineTicket(path);
+  const known = liveObservations.get(path);
+  if (!known || usageLogIdentityKey(known.observed) !== usageLogIdentityKey(revision)) {
+    const first: LiveObservation = { observed: revision, unresolved: revision, declined: undefined };
+    liveObservations.set(path, first);
+    if (usageRevisionIsDestructive(revision)) {
+      first.declined = null;
+      issueDeclineTicket(path);
+    }
     return;
   }
-  if (!usageRevisionIsDestructive(revision)) return;
-  declinedRevisions.set(path, { generation: null, observed: revision });
+  if (revision.size > known.observed.size) {
+    known.observed = revision;
+    return;
+  }
+  if (usageLogRevisionKey(revision) === usageLogRevisionKey(known.observed)) return;
+  known.observed = revision;
+  known.unresolved = shorterOf(known.unresolved, revision);
+  known.declined = null;
   issueDeclineTicket(path);
 }
 
 function observeAgainstIndex(path: string, meta: IndexMeta, revision: UsageLogRevision | null): void {
-  if (!revision) return;
-  const declined = declinedRevisions.get(path);
-  if (declined && usageLogIdentityKey(declined.observed) === usageLogIdentityKey(revision)) {
-    // The change observed before the metadata was read declines this generation; no second ticket.
-    if (declined.generation === null) declined.generation = meta.generation;
-    if (declined.generation === meta.generation) return;
-    // A newer generation was published since: judge against the revision it recorded.
-    declinedRevisions.delete(path);
+  const known = liveObservations.get(path);
+  if (!known || !revision) return;
+  if (known.declined === meta.generation) {
+    known.unresolved = null;
+    return;
   }
   const recorded = meta.revision;
-  if (recorded === null || usageLogIdentityKey(recorded) !== usageLogIdentityKey(revision)) return;
-  if (revision.size > recorded.size || usageLogRevisionKey(recorded) === usageLogRevisionKey(revision)) return;
-  declinedRevisions.set(path, { generation: meta.generation, observed: revision });
-  issueDeclineTicket(path);
+  const shorterThanIndexed = (sample: UsageLogRevision | null): boolean => sample !== null && recorded !== null
+    && usageLogIdentityKey(sample) === usageLogIdentityKey(recorded)
+    && (sample.size < recorded.size || (sample.size === recorded.size && usageLogRevisionKey(sample) !== usageLogRevisionKey(recorded)));
+  if (shorterThanIndexed(known.unresolved) || shorterThanIndexed(revision)) {
+    if (known.declined !== null) issueDeclineTicket(path);
+    known.declined = meta.generation;
+  } else if (known.declined === null) {
+    known.declined = meta.generation;
+  }
+  known.unresolved = null;
 }
 
 /**
@@ -2137,7 +2164,7 @@ export function resetUsageFilterIndexForTests(): void {
   reclaimRun = null;
   reclaimAgain = false;
   pendingInvalidations.clear();
-  declinedRevisions.clear();
+  liveObservations.clear();
   ingestPassesByPath.clear();
   rebuildRequestedPaths.clear();
   sidecarOwnershipChecked.clear();
