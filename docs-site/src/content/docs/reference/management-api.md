@@ -653,9 +653,11 @@ The answer comes only from precomputed hourly totals, never from the rows themse
 - `complete` is `false` when an archive file that may hold rows in the window has no usable totals
   (it is listed in `coverage.pendingSegments` or `coverage.failed`), or when its totals cannot give
   this window an exact figure: `coverage.inexact` lists those files with a `reason`,
-  `uncounted-rows` (rows it could not count, such as one past its 744-hour span, may be in the
-  window), `overlap-dropped` (a multi-attempt request might count twice), or `folded-keys` (the
-  filter selects a value it counted as `(other)`). `summary`, `byHour`, and every breakdown are then
+  `uncounted-rows` (rows it could not count, such as one past its 744-hour span or one whose time
+  could not be read, may be in the window), `overlap-dropped` (a multi-attempt request might count
+  twice), `folded-keys` (the filter selects a value it counted as `(other)`), or `split-overlap` (a
+  `provider`, `model`, or `account` filter selects only earlier attempts of a request, whose
+  pricing figures the totals cannot rebuild). `summary`, `byHour`, and every breakdown are then
   `null` instead of numbers that would look exact. An archive file whose totals have not been read
   yet counts as possibly in the window.
 - `byHour` is a time series: one entry (`key`, the hour's ISO start, plus the same sums) for every

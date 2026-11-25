@@ -45,12 +45,15 @@ const ROWS = [
 
 async function get<T>(path: string): Promise<T> {
   const req = new ManagementRequest(`http://localhost${path}`, { method: "GET" });
-  const response = await settledUsageResponse(() => handleManagementAPI(req, new URL(req.url), config, { refreshCodexCatalog: async () => {} }));
+  const response = await settledUsageResponse(() => handleManagementAPI(req, new URL(req.url), config, {}));
   if (response.status !== 200) throw new Error(`GET ${path} answered ${response?.status}`);
   return await response.json() as T;
 }
 
 interface Figures { requests: number; totalTokens: number }
+interface Pricing { pricedRequests: number; unpricedRequests: number; unmeteredRequests: number; estimatedCostUsd: number }
+const pricing = ({ pricedRequests, unpricedRequests, unmeteredRequests, estimatedCostUsd }: Pricing): Pricing =>
+  ({ pricedRequests, unpricedRequests, unmeteredRequests, estimatedCostUsd });
 interface LiveBody { summary: Figures; providers: Array<{ provider: string } & Figures>; models: Array<{ model: string } & Figures> }
 interface ArchiveBody { attribution: string; summary: Figures & { attemptCount: number }; byProvider: { rows: Array<{ key: string } & Figures> }; byModel: { rows: Array<{ key: string } & Figures> } }
 
@@ -102,7 +105,23 @@ describe("archive attribution matches the live summary", () => {
     const liveOpenai = await get<LiveBody>(`/api/usage?range=all&${liveWindow}&provider=openai`);
     const archiveOpenai = await get<ArchiveBody>(`/api/usage/archive?${archiveWindow}&provider=openai`);
     expect(pick(archiveOpenai.summary)).toEqual(pick(liveOpenai.summary));
+    expect(pricing(archiveOpenai.summary as unknown as Pricing)).toEqual(pricing(liveOpenai.summary as unknown as Pricing));
     expect(archiveOpenai.summary.requests).toBe(1);
+  });
+
+  test("a filter to a request's first, unmetered attempt gives the live pricing figures or declines them", async () => {
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), jsonl(ROWS));
+    await writeArchiveTotals(writeSegment(join(home, "usage-archive"), "903", jsonl(ROWS), "2026-11-20T10-05-00.000Z"));
+    const hour = Math.floor(AT / HOUR) * HOUR;
+    const live = await get<LiveBody>(`/api/usage?range=all&since=${hour}&until=${hour + HOUR - 1}&provider=deepseek`);
+    const archive = await get<ArchiveBody & { complete: boolean }>(`/api/usage/archive?since=${hour}&until=${hour + HOUR}&provider=deepseek`);
+    if (archive.complete) {
+      expect(pick(archive.summary)).toEqual(pick(live.summary));
+      expect(pricing(archive.summary as unknown as Pricing)).toEqual(pricing(live.summary as unknown as Pricing));
+    } else {
+      expect(archive.summary).toBeNull();
+    }
   });
 
   test("a row retried on a second account of the same provider counts once for that provider", async () => {

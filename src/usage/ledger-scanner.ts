@@ -51,6 +51,8 @@ export interface UsageLedgerScanResult {
   parsedRows: number;
   /** LF-complete malformed/schema-invalid rows plus a non-empty bounded torn suffix. */
   invalidRows: number;
+  /** Whether `invalidRows` includes that torn suffix, an uncommitted write rather than a malformed row. */
+  tornSuffix: boolean;
   /** Rows skipped after exceeding USAGE_LEDGER_MAX_LINE_BYTES. */
   oversizedRows: number;
   bytesRead: number;
@@ -296,6 +298,7 @@ export async function scanUsageLedgerCooperatively(
         revision: null,
         parsedRows: 0,
         invalidRows: 0,
+        tornSuffix: false,
         oversizedRows: 0,
         bytesRead: 0,
         processedThroughBytes: 0,
@@ -448,9 +451,8 @@ export async function scanUsageLedgerCooperatively(
 
     // A non-empty suffix without LF is not a committed JSONL row, even when it happens
     // to contain valid JSON. Count it as invalid and leave it out of the aggregate.
-    if (!droppingOversizedLine && lineLength > 0 && !isJsonWhitespace(line, lineLength)) {
-      invalidRows += 1;
-    }
+    const tornSuffix = !droppingOversizedLine && lineLength > 0 && !isJsonWhitespace(line, lineLength);
+    if (tornSuffix) invalidRows += 1;
 
     throwIfAborted(options.signal);
     const endingRevision = revisionFromStat(path, fd, fstatSync(fd));
@@ -499,6 +501,7 @@ export async function scanUsageLedgerCooperatively(
       revision: openedRevision,
       parsedRows,
       invalidRows,
+      tornSuffix,
       oversizedRows,
       bytesRead,
       processedThroughBytes,

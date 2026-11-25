@@ -381,6 +381,23 @@ describe("GET /api/usage/archive", () => {
     expect(grown.body).toMatchObject({ complete: false, summary: null });
   });
 
+  test("rows the totals excluded without a known time make every window they could reach inexact", async () => {
+    const [counted] = archiveRows(1);
+    const later = counted!.timestamp + 10 * HOUR;
+    // A request record without a provider fails the row schema, so its time is never read.
+    const { provider: _provider, ...withoutProvider } = { ...archiveRow(1), timestamp: later };
+    const path = await builtSegment("520", [counted, withoutProvider]);
+    const outside = await archiveGet(window(later, later + HOUR));
+    expect(outside.body).toMatchObject({ complete: false, summary: null });
+    expect(outside.body.coverage.inexact).toEqual([{ segment: basename(path), reason: "uncounted-rows" }]);
+    // A current-version totals file recording an excluded row with no time is read the same way.
+    const totalsPath = archiveTotalsPath(path);
+    const stored = JSON.parse(readFileSync(totalsPath, "utf8")) as Record<string, unknown>;
+    writeFileSync(totalsPath, JSON.stringify({ ...stored, malformedRows: 0, uncounted: { rows: 1, untimedRows: 0, firstAt: null, lastAt: null } }));
+    noteArchiveChanged();
+    expect((await archiveGet(window(later, later + HOUR))).body).toMatchObject({ complete: false, summary: null });
+  });
+
   test("coverage reports the per-segment caps, so a caller knows a breakdown may fold keys", async () => {
     const rows = Array.from({ length: 1_010 }, (_, index) => ({ ...archiveRow(0, 0), requestId: `cap-${index}`, clientHost: `host-${index}` }));
     await builtSegment("515", rows);

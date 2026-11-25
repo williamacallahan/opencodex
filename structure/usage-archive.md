@@ -53,7 +53,8 @@ bucket holds `requests` (rows touching it, each once), `attemptCount`, the attem
 (input, output, cache-read, cache-creation, total) and `estimatedCostUsd`, and the row-level
 `row*` tokens and cost with `pricedRequests`, `unpricedRequests` and `unmeteredRequests`. A row that
 touches several buckets (a failover, or a retry on a second account) is recorded once more in
-`overlaps` as the set of its bucket indices with a count, so a reader counts it once in any total
+`overlaps` as the set of its bucket indices, the bucket of its final attempt (`final`, which holds
+its row-level usage, cost and pricing class) and a count, so a reader counts it once in any total
 those buckets share. No request body, API key or account identifier beyond the account log label
 enters a bucket.
 
@@ -68,14 +69,16 @@ records. A file is therefore at most about 5,744 buckets of roughly 600 bytes of
 The file carries `version` (`ARCHIVE_TOTALS_FORMAT_VERSION`, 5), the segment's `bytes`, the `rows`
 counted, `unparsableRows`, `firstRowAt`/`lastRowAt` of the counted rows, `buckets`, `overlaps`,
 `overlapRowsDropped`, `hourOffsets` (for each UTC hour, the byte offset of its first row in file
-order), `overflowRows` per dimension, `foldedRows`, `uncounted` and `oversizedRows`. A row is
+order), `overflowRows` per dimension, `foldedRows`, `uncounted`, `oversizedRows` and `malformedRows`. A row is
 unparsable when it fails to parse or normalize, exceeds the 1 MiB row ceiling, is a torn final row,
 has no integer timestamp in `[0, 8.64e15]`, has a non-string dimension, or contributes a non-finite or
 negative sum. Of those, a row that parsed as a usage row but was not counted (no usable timestamp, no
-attribution, a bad sum, or an hour past the cap) is recorded in `uncounted`: its count and the span
-of the finite timestamps among them, taken before the row is dropped. `oversizedRows` were never
-parsed, so they could be stamped anywhere. `uncountedCoverage` reads that as `exact`, a span, or
-`anywhere`; the segment's overlap with a window uses the counted span joined with the uncounted one,
+attribution, a bad sum, or an hour past the cap) is recorded in `uncounted`: its count, how many had
+no finite timestamp (`untimedRows`), and the span of the finite ones, taken before the row is
+dropped. `oversizedRows` were never parsed and `malformedRows` (LF-complete rows that failed to parse
+or failed the row schema) never had their time read, so either could be stamped anywhere; only a
+torn final row (the scanner's `tornSuffix`), an uncommitted write, is a proven non-record.
+`uncountedCoverage` reads that as `exact`, a span, or `anywhere` (any exclusion of unknown time); the segment's overlap with a window uses the counted span joined with the uncounted one,
 or always overlaps when it is `anywhere`. A reader serves the file only when the version is 5, or
 the previous version 4 (`ARCHIVE_TOTALS_LEGACY_VERSION`, same buckets, no `uncounted`: its
 `unparsableRows` count as `anywhere`), and `bytes` equals the segment's length. Anything else is not
@@ -167,7 +170,9 @@ segments and sets `capped` when any is positive, because a filtered or per-dimen
 undercount. `coverage.inexact` lists each segment whose totals cannot make the window exact, with its
 reason: `uncounted-rows` (its uncounted rows may lie in the window), `overlap-dropped` (it holds
 multi-attempt rows whose once-only count was not recorded, so `requests` could count them twice), or
-`folded-keys` (a filter selects a dimension it folded into `(other)`). When any segment that may
+`folded-keys` (a filter selects a dimension it folded into `(other)`), or `split-overlap` (a provider,
+model or account filter matches some attempts of a multi-attempt request but not the final one, so
+its pricing class and row cost cannot be rebuilt; a version-4 overlap has no `final`). When any segment that may
 overlap the window has no usable totals or is inexact, the answer sets `complete: false` and carries
 `summary`, `byHour` and every breakdown as `null`, because a number would look exact; otherwise it
 sets `complete: true`. A segment without

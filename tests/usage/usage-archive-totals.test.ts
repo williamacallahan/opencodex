@@ -147,7 +147,15 @@ describe("usage archive hourly totals", () => {
     const read = await readArchiveTotals(path, statSync(path).size);
     expect(read?.version).toBe(ARCHIVE_TOTALS_LEGACY_VERSION);
     expect(uncountedCoverage(read!)).toBe("anywhere");
-    expect(uncountedCoverage(built!)).toBe("exact");
+    // The current version records that row as malformed, whose time was never read: also anywhere.
+    expect(uncountedCoverage(built!)).toBe("anywhere");
+    expect(built).toMatchObject({ malformedRows: 1 });
+    const clean = await buildArchiveTotals(writeSegment(archiveDirectory(), "4247", jsonl(archiveRows(3))));
+    expect(uncountedCoverage(clean!)).toBe("exact");
+    // A torn final row is an uncommitted write, not an excluded record.
+    const torn = await buildArchiveTotals(writeSegment(archiveDirectory(), "4248", `${jsonl(archiveRows(3))}{"requestId":"torn"`));
+    expect(torn).toMatchObject({ malformedRows: 0 });
+    expect(uncountedCoverage(torn!)).toBe("exact");
   });
 
   test("the build yields to the event loop between chunks instead of reading the segment in one turn", async () => {

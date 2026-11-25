@@ -85,9 +85,11 @@ export interface ArchiveBreakdown {
 /**
  * Why a segment's totals cannot give this window an exact figure: rows it did not count may be stamped
  * in the window (`uncounted-rows`); it could not record every multi-attempt request's once-only count
- * (`overlap-dropped`); or the filter selects values it folded into `(other)` (`folded-keys`).
+ * (`overlap-dropped`); the filter selects values it folded into `(other)` (`folded-keys`); or a
+ * provider, model or account filter matches some attempts of a multi-attempt request but not the one
+ * its row-level usage, cost and pricing class are counted under (`split-overlap`).
  */
-export type ArchiveInexactReason = "uncounted-rows" | "overlap-dropped" | "folded-keys";
+export type ArchiveInexactReason = "uncounted-rows" | "overlap-dropped" | "folded-keys" | "split-overlap";
 
 export interface ArchiveTotalsAnswer {
   summary: ArchiveSums;
@@ -195,8 +197,12 @@ export async function answerArchiveTotals(
       for (const dimension of ARCHIVE_DIMENSIONS) tally(byDimension[dimension], bucket[dimension], isAttribution(dimension) ? attempt : total);
     }
     // A row that touched several matching buckets was counted once in each; count it once per total.
+    let split = false;
     for (const overlap of totals.overlaps) {
-      const members = overlap.buckets.filter(index => matched[index] === 1).map(index => totals.buckets[index]!);
+      const matchedIndexes = overlap.buckets.filter(index => matched[index] === 1);
+      if (attributionFiltered && matchedIndexes.length > 0 && matchedIndexes.length < overlap.buckets.length
+        && (overlap.final === undefined || matched[overlap.final] !== 1)) split = true;
+      const members = matchedIndexes.map(index => totals.buckets[index]!);
       if (members.length < 2) continue;
       summary.requests -= overlap.count * (members.length - 1);
       uncount(byHour, members[0]!.hour, overlap.count * (members.length - 1));
@@ -206,6 +212,7 @@ export async function answerArchiveTotals(
         for (const [value, times] of shared) if (times > 1) uncount(byDimension[dimension], value, overlap.count * (times - 1));
       }
     }
+    if (split) inexact("split-overlap");
     return state;
   };
 

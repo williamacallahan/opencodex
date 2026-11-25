@@ -71,6 +71,12 @@ export interface ArchiveOverlap {
   buckets: number[];
   /** Rows with exactly that set of buckets. */
   count: number;
+  /**
+   * Version 5: the bucket holding these rows' final attempt, where their row-level usage, cost and
+   * pricing class are counted. A filter matching some of the buckets but not this one cannot
+   * reconstruct those figures.
+   */
+  final?: number;
 }
 
 /**
@@ -81,6 +87,8 @@ export interface ArchiveOverlap {
  */
 export interface ArchiveUncountedRows {
   rows: number;
+  /** Of `rows`, those with no finite timestamp, which could belong to any window. */
+  untimedRows: number;
   firstAt: number | null;
   lastAt: number | null;
 }
@@ -117,6 +125,11 @@ export interface ArchiveTotalsFile {
   uncounted?: ArchiveUncountedRows;
   /** Version 5 only: rows over the 1 MiB ceiling, never parsed, so stamped anywhere. */
   oversizedRows?: number;
+  /**
+   * Version 5 only: LF-complete rows that failed to parse or failed the row schema, so their time was
+   * never read; a torn final row, an uncommitted write, is not one.
+   */
+  malformedRows?: number;
 }
 
 export interface ArchiveHourOffset {
@@ -156,7 +169,7 @@ export async function buildArchiveTotals(segmentPath: string, options: ArchiveTo
   let foldedRows = 0;
   let overlapRowsDropped = 0;
   let rows = 0;
-  const uncounted: ArchiveUncountedRows = { rows: 0, firstAt: null, lastAt: null };
+  const uncounted: ArchiveUncountedRows = { rows: 0, untimedRows: 0, firstAt: null, lastAt: null };
   let firstRowAt: number | null = null;
   let lastRowAt: number | null = null;
 
@@ -201,7 +214,7 @@ export async function buildArchiveTotals(segmentPath: string, options: ArchiveTo
         if (Number.isFinite(entry.timestamp)) {
           uncounted.firstAt = uncounted.firstAt === null ? entry.timestamp : Math.min(uncounted.firstAt, entry.timestamp);
           uncounted.lastAt = uncounted.lastAt === null ? entry.timestamp : Math.max(uncounted.lastAt, entry.timestamp);
-        }
+        } else uncounted.untimedRows += 1;
         return;
       }
       rows += 1;
@@ -226,10 +239,10 @@ export async function buildArchiveTotals(segmentPath: string, options: ArchiveTo
       for (const sum of ROW_SUMS) final[sum] += attributed.rowSums[sum];
       if (touched.size < 2) return;
       const members = [...touched].sort((left, right) => left - right);
-      const signature = members.join(",");
+      const signature = `${members.join(",")}>${last}`;
       const overlap = overlaps.get(signature);
       if (overlap) overlap.count += 1;
-      else if (overlaps.size < MAX_OVERLAPS_PER_SEGMENT) overlaps.set(signature, { buckets: members, count: 1 });
+      else if (overlaps.size < MAX_OVERLAPS_PER_SEGMENT) overlaps.set(signature, { buckets: members, count: 1, final: last });
       else overlapRowsDropped += 1;
     },
   });
@@ -250,6 +263,7 @@ export async function buildArchiveTotals(segmentPath: string, options: ArchiveTo
     foldedRows,
     uncounted,
     oversizedRows: scan.oversizedRows,
+    malformedRows: scan.invalidRows - (scan.tornSuffix ? 1 : 0),
   };
   return totals;
 }
@@ -273,7 +287,8 @@ function isOverlap(bucketCount: number): (value: unknown) => value is ArchiveOve
     if (typeof value !== "object" || value === null) return false;
     const overlap = value as Record<string, unknown>;
     return isCount(overlap.count) && Array.isArray(overlap.buckets) && overlap.buckets.length >= 2
-      && overlap.buckets.every(index => Number.isSafeInteger(index) && index >= 0 && index < bucketCount);
+      && overlap.buckets.every(index => Number.isSafeInteger(index) && index >= 0 && index < bucketCount)
+      && (overlap.final === undefined || (Array.isArray(overlap.buckets) && overlap.buckets.includes(overlap.final)));
   };
 }
 
@@ -293,19 +308,22 @@ function isUncounted(value: unknown): value is ArchiveUncountedRows {
   if (typeof value !== "object" || value === null) return false;
   const uncounted = value as Record<string, unknown>;
   const finiteOrNull = (at: unknown): boolean => at === null || (typeof at === "number" && Number.isFinite(at));
-  return isCount(uncounted.rows) && finiteOrNull(uncounted.firstAt) && finiteOrNull(uncounted.lastAt);
+  return isCount(uncounted.rows) && isCount(uncounted.untimedRows) && finiteOrNull(uncounted.firstAt) && finiteOrNull(uncounted.lastAt);
 }
 
 /**
- * Where a segment's totals may be missing rows: `exact` when every usage row it read was counted, a
- * span when uncounted rows were stamped there, or `anywhere` when that is unknown (oversized rows are
- * never parsed, and a version-4 file did not record where its unparsable rows were stamped).
+ * Where a segment's totals may be missing rows: `exact` when every row it read was counted, a span
+ * when every uncounted row's time is known, or `anywhere` when any exclusion's time is unknown: an
+ * oversized row (never parsed), a malformed one (its time never read), an uncounted row without a
+ * finite timestamp, a count with no recorded span, and every unparsable row of a version-4 file, which
+ * did not record where they were stamped. Only a torn final row is a proven non-record.
  */
 export function uncountedCoverage(totals: ArchiveTotalsFile): "exact" | "anywhere" | { firstAt: number; lastAt: number } {
   if (totals.version === ARCHIVE_TOTALS_LEGACY_VERSION) return totals.unparsableRows > 0 ? "anywhere" : "exact";
-  if ((totals.oversizedRows ?? 0) > 0) return "anywhere";
-  const { firstAt, lastAt } = totals.uncounted ?? { firstAt: null, lastAt: null };
-  return firstAt !== null && lastAt !== null ? { firstAt, lastAt } : "exact";
+  const uncounted = totals.uncounted ?? { rows: 0, untimedRows: 0, firstAt: null, lastAt: null };
+  if ((totals.oversizedRows ?? 0) > 0 || (totals.malformedRows ?? 0) > 0 || uncounted.untimedRows > 0) return "anywhere";
+  if (uncounted.rows === 0) return "exact";
+  return uncounted.firstAt !== null && uncounted.lastAt !== null ? { firstAt: uncounted.firstAt, lastAt: uncounted.lastAt } : "anywhere";
 }
 
 /**
@@ -332,7 +350,8 @@ export async function readArchiveTotals(segmentPath: string, segmentBytes: numbe
   }
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const file = parsed as Record<string, unknown>;
-  if (file.version === ARCHIVE_TOTALS_FORMAT_VERSION && (!isUncounted(file.uncounted) || !isCount(file.oversizedRows))) return undefined;
+  if (file.version === ARCHIVE_TOTALS_FORMAT_VERSION
+    && (!isUncounted(file.uncounted) || !isCount(file.oversizedRows) || !isCount(file.malformedRows))) return undefined;
   if ((file.version !== ARCHIVE_TOTALS_FORMAT_VERSION && file.version !== ARCHIVE_TOTALS_LEGACY_VERSION) || file.bytes !== segmentBytes
     || !isCount(file.rows) || !isCount(file.unparsableRows) || !isInstant(file.firstRowAt) || !isInstant(file.lastRowAt)
     || !Array.isArray(file.buckets) || !file.buckets.every(isBucket)
