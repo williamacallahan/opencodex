@@ -152,7 +152,7 @@ import { listOpenAiForwardSidecarCandidates, resolveFirstUsableOpenAiSidecar, ty
 import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider, supportsNativeResponsesCompactEndpoint } from "../../providers/openai-tiers";
 import { requiredTurnStateOwner } from "../turn-state-handles";
 import { buildResponsesTransport, copyResponsesClientMetadata } from "../../adapters/openai-responses/transport";
-import { scrubOcxCompactionItems, stripCanonicalOnlyInputItems, stripCanonicalOnlyTopLevelFields, stripInternalChatMessageMetadataPassthrough } from "../../adapters/openai-responses/request-strips";
+import { scrubOcxCompactionItems, stripCanonicalOnlyInputItems, stripCanonicalOnlyTopLevelFields, stripInternalChatMessageMetadataPassthrough, stripRejectedSamplingParams } from "../../adapters/openai-responses/request-strips";
 import { dropResponsesReasoningInputItems } from "../../adapters/openai-responses/reasoning";
 import { requiresPlaintextReasoningReplay } from "../../adapters/openai-responses/passthrough";
 import { stringInputAsMessages } from "../../adapters/openai-responses/canonical-forward";
@@ -1215,7 +1215,9 @@ export async function handleResponsesCompact(
           ).body as typeof replayBody;
           validateFinalCustomToolCompatibility(replayBody, sendProvider.supportsResponsesCustomTools);
         }
-        return poolReserveWireBody({ ...replayBody as typeof compactBody, model: route.modelId }, sendProvider);
+        // The adapter's per-model sampling filter, for this physical send's provider and model.
+        const filtered = stripRejectedSamplingParams({ ...replayBody as typeof compactBody, model: route.modelId }, sendProvider, route.modelId);
+        return poolReserveWireBody(filtered as typeof compactBody, sendProvider);
       };
       const doFetch = (upstreamRecovery?: UpstreamSendRecovery) => fetchWithHeaderTimeout(
         compactUrl,

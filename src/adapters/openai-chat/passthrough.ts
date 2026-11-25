@@ -16,7 +16,7 @@ import { applyGithubCopilotContextTier } from "../../providers/github-copilot-co
 import { canonicalFastTierMarker, decideTier, type ResolvedFastPolicy } from "../../providers/fastwire";
 import { debugProviderDiagnostic } from "../../lib/debug";
 import { isDebugEnabled } from "../../lib/debug-settings";
-import { modelInList, type OcxProviderConfig } from "../../types";
+import { modelIdsInList, modelInList, type OcxProviderConfig } from "../../types";
 import { mapReasoningEffort, modelRecordValue } from "../../reasoning-effort";
 import { resolveReasoningCapabilities } from "../../providers/reasoning-capabilities";
 import { chatParallelToolCallsWireValue } from "./parallel-tool-calls";
@@ -157,10 +157,11 @@ export function buildOpenAIChatPassthroughRequest(
   }, modelId);
   if (body.temperature == null && sampling.temperature !== undefined) body.temperature = sampling.temperature;
   if (body.top_p == null && sampling.topP !== undefined) body.top_p = sampling.topP;
-  if (modelInList(provider.noTemperatureModels, modelId)) delete body.temperature;
-  if (modelInList(provider.noTopPModels, modelId)) delete body.top_p;
-  if (modelInList(provider.noStopModels, modelId)) delete body.stop;
-  if (modelInList(provider.noPenaltyModels, modelId)) {
+  const sentIds = [modelId, String(body.model)];
+  if (modelIdsInList(provider.noTemperatureModels, sentIds)) delete body.temperature;
+  if (modelIdsInList(provider.noTopPModels, sentIds)) delete body.top_p;
+  if (modelIdsInList(provider.noStopModels, sentIds)) delete body.stop;
+  if (modelIdsInList(provider.noPenaltyModels, sentIds)) {
     delete body.presence_penalty;
     delete body.frequency_penalty;
   }

@@ -390,6 +390,14 @@ export function modelInList(list: string[] | undefined, modelId: string): boolea
   return colon > 0 && list.includes(modelId.slice(0, colon));
 }
 
+/**
+ * Whether a per-model deny list names any id this send is known by: the routed catalog id and the
+ * serialized wire model, which differ when the adapter strips a bracketed suffix (`k3.1-pro[256k]`).
+ */
+export function modelIdsInList(list: string[] | undefined, modelIds: readonly (string | undefined)[]): boolean {
+  return modelIds.some(modelId => modelId !== undefined && modelInList(list, modelId));
+}
+
 export type OcxToolChoice =
   | "auto"
   | "none"

@@ -1,4 +1,4 @@
-import { MODEL_ADAPTER_OVERRIDE_ALLOWED, modelInList, type OcxProviderConfig } from "../types";
+import { MODEL_ADAPTER_OVERRIDE_ALLOWED, modelIdsInList, type OcxProviderConfig } from "../types";
 import { isCanonicalOpenAiForwardProvider, isOpenAiOperatedResponsesDestination, responsesTransportUrl } from "../providers/openai-tiers-destination";
 
 type Sampling = { temperature?: number | null; topP?: number | null };
@@ -23,10 +23,11 @@ export function applyChatSamplingDefaults(
   body: Record<string, unknown>, provider: OcxProviderConfig, modelId: string, client: Sampling,
 ): void {
   const sampling = resolveSamplingDefaults(provider, String(body.model), client, modelId);
-  if (sampling.temperature !== undefined && !modelInList(provider.noTemperatureModels, modelId)) {
+  const sentIds = [modelId, String(body.model)];
+  if (sampling.temperature !== undefined && !modelIdsInList(provider.noTemperatureModels, sentIds)) {
     body.temperature = sampling.temperature;
   }
-  if (sampling.topP !== undefined && !modelInList(provider.noTopPModels, modelId)) {
+  if (sampling.topP !== undefined && !modelIdsInList(provider.noTopPModels, sentIds)) {
     body.top_p = sampling.topP;
   }
 }

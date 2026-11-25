@@ -14,6 +14,7 @@ export {
   toolChoiceCandidates,
   toolAllowedByChoice,
   resolveToolChoiceWireName,
+  modelIdsInList,
   modelInList,
   isAllowedToolChoice,
   requiresToolCall,

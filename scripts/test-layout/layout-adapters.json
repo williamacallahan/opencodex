@@ -9,6 +9,7 @@
   "fix-search-unicode-clamp.test.ts": "web-search",
   "fix-retry-release-timer.test.ts": "lib",
   "fix-tool-number-preservation.test.ts": "adapters",
+  "sampling-deny-wire-ids.test.ts": "adapters",
   "fix-eventstream-cancel-wait.test.ts": "responses",
   "zed-openai-contract.test.ts": "providers",
   "zed-failure-relay.test.ts": "providers",

@@ -8,7 +8,7 @@ import { protectGlmSummaryBudget, resolveMaxTokens } from "./openai-chat/summary
 import { chatParallelToolCallsWireValue } from "./openai-chat/parallel-tool-calls";
 import { applyExplicitChatReasoningWirePolicy, declaresIndependentChatReasoningEffort } from "./openai-chat/reasoning-wire";
 import type { AdapterRequest, IncomingMeta, ProviderAdapter } from "./base";
-import { modelInList, type AdapterEvent, type OcxParsedRequest, type OcxProviderConfig, type OcxUsage } from "../types";
+import { modelIdsInList, modelInList, type AdapterEvent, type OcxParsedRequest, type OcxProviderConfig, type OcxUsage } from "../types";
 import { mapReasoningEffort } from "../reasoning-effort";
 import { debugProviderDiagnostic } from "../lib/debug";
 import { sseFieldValue } from "../lib/sse-decoder";
@@ -149,7 +149,7 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
         }
         if (maxTokens !== undefined) body.max_tokens = maxTokens;
         applyChatSamplingDefaults(body, provider, parsed.modelId, parsed.options);
-        if (parsed.options.stopSequences !== undefined && !modelInList(provider.noStopModels, parsed.modelId)) {
+        if (parsed.options.stopSequences !== undefined && !modelIdsInList(provider.noStopModels, [parsed.modelId, String(body.model)])) {
           body.stop = parsed.options.stopSequences;
         }
         const reasoningDisabled = modelInList(provider.noReasoningModels, parsed.modelId);

@@ -2,7 +2,7 @@ import { expandRetainedCompactionInput } from "../../responses/retained-compacti
 import { createHash } from "node:crypto";
 import { COMPACT_PROMPT, appendCheckpointContinuationNote, compactionItemToText, decodeCompactionSummary, isCompactionItemType } from "../../responses/compaction";
 import { debugProviderDiagnostic } from "../../lib/debug";
-import { modelInList } from "../../types";
+import { modelIdsInList } from "../../types";
 import { isPlainObject } from "./internal";
 import { activateDeferredTool } from "./tool-schema";
 import { stripOpenAiOnlyWebSearchFields } from "./web-search";
@@ -337,21 +337,24 @@ export function stripCanonicalOnlyInputItems(body: unknown): unknown {
  * caller can send penalties. Some listed models only have the Responses wire (xAI
  * grok-4.20-multi-agent-0309 answers Chat Completions with 400), so the Chat adapter's omission
  * cannot cover them. A combo or policy route keeps the caller's temperature and top_p in its shared
- * body for later candidates, so this per-target copy is where a rejecting model loses them.
+ * body for later candidates, so this per-target copy is where a rejecting model loses them. Lists
+ * name catalog ids, so both the routed id and the serialized `model` are matched, and the filter
+ * runs on every auth mode: a custom forward gateway declares its own lists.
  * Returns the input unchanged when nothing is removed, so the caller-owned raw body is never
  * mutated.
  */
 export function stripRejectedSamplingParams(
   body: unknown,
   provider: { noTemperatureModels?: string[]; noTopPModels?: string[]; noStopModels?: string[]; noPenaltyModels?: string[] },
-  modelId: string,
+  catalogModelId: string,
 ): unknown {
   if (!isPlainObject(body)) return body;
+  const ids = [catalogModelId, typeof body.model === "string" ? body.model : undefined];
   const dropped = [
-    ...(Object.hasOwn(body, "temperature") && modelInList(provider.noTemperatureModels, modelId) ? ["temperature"] : []),
-    ...(Object.hasOwn(body, "top_p") && modelInList(provider.noTopPModels, modelId) ? ["top_p"] : []),
-    ...(Object.hasOwn(body, "stop") && modelInList(provider.noStopModels, modelId) ? ["stop"] : []),
-    ...(modelInList(provider.noPenaltyModels, modelId)
+    ...(Object.hasOwn(body, "temperature") && modelIdsInList(provider.noTemperatureModels, ids) ? ["temperature"] : []),
+    ...(Object.hasOwn(body, "top_p") && modelIdsInList(provider.noTopPModels, ids) ? ["top_p"] : []),
+    ...(Object.hasOwn(body, "stop") && modelIdsInList(provider.noStopModels, ids) ? ["stop"] : []),
+    ...(modelIdsInList(provider.noPenaltyModels, ids)
       ? ["presence_penalty", "frequency_penalty"].filter(field => Object.hasOwn(body, field))
       : []),
   ];
