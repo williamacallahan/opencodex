@@ -679,8 +679,11 @@ The answer comes only from precomputed hourly totals, never from the rows themse
   file is written into `usage-archive` while trimming is suspended), `segment-changed`, `io-error`
   (with `code`), or `build-error`. They are not retried until the proxy restarts, so their rows are
   missing from this answer.
-- `coverage.duplicateSegments` counts leftover archive files skipped because their rows are
-  already counted from another file or are still in `usage.jsonl`, so no row is counted twice.
+- `coverage.ambiguousSegments` names archive files in the window that cannot be told apart from a
+  copy of other rows: several files cut from the same ledger, or one named after the start of the
+  current `usage.jsonl`. Older releases could leave a copy behind that is byte-identical to the
+  published file, so these files are neither counted nor skipped, and the answer is incomplete.
+  They are only read, never moved or deleted.
 
 `GET /api/usage/archive/rows` returns the archived rows themselves, for questions such as which
 requests one workload sent. It takes the same `since`, `until`, and filters, plus an exact
@@ -695,7 +698,9 @@ then filtered by its own time. A `provider`, `model`, or `account` filter matche
 matches. An archive file whose totals are not built yet is not read: it is listed in
 `coverage.pendingSegments` with `coverage.pending: true`, its build is asked for and refused while
 trimming is suspended (the next answer lists it under `coverage.failed` as `publishing-suspended`),
-and `incomplete` is `true`. Closing the request stops its read at once.
+and `incomplete` is `true`. An ambiguous archive file (see `coverage.ambiguousSegments` above) is
+not read either; it is listed there and `incomplete` is `true`. Closing the request stops its read
+at once.
 `coverage.segments` lists each file read with the byte offset it started from (`fromByte`) and why
 its read ended (`endedBy`: `segment-end`, `limit`, `deadline`, or `segment-changed` when the file
 was replaced or shortened during the read). The top-level `endedBy` is `window-end` when every file

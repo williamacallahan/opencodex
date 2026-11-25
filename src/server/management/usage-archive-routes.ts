@@ -11,7 +11,7 @@
  */
 import { REQUEST_HISTORY_MAX_PAGE_SIZE } from "../../routing/history/indexer";
 import { answerArchiveTotals, type ArchiveFilter } from "../../usage/archive-answer";
-import { loadWindowSegments, queueMissingTotals, readArchiveListing, type ArchiveSegmentState } from "../../usage/archive-query";
+import { ambiguousWindowSegments, loadWindowSegments, queueMissingTotals, readArchiveListing, type ArchiveSegmentState } from "../../usage/archive-query";
 import { inArchiveRowsReadQueue, readArchivedRows, type ArchivedRowsQuery } from "../../usage/archive-rows";
 import { ARCHIVE_DIMENSIONS, MAX_DATE_MS, type ArchiveDimension } from "../../usage/archive-totals";
 import { parseUsageTimeWindow } from "../../usage/time-range";
@@ -107,7 +107,9 @@ async function archiveTotalsResponse(ctx: ManagementContext): Promise<Response> 
   const listing = await readArchiveListing();
   const answer = await answerArchiveTotals(listing, since, until, filter);
   queueMissingTotals(answer.windowSegments);
-  const complete = answer.pendingSegments.length === 0 && answer.failedSegments.length === 0 && answer.inexactSegments.length === 0;
+  const ambiguous = await ambiguousWindowSegments(listing, since, until);
+  const complete = answer.pendingSegments.length === 0 && answer.failedSegments.length === 0 && answer.inexactSegments.length === 0
+    && ambiguous.length === 0;
   const capped = answer.foldedRows > 0 || answer.overlapRowsDropped > 0 || ARCHIVE_DIMENSIONS.some(dimension => answer.overflowRows[dimension] > 0);
   const breakdowns = Object.fromEntries(ARCHIVE_DIMENSIONS.map(dimension => [breakdownName(dimension), answer.byDimension[dimension]]));
   return jsonResponse({
@@ -123,7 +125,8 @@ async function archiveTotalsResponse(ctx: ManagementContext): Promise<Response> 
       pendingSegments: answer.pendingSegments.map(state => state.name),
       failed: failedCoverage(answer.failedSegments),
       inexact: answer.inexactSegments,
-      duplicateSegments: listing.skipped.length,
+      // Read only to report: neither counted nor skipped, since nothing proves which copy is archived once.
+      ambiguousSegments: ambiguous.map(entry => entry.name),
       unparsableRows: answer.unparsableRows,
       // Per-segment caps folded some keys into `(other)`: a filtered or per-dimension figure may undercount.
       capped,
@@ -175,15 +178,16 @@ async function archiveRowsResponse(ctx: ManagementContext): Promise<Response> {
     const listing = await readArchiveListing();
     const states = await loadWindowSegments(listing, query.since, query.until);
     queueMissingTotals(states);
+    const ambiguous = await ambiguousWindowSegments(listing, query.since, query.until);
     const deadline = AbortSignal.any([AbortSignal.timeout(ARCHIVE_ROWS_DEADLINE_MS), abandoned]);
-    return { listing, result: await readArchivedRows(states, query, deadline) };
+    return { listing, ambiguous, result: await readArchivedRows(states, query, deadline) };
   }, abandoned);
   if (queued.kind === "busy") {
     const response = jsonResponse({ error: { code: "archive_rows_busy", message: "another archive row read is running; retry shortly" } }, 503, ctx.req, ctx.config);
     response.headers.set("Retry-After", "1");
     return response;
   }
-  const { listing, result } = queued.value;
+  const { listing, ambiguous, result } = queued.value;
   const projectDiagnostics = upstreamDiagnosticLogProjection();
   const pending = result.pending.filter(state => !state.failure);
   return jsonResponse({
@@ -194,14 +198,14 @@ async function archiveRowsResponse(ctx: ManagementContext): Promise<Response> {
     entries: result.rows.map(row => requestLogDto(requestLogEntryFromPersistedUsage(row, { projectDiagnostics }), { includeDecodeRate: false, projectDiagnostics })),
     endedBy: result.endedBy,
     truncated: result.endedBy !== "window-end",
-    // Segments in the window without totals (pending or failed) were not read, so rows may be missing.
-    incomplete: result.endedBy !== "window-end" || result.pending.length > 0,
+    // Segments in the window without totals (pending or failed), and ambiguous ones, were not read, so rows may be missing.
+    incomplete: result.endedBy !== "window-end" || result.pending.length > 0 || ambiguous.length > 0,
     coverage: {
       segments: result.segments,
       pending: pending.length > 0,
       pendingSegments: pending.map(state => state.name),
       failed: failedCoverage(result.pending.filter(state => state.failure)),
-      duplicateSegments: listing.skipped.length,
+      ambiguousSegments: ambiguous.map(entry => entry.name),
       liveLedgerSince: isoOrNull(listing.liveLedgerSince),
     },
   }, 200, ctx.req, ctx.config);

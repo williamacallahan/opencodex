@@ -55,8 +55,8 @@ export interface ArchiveSegmentEntry extends ArchiveSegmentName {
 export interface ArchiveListing {
   /** Segments counted once each, oldest first by the first-row time in their name. */
   segments: ArchiveSegmentEntry[];
-  /** Leftover duplicates and unpublished trims of the live ledger, never counted. */
-  skipped: ArchiveSegmentName[];
+  /** Segments that cannot be told apart from a copy of other rows (`countedArchiveSegments`): read only to report them. */
+  ambiguous: ArchiveSegmentEntry[];
   /** The live ledger's first timed row, where the archive's coverage ends. */
   liveLedgerSince: number | null;
 }
@@ -173,15 +173,16 @@ export async function readArchiveListing(configDir = getConfigDir()): Promise<Ar
     } catch (error) {
       if (!isMissing(error)) throw error;
       listingCache = null;
-      return { segments: [], skipped: [], liveLedgerSince: live?.since ?? null };
+      return { segments: [], ambiguous: [], liveLedgerSince: live?.since ?? null };
     }
     if (cache && cache.directoryMtimeMs === directoryMtimeMs && now - cache.listedAt < LISTING_MAX_AGE_MS) cache.checkedAt = now;
     else cache = await listDirectory(directory, directoryMtimeMs, now);
     listingCache = cache;
   }
-  const { counted, skipped } = countedArchiveSegments(cache.entries, live?.head ?? null);
-  counted.sort((left, right) => (archiveLabelTime(left.label) ?? Number.NEGATIVE_INFINITY) - (archiveLabelTime(right.label) ?? Number.NEGATIVE_INFINITY));
-  return { segments: counted, skipped, liveLedgerSince: live?.since ?? null };
+  const { counted, ambiguous } = countedArchiveSegments(cache.entries, live?.head ?? null);
+  const byLabelTime = (left: ArchiveSegmentEntry, right: ArchiveSegmentEntry): number =>
+    (archiveLabelTime(left.label) ?? Number.NEGATIVE_INFINITY) - (archiveLabelTime(right.label) ?? Number.NEGATIVE_INFINITY);
+  return { segments: counted.sort(byLabelTime), ambiguous: ambiguous.sort(byLabelTime), liveLedgerSince: live?.since ?? null };
 }
 
 /**
@@ -327,6 +328,20 @@ export async function loadWindowSegments(listing: ArchiveListing, since: number,
     await yieldToEventLoop();
   }
   return states;
+}
+
+/**
+ * The ambiguous segments that may hold rows in `[since, until)`: their totals, when present, are read
+ * only for their span. A window they reach cannot be answered exactly.
+ */
+export async function ambiguousWindowSegments(listing: ArchiveListing, since: number, until: number): Promise<ArchiveSegmentEntry[]> {
+  const reached: ArchiveSegmentEntry[] = [];
+  for (const entry of listing.ambiguous) {
+    if (!entryMayOverlap(entry, since, until)) continue;
+    if (segmentOverlaps(segmentState(entry, await loadTotals(entry)), since, until)) reached.push(entry);
+    await yieldToEventLoop();
+  }
+  return reached;
 }
 
 /** Queue builds for segments without totals, except those whose build already failed in this process. */

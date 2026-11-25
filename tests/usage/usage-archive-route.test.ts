@@ -30,8 +30,9 @@ interface TotalsBody {
   attribution: string;
   coverage: {
     segments: number; pending: boolean; pendingSegments: string[]; failed: Array<{ segment: string; reason: string; code?: string }>;
-    duplicateSegments: number; unparsableRows: number; earliestRowAt: string | null; latestRowAt: string | null; liveLedgerSince: string | null;
+    unparsableRows: number; earliestRowAt: string | null; latestRowAt: string | null; liveLedgerSince: string | null;
     inexact?: Array<{ segment: string; reason: string }>;
+    ambiguousSegments?: string[];
   };
   summary: ArchiveSumsBody;
   byHour: Array<{ key: string } & ArchiveSumsBody>;
@@ -98,7 +99,7 @@ describe("GET /api/usage/archive", () => {
     expect(body).toMatchObject({ since: iso(effectiveSince), until: iso(effectiveUntil) });
     const inside = rows.filter(row => row.timestamp >= effectiveSince && row.timestamp < effectiveUntil);
     expect(body.summary).toMatchObject(plainSummary(inside));
-    expect(body.coverage).toMatchObject({ segments: 1, pending: false, pendingSegments: [], duplicateSegments: 0, unparsableRows: 0, liveLedgerSince: null });
+    expect(body.coverage).toMatchObject({ segments: 1, pending: false, pendingSegments: [], ambiguousSegments: [], unparsableRows: 0, liveLedgerSince: null });
     expect(body.coverage.earliestRowAt).toBe(iso(rows[0]!.timestamp));
     expect(body.byHour.map(row => row.key)).toEqual([...new Set(inside.map(row => iso(Math.floor(row.timestamp / HOUR) * HOUR)))]);
   });
@@ -212,7 +213,7 @@ describe("GET /api/usage/archive", () => {
     expect(body.byHour).not.toHaveProperty("truncated");
   });
 
-  test("a leftover prefix of a segment and an unpublished trim of the live ledger are not counted again", async () => {
+  test("a second segment of the same ledger and a segment named after the live head are reported, not resolved by name or mtime", async () => {
     const rows = archiveRows(30);
     await builtSegment("505", rows);
     // An earlier trim of the same ledger file that never published: same inode, same first row, shorter, older.
@@ -226,11 +227,17 @@ describe("GET /api/usage/archive", () => {
     await builtSegment(liveIno, live.slice(0, 4), liveLabel);
 
     const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 24 * HOUR));
-    expect(body.summary).toMatchObject(plainSummary(rows));
-    expect(body.coverage).toMatchObject({ segments: 1, duplicateSegments: 2, liveLedgerSince: iso(live[0]!.timestamp) });
+    // Both copies of ledger 505 and the live-head copy reach the window, so it is declined.
+    expect(body).toMatchObject({ complete: false, summary: null });
+    expect(body.coverage.ambiguousSegments!.filter(name => name.includes("_505-"))).toHaveLength(2);
+    expect(body.coverage.ambiguousSegments!.filter(name => name.includes(`_${liveIno}-`))).toHaveLength(1);
+    const liveWindow = await archiveGet(window(live[0]!.timestamp, live[0]!.timestamp + HOUR));
+    expect(liveWindow.body).toMatchObject({ complete: false, summary: null });
+    expect(liveWindow.body.coverage.ambiguousSegments).toEqual([expect.stringContaining(`_${liveIno}-`)]);
+    expect(liveWindow.body.coverage.liveLedgerSince).toBe(iso(live[0]!.timestamp));
   });
 
-  test("after a limit change, the newer shorter segment counts and an older longer leftover of the same file does not", async () => {
+  test("after a limit change, a newer shorter segment and an older longer one of the same file are both reported, neither counted", async () => {
     // A trim was killed before its rename (long, older); the limit was raised; the next trim of the same
     // file cut less and published (short, newer). The leftover's extra rows are in the live ledger now.
     const rows = archiveRows(30);
@@ -239,8 +246,8 @@ describe("GET /api/usage/archive", () => {
     mkdirSync(dirname(usageLogPath()), { recursive: true });
     writeFileSync(usageLogPath(), jsonl(rows.slice(8)));
     const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 24 * HOUR));
-    expect(body.summary).toMatchObject(plainSummary(rows.slice(0, 8)));
-    expect(body.coverage).toMatchObject({ segments: 1, duplicateSegments: 1, liveLedgerSince: iso(rows[8]!.timestamp) });
+    expect(body).toMatchObject({ complete: false, summary: null, coverage: { segments: 0, liveLedgerSince: iso(rows[8]!.timestamp) } });
+    expect(body.coverage.ambiguousSegments).toHaveLength(2);
   });
 
   test("a segment's mtime never drops it from a window: its totals are read once for its span, and a window it cannot reach skips it after that", async () => {
@@ -333,6 +340,19 @@ describe("GET /api/usage/archive", () => {
     if (!body.complete) expect(body.summary).toBeNull();
   });
 
+  test("two untimed archive files of the same ledger are reported, neither counted twice nor answered as empty", async () => {
+    // A crashed copy and a published segment of the same ledger file can be byte-identical; nothing tells them apart.
+    const rows = archiveRows(6);
+    const first = await builtSegment("518", rows, "untimed-2026-11-02T00-00-00.000Z");
+    const second = await builtSegment("518", rows, "untimed-2026-11-03T00-00-00.000Z");
+    const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 6 * HOUR));
+    expect(body.complete).toBe(false);
+    expect(body.summary).toBeNull();
+    expect(body.coverage.ambiguousSegments?.sort()).toEqual([basename(first), basename(second)].sort());
+    // Both stay where they are, unread by anything but this answer.
+    expect(readdirSync(archiveDirectory()).sort()).toEqual([basename(first), basename(second), basename(archiveTotalsPath(first)), basename(archiveTotalsPath(second))].sort());
+  });
+
   test("coverage reports the per-segment caps, so a caller knows a breakdown may fold keys", async () => {
     const rows = Array.from({ length: 1_010 }, (_, index) => ({ ...archiveRow(0, 0), requestId: `cap-${index}`, clientHost: `host-${index}` }));
     await builtSegment("515", rows);
@@ -360,8 +380,10 @@ describe("GET /api/usage/archive", () => {
     const ino = String(statSync(usageLogPath(), { bigint: true }).ino);
     const all = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 24 * HOUR);
     await builtSegment(ino, old, iso(old[0]!.timestamp).replaceAll(":", "-"));
-    // While the ledger starts with those rows, the segment is an unpublished trim of it.
-    expect((await archiveGet(all)).body.summary.requests).toBe(0);
+    // While the ledger starts with those rows, the segment may be an unpublished trim of it: reported, not counted.
+    const whileHead = (await archiveGet(all)).body;
+    expect(whileHead).toMatchObject({ complete: false, summary: null });
+    expect(whileHead.coverage.ambiguousSegments).toEqual([expect.stringContaining(`_${ino}-`)]);
     // The trim publishes: the new ledger, on the same inode, starts later; the segment now counts.
     writeFileSync(usageLogPath(), jsonl(archiveRows(2, undefined, 50)));
     noteArchiveChanged();

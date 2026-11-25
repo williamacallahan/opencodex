@@ -120,14 +120,18 @@ published.
 ## Counting each row once
 
 A completed trim publishes the new ledger through a rename, so each published segment comes from a
-different ledger file (inode). Segments of the same file all copy it from byte 0 and share its
-first-row label, and the publishing trim is always the last to write one, so `countedArchiveSegments`
-counts, among segments with the same inode and label, only the one with the latest mtime (the longer
-on a tie). It skips a segment named with the live ledger's inode and head label (`ledgerHeadLabel`),
-a trim that stopped before its rename. The live head is cached by the same identity
-`usageLogIdentityKey` uses (device, inode, birth time) and dropped on every in-process archive write,
-so a new ledger that reuses a retired inode never makes a published segment look unpublished. These
-are read-side rules only: nothing deletes a duplicate or leftover segment any more.
+different ledger file (inode). Earlier builds also left copies: several segments of one file, and a
+segment named with the live ledger's inode and head label (`ledgerHeadLabel`). A crashed copy taken
+before a trim's rename, a published segment, and a published segment beside a restored ledger can be
+byte-identical, so neither an mtime nor a name proves which rows are archived once.
+`countedArchiveSegments` therefore counts a segment only when it is the only one of its inode and does
+not match the live head; every other segment is `ambiguous`. Ambiguous segments are read only to
+learn their span and are reported: a window one may reach lists it in `coverage.ambiguousSegments`
+and answers `complete: false` with no numbers (the rows route answers `incomplete: true` and does not
+read it). They are never counted, skipped silently, adopted, or deleted. The live head is cached by
+the same identity `usageLogIdentityKey` uses (device, inode, birth time) and dropped on every
+in-process archive write, so a new ledger that reuses a retired inode never makes a published segment
+look ambiguous. These are read-side rules only: nothing deletes a segment any more.
 
 ## Reading without blocking
 

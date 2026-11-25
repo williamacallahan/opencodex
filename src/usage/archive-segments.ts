@@ -5,10 +5,9 @@
  * A segment is `<first row UTC>_<ledger inode>-<cut offset>.jsonl` and holds bytes `[0, cut)` of the
  * ledger file that inode named. A completed trim publishes the new ledger through a rename, so every
  * published segment comes from a different file and covers rows no other published segment holds.
- * The only overlaps are the leftovers `src/usage/ledger-retention.ts` cleans up and can fail to:
- * segments of the same file and the same first row, of which the published one is the newest, and a
- * segment named with the live ledger's inode and first row, a trim that never published, whose rows
- * are still at the head of `usage.jsonl`. {@link countedArchiveSegments} applies that rule.
+ * Earlier builds also left copies: several segments of one file, and a segment named with the live
+ * ledger's inode and first row. Nothing on disk tells a published segment from a crashed copy of the
+ * same bytes, so {@link countedArchiveSegments} counts neither and reports both.
  */
 import { readSync } from "node:fs";
 import { join } from "node:path";
@@ -164,34 +163,28 @@ export interface LiveLedgerHead {
 }
 
 /**
- * Which segments to count so every archived row is counted once.
+ * Which segments to count so every archived row is counted once, and which cannot be decided.
  *
- * Segments of the same ledger file (inode) that start at the same row (label) all copy that file from
- * byte 0, so they overlap. Only the trim that published replaced the file, and no trim of a replaced
- * file can write a segment, so the published one is the most recently written: that one counts (the
- * longer on a tie) and the others are skipped. An older, shorter leftover holds only rows the published
- * segment also holds; an older, longer one (a trim killed before its rename, then a smaller cut after a
- * limit change) also holds rows the published ledger now has. A segment carrying the live ledger's
- * inode and head label is a trim that stopped before its rename: its rows are still in `usage.jsonl`.
+ * A segment is counted when it is the only one cut from its ledger file (inode) and is not named with
+ * the live ledger's inode and head label. Every segment that shares its inode with another, and one
+ * matching the live head, is `ambiguous`: a crashed copy taken before a trim's rename, a published
+ * segment, and a published segment beside a restored ledger can hold identical bytes, so neither the
+ * newest mtime nor the name proves which rows are archived once. Ambiguous segments are only read and
+ * reported; they are never counted, skipped silently, adopted, or deleted.
  */
-export function countedArchiveSegments<T extends ArchiveSegmentName & { mtimeMs: number }>(
+export function countedArchiveSegments<T extends ArchiveSegmentName>(
   segments: readonly T[],
   live: LiveLedgerHead | null,
-): { counted: T[]; skipped: T[] } {
-  const newest = new Map<string, T>();
-  const skipped: T[] = [];
-  for (const segment of segments) {
-    if (live && live.label !== undefined && segment.ino === live.ino && segment.label === live.label) {
-      skipped.push(segment);
-      continue;
-    }
-    const key = `${segment.ino}\0${segment.label}`;
-    const current = newest.get(key);
-    if (!current) newest.set(key, segment);
-    else if (segment.mtimeMs > current.mtimeMs || (segment.mtimeMs === current.mtimeMs && segment.bytes > current.bytes)) {
-      skipped.push(current);
-      newest.set(key, segment);
-    } else skipped.push(segment);
+): { counted: T[]; ambiguous: T[] } {
+  const byInode = new Map<string, T[]>();
+  for (const segment of segments) byInode.set(segment.ino, [...(byInode.get(segment.ino) ?? []), segment]);
+  const counted: T[] = [];
+  const ambiguous: T[] = [];
+  for (const group of byInode.values()) {
+    const [only] = group;
+    const liveHead = (segment: T): boolean => live !== null && live.label !== undefined && segment.ino === live.ino && segment.label === live.label;
+    if (group.length === 1 && !liveHead(only!)) counted.push(only!);
+    else ambiguous.push(...group);
   }
-  return { counted: [...newest.values()], skipped };
+  return { counted, ambiguous };
 }
