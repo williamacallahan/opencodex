@@ -289,6 +289,9 @@ export async function prepareResponsesRequest(
       : body && typeof body === "object" ? (body as { model?: unknown }).model : undefined);
   options.clientModelLabel ??= clientFacingModelLabel(originalSelector);
   redactHostedImageDisplayPaths(body);
+  // Compaction recovery replays the caller's body: before the operator compaction override below
+  // replaces its model or injects effort, and before any selector normalization.
+  options.onRequestBodyAsSent?.(body);
   observeCacheDiagnosticInbound(
     logCtx,
     body,
@@ -320,7 +323,6 @@ export async function prepareResponsesRequest(
   // concrete provider/model, so neither site below may rewrite or re-resolve it. It keeps the phase
   // through `options.memoryModelPhase` instead, which is what applies the phase effort.
   const memoryModelApplies = memoryModelTarget !== undefined && !concreteSelection;
-  options.onRequestBodyAsSent?.(body);
   // An effort row naming a table-less combo (`combo/x--high`) must reach the combo dispatcher
   // as its base id, so the selector is normalized here, before comboIdFromRawBody reads model.
   const comboRows = !concreteSelection && body && typeof body === "object" && !Array.isArray(body)
@@ -467,6 +469,13 @@ export async function prepareResponsesRequest(
       // The original request body was accepted above. Combo children are synthetic
       // replays and must not repeat the caller-owned timeout transition.
       onRequestBodyRead: undefined,
+      // A combo keeps its failures inside the combo: no child may snapshot a body, register a
+      // route, or report events or sends to the parent's compaction recovery. Completion
+      // callbacks still flow through.
+      onRequestBodyAsSent: undefined,
+      onCompactionRecoveryRoute: undefined,
+      onCompactionRecoveryAdapterEvent: undefined,
+      onCompactionRecoverySendsReported: undefined,
     });
   }
   let unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(

@@ -103,6 +103,7 @@ export async function runWithCompactionRecovery(
   }
   let snapshot: Record<string, unknown> | undefined;
   let snapshotBytes = 0;
+  let snapshotObserved = false;
   let sourceRoute: RouteResult | undefined;
   let partialOutput = false;
   let replayUnsafe = false;
@@ -123,6 +124,9 @@ export async function runWithCompactionRecovery(
     },
     onRequestBodyAsSent(body) {
       options.onRequestBodyAsSent?.(body);
+      // One snapshot per request: a later caller can neither replace it nor charge bytes twice.
+      if (snapshotObserved) return;
+      snapshotObserved = true;
       if (!record(body) || !Array.isArray(body.input) || typeof body.model !== "string"
         || !body.input.some(item => record(item) && item.type === "compaction_trigger") || !portableBody(body)) return;
       const users = extractCompactUserMessages(body.input);

@@ -2,6 +2,7 @@
   "responses-forward-client-headers-live.test.ts": "responses",
   "gateway-row-attribution-live.test.ts": "responses",
   "decision-call-attribution.test.ts": "responses",
+  "compaction-recovery-isolation.test.ts": "responses",
   "pool-retry-client-metadata.test.ts": "responses",
   "chat-inbound-tool-strict-defaults.test.ts": "responses",
   "responses-direct-chat-tool-choice.test.ts": "responses",
