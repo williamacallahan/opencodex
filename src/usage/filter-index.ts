@@ -935,29 +935,50 @@ function scheduleRetiredGenerationReclaim(dir: string, path: string): void {
     reclaimAgain = true;
     return;
   }
-  const run: { path: string; promise: Promise<void> } = {
-    path,
-    promise: new Promise<void>(resolve => setTimeout(resolve, 0))
-      .then(() => reclaimRetiredGenerations(dir, path))
-      .catch(error => {
-        console.warn(`[usage] retired usage index rows could not be reclaimed yet: ${error instanceof Error ? error.message : String(error)}`);
-      })
-      .finally(() => {
-        if (reclaimRun !== run) return;
-        reclaimRun = null;
-        if (reclaimAgain) {
-          reclaimAgain = false;
-          scheduleRetiredGenerationReclaim(dir, path);
-        }
-      }),
-  };
+  const run: { path: string; promise: Promise<void> } = { path, promise: Promise.resolve() };
+  run.promise = new Promise<void>(resolve => setTimeout(resolve, 0))
+    .then(() => reclaimUntilDone(dir, path, () => reclaimRun === run))
+    .catch(error => {
+      console.warn(`[usage] retired usage index rows could not be reclaimed yet: ${error instanceof Error ? error.message : String(error)}`);
+    })
+    .finally(() => {
+      if (reclaimRun !== run) return;
+      reclaimRun = null;
+      if (reclaimAgain) {
+        reclaimAgain = false;
+        scheduleRetiredGenerationReclaim(dir, path);
+      }
+    });
   reclaimRun = run;
+}
+
+const RECLAIM_BUSY_FIRST_DELAY_MS = 50;
+const RECLAIM_BUSY_MAX_DELAY_MS = 2_000;
+
+/**
+ * Another writer holding the index lock is transient: wait with capped backoff and try again, so
+ * the backlog drains after the lock is released without waiting for the next index read. The
+ * connection is closed and no transaction is open during the wait.
+ */
+async function reclaimUntilDone(dir: string, path: string, current: () => boolean): Promise<void> {
+  for (let delay = RECLAIM_BUSY_FIRST_DELAY_MS; current(); delay = Math.min(delay * 2, RECLAIM_BUSY_MAX_DELAY_MS)) {
+    try {
+      await reclaimRetiredGenerations(dir, path);
+      return;
+    } catch (error) {
+      if (!isBusyError(error)) throw error;
+      await new Promise<void>(resolve => setTimeout(resolve, delay).unref?.());
+    }
+  }
 }
 
 async function reclaimRetiredGenerations(dir: string, path: string): Promise<void> {
   if (getConfigDir() !== dir || !existsSync(path)) return;
   const db = openIndexForWrite(dir, path);
   try {
+    // A held lock fails at once and is retried by the caller off the event loop, never waited
+    // for here: busy_timeout sleeps synchronously.
+    db.exec("PRAGMA busy_timeout = 0");
     for (;;) {
       const { candidates, orphanLease } = retiredGenerationCandidates(db, metaText(db, META_KEYS.generation));
       if (candidates.length === 0 && !orphanLease) return;
@@ -973,8 +994,10 @@ async function reclaimRetiredGenerations(dir: string, path: string): Promise<voi
             const rows = db.query(
               "DELETE FROM usage_rows WHERE generation = ? AND byte_offset IN (SELECT byte_offset FROM usage_rows WHERE generation = ? ORDER BY byte_offset LIMIT ?)",
             ).run(generation, generation, RECLAIM_BATCH_ROWS).changes;
+            // One ledger row can carry thousands of attempt attributions, so this batch is bounded
+            // by attribution rows (the table's whole key), not by ledger offsets.
             const attributions = db.query(
-              "DELETE FROM usage_attributions WHERE generation = ? AND byte_offset IN (SELECT byte_offset FROM usage_attributions WHERE generation = ? ORDER BY byte_offset LIMIT ?)",
+              "DELETE FROM usage_attributions WHERE generation = ? AND (byte_offset, provider, model) IN (SELECT byte_offset, provider, model FROM usage_attributions WHERE generation = ? ORDER BY byte_offset, provider, model LIMIT ?)",
             ).run(generation, generation, RECLAIM_BATCH_ROWS).changes;
             if (rows === 0 && attributions === 0) {
               db.query("DELETE FROM usage_filter_index_writers WHERE generation = ?").run(generation);

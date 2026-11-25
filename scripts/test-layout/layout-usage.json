@@ -6,6 +6,7 @@
   "usage-client-attribution.test.ts": "usage",
   "token-breakdown.test.ts": "usage",
   "usage-filter-index.test.ts": "usage",
+  "usage-filter-index-reclaim.test.ts": "usage",
   "usage-filter-paging.test.ts": "usage",
   "request-log.test.ts": "usage",
   "request-log-normalization.test.ts": "usage",
