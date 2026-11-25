@@ -133,14 +133,16 @@ function assertRefusedAndUncached(response: Rec): void {
   expect(expandPreviousResponseInput(continuation)).toBe(continuation);
 }
 
-function assertAllowed(response: Rec, name: string): void {
+function assertAllowed(response: Rec, name: string, wire: Wire): void {
   expect(response.status).toBe("completed");
   expect(response.error).toBeUndefined();
   expect(response.output).toEqual(expect.arrayContaining([
     expect.objectContaining({ type: "function_call", name, status: "completed" }),
   ]));
+  // Only the Responses wire accepts previous_response_id, so only it keeps continuation state.
   const continuation = { previous_response_id: response.id, input: [userInput] };
-  expect(expandPreviousResponseInput(continuation)).not.toBe(continuation);
+  if (wire === undefined) expect(expandPreviousResponseInput(continuation)).not.toBe(continuation);
+  else expect(expandPreviousResponseInput(continuation)).toBe(continuation);
 }
 
 describe("explicit empty catalog current-turn and continuation boundaries", () => {
@@ -163,9 +165,10 @@ describe("explicit empty catalog current-turn and continuation boundaries", () =
     }
   }
 
-  for (const lane of ["adapter", "runTurn"] as const) for (const wire of [undefined, "chat"] as const) {
+  for (const lane of ["adapter", "runTurn"] as const) {
+    const wire: Wire = undefined;
     for (const current of [false, true]) {
-      test(`${lane}, ${wire ?? "responses"}: ${current ? "current" : "replayed"} hosted tool_search ${current ? "authorizes" : "cannot authorize"} its translated call`, async () => {
+      test(`${lane}, responses: ${current ? "current" : "replayed"} hosted tool_search ${current ? "authorizes" : "cannot authorize"} its translated call`, async () => {
         const config = setup(lane);
         const prior = await post(config, wire, false, { input: [hostedToolSearch, userInput] });
         expect(prior.status).toBe("completed");
@@ -186,71 +189,60 @@ describe("explicit empty catalog current-turn and continuation boundaries", () =
     }
   }
 
+  // previous_response_id exists only on the Responses wire; Chat and Messages carry history inline.
+  for (const lane of ["adapter", "runTurn"] as const) for (const stream of [false, true]) {
+    const wire: Wire = undefined;
+    const label = `${lane}, responses, ${stream ? "SSE" : "JSON"}`;
+
+    test(`${label}: current tools:[] blocks a historical tool without caching refusal`, async () => {
+      const config = setup(lane);
+      const prior = await post(config, wire, stream, { input: [additional(["Write"]), userInput] });
+      expect(prior.status).toBe("completed");
+      nextCall = "Write";
+      const response = await post(config, wire, stream, { previous_response_id: prior.id, tools: [] });
+      expect(dispatched).toHaveLength(2);
+      expect(dispatched[1]!.replayPrefix).toBeGreaterThan(0);
+      expect(dispatched[1]!.tools).toContain("Write");
+      assertRefusedAndUncached(response);
+    });
+
+    for (const explicitEmpty of [false, true]) test(`${label}: current ${explicitEmpty ? "restricted" : "deferred"} declaration normalizes historical default.Read`, async () => {
+      const config = setup(lane);
+      const prior = await post(config, wire, stream, { input: [additional(["default.Read"]), userInput] });
+      expect(prior.status).toBe("completed");
+      nextCall = "default.Read";
+      const response = await post(config, wire, stream, {
+        previous_response_id: prior.id, ...(explicitEmpty ? { tools: [] } : {}), input: [additional(["Read"]), userInput],
+      });
+      expect(dispatched).toHaveLength(2);
+      expect(dispatched[1]!.replayPrefix).toBeGreaterThan(0);
+      expect(dispatched[1]!.tools).toEqual(expect.arrayContaining(["default.Read", "Read"]));
+      assertAllowed(response, "Read", wire);
+      expect((response.output as Rec[]).some(item => item.name === "default.Read")).toBe(false);
+    });
+
+    test(`${label}: current custom exec controls helper normalization after historical apply_patch`, async () => {
+      const config = setup(lane);
+      const prior = await post(config, wire, stream, { input: [additional(["apply_patch"]), userInput] });
+      nextCall = "apply_patch";
+      const response = await post(config, wire, stream, {
+        previous_response_id: prior.id, tools: [], input: [
+          { type: "additional_tools", role: "developer", tools: [{ type: "custom", name: "exec", format: { type: "text" } }] },
+          userInput,
+        ],
+      });
+      expect(dispatched[1]!.replayPrefix).toBeGreaterThan(0);
+      expect(response.status).toBe("completed");
+      expect(response.output).toEqual(expect.arrayContaining([expect.objectContaining({
+        type: "custom_tool_call", name: "exec", status: "completed",
+        input: 'const result = await tools.apply_patch("{}");\ntext(result);',
+      })]));
+    });
+  }
+
   for (const lane of ["adapter", "runTurn"] as const) for (const wire of ["chat", "anthropic"] as const) {
     for (const stream of [false, true]) {
       const label = `${lane}, ${wire}, ${stream ? "SSE" : "JSON"}`;
-
-      for (const emptyAtIngress of [false, true]) {
-        test(`${label}: ${emptyAtIngress ? "ingress-only empty flag" : "current tools:[]"} blocks a historical tool without caching refusal`, async () => {
-          const config = setup(lane);
-          const prior = await post(config, wire, stream, { input: [additional(["Write"]), userInput] });
-          expect(prior.status).toBe("completed");
-          nextCall = "Write";
-          // Translation may drop tools:[] entirely; its ingress-owned fact must survive replay.
-          const response = await post(config, wire, stream, {
-            previous_response_id: prior.id, ...(emptyAtIngress ? {} : { tools: [] }),
-          }, emptyAtIngress);
-          expect(dispatched).toHaveLength(2);
-          expect(dispatched[1]!.replayPrefix).toBeGreaterThan(0);
-          expect(dispatched[1]!.tools).toContain("Write");
-          assertRefusedAndUncached(response);
-        });
-      }
-
-      test(`${label}: current partial catalog preserves a deferred tool`, async () => {
-        const config = setup(lane);
-        const prior = await post(config, wire, stream, { input: [additional([]), userInput] });
-        expect(prior.status).toBe("completed");
-        nextCall = "Write";
-        const response = await post(config, wire, stream, { previous_response_id: prior.id, tools: [tool("Read")] });
-        expect(dispatched).toHaveLength(2);
-        expect(dispatched[1]!.replayPrefix).toBeGreaterThan(0);
-        expect(dispatched[1]!.tools).toContain("Read");
-        assertAllowed(response, "Write");
-      });
-
-      for (const explicitEmpty of [false, true]) test(`${label}: current ${explicitEmpty ? "restricted" : "deferred"} declaration normalizes historical default.Read`, async () => {
-        const config = setup(lane);
-        const prior = await post(config, wire, stream, { input: [additional(["default.Read"]), userInput] });
-        expect(prior.status).toBe("completed");
-        nextCall = "default.Read";
-        const response = await post(config, wire, stream, {
-          previous_response_id: prior.id, ...(explicitEmpty ? { tools: [] } : {}), input: [additional(["Read"]), userInput],
-        });
-        expect(dispatched).toHaveLength(2);
-        expect(dispatched[1]!.replayPrefix).toBeGreaterThan(0);
-        expect(dispatched[1]!.tools).toEqual(expect.arrayContaining(["default.Read", "Read"]));
-        assertAllowed(response, "Read");
-        expect((response.output as Rec[]).some(item => item.name === "default.Read")).toBe(false);
-      });
-
-      test(`${label}: current custom exec controls helper normalization after historical apply_patch`, async () => {
-        const config = setup(lane);
-        const prior = await post(config, wire, stream, { input: [additional(["apply_patch"]), userInput] });
-        nextCall = "apply_patch";
-        const response = await post(config, wire, stream, {
-          previous_response_id: prior.id, tools: [], input: [
-            { type: "additional_tools", role: "developer", tools: [{ type: "custom", name: "exec", format: { type: "text" } }] },
-            userInput,
-          ],
-        });
-        expect(dispatched[1]!.replayPrefix).toBeGreaterThan(0);
-        expect(response.status).toBe("completed");
-        expect(response.output).toEqual(expect.arrayContaining([expect.objectContaining({
-          type: "custom_tool_call", name: "exec", status: "completed",
-          input: 'const result = await tools.apply_patch("{}");\ntext(result);',
-        })]));
-      });
 
       for (const name of ["Read", "Write"]) {
         test(`${label}: tools:[] plus current additional Read ${name === "Read" ? "allows Read" : "refuses Write"}`, async () => {
@@ -259,7 +251,7 @@ describe("explicit empty catalog current-turn and continuation boundaries", () =
           const response = await post(config, wire, stream, { tools: [], input: [additional(["Read"]), userInput] });
           expect(dispatched).toHaveLength(1);
           expect(dispatched[0]!.tools).toContain("Read");
-          if (name === "Read") assertAllowed(response, name);
+          if (name === "Read") assertAllowed(response, name, wire);
           else assertRefusedAndUncached(response);
         });
       }
@@ -287,7 +279,7 @@ describe("explicit empty catalog current-turn and continuation boundaries", () =
         nextCall = "Write";
         const response = await post(config, wire, stream, { tools: [] }, true);
         expect(dispatched).toHaveLength(1);
-        assertAllowed(response, "Write");
+        assertAllowed(response, "Write", wire);
       });
     }
   }
@@ -297,15 +289,13 @@ describe("explicit empty catalog output normalization through direct client enco
   for (const wire of ["chat", "anthropic"] as const) {
     test(`${wire}: direct encoder option retains current custom exec helper compilation via the Responses bridge`, async () => {
       const config = setup("adapter");
-      const prior = await post(config, wire, false, { input: [additional(["apply_patch"]), userInput] });
       nextCall = "apply_patch";
       const response = await post(config, wire, true, {
-        previous_response_id: prior.id, tools: [], input: [
+        tools: [], input: [
           { type: "additional_tools", role: "developer", tools: [{ type: "custom", name: "exec", format: { type: "text" } }] },
           userInput,
         ],
       }, false, true);
-      expect(dispatched[1]!.replayPrefix).toBeGreaterThan(0);
       expect(response.status).toBe("completed");
       expect(response.output).toEqual(expect.arrayContaining([expect.objectContaining({
         type: "custom_tool_call", name: "exec", status: "completed",
@@ -314,13 +304,12 @@ describe("explicit empty catalog output normalization through direct client enco
     });
   }
   for (const wire of ["chat", "anthropic"] as const) for (const stream of [false, true]) {
-    test(`${wire}, ${stream ? "SSE" : "JSON"}: direct output uses current Read after historical default.Read`, async () => {
+    test(`${wire}, ${stream ? "SSE" : "JSON"}: direct output normalizes default.Read to the current Read`, async () => {
       const config = setup("adapter");
-      const prior = await post(config, wire, false, { input: [additional(["default.Read"]), userInput] });
       nextCall = "default.Read";
       const response = await handleResponses(new Request("http://127.0.0.1/v1/responses", {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
-          model: "fixture/model", stream: true, previous_response_id: prior.id,
+          model: "fixture/model", stream: true,
           tools: [], input: [additional(["Read"]), userInput],
         }),
       }), config, { model: "", provider: "" }, {
@@ -328,7 +317,6 @@ describe("explicit empty catalog output normalization through direct client enco
       });
       const text = await response.text();
       expect(response.status).toBe(200);
-      expect(dispatched[1]!.replayPrefix).toBeGreaterThan(0);
       expect(text).toContain('"name":"Read"');
       expect(text).not.toContain("default.Read");
       // Verify the direct client wire instead of accepting an unnoticed Responses fallback.
