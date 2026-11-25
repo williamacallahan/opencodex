@@ -629,9 +629,10 @@ test("a read that completes after the deadline is not accepted", async () => {
 
 test("the deadline ends and cancels a read whose body never finishes", async () => {
   let cancelled = false;
+  let stalled: Response | undefined;
   const deps: UsageCompareDeps = {
     // The stream ignores the request's signal, so only the reader's own cancel can release it.
-    ...localDeps(async () => new Response(new ReadableStream({
+    ...localDeps(async () => stalled = new Response(new ReadableStream({
       start(controller) { controller.enqueue(new TextEncoder().encode("{")); },
       cancel() { cancelled = true; },
     }), { headers: { "content-type": "application/json" } })),
@@ -643,4 +644,6 @@ test("the deadline ends and cancels a read whose body never finishes", async () 
   expect(result.errors).toContain("time limit");
   expect(Date.now() - started).toBeLessThan(1_500);
   expect(cancelled).toBe(true);
+  // The reader that consumed it is released, not left holding the stream.
+  expect(stalled!.body!.locked).toBe(false);
 });

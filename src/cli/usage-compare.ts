@@ -313,11 +313,16 @@ async function jsonWithinDeadline(response: Response, budget: CompareBudget): Pr
   if (!response.body) return response.json();
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
-  const text = await withinDeadline((async () => {
-    for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) chunks.push(chunk.value);
-    return Buffer.concat(chunks).toString("utf8");
-  })(), budget, () => { void reader.cancel().catch(() => {}); });
-  return JSON.parse(text);
+  try {
+    const text = await withinDeadline((async () => {
+      for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) chunks.push(chunk.value);
+      return Buffer.concat(chunks).toString("utf8");
+    })(), budget, () => { void reader.cancel().catch(() => {}); });
+    return JSON.parse(text);
+  } finally {
+    // Released on every exit; a read still pending after the cancel is rejected by the release.
+    reader.releaseLock();
+  }
 }
 
 /** The proxy or hub is still building this window's report; ask again after `retryAfterSeconds`. */
