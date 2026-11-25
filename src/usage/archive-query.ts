@@ -1,13 +1,13 @@
 /**
- * Usage totals for a window inside the archive, answered only from the hourly totals files.
+ * The archive as reads see it: its counted segments, which of them may overlap a window, and their
+ * totals files, loaded one at a time.
  *
  * The hub serves inference on the same event loop, so no request turn here is proportional to the
  * archive's size. The directory listing is cached for a few seconds and re-listed only when the
- * directory's mtime moved; only segments that may overlap the window, judged from the first-row time
- * in their name and their mtime, have their totals loaded, asynchronously and one file per turn;
- * parsed totals sit in a cache bounded by bucket count with least-recently-used eviction; and the
- * aggregation yields every few thousand buckets. Reading never builds: a segment without current
- * totals is reported `pending` and queued, and one whose build failed is reported `failed` and left.
+ * directory's mtime moved; only segments that may overlap the window have their totals loaded,
+ * asynchronously and one file per turn; and parsed totals sit in a cache bounded by bucket count with
+ * least-recently-used eviction. A read keeps a segment's span and hour index, never its buckets.
+ * Reading never builds: a segment without current totals is queued, and one whose build failed is left.
  */
 import { closeSync, fstatSync, openSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
@@ -26,31 +26,23 @@ import {
   type LiveLedgerHead,
 } from "./archive-segments";
 import {
-  addArchiveSums,
-  ARCHIVE_DIMENSIONS,
   archiveTotalsBuildFailure,
-  blankArchiveSums,
   buildArchiveTotalsInBackground,
-  perArchiveDimension,
   readArchiveTotals,
   type ArchiveBuildFailure,
-  type ArchiveDimension,
-  type ArchiveSums,
+  type ArchiveHourOffset,
   type ArchiveTotalsFile,
 } from "./archive-totals";
 import { exactFileIdentity, usageLogPath } from "./log";
 
-export const ARCHIVE_BREAKDOWN_ROWS = 200;
 /** A listing this young is served without looking at the directory again. */
 const LISTING_TTL_MS = 5_000;
 /** Even with an unchanged directory mtime (coarse on some filesystems), re-list at least this often. */
 const LISTING_MAX_AGE_MS = 60_000;
 /** Parsed buckets kept across requests: twenty segments at their bucket cap, a few tens of MB of heap. */
 export const TOTALS_CACHE_MAX_BUCKETS = 100_000;
-/** Buckets summed between two yields to the event loop. */
-const AGGREGATION_SLICE_BUCKETS = 2_000;
 
-const yieldToEventLoop = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0));
+export const yieldToEventLoop = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0));
 
 /** A counted segment as the listing knows it: name, path, length, mtime, and whether a totals file exists. */
 export interface ArchiveSegmentEntry extends ArchiveSegmentName {
@@ -68,11 +60,26 @@ export interface ArchiveListing {
   liveLedgerSince: number | null;
 }
 
-/** A segment in a window, with its totals when they are built and current. */
+/** What a read keeps of a built totals file once its buckets are summed: never the buckets. */
+export interface ArchiveSegmentBuilt {
+  firstRowAt: number | null;
+  lastRowAt: number | null;
+  hourOffsets: ArchiveHourOffset[];
+}
+
+/** A segment in a window: its span and hour index when its totals are built and current. */
 export interface ArchiveSegmentState extends ArchiveSegmentEntry {
-  totals: ArchiveTotalsFile | undefined;
+  built: ArchiveSegmentBuilt | undefined;
   failure: ArchiveBuildFailure | undefined;
 }
+
+/**
+ * How long before its first row's timestamp a row can be appended. A row is stamped when its request
+ * starts and appended when it completes, so a segment named by its first row can hold rows stamped
+ * earlier. No hub setting bounds a request's total duration (streams are bounded by idle and connect
+ * timeouts, not wall clock), so this is one hour, the slack the row reads already allow.
+ */
+export const ARCHIVE_APPEND_SLACK_MS = 60 * 60 * 1000;
 
 function isMissing(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
@@ -80,7 +87,12 @@ function isMissing(error: unknown): boolean {
 
 let liveHeadCache: { key: string; head: LiveLedgerHead; since: number | null } | null = null;
 
-/** The live ledger's inode and head row, read again only when the ledger file itself was replaced. */
+/**
+ * The live ledger's inode and head row, read again when the ledger file was replaced. The key is the
+ * ledger identity `usageLogIdentityKey` uses (device, inode, birth time), since a filesystem can give
+ * a new ledger a retired one's inode, and the cache is also dropped on every in-process archive write,
+ * which every trim makes: a stale head label would mark a published segment as unpublished.
+ */
 function liveLedgerHead(): { head: LiveLedgerHead; since: number | null } | null {
   let fd: number;
   try {
@@ -91,9 +103,10 @@ function liveLedgerHead(): { head: LiveLedgerHead; since: number | null } | null
   }
   try {
     const identity = exactFileIdentity(fd);
-    const size = Number(fstatSync(fd).size);
-    const key = `${identity.dev}\0${identity.ino}`;
-    // A trim replaces the file, so the head changes only with the inode; an empty ledger can still gain one.
+    const opened = fstatSync(fd);
+    const size = Number(opened.size);
+    const key = `${identity.dev}\0${identity.ino}\0${Number(opened.birthtimeMs)}\0${archiveChangeGeneration()}`;
+    // An empty ledger can still gain a head row, so only a found one is kept.
     if (liveHeadCache?.key === key && liveHeadCache.since !== null) return liveHeadCache;
     liveHeadCache = { key, head: { ino: identity.ino, label: ledgerHeadLabel(fd, size) }, since: firstTimedRow(fd, size)?.getTime() ?? null };
     return liveHeadCache;
@@ -167,26 +180,38 @@ export async function readArchiveListing(configDir = getConfigDir()): Promise<Ar
   return { segments: counted, skipped, liveLedgerSince: live?.since ?? null };
 }
 
+/** First and last row of every totals file read, kept apart from the buckets so coverage stays exact. */
+const spanCache = new Map<string, { totalsMtimeMs: number; firstRowAt: number | null; lastRowAt: number | null }>();
+
+/** The exact span of a segment whose current totals file has been read, else undefined. */
+export function knownSpan(entry: ArchiveSegmentEntry): { firstRowAt: number | null; lastRowAt: number | null } | undefined {
+  const known = spanCache.get(totalsPathOf(entry));
+  return known !== undefined && known.totalsMtimeMs === entry.totalsMtimeMs ? known : undefined;
+}
+
 /**
- * Whether a segment may hold rows in `[since, until)`, from its listing alone: its first row is in
- * its name (an untimed name gives no lower bound) and its last row is no later than its mtime, the
- * trim time. Totals, once loaded, give the exact span.
+ * Whether a segment may hold rows in `[since, until)`, from what is known without reading its
+ * buckets: the exact span once its totals have been read; otherwise the first-row time in its name
+ * less {@link ARCHIVE_APPEND_SLACK_MS} (an untimed name gives no lower bound), and its mtime, the trim
+ * time, as the last row's upper bound.
  */
-function entryMayOverlap(entry: ArchiveSegmentEntry, since: number, until: number): boolean {
-  return (archiveLabelTime(entry.label) ?? Number.NEGATIVE_INFINITY) < until && entry.mtimeMs >= since;
+export function entryMayOverlap(entry: ArchiveSegmentEntry, since: number, until: number): boolean {
+  const span = knownSpan(entry);
+  if (span) return span.firstRowAt !== null && span.lastRowAt !== null && span.firstRowAt < until && span.lastRowAt >= since;
+  const labelled = archiveLabelTime(entry.label);
+  const lowerBound = labelled === undefined ? Number.NEGATIVE_INFINITY : labelled - ARCHIVE_APPEND_SLACK_MS;
+  return lowerBound < until && entry.mtimeMs >= since;
 }
 
 export function segmentOverlaps(state: ArchiveSegmentState, since: number, until: number): boolean {
-  if (!state.totals) return entryMayOverlap(state, since, until);
-  const { firstRowAt, lastRowAt } = state.totals;
+  if (!state.built) return entryMayOverlap(state, since, until);
+  const { firstRowAt, lastRowAt } = state.built;
   return firstRowAt !== null && lastRowAt !== null && firstRowAt < until && lastRowAt >= since;
 }
 
 /** Least-recently-used parsed totals, keyed by totals path and bounded by their bucket count. */
 const totalsCache = new Map<string, { totalsMtimeMs: number; bytes: number; totals: ArchiveTotalsFile }>();
 let cachedBuckets = 0;
-/** First and last row of every totals file seen, kept apart from the buckets so coverage stays exact. */
-const spanCache = new Map<string, { totalsMtimeMs: number; firstRowAt: number | null; lastRowAt: number | null }>();
 
 /** Test seam: the number of totals files read from disk, to prove a window reads only its own segments. */
 export const archiveTotalsReads = { count: 0 };
@@ -199,7 +224,8 @@ function evictTotals(): void {
   }
 }
 
-async function loadTotals(entry: ArchiveSegmentEntry): Promise<ArchiveTotalsFile | undefined> {
+/** A segment's current totals, from the cache or one asynchronous read. */
+export async function loadTotals(entry: ArchiveSegmentEntry): Promise<ArchiveTotalsFile | undefined> {
   if (entry.totalsMtimeMs === undefined) return undefined;
   const key = totalsPathOf(entry);
   const cached = totalsCache.get(key);
@@ -222,16 +248,24 @@ async function loadTotals(entry: ArchiveSegmentEntry): Promise<ArchiveTotalsFile
   return totals;
 }
 
+/** What a read keeps of one segment: its span and hour index, never its buckets. */
+export function segmentState(entry: ArchiveSegmentEntry, totals: ArchiveTotalsFile | undefined): ArchiveSegmentState {
+  return {
+    ...entry,
+    built: totals ? { firstRowAt: totals.firstRowAt, lastRowAt: totals.lastRowAt, hourOffsets: totals.hourOffsets } : undefined,
+    failure: totals ? undefined : archiveTotalsBuildFailure(entry.path),
+  };
+}
+
 /**
- * The counted segments that may overlap `[since, until)`, with their totals loaded: only those files
- * are read, one per event-loop turn.
+ * The counted segments that may overlap `[since, until)`, with their spans and hour indexes: only
+ * those totals files are read, one per event-loop turn, and no buckets are kept.
  */
 export async function loadWindowSegments(listing: ArchiveListing, since: number, until: number): Promise<ArchiveSegmentState[]> {
   const states: ArchiveSegmentState[] = [];
   for (const entry of listing.segments) {
     if (!entryMayOverlap(entry, since, until)) continue;
-    const totals = await loadTotals(entry);
-    states.push({ ...entry, totals, failure: totals ? undefined : archiveTotalsBuildFailure(entry.path) });
+    states.push(segmentState(entry, await loadTotals(entry)));
     await yieldToEventLoop();
   }
   return states;
@@ -239,127 +273,41 @@ export async function loadWindowSegments(listing: ArchiveListing, since: number,
 
 /** Queue builds for segments without totals, except those whose build already failed in this process. */
 export function queueMissingTotals(states: readonly ArchiveSegmentState[]): void {
-  for (const state of states) if (!state.totals && !state.failure) buildArchiveTotalsInBackground(state.path);
+  for (const state of states) if (!state.built && !state.failure) buildArchiveTotalsInBackground(state.path);
 }
 
 /**
- * Build the totals of every counted segment that lacks current ones, newest first since recent days
- * are asked about most. Each goes through the build queue, which runs one at a time with an idle gap
- * between builds; one that fails is remembered and not queued again until the process restarts.
+ * Build the totals of at most `limit` counted segments that lack current ones, newest first since
+ * recent days are asked about most, and wait for them. Each goes through the paced build queue; one
+ * that fails is remembered and not queued again until the process restarts. Returns how many
+ * segments still lack totals, so a caller can schedule the next pass instead of queueing everything.
  */
-export async function buildMissingArchiveTotals(configDir = getConfigDir()): Promise<void> {
+export async function buildMissingArchiveTotals(limit: number, configDir = getConfigDir()): Promise<number> {
   const listing = await readArchiveListing(configDir);
+  const missing: ArchiveSegmentEntry[] = [];
   for (const entry of [...listing.segments].reverse()) {
-    if (await loadTotals(entry)) continue;
-    buildArchiveTotalsInBackground(entry.path);
+    // A totals file that exists is checked against its segment once; spans are then known for coverage.
+    if (entry.totalsMtimeMs !== undefined && (knownSpan(entry) || await loadTotals(entry))) continue;
+    if (!archiveTotalsBuildFailure(entry.path)) missing.push(entry);
     await yieldToEventLoop();
   }
-}
-
-export type ArchiveFilter = Partial<Record<ArchiveDimension, string>>;
-
-export interface ArchiveBreakdown {
-  rows: Array<{ key: string } & ArchiveSums>;
-  /** Keys left out after the first {@link ARCHIVE_BREAKDOWN_ROWS}. */
-  truncated: number;
-}
-
-export interface ArchiveTotalsAnswer {
-  summary: ArchiveSums;
-  segmentsInRange: number;
-  pendingSegments: ArchiveSegmentState[];
-  failedSegments: ArchiveSegmentState[];
-  unparsableRows: number;
-  earliestRowAt: number | null;
-  latestRowAt: number | null;
-  /** Some segment's span came from its name and mtime because its totals have not been read yet. */
-  spanApproximate: boolean;
-  /** Every hour of the window that has rows, oldest first; the window itself bounds its length. */
-  byHour: Array<{ key: string } & ArchiveSums>;
-  byDimension: { [dimension in ArchiveDimension]: ArchiveBreakdown };
-}
-
-function tally<K>(map: Map<K, ArchiveSums>, key: K, sums: ArchiveSums): void {
-  let current = map.get(key);
-  if (!current) {
-    current = blankArchiveSums();
-    map.set(key, current);
-  }
-  addArchiveSums(current, sums);
-}
-
-function topRows(map: Map<string, ArchiveSums>): ArchiveBreakdown {
-  const rows = [...map].map(([key, sums]) => ({ key, ...sums }))
-    .sort((left, right) => right.requests - left.requests || right.totalTokens - left.totalTokens || left.key.localeCompare(right.key));
-  return { rows: rows.slice(0, ARCHIVE_BREAKDOWN_ROWS), truncated: Math.max(0, rows.length - ARCHIVE_BREAKDOWN_ROWS) };
+  const batch = missing.slice(0, limit);
+  await Promise.all(batch.map(entry => buildArchiveTotalsInBackground(entry.path)));
+  return missing.length - batch.length;
 }
 
 /** The archive's whole span, exact where a totals file has been read and from names and mtimes where not. */
-function archiveSpan(listing: ArchiveListing): { earliestRowAt: number | null; latestRowAt: number | null; approximate: boolean } {
+export function archiveSpan(listing: ArchiveListing): { earliestRowAt: number | null; latestRowAt: number | null; approximate: boolean } {
   let earliestRowAt: number | null = null;
   let latestRowAt: number | null = null;
   let approximate = false;
   for (const entry of listing.segments) {
-    const known = spanCache.get(totalsPathOf(entry));
-    const exact = known !== undefined && known.totalsMtimeMs === entry.totalsMtimeMs;
-    const first = exact ? known.firstRowAt : archiveLabelTime(entry.label) ?? null;
-    const last = exact ? known.lastRowAt : entry.mtimeMs;
-    approximate ||= !exact;
+    const known = knownSpan(entry);
+    const first = known ? known.firstRowAt : archiveLabelTime(entry.label) ?? null;
+    const last = known ? known.lastRowAt : entry.mtimeMs;
+    approximate ||= !known;
     if (first !== null) earliestRowAt = Math.min(earliestRowAt ?? first, first);
     if (last !== null) latestRowAt = Math.max(latestRowAt ?? last, last);
   }
   return { earliestRowAt, latestRowAt, approximate };
-}
-
-/** Sum the buckets of every window segment whose hour lies in `[since, until)` and matches the filter. */
-export async function answerArchiveTotals(
-  listing: ArchiveListing,
-  states: readonly ArchiveSegmentState[],
-  since: number,
-  until: number,
-  filter: ArchiveFilter,
-): Promise<ArchiveTotalsAnswer> {
-  const summary = blankArchiveSums();
-  const byHour = new Map<number, ArchiveSums>();
-  const byDimension = perArchiveDimension(() => new Map<string, ArchiveSums>());
-  const filters = ARCHIVE_DIMENSIONS.flatMap(dimension => filter[dimension] === undefined ? [] : [[dimension, filter[dimension]!] as const]);
-  const pendingSegments: ArchiveSegmentState[] = [];
-  const failedSegments: ArchiveSegmentState[] = [];
-  let segmentsInRange = 0;
-  let unparsableRows = 0;
-  let sinceYield = 0;
-  for (const state of states) {
-    if (!segmentOverlaps(state, since, until)) continue;
-    segmentsInRange += 1;
-    const totals = state.totals;
-    if (!totals) {
-      (state.failure ? failedSegments : pendingSegments).push(state);
-      continue;
-    }
-    unparsableRows += totals.unparsableRows;
-    for (const bucket of totals.buckets) {
-      if (++sinceYield >= AGGREGATION_SLICE_BUCKETS) {
-        sinceYield = 0;
-        await yieldToEventLoop();
-      }
-      if (bucket.hour < since || bucket.hour >= until) continue;
-      if (filters.some(([dimension, wanted]) => bucket[dimension] !== wanted)) continue;
-      addArchiveSums(summary, bucket);
-      tally(byHour, bucket.hour, bucket);
-      for (const dimension of ARCHIVE_DIMENSIONS) tally(byDimension[dimension], bucket[dimension], bucket);
-    }
-  }
-  const span = archiveSpan(listing);
-  return {
-    summary,
-    segmentsInRange,
-    pendingSegments,
-    failedSegments,
-    unparsableRows,
-    earliestRowAt: span.earliestRowAt,
-    latestRowAt: span.latestRowAt,
-    spanApproximate: span.approximate,
-    byHour: [...byHour].sort(([left], [right]) => left - right).map(([hour, sums]) => ({ key: new Date(hour).toISOString(), ...sums })),
-    byDimension: perArchiveDimension(dimension => topRows(byDimension[dimension])),
-  };
 }

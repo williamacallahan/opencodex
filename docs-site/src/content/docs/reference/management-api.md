@@ -620,22 +620,29 @@ hours, and the response's `since` and `until` state the effective bounds, `until
 Optional exact-match filters are `provider`, `model`, `harness` (the recorded client),
 `workloadLauncher` (the workload before its first `:`), `workloadSource`, `clientHost`,
 `clientAddress`, and `account` (the account log label). `harness` and `clientAddress` are
-normalized the same way as the `/api/usage` filters, and values are trimmed. An empty value, such as
+normalized the same way as the `/api/usage` filters, `provider` and `model` compare without regard to
+case as there, and values are trimmed. An empty value, such as
 `harness=`, selects rows that never recorded that dimension. An unknown or repeated parameter
 answers 400 `invalid_parameter`; a bad window answers 400 `invalid_window`.
 
 The answer comes only from precomputed hourly totals, never from the rows themselves:
 
-- `attribution` is `"final-attempt"`: a request that made several attempts, such as a retry or a
-  combo, is counted under its final attempt's provider, model, and account. `/api/usage` instead
-  attributes each attempt to its own provider and model, so those breakdowns can differ for such
-  requests; the request and token totals do not.
-- `summary` holds `requests`, `inputTokens`, `outputTokens`, `cacheReadInputTokens`,
+- `attribution` is `"per-attempt"`: like `/api/usage`, a request that made several attempts, such
+  as a failover combo or a retry on another account, counts toward each attempt's own provider,
+  model, and account, with that attempt's tokens and cost. A combo's served traffic therefore appears
+  under the provider that served it, and a Reserve send under `gpt-reserve`.
+- `summary` holds `requests`, `attemptCount`, `inputTokens`, `outputTokens`, `cacheReadInputTokens`,
   `cacheCreationInputTokens`, `totalTokens`, and `estimatedCostUsd` with its `pricedRequests`,
-  `unpricedRequests`, and `unmeteredRequests`, computed with the same rules as `/api/usage`.
+  `unpricedRequests`, and `unmeteredRequests`, computed with the same rules as `/api/usage`:
+  requests count each request once, and a `provider`, `model`, or `account` filter sums only the
+  matching attempts, as the live filter does.
 - Per archive file, each dimension keeps its first 1,000 distinct values and counts later ones as
   `(other)`, like `/api/usage`, and a file keeps at most 5,000 combinations, counting further ones
-  in an all-`(other)` entry for their hour. Totals stay exact; only the breakdown keys fold.
+  in an all-`(other)` entry for their hour. Unfiltered totals stay exact; `coverage.capped` is
+  `true` when any of this happened in the window, with `coverage.overflowRows` per dimension,
+  `coverage.foldedRows`, and `coverage.overlapRowsDropped` (multi-attempt requests whose
+  once-only count could not be recorded), because a filtered or per-dimension figure may then
+  undercount or count such a request twice.
 - `byHour` is a time series: one entry (`key`, the hour's ISO start, plus the same sums) for every
   UTC hour in the window that has rows, oldest first, never capped.
 - `byProvider`, `byModel`, `byHarness`, `byWorkloadLauncher`, `byWorkloadSource`, `byClientHost`,
@@ -649,7 +656,8 @@ The answer comes only from precomputed hourly totals, never from the rows themse
 - `coverage.pending` is `true` when an archive file in the window has no totals yet, and
   `pendingSegments` names them. The request starts their build in the background and answers with
   what is available, so a pending answer is incomplete; ask again shortly. The proxy also builds
-  missing totals in the background about a minute after it starts.
+  missing totals in the background, starting about a minute after it starts, four archive files
+  every five minutes, newest first.
 - `coverage.failed` lists archive files in the window whose totals build failed since the proxy
   started, each as `{ segment, reason }` with `reason` `segment-changed`, `io-error` (with `code`),
   or `build-error`. They are not retried until the proxy restarts, so their rows are missing from
@@ -666,13 +674,15 @@ request that waits more than five seconds for its turn answers 503 `archive_rows
 with the same redaction as `GET /api/request-history`. Each archive file is read from the first
 row of the hour before `since`, using the offsets its totals record, and up to an hour past
 `until`, so a row logged slightly out of order is still found; every row is then filtered by its
-own time. An archive file whose totals are not built yet is not read: it is listed in
-`coverage.pendingSegments` with `coverage.pending: true` and its build starts in the background.
+own time. A `provider`, `model`, or `account` filter matches a request when any of its attempts
+matches. An archive file whose totals are not built yet is not read: it is listed in
+`coverage.pendingSegments` with `coverage.pending: true`, its build starts in the background, and
+`incomplete` is `true`. Closing the request stops its read at once.
 `coverage.segments` lists each file read with the byte offset it started from (`fromByte`) and why
 its read ended (`endedBy`: `window-end`, `segment-end`, `limit`, or `deadline`). The top-level
 `endedBy` is `window-end` when every file was read through the window, `limit` when more rows
 matched than were returned, or `deadline` when the read stopped after five seconds with the rows it
-had; `truncated` is `true` for the last two.
+had; `truncated` is `true` for the last two, and `incomplete` is `true` then too.
 
 :::caution
 Storage cleanup endpoints can move or permanently remove archived session data. Always preview

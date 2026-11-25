@@ -25,6 +25,7 @@ interface RowsBody {
   entries: Array<Record<string, unknown> & { requestId: string }>;
   endedBy: string;
   truncated: boolean;
+  incomplete: boolean;
   coverage: { segments: Array<{ segment: string; fromByte: number; endedBy: string }>; pending: boolean; pendingSegments: string[] };
   error?: { code: string };
 }
@@ -154,6 +155,49 @@ describe("GET /api/usage/archive/rows", () => {
     finishFirst();
     expect(await first).toEqual({ kind: "read", value: "first" });
     expect(await inArchiveRowsReadQueue(20, async () => "third")).toEqual({ kind: "read", value: "third" });
+  });
+
+  test("an abandoned read gives up its turn at once, and a read that throws gives it up too", async () => {
+    const request = new AbortController();
+    const first = inArchiveRowsReadQueue(5_000, () => new Promise<string>((_, reject) => {
+      request.signal.addEventListener("abort", () => reject(new Error("abandoned")), { once: true });
+    }), request.signal);
+    const started = performance.now();
+    const second = inArchiveRowsReadQueue(5_000, async () => "second");
+    // Let the first read take its turn, then abandon it mid-read.
+    await Bun.sleep(0);
+    request.abort();
+    await expect(first).rejects.toThrow("abandoned");
+    expect(await second).toEqual({ kind: "read", value: "second" });
+    expect(performance.now() - started).toBeLessThan(1_000);
+    // A waiter whose own request is abandoned stops waiting without taking a turn.
+    let finish!: () => void;
+    const blocking = inArchiveRowsReadQueue(5_000, () => new Promise<void>(resolve => { finish = resolve; }));
+    const leaving = new AbortController();
+    const waiter = inArchiveRowsReadQueue(5_000, async () => "never", leaving.signal);
+    leaving.abort();
+    expect(await waiter).toEqual({ kind: "busy" });
+    finish();
+    await blocking;
+    expect(await inArchiveRowsReadQueue(100, async () => "after")).toEqual({ kind: "read", value: "after" });
+  });
+
+  test("a pending segment in the window marks the answer incomplete", async () => {
+    writeSegment(archiveDirectory(), "612", jsonl(archiveRows(10)));
+    const { body } = await rowsGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR));
+    expect(body).toMatchObject({ endedBy: "window-end", truncated: false, incomplete: true, coverage: { pending: true } });
+  });
+
+  test("one row stamped far ahead and appended early does not end the read before the window's rows", async () => {
+    const day = Date.UTC(2026, 10, 4);
+    const rows: ArchiveFixtureRow[] = [{ ...archiveRow(0), requestId: "first", timestamp: day }];
+    rows.push({ ...archiveRow(1), requestId: "stray", timestamp: day + 30 * HOUR });
+    for (let minute = 1; minute < 120; minute += 10) rows.push({ ...archiveRow(rows.length), timestamp: day + minute * 60_000 });
+    await builtSegment("613", rows, iso(day).replaceAll(":", "-"));
+    const { body } = await rowsGet(window(day + HOUR, day + 2 * HOUR));
+    const expected = rows.filter(row => row.timestamp >= day + HOUR && row.timestamp < day + 2 * HOUR);
+    expect(expected.length).toBeGreaterThan(0);
+    expect(body.entries.map(entry => entry.requestId)).toEqual(expected.map(row => row.requestId));
   });
 
   test.each([

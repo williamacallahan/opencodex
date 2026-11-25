@@ -542,6 +542,20 @@ export function usageAttributions(entry: PersistedUsageEntry): UsageAttribution[
   });
 }
 
+/**
+ * Each attribution of a row with the cost estimate the summary assigns it: an attempt's own estimate,
+ * or the row's when it has no attempts. The one rule every per-attempt breakdown follows.
+ */
+export function attributionsWithEstimates(
+  entry: PersistedUsageEntry,
+  costInfo: EntryCostInfo,
+): Array<{ attribution: UsageAttribution; estimate: AttemptCostEstimate | CostEstimate | null }> {
+  return usageAttributions(entry).map((attribution, index) => ({
+    attribution,
+    estimate: entry.attempts?.length ? costInfo.attemptEstimates?.[index] ?? null : costInfo.estimate,
+  }));
+}
+
 function projectedComboUsage(
   attempts: readonly NonNullable<PersistedUsageEntry["attempts"]>[number][],
 ): { usage?: PersistedUsageEntry["usage"]; totalTokens?: number } {
@@ -1102,7 +1116,7 @@ function legacyCodexAccountLabel(provider: string): string | null {
  * An explicitly stamped label of EITHER family is authoritative for any provider (#2699).
  * The legacy fallback stays openai-only so unrelated unlabeled providers are not guessed.
  */
-function accountLabelForAttribution(provider: string, explicit: unknown): string | null {
+export function accountLabelForAttribution(provider: string, explicit: unknown): string | null {
   if (isCodexUsageAccountLogLabel(explicit)) return explicit;
   return legacyCodexAccountLabel(provider);
 }
@@ -1685,15 +1699,12 @@ class StreamingUsageSummaryAccumulator implements UsageSummaryAccumulator {
     this.estimatedRetainedBytes += ESTIMATED_BREAKDOWN_BYTES * addAttributionCounts(partition.attribution, entry, entry.totalTokens ?? 0);
 
     const requestKey = this.mode === "exact" ? this.requestKey(entry.requestId) : null;
-    const attributions = usageAttributions(entry);
+    const attributions = attributionsWithEstimates(entry, costInfo);
     const modelFacts = new Map<string, number>();
     const providerFacts = new Map<string, number>();
     const accountLabels = new Set<string>();
     for (let index = 0; index < attributions.length; index++) {
-      const attribution = attributions[index]!;
-      const estimate = entry.attempts?.length
-        ? costInfo.attemptEstimates?.[index] ?? null
-        : costInfo.estimate;
+      const { attribution, estimate } = attributions[index]!;
       const ordinal = this.nextOrdinal++;
       const facts = (entry.attempts?.length ? attemptStatusFact(entry.attempts[index]!) : requestStatusFact(attribution.usageStatus))
         | (estimate ? REQUEST_PRICED : spentNothing(entry.attempts?.[index]) ? 0 : REQUEST_UNPRICED);
