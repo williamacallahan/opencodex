@@ -1294,6 +1294,9 @@ describe("filtered usage index availability", () => {
     const sidecars = ["usage-filter-index.sqlite-wal", "usage-filter-index.sqlite-shm"];
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { paths: string[] };
     writeFileSync(manifestPath, JSON.stringify({ ...manifest, paths: manifest.paths.filter(path => !sidecars.includes(path)) }, null, 2));
+    // The background reclaimer may still hold the projection open; removing its sidecars under it, or
+    // resetting the module while it runs, would test the race instead of the repair.
+    await settleUsageFilterIndexReclaimForTests();
     for (const suffix of ["-wal", "-shm"]) rmSync(`${indexPath}${suffix}`, { force: true });
     resetUsageAggregateCacheForTests();
     resetAppOwnedMemoryForTests();
@@ -1302,6 +1305,8 @@ describe("filtered usage index availability", () => {
     appendRows([{ ...syntheticRow(99), requestId: "after-upgrade" }]);
     expect((await getFilteredUsageAggregate({ provider: "openai" })).filterIndex).toBeDefined();
     expect(owned().filter(path => sidecars.includes(path)).sort()).toEqual([...sidecars].sort());
+    // Settled before afterEach deletes the test home under it.
+    await settleUsageFilterIndexReclaimForTests();
   });
 
   test("a 0-byte projection left by a crash and its sidecars are registered once they appear", async () => {

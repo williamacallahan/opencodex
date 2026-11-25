@@ -512,23 +512,30 @@ describe("attribution reaches usage.jsonl", () => {
     saveConfig(remoteConfig());
     appendUsageEntry({
       requestId: "pending-rollup", timestamp: Date.now(), provider: "p", model: "m",
-      status: 200, durationMs: 1, usageStatus: "exact", admissionKind: "configured", apiKeyId: "key-one",
+      status: 200, durationMs: 1, usageStatus: "unreported", admissionKind: "configured", apiKeyId: "key-one",
     } as PersistedUsageEntry);
     const originalScan = usageLedgerScannerModule.scanUsageLedgerCooperatively;
-    const scanSpy = spyOn(usageLedgerScannerModule, "scanUsageLedgerCooperatively").mockImplementation(options => originalScan(options));
+    // The scan is held until the pending answer has arrived, so the order is decided by the test, not
+    // by how fast the HTTP round trip is next to the timer turn that starts the scan.
+    let releaseScan!: () => void;
+    const scanGate = new Promise<void>(resolve => { releaseScan = resolve; });
+    const scanSpy = spyOn(usageLedgerScannerModule, "scanUsageLedgerCooperatively").mockImplementation(async options => {
+      await scanGate;
+      return originalScan(options);
+    });
     const server = startServer(0);
     try {
       const pending = await keysGet(server, false);
-      // The scan had not started when the response was built: it begins on a later timer turn.
-      expect(scanSpy).not.toHaveBeenCalled();
       expect(pending).toMatchObject({ usageIncluded: false, usagePending: true });
       expect((pending.keys as Array<Record<string, unknown>>)[0]).not.toHaveProperty("usage");
+      releaseScan();
       await settleUsageColdRebuildForTests();
       const completed = await keysGet(server);
       expect(completed).not.toHaveProperty("usagePending");
       expect(typeof completed.usageAsOf).toBe("string");
       expect((completed.keys as Array<{ usage?: { totalRequests: number } }>)[0]!.usage?.totalRequests).toBe(1);
     } finally {
+      releaseScan();
       scanSpy.mockRestore();
       await settleUsageColdRebuildForTests();
       await server.stop(true);
