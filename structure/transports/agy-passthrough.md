@@ -120,7 +120,7 @@ top-level `requestType` and `request.labels.trajectory_id` (strings add their by
 `uuid`, `signed-digits`, `digits`, `hex`, `empty`, `other`), `requestType` itself when it matches
 `^[A-Za-z_-]{1,24}$`, the character-class pattern of the top-level `requestId` (`request_id_pattern`: hex-digit runs `h<n>`, all-decimal runs `d<n>`, other letter runs `a<n>`, `/ - _ . :` kept, anything else `?`, `toolong` over 200 characters, `absent` when not a string; no character of the value survives and the pattern is not part of the shape signature, since the UUID varies per request), and the body size rounded up to a power of two. Values, the project, request ids, prompt
 text and headers are never read into it. It is bounded for the process lifetime (one line per distinct shape,
-20 lines, 64 remembered shapes, nothing computed afterwards), runs one extra walk (for a call still unlabelled after the monitoring lookup) of the top level and of
+8 lines, 64 remembered shapes, 64 body walks in all, the body untouched afterwards), runs one extra walk (for a call still unlabelled after the monitoring lookup) of the top level and of
 `request`'s direct members only when no session was found, never throws, and leaves the forwarded bytes
 untouched. `tests/server/agy-unlabelled-shape.test.ts` covers it.
 

@@ -5,7 +5,8 @@
  * `<other>`), the JSON type of three named values with a length and a closed class for strings, the
  * `requestType` mode name when it is enum-like, the character-class pattern of the top-level `requestId` (no character of it survives), and the body size rounded up to a power of two. Values, the
  * project, request ids, prompt text and headers are never read into the line. It is bounded for life: one
- * line per distinct shape, 20 lines, 64 remembered shapes, and nothing is computed once either cap is reached.
+ * line per distinct shape, 8 lines, 64 remembered shapes and 64 body walks per process, and the body is not touched
+ * once any cap is reached.
  */
 export interface JsonScanners {
   skipWs(bytes: Uint8Array, pos: number): number;
@@ -13,7 +14,9 @@ export interface JsonScanners {
   skipVal(bytes: Uint8Array, start: number): number;
 }
 
-const MAX_LINES = 20;
+const MAX_LINES = 8;
+/** Every walk of a body counts, logged or not, so a process never walks more than this many bodies. */
+const MAX_WALKS = 64;
 const MAX_SHAPES = 64;
 const MAX_NAMES = 40;
 const MAX_STRING_CLASS_BYTES = 64;
@@ -23,6 +26,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const decoder = new TextDecoder();
 const seenShapes = new Set<string>();
 let linesLogged = 0;
+let walks = 0;
 
 interface Member {
   readonly name: string;
@@ -182,7 +186,8 @@ export function unlabelledShapeFields(bytes: Uint8Array, scan: JsonScanners): [s
 
 /** Log the shape of one unlabelled generate body at most once per shape; never throws. */
 export function logUnlabelledGenerateShape(bytes: Uint8Array, scan: JsonScanners): void {
-  if (linesLogged >= MAX_LINES || seenShapes.size >= MAX_SHAPES) return;
+  if (linesLogged >= MAX_LINES || seenShapes.size >= MAX_SHAPES || walks >= MAX_WALKS) return;
+  walks += 1;
   try {
     const fields = unlabelledShapeFields(bytes, scan);
     if (!fields) return;
@@ -199,4 +204,5 @@ export function logUnlabelledGenerateShape(bytes: Uint8Array, scan: JsonScanners
 export function resetUnlabelledShapeLogForTests(): void {
   seenShapes.clear();
   linesLogged = 0;
+  walks = 0;
 }

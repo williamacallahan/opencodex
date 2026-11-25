@@ -18,6 +18,11 @@ beforeEach(() => {
 });
 afterEach(() => info.mockRestore());
 
+const readsOf = (bytes: Uint8Array): number => {
+  let reads = 0;
+  logUnlabelledGenerateShape(bytes, { ...AGY_JSON_SCANNERS, skipWs: (b, p) => { reads += 1; return AGY_JSON_SCANNERS.skipWs(b, p); } });
+  return reads;
+};
 const log = (body: unknown) => logUnlabelledGenerateShape(enc(body), AGY_JSON_SCANNERS);
 
 describe("unlabelled generate shape", () => {
@@ -66,17 +71,29 @@ describe("unlabelled generate shape", () => {
     expect(lines).toHaveLength(1);
   });
 
-  test("one line per shape, at most 20 lines, and nothing is computed after the cap", () => {
+  test("one line per shape, at most 8 lines, and the body is not read once the line cap is reached", () => {
     for (let round = 0; round < 3; round += 1) log({ request: { a: 1 } });
     expect(lines).toHaveLength(1);
-    for (let shape = 0; shape < 60; shape += 1) log({ request: { [`field_${shape}`]: 1 } });
-    expect(lines).toHaveLength(20);
-    const bytes = enc({ request: { never_seen: 1 } });
-    let reads = 0;
-    const counting = { skipWs: (b: Uint8Array, p: number) => { reads += 1; return AGY_JSON_SCANNERS.skipWs(b, p); }, scanStr: AGY_JSON_SCANNERS.scanStr, skipVal: AGY_JSON_SCANNERS.skipVal };
+    for (let shape = 0; shape < 30; shape += 1) log({ request: { [`field_${shape}`]: 1 } });
+    expect(lines).toHaveLength(8);
+    expect(readsOf(enc({ request: { never_seen: 1 } }))).toBe(0);
+  });
+
+  test("a body walked again for an already-seen shape counts, so a process walks at most 64 bodies", () => {
+    let walked = 0;
+    const counting = { ...AGY_JSON_SCANNERS, skipWs: (b: Uint8Array, p: number) => { walked += 1; return AGY_JSON_SCANNERS.skipWs(b, p); } };
+    const bytes = enc({ request: { same: 1 } });
+    for (let call = 0; call < 500; call += 1) logUnlabelledGenerateShape(bytes, counting);
+    expect(lines).toHaveLength(1);
+    const walksAfterBudget = walked;
     logUnlabelledGenerateShape(bytes, counting);
-    expect(reads).toBe(0);
-    expect(lines).toHaveLength(20);
+    expect(walked).toBe(walksAfterBudget);
+    resetUnlabelledShapeLogForTests();
+    walked = 0;
+    for (let call = 0; call < 64; call += 1) logUnlabelledGenerateShape(bytes, counting);
+    const full = walked;
+    for (let call = 0; call < 64; call += 1) logUnlabelledGenerateShape(bytes, counting);
+    expect(walked).toBe(full);
   });
 
   test("a labelled body is not a shape to log, and the scan says so", () => {
