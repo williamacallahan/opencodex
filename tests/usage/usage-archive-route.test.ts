@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { runPassiveRead } from "../../src/lib/passive-read";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { archiveTotalsReads } from "../../src/usage/archive-query";
 import { noteArchiveChanged } from "../../src/usage/archive-segments";
 import { ARCHIVE_TOTALS_FORMAT_VERSION, MAX_HOURS_PER_SEGMENT, MAX_OVERLAPS_PER_SEGMENT, archiveTotalsPath } from "../../src/usage/archive-totals";
 import { usageLogPath } from "../../src/usage/log";
+import { resetUsageRevisionObservationsForTests } from "../../src/usage/revision-observation";
 import type { OcxConfig } from "../../src/types";
 import { ManagementRequest } from "../helpers/management-auth";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -59,6 +61,15 @@ async function rowsGet(query: string): Promise<{ status: number; body: { incompl
   const response = await handleManagementAPI(req, new URL(req.url), config, {});
   if (!response) throw new Error("no management route for /api/usage/archive/rows");
   return { status: response.status, body: await response.json() as { incomplete: boolean; coverage: { missingSegments: string[] } } };
+}
+
+/** Ask until `coverage.liveLedgerSince` is `expected`, while the filter index catches up in the background. */
+async function untilLiveLedgerSince(query: string, expected: string, timeoutMs = 10_000): Promise<TotalsBody> {
+  let body = (await archiveGet(query)).body;
+  for (const started = Date.now(); body.coverage.liveLedgerSince !== expected && Date.now() - started < timeoutMs; body = (await archiveGet(query)).body) {
+    await Bun.sleep(25);
+  }
+  return body;
 }
 
 const window = (since: number, until: number, extra = ""): string =>
@@ -507,6 +518,34 @@ describe("GET /api/usage/archive", () => {
     expect(body.coverage.ambiguousSegments).toEqual([basename(segmentB)]);
     expect(body.coverage.liveLedgerSince).toBe(iso(b[0]!.timestamp));
   });
+
+  test("a truncation seen only by a passive read still makes the index rebuild when the ledger regrows past it", async () => {
+    const day = Date.UTC(2026, 10, 10);
+    const at = (hour: number, minute: number) => day + hour * HOUR + minute * 60_000;
+    const b = archiveRows(3, 60_000).map((row, index) => ({ ...row, requestId: `b-${index}`, timestamp: at(1, index) }));
+    const segmentB = await builtSegment("534", b, iso(b[0]!.timestamp).replaceAll(":", "-"));
+    // The head line is rewritten from A (08:00) to B (01:01) at the same length, so every byte the
+    // append's 64 KiB boundary digest covers is unchanged.
+    const line = (row: object, length: number): string => {
+      const bare = JSON.stringify({ ...row, padding: "" });
+      return `${JSON.stringify({ ...row, padding: "x".repeat(length - bare.length) })}\n`;
+    };
+    const headA = line({ ...archiveRow(0), requestId: "a-0", timestamp: at(8, 0) }, 800);
+    const headB = line(b[1]!, 800);
+    const tail = archiveRows(400, 60_000, 50).map((row, index) => line({ ...row, timestamp: at(12, 0) + index * 1_000 }, 700)).join("");
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), headA + tail);
+    const query = window(at(1, 0), at(2, 0));
+    expect((await untilLiveLedgerSince(query, iso(at(8, 0)))).coverage.liveLedgerSince).toBe(iso(at(8, 0)));
+    // A restarted process: nothing it has observed knows the ledger's earlier length.
+    resetUsageRevisionObservationsForTests();
+    truncateSync(usageLogPath(), 406);
+    await runPassiveRead(() => archiveGet(query));
+    writeFileSync(usageLogPath(), headB + tail + line({ ...archiveRow(0), requestId: "appended", timestamp: at(13, 0) }, 700));
+    const body = await untilLiveLedgerSince(query, iso(b[1]!.timestamp));
+    expect(body.coverage.liveLedgerSince).toBe(iso(b[1]!.timestamp));
+    expect(body).toMatchObject({ complete: false, summary: null, coverage: { ambiguousSegments: [basename(segmentB)] } });
+  }, 30_000);
 
   test("while the live ledger's earliest row is unverified the archive withholds, and once the index catches up the same window answers exactly", async () => {
     // The 2026-11-24 window from the archive, while usage.jsonl holds 2026-11-25 onward and is too

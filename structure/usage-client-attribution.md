@@ -91,7 +91,12 @@ answer. `usage.jsonl` stays authoritative and is never truncated or rewritten.
 The archive reads use the same projection for one more fact: the live ledger's earliest finite row
 timestamp (`verifiedUsageLedgerMinimum`), which bounds where the archive's coverage ends. It is the
 published generation's `min_timestamp` meta, accepted only when `generationValidated` holds and the
-recorded ledger revision is exactly the current one; reading it writes nothing. An active archive read
+recorded ledger revision is exactly the current one; reading it writes nothing. Both it and the
+passive candidate read decline a generation whose ledger is the same file but shorter than the
+recorded source, or as long but different, even in a process that observed no earlier length
+(`markDestructiveWithoutWriting`). They mark the generation in memory only, and the next writer-owned
+refresh records the mark and rebuilds. A regrowth that restores the last 64 KiB before the indexed
+boundary would otherwise pass the append's boundary digest and keep the old rows and minimum. An active archive read
 first ingests up to 8 MiB to bring the index current, and starts a larger ingest in the background
 without waiting for it. It also never waits on an ingest already running, which may be a full rebuild
 (`structure/usage-archive.md`).

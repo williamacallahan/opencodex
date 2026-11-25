@@ -1806,6 +1806,23 @@ export async function readUsageFilterCandidates(
 }
 
 /**
+ * Mark the generation declined for a destructive change seen by a read that writes nothing; the next
+ * writer-owned refresh records it for every process (`refreshOnce`) and rebuilds instead of extending.
+ * Destructive means against this process's observations or, since a process may have none, against
+ * the source revision the index persisted: the same file shorter than it, or as long but different.
+ * A regrowth that restores the last 64 KiB before the indexed boundary would otherwise pass the
+ * append's boundary digest.
+ */
+function markDestructiveWithoutWriting(path: string, meta: IndexMeta | null, revision: UsageLogRevision | null): boolean {
+  const recorded = meta?.revision ?? null;
+  const shrankBelowIndex = revision !== null && recorded !== null && usageLogIdentityKey(recorded) === usageLogIdentityKey(revision)
+    && (revision.size < recorded.size || (revision.size === recorded.size && usageLogRevisionKey(recorded) !== usageLogRevisionKey(revision)));
+  if (!shrankBelowIndex && !usageRevisionIsDestructive(revision)) return false;
+  pendingInvalidations.set(path, { ticket: ++invalidationTicket, home: getConfigDir() });
+  return true;
+}
+
+/**
  * Read the projection without writing anything, for a passive management read.
  *
  * Returns null unless the projection is current for the exact ledger revision, in which case
@@ -1818,10 +1835,7 @@ export async function readUsageFilterCandidatesPassive(
   if (!existsSync(path)) return null;
   // Writes nothing: a destructive change seen here declines the generation in this process only,
   // and the next writer-owned refresh records it for every process.
-  if (usageRevisionIsDestructive(currentUsageLogRevision())) {
-    pendingInvalidations.set(path, { ticket: ++invalidationTicket, home: getConfigDir() });
-    return null;
-  }
+  if (markDestructiveWithoutWriting(path, null, currentUsageLogRevision())) return null;
   let db: Database;
   try {
     db = new Database(path, { readonly: true });
@@ -1841,6 +1855,7 @@ export async function readUsageFilterCandidatesPassive(
     try {
       const meta = readMeta(db);
       const revision = currentUsageLogRevision();
+      markDestructiveWithoutWriting(path, meta, revision);
       if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || !meta.generation
         || !generationValidated(db, path, meta)) {
         throw new UsageLedgerRebuildRequiredError("content_changed");
@@ -1973,6 +1988,7 @@ function readUsageLedgerMinimum(): UsageLedgerMinimum {
     if (!usable || usageLogIdentityKey(meta.revision) !== usageLogIdentityKey(revision)) {
       return { state: "behind", bytesToIngest: revision.size, appendOnly: false };
     }
+    if (markDestructiveWithoutWriting(path, meta, revision)) return { state: "behind", bytesToIngest: revision.size, appendOnly: false };
     if (usageLogRevisionKey(meta.revision) === usageLogRevisionKey(revision)) {
       // The publish that recorded this revision wrote the minimum of its finite row timestamps.
       return meta.indexedRows > 0 && !hasPublishedRows(db, meta.generation)
