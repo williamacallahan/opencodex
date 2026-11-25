@@ -348,6 +348,7 @@ timing method unknown)** and a visible explanation of the timing method when a r
 | `GET /api/usage/source-facets` | Count recent app and device choices for an authorized dashboard session | 400 for invalid filters; 403 without the required session; 503 if the scan or inventory is unavailable |
 | `GET /api/usage?jev=1` | Project persisted JEV decisions and their physical target sends. Optional `comboId` selects one Combo; `range` accepts `7d`, `30d`, or `all` (default `30d`). | 400 invalid `comboId`; 500 `{ "error": "read_failed" }` if the ledger cannot be read |
 | `GET /api/usage/timeline` | Bucketed usage by model/account; accepts `hours`, `bucketMinutes`, `metric`, `aggregation`, `grouping`, comma-separated `models` and repeated `hiddenProvider` filters | 400 invalid query or limits |
+| `GET /api/usage/archive` | Usage totals for a window of the 31-day usage archive, from precomputed hourly totals; see [Archived usage](#archived-usage) | 400 `invalid_window` or `invalid_parameter` |
 | `GET /api/metrics` | Return process-local Prometheus text metrics for requests and cached Kiro quota. Kiro accounts use bounded opaque digest labels; raw account and credential identifiers are never exported. | 404 when `metricsExport.enabled` was not true at startup; ordinary management authentication is required and data-plane credentials grant no access |
 | `GET /api/storage` | Scan Codex storage usage by bucket | Returns an `error: "scan_failed"` payload on scan failure |
 | `POST /api/storage/cleanup/preview` | Preview archived-session cleanup and return a binding digest | 400 `invalid_json` or `invalid_percent` |
@@ -605,6 +606,38 @@ tokens served from the provider's prompt cache, clamped to `[0, 1]`. It is `null
 when the provider reported no cache telemetry or the row has no input tokens, because "no cache
 data" and "a genuine 0% hit rate" are different facts and a chart that renders them alike is
 misleading.
+
+#### Archived usage
+
+With `usageLedgerMaxBytes` set, a trim moves the oldest rows of `usage.jsonl` into the
+`usage-archive` directory for 31 days (see the server configuration reference). `/api/usage`
+reads only the live ledger; `GET /api/usage/archive` answers for the archived part.
+
+`since` and `until` are required, as a full ISO datetime with timezone or epoch milliseconds;
+`until` must be after `since`, at most 32 days later. The window widens outward to whole UTC
+hours, and the response's `since` and `until` state the effective bounds, `until` exclusive.
+Optional exact-match filters are `provider`, `model`, `harness` (the recorded client),
+`workloadLauncher` (the workload before its first `:`), `workloadSource`, `clientHost`,
+`clientAddress`, and `account` (the account log label). An empty value, such as `harness=`, selects
+rows that never recorded that dimension. An unknown or repeated parameter answers 400
+`invalid_parameter`; a bad window answers 400 `invalid_window`.
+
+The answer comes only from precomputed hourly totals, never from the rows themselves:
+
+- `summary` holds `requests`, `inputTokens`, `outputTokens`, `cacheReadInputTokens`,
+  `cacheCreationInputTokens`, `totalTokens`, and `estimatedCostUsd` with its `pricedRequests`,
+  `unpricedRequests`, and `unmeteredRequests`, computed with the same rules as `/api/usage`.
+- `byHour`, `byProvider`, `byModel`, `byHarness`, `byWorkloadLauncher`, `byWorkloadSource`,
+  `byClientHost`, `byClientAddress`, and `byAccount` each hold `rows` (`key` plus the same sums,
+  most requests first, at most 200) and `truncated`, the number of keys left out.
+- `coverage` gives `earliestRowAt` and `latestRowAt` of the whole archive, `segments` (archive
+  files in the window), `unparsableRows` in them, and `liveLedgerSince`, the first row still in
+  `usage.jsonl`. Rows from that time on are not in this answer; add `/api/usage` for them.
+- `coverage.pending` is `true` when an archive file in the window has no totals yet, and
+  `pendingSegments` names them. The request starts their build in the background and answers with
+  what is available, so a pending answer is incomplete; ask again shortly.
+- `coverage.duplicateSegments` counts leftover archive files skipped because their rows are
+  already counted from another file or are still in `usage.jsonl`, so no row is counted twice.
 
 :::caution
 Storage cleanup endpoints can move or permanently remove archived session data. Always preview

@@ -484,8 +484,10 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/server/management/model-routes.ts` | [`pricing.md`](pricing.md) |
 | `src/server/management/provider-overwrite-carry.ts` | [`providers/hosted-tool-denials.md`](providers/hosted-tool-denials.md) |
 | `src/server/management/quota-pool-routes.ts` | [`quota-pool.md`](quota-pool.md) |
+| `src/server/management/route-registry.ts` | [`usage-archive.md`](usage-archive.md) |
 | `src/server/management/telemetry-routes.ts` | [`telemetry.md`](telemetry.md) |
 | `src/server/management/usage-aggregate-cache.ts` | [`usage-client-attribution.md`](usage-client-attribution.md) |
+| `src/server/management/usage-archive-routes.ts` | [`usage-archive.md`](usage-archive.md) |
 | `src/server/messages-native-integrity.ts` | [`transports/strict-messages.md`](transports/strict-messages.md) |
 | `src/server/messages-native-tool-guard.ts` | [`data-planes/error-detail.md`](data-planes/error-detail.md) |
 | `src/server/messages-native.ts` | [`data-planes/error-detail.md`](data-planes/error-detail.md)<br>[`transports/strict-messages.md`](transports/strict-messages.md) |
@@ -578,6 +580,7 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/update/restart-ownership.ts` | [`ops/desktop-supervision.md`](ops/desktop-supervision.md) |
 | `src/update/supervised-recovery.mjs` | [`ops/update-supervised-recovery.md`](ops/update-supervised-recovery.md) |
 | `src/usage/` | [`runtime.md`](runtime.md)<br>[`providers/jev-decision.md`](providers/jev-decision.md)<br>[`gui-and-management-api.md`](gui-and-management-api.md)<br>[`dashboard-and-usage.md`](dashboard-and-usage.md)<br>[`companion.md`](companion.md) |
+| `src/usage/archive-query.ts` | [`usage-archive.md`](usage-archive.md) |
 | `src/usage/archive-segments.ts` | [`usage-archive.md`](usage-archive.md) |
 | `src/usage/archive-totals.ts` | [`usage-archive.md`](usage-archive.md) |
 | `src/usage/client.ts` | [`usage-client-attribution.md`](usage-client-attribution.md) |

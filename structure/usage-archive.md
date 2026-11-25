@@ -45,3 +45,33 @@ segment, so its own mtime is never the retention clock.
 `tests/usage/usage-archive-totals.test.ts` covers the trim-time build against a plain sum, the lazy
 build, unparsable rows, format and length mismatches, the prune, a failing build beside a published
 trim, and the yields.
+
+## Counting each row once
+
+A completed trim publishes the new ledger through a rename, so each published segment comes from a
+different ledger file (inode) and no two published segments share a row. The overlaps that remain
+are the leftovers `ledger-retention.ts` removes and can fail to remove. `countedArchiveSegments`
+therefore counts, among segments with the same inode and the same first-row label, only the longest,
+since the shorter ones are byte prefixes of it; and it skips a segment named with the live ledger's
+inode and head label (`ledgerHeadLabel`), a trim that stopped before its rename whose rows are still
+in `usage.jsonl`. Every archive read applies this rule and reports the skipped count.
+
+## Totals route
+
+`GET /api/usage/archive` in `src/server/management/usage-archive-routes.ts` sits behind the same
+management authentication as `/api/usage` and is declared in
+`src/server/management/route-registry.ts` as a `deferred-verb` exemption owned by this doc: no CLI
+verb reads the archive yet. It validates `since`/`until` with `parseUsageTimeWindow` (required,
+`until` strictly later, at most 32 days), rejects unknown or repeated parameters, and widens the
+window outward to whole UTC hours, `until` exclusive. `src/usage/archive-query.ts` lists the
+segments, applies the counting rule, and sums the buckets of every counted segment whose hour is in
+the window and whose dimensions equal every given filter. Parsed totals are cached per totals-file
+mtime and segment length, so a repeated query re-reads only changed files.
+
+The route never builds inline. A counted segment that may overlap the window (its totals' first and
+last row, or for a pending one its name's first-row time and its mtime) but has no current totals
+is listed in `coverage.pendingSegments` and queued for a background build. The answer never
+includes rows still in `usage.jsonl`; `coverage.liveLedgerSince` is the live ledger's first timed
+row. Each breakdown keeps the 200 keys with the most requests and reports the rest as `truncated`.
+`tests/usage/usage-archive-route.test.ts` covers hour widening, filters, the 400 cases, pending and
+rebuilt totals, the cap, and the counting rule.

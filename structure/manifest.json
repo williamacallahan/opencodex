@@ -1051,8 +1051,11 @@
       "title": "Usage Archive Reads",
       "scope": "Hourly totals built for usage archive segments and the management reads answered from them.",
       "documents": [
+        "src/usage/archive-query.ts",
         "src/usage/archive-segments.ts",
         "src/usage/archive-totals.ts",
+        "src/server/management/usage-archive-routes.ts",
+        "src/server/management/route-registry.ts",
         "src/usage/ledger-retention.ts",
         "src/usage/ledger-scanner.ts",
         "src/server/usage-ledger-retention.ts"
