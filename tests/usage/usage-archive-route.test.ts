@@ -594,6 +594,38 @@ describe("GET /api/usage/archive", () => {
     expect(published).toHaveLength(1);
   }, 40_000);
 
+  test("appends seen by passive reads after a truncation do not keep the rebuild of the captured prefix from publishing", async () => {
+    const rows = archiveRows(40, 60_000).map(row => ({ ...row, timestamp: row.timestamp + 10 * 24 * HOUR }));
+    await builtSegment("537", archiveRows(3, 60_000));
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), jsonl(rows));
+    const query = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR);
+    expect((await untilLiveLedgerSince(query, iso(rows[0]!.timestamp))).coverage.liveLedgerSince).toBe(iso(rows[0]!.timestamp));
+    const published: string[] = [];
+    const staged: string[] = [];
+    let appended = 0;
+    setUsageFilterIndexTestHooksForTests({
+      // Traffic while each rebuild is staged: a row appended, then a passive read, three times. Every
+      // revision stays shorter than the one the old generation indexed. An append's publish, which
+      // keeps its generation, meets none, so the ledger can settle once the rebuild has published.
+      beforePublish: async ({ stagedGeneration, publishedGeneration }) => {
+        if (stagedGeneration === publishedGeneration) return;
+        staged.push(stagedGeneration);
+        for (let read = 0; read < 3; read += 1) {
+          appendFileSync(usageLogPath(), jsonl([{ ...rows[30 + (appended++ % 10)]!, requestId: `traffic-${appended}` }]));
+          await runPassiveRead(() => archiveGet(query));
+        }
+      },
+      afterPublish: ({ generation }) => { published.push(generation); },
+    });
+    writeFileSync(usageLogPath(), jsonl(rows.slice(5, 15)));
+    const settled = await untilLiveLedgerSince(query, iso(rows[5]!.timestamp));
+    expect(settled.coverage.liveLedgerSince).toBe(iso(rows[5]!.timestamp));
+    // The first staging, of the captured prefix, published.
+    expect(published[0]).toBe(staged[0]);
+    expect(staged).toHaveLength(1);
+  }, 40_000);
+
   test("while the live ledger's earliest row is unverified the archive withholds, and once the index catches up the same window answers exactly", async () => {
     // The 2026-11-24 window from the archive, while usage.jsonl holds 2026-11-25 onward and the
     // filter index has not ingested it yet.

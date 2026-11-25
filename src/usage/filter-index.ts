@@ -1076,8 +1076,8 @@ function assertHomeUnchanged(dir: string): void {
  * too (`pendingInvalidations`); a passive read only marks it, with `home`, for the next writer to record.
  */
 const pendingInvalidations = new Map<string, { ticket: number; home?: string }>();
-/** Per index path, the destructive revision a no-write read last declined it for, pending or recorded since. */
-const declinedRevisions = new Map<string, string>();
+/** Per index path, the generation a no-write read declined and the last live revision observed since. */
+const declinedRevisions = new Map<string, { generation: string; observed: UsageLogRevision }>();
 let invalidationTicket = 0;
 
 function sourceInvalidations(db: Database): number {
@@ -1815,18 +1815,31 @@ export async function readUsageFilterCandidates(
  * the source revision the index persisted: the same file shorter than it, or as long but different.
  * A regrowth that restores the last 64 KiB before the indexed boundary would otherwise pass the
  * append's boundary digest.
+ *
+ * One change, one ticket. The published generation keeps describing the longer file until a rebuild
+ * publishes, so later reads compare against the last live revision observed since the generation was
+ * declined (`declinedRevisions`), kept after the ticket is recorded: growth of the same file advances
+ * it and issues nothing, and only a shrink below it or a same-length rewrite is a new change. A fresh
+ * ticket from every read would fail the rebuild's publication fence forever.
  */
-function markDestructiveWithoutWriting(path: string, meta: IndexMeta | null, revision: UsageLogRevision | null): boolean {
-  const recorded = meta?.revision ?? null;
-  const shrankBelowIndex = revision !== null && recorded !== null && usageLogIdentityKey(recorded) === usageLogIdentityKey(revision)
+function markDestructiveWithoutWriting(path: string, meta: IndexMeta, revision: UsageLogRevision | null): boolean {
+  if (!revision) return false;
+  const declined = declinedRevisions.get(path);
+  if (declined?.generation === meta.generation && usageLogIdentityKey(declined.observed) === usageLogIdentityKey(revision)) {
+    const observed = declined.observed;
+    if (revision.size > observed.size || usageLogRevisionKey(revision) === usageLogRevisionKey(observed)) {
+      if (revision.size > observed.size) declined.observed = revision;
+      return true;
+    }
+    declined.observed = revision;
+    pendingInvalidations.set(path, { ticket: ++invalidationTicket, home: getConfigDir() });
+    return true;
+  }
+  const recorded = meta.revision;
+  const shrankBelowIndex = recorded !== null && usageLogIdentityKey(recorded) === usageLogIdentityKey(revision)
     && (revision.size < recorded.size || (revision.size === recorded.size && usageLogRevisionKey(recorded) !== usageLogRevisionKey(revision)));
   if (!shrankBelowIndex && !usageRevisionIsDestructive(revision)) return false;
-  // One change, one ticket: the published generation keeps describing the longer file until a rebuild
-  // publishes, so every read meanwhile sees the same shortened revision, and a fresh ticket from each
-  // would fail the rebuild's publication fence forever. Only a different destructive revision is new.
-  const revisionKey = usageLogRevisionKey(revision);
-  if (declinedRevisions.get(path) === revisionKey) return true;
-  declinedRevisions.set(path, revisionKey);
+  declinedRevisions.set(path, { generation: meta.generation, observed: revision });
   pendingInvalidations.set(path, { ticket: ++invalidationTicket, home: getConfigDir() });
   return true;
 }
@@ -1842,9 +1855,6 @@ export async function readUsageFilterCandidatesPassive(
 ): Promise<UsageFilterCandidateRead | null> {
   const path = indexPathForCurrentHome();
   if (!existsSync(path)) return null;
-  // Writes nothing: a destructive change seen here declines the generation in this process only,
-  // and the next writer-owned refresh records it for every process.
-  if (markDestructiveWithoutWriting(path, null, currentUsageLogRevision())) return null;
   let db: Database;
   try {
     db = new Database(path, { readonly: true });
@@ -1864,6 +1874,8 @@ export async function readUsageFilterCandidatesPassive(
     try {
       const meta = readMeta(db);
       const revision = currentUsageLogRevision();
+      // Writes nothing: a destructive change seen here declines the generation in this process only,
+      // and the next writer-owned refresh records it for every process.
       markDestructiveWithoutWriting(path, meta, revision);
       if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || !meta.generation
         || !generationValidated(db, path, meta)) {
