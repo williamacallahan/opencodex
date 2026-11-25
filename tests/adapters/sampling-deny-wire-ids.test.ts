@@ -6,6 +6,8 @@ import { createOpenAIChatAdapter } from "../../src/adapters/openai-chat";
 import { buildOpenAIChatPassthroughRequest } from "../../src/adapters/openai-chat/passthrough";
 import { createResponsesPassthroughAdapter } from "../../src/adapters/openai-responses";
 import { getDefaultConfig } from "../../src/config";
+import { createRequestExecutionBudget } from "../../src/lib/request-execution-budget";
+import { configureSharedSpendLedger, sharedSpendLedger, spendPolicyFromConfig } from "../../src/lib/spend-reservation-ledger";
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
 import { parseRequest } from "../../src/responses/parser";
 import { handleResponsesCompact } from "../../src/server/responses";
@@ -190,10 +192,25 @@ describe("native compact endpoint", () => {
     const config = { ...getDefaultConfig(), defaultProvider: "openai-apikey", providers: { "openai-apikey": provider },
       apiKeys: [{ id: "scoped", name: "scoped", key: "ocx_data_" + "c".repeat(40), createdAt: "2026-11-25T00:00:00Z",
         allowedModels: ["openai-apikey/gpt-5.6-sol-pro"] }] };
-    const response = await handleResponsesCompact(compactionRequest(baseCompactionBody({ model: "openai-apikey/gpt-5.6-sol-pro" })),
-      config, { model: "", provider: "" }, undefined, { kind: "configured", keyId: "scoped", source: "bearer" });
-    expect(response.status).toBe(403);
-    await response.text();
-    expect(upstream).toBe(0);
+    // A local refusal spends nothing: no send slot from the workflow's allowance, and, with token
+    // ceilings on, no reservation recorded as dispatched.
+    configureSharedSpendLedger(spendPolicyFromConfig({ pool: { maxTokens: 100_000 } }, undefined, ["openai-apikey"]));
+    const sendBudget = createRequestExecutionBudget();
+    const allowance = sendBudget.remainingBaseSends(4);
+    try {
+      const response = await handleResponsesCompact(compactionRequest(baseCompactionBody({ model: "openai-apikey/gpt-5.6-sol-pro" })),
+        config, { model: "", provider: "" }, undefined, { kind: "configured", keyId: "scoped", source: "bearer" }, { sendBudget });
+      expect(response.status).toBe(403);
+      await response.text();
+      expect(upstream).toBe(0);
+      expect(sendBudget.used).toBe(0);
+      expect(sendBudget.remainingBaseSends(4)).toBe(allowance);
+      const spend = sharedSpendLedger().snapshot("pool", "openai-apikey");
+      expect(spend?.reserved ?? 0).toBe(0);
+      expect(spend?.unresolved ?? 0).toBe(0);
+      expect(spend?.settled ?? 0).toBe(0);
+    } finally {
+      configureSharedSpendLedger(spendPolicyFromConfig({}));
+    }
   });
 });

@@ -2,6 +2,8 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRequestExecutionBudget } from "../../src/lib/request-execution-budget";
+import { configureSharedSpendLedger, sharedSpendLedger, spendPolicyFromConfig } from "../../src/lib/spend-reservation-ledger";
 import { markResponseNonReplayable } from "../../src/lib/upstream-retry";
 import { saveConfig } from "../../src/config";
 import { apiKeyAccountLogLabel } from "../../src/codex/account-label";
@@ -181,16 +183,27 @@ test("a proactive key pick that changes the wire projection is refused for a key
     current.providers[name] = { ...current.providers[name]!, modelSuffixBracketStrip: true };
     return real(current, name, routed, ...rest);
   });
+  // A local refusal spends nothing: no send slot from the workflow's allowance, and, with token
+  // ceilings on, no reservation recorded as dispatched.
+  configureSharedSpendLedger(spendPolicyFromConfig({ pool: { maxTokens: 100_000 } }, undefined, [NAME]));
+  const sendBudget = createRequestExecutionBudget();
+  const allowance = sendBudget.remainingBaseSends(4);
   try {
     const req = new Request("http://localhost/v1/responses/compact", { method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ model: `${NAME}/test[ctx]`, input: [{ role: "user", content: "fixture question" }], stream: false }) });
     const response = await handleResponsesCompact(req, config, { model: "", provider: "" }, undefined,
-      { kind: "configured", keyId: "scoped", source: "bearer" });
+      { kind: "configured", keyId: "scoped", source: "bearer" }, { sendBudget });
     expect(response.status).toBe(403);
     await response.text();
     expect(seen).toEqual([]);
+    expect(sendBudget.used).toBe(0);
+    expect(sendBudget.remainingBaseSends(4)).toBe(allowance);
+    const spend = sharedSpendLedger().snapshot("pool", NAME);
+    expect(spend?.reserved ?? 0).toBe(0);
+    expect(spend?.unresolved ?? 0).toBe(0);
+    expect(spend?.settled ?? 0).toBe(0);
     noLeaks(config);
-  } finally { pick.mockRestore(); }
+  } finally { pick.mockRestore(); configureSharedSpendLedger(spendPolicyFromConfig({})); }
 });
 
 test("compact refuses after three queued rebuilds without spending a physical send", async () => {

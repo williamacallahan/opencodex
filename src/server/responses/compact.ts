@@ -1161,6 +1161,16 @@ export async function handleResponsesCompact(
       };
       return decision.permit.execute ? decision.permit.execute(dispatch) : dispatch();
     };
+    // The one authorization of the model a native send emits: after the virtual and bracket
+    // projections, for the attempt's own provider (a proactive or queued key pick can rebuild it),
+    // against the scope captured at admission. The Reserve move is the hub's own capacity
+    // substitution, not the caller's selection, so, as on the ordinary Responses path, it is not
+    // scoped. A denial is answered 403 by localDispatchRefusal.
+    const authorizedCompactWireModel = (provider: OcxProviderConfig): string => {
+      const wireModelId = compactWireModelId(provider, route.modelId);
+      assertRouteAllowedByScope(admissionScope, clientModelLabel, { providerName: route.providerName, modelId: wireModelId });
+      return wireModelId;
+    };
     const sendCompactAttempt = (
       sendProvider: OcxProviderConfig,
       sendHeaders: Headers,
@@ -1172,6 +1182,9 @@ export async function handleResponsesCompact(
     ): Promise<Response> => {
       // Only the captured custom-tool contract: native compact keeps the provider's own wire.
       sendProvider = projectCapturedCustomToolPolicy(sendProvider, route.staticPolicy);
+      // Authorized before the send ladder claims a physical send, so a local refusal spends no
+      // workflow allowance and records no spend reservation as dispatched.
+      try { authorizedCompactWireModel(sendProvider); } catch (error) { return Promise.reject(error); }
       // A gateway send carries only its own transport headers, whatever recovery handed in.
       // An account-change scrub that removed the turn state from the send headers still applies.
       let wireHeaders = gatewayTransport ? new Headers(gatewayTransport.headers) : sendHeaders;
@@ -1233,15 +1246,9 @@ export async function handleResponsesCompact(
           validateFinalCustomToolCompatibility(replayBody, sendProvider.supportsResponsesCustomTools);
         }
         // The adapter's wire-model projection, then its per-model sampling filter for this physical
-        // send, matched against the final model and the catalog ids from before any rewrite.
-        // The one authorization of the model this native send emits, after the virtual and bracket
-        // projections and for this attempt's provider (a proactive or queued key pick can rebuild
-        // it), against the scope captured at admission. A denial throws before any byte is sent and
-        // localDispatchRefusal answers 403. The Reserve move below is the hub's own capacity
-        // substitution, not the caller's selection, so, as on the ordinary Responses path, it is
-        // not scoped.
-        const wireModelId = compactWireModelId(sendProvider, route.modelId);
-        assertRouteAllowedByScope(admissionScope, clientModelLabel, { providerName: route.providerName, modelId: wireModelId });
+        // send, matched against the final model and the catalog ids from before any rewrite. The
+        // provider may be a queued rebuild here, so it is authorized again before serialization.
+        const wireModelId = authorizedCompactWireModel(sendProvider);
         const projected = poolReserveWireBody({ ...replayBody as typeof compactBody, model: wireModelId }, sendProvider);
         return stripRejectedSamplingParams(projected, sendProvider, [selectedModelId, route.modelId]) as typeof compactBody;
       };
