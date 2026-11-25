@@ -524,6 +524,12 @@ describe("GET /api/usage/archive", () => {
   test.each([
     ["names another segment", (totals: Record<string, unknown>) => ({ ...totals, segment: "2026-01-01T00-00-00.000Z_1-1.jsonl" })],
     ["is an unsupported version", (totals: Record<string, unknown>) => ({ ...totals, version: 3 })],
+    ["counts rows but has no first row time", (totals: Record<string, unknown>) => ({ ...totals, firstRowAt: null })],
+    ["has its first row after its last", (totals: Record<string, unknown>) => ({ ...totals, firstRowAt: totals.lastRowAt, lastRowAt: totals.firstRowAt })],
+    ["records an empty span beside counted buckets", (totals: Record<string, unknown>) => ({ ...totals, rows: 0, firstRowAt: null, lastRowAt: null })],
+    ["places its span outside its bucket and offset hours", (totals: Record<string, unknown>) => ({
+      ...totals, firstRowAt: (totals.firstRowAt as number) + 48 * HOUR, lastRowAt: (totals.lastRowAt as number) + 48 * HOUR,
+    })],
   ])("a totals file left without its segment that %s cannot rule a window out", async (_label, alter) => {
     const rows = archiveRows(3);
     const path = await builtSegment("530", rows);
@@ -536,6 +542,18 @@ describe("GET /api/usage/archive", () => {
     const { body } = await archiveGet(window(later, later + HOUR));
     expect(body).toMatchObject({ complete: false, summary: null });
     expect(body.coverage.missingSegments).toEqual([basename(path)]);
+  });
+
+  test("a counted segment whose totals place its span outside its bucket hours is not answered from them", async () => {
+    const rows = archiveRows(3);
+    const path = await builtSegment("533", rows);
+    const totalsPath = archiveTotalsPath(path);
+    const totals = JSON.parse(readFileSync(totalsPath, "utf8")) as { firstRowAt: number; lastRowAt: number };
+    // Two days later than every bucket: the span alone would skip the window that holds the rows.
+    writeFileSync(totalsPath, JSON.stringify({ ...totals, firstRowAt: totals.firstRowAt + 48 * HOUR, lastRowAt: totals.lastRowAt + 48 * HOUR }));
+    noteArchiveChanged();
+    const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR));
+    expect(body).toMatchObject({ complete: false, summary: null });
   });
 
   test("coverage reports the per-segment caps, so a caller knows a breakdown may fold keys", async () => {

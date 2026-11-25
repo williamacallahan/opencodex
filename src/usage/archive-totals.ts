@@ -322,6 +322,40 @@ function isUncounted(value: unknown): value is ArchiveUncountedRows {
 }
 
 /**
+ * Whether a totals file's span agrees with what it counted, as every build writes it: counted rows have
+ * ordered, non-null extrema whose hours are the first and last of its buckets' and offsets' hours, the
+ * same set of hours, with offsets rising in file order inside the segment; no counted rows means no
+ * extrema, buckets, overlaps or offsets. Each field can be valid alone while together they describe no
+ * file a build wrote, and a span that disagrees cannot say which windows the rows reach.
+ */
+function spanConsistent(file: Pick<ArchiveTotalsFile, "bytes" | "rows" | "firstRowAt" | "lastRowAt" | "buckets" | "overlaps" | "hourOffsets">): boolean {
+  if (file.rows === 0) {
+    return file.firstRowAt === null && file.lastRowAt === null && file.buckets.length === 0 && file.overlaps.length === 0
+      && file.hourOffsets.length === 0;
+  }
+  if (file.firstRowAt === null || file.lastRowAt === null || file.firstRowAt > file.lastRowAt) return false;
+  if (file.buckets.length === 0 || file.hourOffsets.length === 0) return false;
+  const firstHour = Math.floor(file.firstRowAt / HOUR_MS) * HOUR_MS;
+  const lastHour = Math.floor(file.lastRowAt / HOUR_MS) * HOUR_MS;
+  const offsetHours = new Set<number>();
+  let previousOffset = -1;
+  for (const { hour, offset } of file.hourOffsets) {
+    if (offsetHours.has(hour) || offset <= previousOffset || offset >= file.bytes) return false;
+    offsetHours.add(hour);
+    previousOffset = offset;
+  }
+  const bucketHours = new Set(file.buckets.map(bucket => bucket.hour));
+  if (bucketHours.size !== offsetHours.size || [...bucketHours].some(hour => !offsetHours.has(hour))) return false;
+  let minHour = Number.POSITIVE_INFINITY;
+  let maxHour = Number.NEGATIVE_INFINITY;
+  for (const hour of bucketHours) {
+    minHour = Math.min(minHour, hour);
+    maxHour = Math.max(maxHour, hour);
+  }
+  return minHour === firstHour && maxHour === lastHour;
+}
+
+/**
  * Where a segment's totals may be missing rows: `exact` when every row it read was counted, a span
  * when every uncounted row's time is known, or `anywhere` when any exclusion's time is unknown: an
  * oversized row (never parsed), a malformed one (its time never read), an uncounted row without a
@@ -371,6 +405,7 @@ export async function readArchiveTotals(segmentPath: string, segmentBytes: numbe
     || !Array.isArray(file.overlaps) || !file.overlaps.every(isOverlap(file.buckets.length)) || !isCount(file.overlapRowsDropped)
     || !Array.isArray(file.hourOffsets) || !file.hourOffsets.every(isHourOffset)
     || !isOverflowCounts(file.overflowRows) || !isCount(file.foldedRows)) return undefined;
+  if (!spanConsistent(parsed as ArchiveTotalsFile)) return undefined;
   return parsed as ArchiveTotalsFile;
 }
 

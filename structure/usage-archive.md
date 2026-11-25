@@ -180,8 +180,14 @@ judges a totals file against the files as they are now, before and after reading
 the cached listing so the next read relists. A totals file must name its own segment (`segment`) and
 match its actual length, and a version-5 file must record the segment it was built from (`source`:
 device, inode, size, nanosecond mtime); for a version-4 file, which records none, the first segment
-identity seen with it in this process stands in, and any other is a replacement it cannot verify. A
-totals file left without its segment is a missing source: `missingWindowSegments` lets it rule a
+identity seen with it in this process stands in, and any other is a replacement it cannot verify.
+Its span must also agree with what it counted (`spanConsistent` in `readArchiveTotals`). Counted rows
+need ordered, non-null `firstRowAt` and `lastRowAt` whose hours are the first and last of the
+buckets' hours. The buckets and `hourOffsets` must cover the same set of hours, with offsets rising
+inside the segment. A file with no counted rows has no extrema, buckets, overlaps or offsets. Any
+other combination is no file a build wrote, and its span cannot say which windows its rows reach,
+so the file is unusable: a counted segment's answer is incomplete, and a totals file left without
+its segment reaches every window. A totals file left without its segment is a missing source: `missingWindowSegments` lets it rule a
 window out only when it validates as that segment's totals (its own name, a supported version, the
 length the name records) with known coverage; otherwise, and for a window it may reach, it is listed
 in `coverage.missingSegments` and the answer is incomplete.

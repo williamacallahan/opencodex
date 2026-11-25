@@ -702,7 +702,9 @@ The answer comes only from precomputed hourly totals, never from the rows themse
   published file, so these files are neither counted nor skipped, and the answer is incomplete.
   They are only read, never moved or deleted.
 - `coverage.missingSegments` names archive files whose hourly totals remain but whose rows are
-  gone; a window they may reach is incomplete, never an empty archive.
+  gone; a window they may reach is incomplete, never an empty archive. Totals whose recorded time
+  span disagrees with their own hourly buckets cannot say which windows they reach, so they are
+  listed for every window.
 - `coverage.duplicateSegments` is deprecated and kept for existing callers: it is the number of
   files in the whole archive, not only in the window, that share a source ledger with another file
   or may be a prefix of `usage.jsonl`. It does not count files withheld because `usage.jsonl` may
