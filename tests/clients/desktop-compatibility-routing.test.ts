@@ -1,14 +1,23 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createNativeRoutingVerifier, matchesNativeCompatibilityRouting } from "../../src/codex/desktop-compatibility/routing-preflight";
+import { createNativeRoutingVerifier, matchesNativeCompatibilityRouting, NATIVE_ROUTING_OVERRIDE_ENV } from "../../src/codex/desktop-compatibility/routing-preflight";
 import { bindNativeCompatibilityOwner, nativeCompatibilityOwner, type NativeCompatibilityOwner } from "../../src/codex/desktop-compatibility/routing-binding";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 const owner: NativeCompatibilityOwner = { hostname: "127.0.0.1", port: 12001, loopbackPort: 12002, config: { port: 10100, providers: {} } };
 const text = 'model_provider = "openai"\nopenai_base_url = "http://127.0.0.1:12001/v1"\n';
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) removeTreeWithRetry(root); });
+// The verifier refuses under a process-level transport override by design; a developer shell
+// that exports one (CODEX_API_BASE_URL) must not decide these cases.
+const ambientOverrides = new Map<string, string | undefined>();
+beforeEach(() => {
+  for (const key of NATIVE_ROUTING_OVERRIDE_ENV) { ambientOverrides.set(key, process.env[key]); delete process.env[key]; }
+});
+afterEach(() => {
+  for (const root of roots.splice(0)) removeTreeWithRetry(root);
+  for (const [key, value] of ambientOverrides) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+});
 
 test("address family matches the bound listener instead of any loopback alias", () => {
   const ipv6 = text.replace("127.0.0.1", "[::1]");

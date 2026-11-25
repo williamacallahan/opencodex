@@ -48,6 +48,8 @@ export function matchesNativeCompatibilityRouting(text: string, owner: NativeCom
       : ["::1", "[::1]", "::", "[::]"].includes(owner.hostname);
   } catch { return false; }
 }
+/** Process-level overrides that could put the app on another transport despite its TOML. */
+export const NATIVE_ROUTING_OVERRIDE_ENV = ["CODEX_API_BASE_URL", "CODEX_APP_SERVER_WS_URL", "CODEX_ELECTRON_USER_DATA_PATH", "ELECTRON_RUN_AS_NODE"] as const;
 export function createNativeRoutingVerifier(codexHome: string, readOwner = nativeCompatibilityOwner) {
   const path = join(codexHome, "config.toml");
   let baseline: string | undefined, invalidated = false;
@@ -55,7 +57,7 @@ export function createNativeRoutingVerifier(codexHome: string, readOwner = nativ
     if (invalidated) return false;
     try {
       // Process-level overrides could put the app on another transport despite its TOML.
-      if (["CODEX_API_BASE_URL", "CODEX_APP_SERVER_WS_URL", "CODEX_ELECTRON_USER_DATA_PATH", "ELECTRON_RUN_AS_NODE"].some(key => process.env[key]?.trim())) { invalidated = true; return false; }
+      if (NATIVE_ROUTING_OVERRIDE_ENV.some(key => process.env[key]?.trim())) { invalidated = true; return false; }
       const stat = lstatSync(path);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1048576) { invalidated = true; return false; }
       const text = readFileSync(path, "utf8"), owner = readOwner();
