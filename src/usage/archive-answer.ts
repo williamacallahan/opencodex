@@ -12,7 +12,7 @@
  */
 import { ATTRIBUTION_DIMENSIONS } from "./archive-row-attribution";
 import {
-  archiveSpan, loadTotals, segmentMayOverlapNow, segmentOverlaps, segmentState, uncountedMayOverlap, yieldToEventLoop,
+  archiveSpan, loadTotals, mayDuplicateLiveLedger, segmentMayOverlapNow, segmentOverlaps, segmentState, uncountedMayOverlap, yieldToEventLoop,
   type ArchiveListing, type ArchiveSegmentEntry, type ArchiveSegmentState,
 } from "./archive-query";
 import {
@@ -99,6 +99,8 @@ export interface ArchiveTotalsAnswer {
    * keys and its class is kept once.
    */
   unpricedBreakdowns: ArchiveDimension[];
+  /** Counted segments in the window the live ledger may also hold (`mayDuplicateLiveLedger`): withheld, not folded. */
+  liveDuplicateSegments: ArchiveSegmentState[];
   /** Segments in the window whose totals were read but cannot make its figures exact, each with why. */
   inexactSegments: Array<{ segment: string; reason: ArchiveInexactReason }>;
   /** Every counted segment that may overlap the window, with its span, hour index and build failure. */
@@ -170,7 +172,7 @@ export async function answerArchiveTotals(
   const overflowRows = perArchiveDimension(() => 0);
   const answer = {
     windowSegments: [] as ArchiveSegmentState[], pendingSegments: [] as ArchiveSegmentState[], failedSegments: [] as ArchiveSegmentState[],
-    inexactSegments: [] as ArchiveTotalsAnswer["inexactSegments"], segmentsInRange: 0, unparsableRows: 0, foldedRows: 0, overlapRowsDropped: 0,
+    inexactSegments: [] as ArchiveTotalsAnswer["inexactSegments"], liveDuplicateSegments: [] as ArchiveSegmentState[], segmentsInRange: 0, unparsableRows: 0, foldedRows: 0, overlapRowsDropped: 0,
   };
 
   /** Fold one segment and let go of its buckets: only the returned state outlives this call. */
@@ -181,6 +183,10 @@ export async function answerArchiveTotals(
     answer.segmentsInRange += 1;
     if (!totals) {
       (state.failure ? answer.failedSegments : answer.pendingSegments).push(state);
+      return state;
+    }
+    if (mayDuplicateLiveLedger(state, listing)) {
+      answer.liveDuplicateSegments.push(state);
       return state;
     }
     const inexact = (reason: ArchiveInexactReason): void => { answer.inexactSegments.push({ segment: state.name, reason }); };

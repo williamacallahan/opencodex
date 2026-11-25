@@ -471,6 +471,21 @@ describe("GET /api/usage/archive", () => {
     expect(body.coverage.missingSegments).toEqual([basename(path)]);
   });
 
+  test("after a restore puts archived rows back in the live ledger, a segment it may duplicate is withheld whatever its label", async () => {
+    const day = Date.UTC(2026, 10, 8);
+    const hourRows = (hour: number, from: number) => archiveRows(3, 60_000, from).map(row => ({ ...row, timestamp: day + hour * HOUR + (row.timestamp - ARCHIVE_FIRST_ROW_AT) }));
+    const [a, b, c] = [hourRows(1, 0), hourRows(2, 10), hourRows(3, 20)];
+    await builtSegment("528", a, iso(a[0]!.timestamp).replaceAll(":", "-"));
+    const segmentB = await builtSegment("529", b, iso(b[0]!.timestamp).replaceAll(":", "-"));
+    // The live ledger restored from a backup taken before either trim: A, then B, then newer rows.
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), jsonl([...a, ...b, ...c]));
+    noteArchiveChanged();
+    const { body } = await archiveGet(window(day + 2 * HOUR, day + 3 * HOUR));
+    expect(body).toMatchObject({ complete: false, summary: null });
+    expect(body.coverage.ambiguousSegments).toContain(basename(segmentB));
+  });
+
   test("coverage reports the per-segment caps, so a caller knows a breakdown may fold keys", async () => {
     const rows = Array.from({ length: 1_010 }, (_, index) => ({ ...archiveRow(0, 0), requestId: `cap-${index}`, clientHost: `host-${index}` }));
     await builtSegment("515", rows);

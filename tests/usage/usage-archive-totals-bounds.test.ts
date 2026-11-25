@@ -63,6 +63,7 @@ describe("usage archive totals bounds", () => {
       ambiguous: [],
       missing: [],
       liveLedgerSince: null,
+      liveLedgerPresent: false,
     };
     const held: Array<WeakRef<object>> = [];
     let peak = 0;

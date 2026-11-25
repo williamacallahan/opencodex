@@ -687,7 +687,8 @@ The answer comes only from precomputed hourly totals, never from the rows themse
 - `coverage.ambiguousSegments` names archive files in the window that cannot be told apart from a
   copy of other rows: several files cut from the same ledger, or one that may be a prefix of the
   current `usage.jsonl` (cut from the same file, starting with the same first row, which a restored
-  ledger keeps, or untimed while `usage.jsonl` has no timed first row to compare). Older releases could leave a copy behind that is byte-identical to the
+  ledger keeps, or untimed while `usage.jsonl` has no timed first row to compare), or one whose rows
+  reach the first row of `usage.jsonl` or later, which a restored `usage.jsonl` may hold again. Older releases could leave a copy behind that is byte-identical to the
   published file, so these files are neither counted nor skipped, and the answer is incomplete.
   They are only read, never moved or deleted.
 - `coverage.missingSegments` names archive files whose hourly totals remain but whose rows are

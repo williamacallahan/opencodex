@@ -67,6 +67,8 @@ export interface ArchiveListing {
   missing: ArchiveMissingSegment[];
   /** The live ledger's first timed row, where the archive's coverage ends. */
   liveLedgerSince: number | null;
+  /** Whether a live ledger exists; with no timed head row it cannot show where the archive ends. */
+  liveLedgerPresent: boolean;
 }
 
 /** A totals file left without its segment, by the segment name it describes. */
@@ -210,7 +212,7 @@ export async function readArchiveListing(configDir = getConfigDir(), signal?: Ab
       if (signal?.aborted) throw error;
       if (!isMissing(error)) throw error;
       listingCache = null;
-      return { segments: [], ambiguous: [], missing: [], liveLedgerSince: live?.since ?? null };
+      return { segments: [], ambiguous: [], missing: [], liveLedgerSince: live?.since ?? null, liveLedgerPresent: live !== null };
     }
     if (cache && cache.directoryMtimeMs === directoryMtimeMs && now - cache.listedAt < LISTING_MAX_AGE_MS) cache.checkedAt = now;
     else cache = await listDirectory(directory, directoryMtimeMs, now, signal);
@@ -220,7 +222,10 @@ export async function readArchiveListing(configDir = getConfigDir(), signal?: Ab
   const { counted, ambiguous } = countedArchiveSegments(cache.entries, live?.head ?? null);
   const byLabelTime = (left: ArchiveSegmentEntry, right: ArchiveSegmentEntry): number =>
     (archiveLabelTime(left.label) ?? Number.NEGATIVE_INFINITY) - (archiveLabelTime(right.label) ?? Number.NEGATIVE_INFINITY);
-  return { segments: counted.sort(byLabelTime), ambiguous: ambiguous.sort(byLabelTime), missing: cache.missing, liveLedgerSince: live?.since ?? null };
+  return {
+    segments: counted.sort(byLabelTime), ambiguous: ambiguous.sort(byLabelTime), missing: cache.missing,
+    liveLedgerSince: live?.since ?? null, liveLedgerPresent: live !== null,
+  };
 }
 
 /**
@@ -287,6 +292,19 @@ export function segmentOverlaps(state: ArchiveSegmentState, since: number, until
   if (!state.built) return entryMayOverlap(state, since, until);
   const span = rowCoverage(state.built);
   return span ? spanReaches(span, since, until) : true;
+}
+
+/**
+ * Whether a counted segment may hold rows the live ledger also holds. A published segment's rows all
+ * precede the live ledger's first row, so one whose rows reach that row or later (or whose span is not
+ * known, or a live ledger with no timed head to compare) may be a copy a restore put back: its
+ * disjointness from the live ledger is not established, whatever its label says.
+ */
+export function mayDuplicateLiveLedger(state: ArchiveSegmentState, listing: ArchiveListing): boolean {
+  if (!listing.liveLedgerPresent) return false;
+  if (listing.liveLedgerSince === null || !state.built) return true;
+  const span = rowCoverage(state.built);
+  return span === null || span.lastRowAt === null || span.lastRowAt >= listing.liveLedgerSince;
 }
 
 /** Whether rows the segment's totals did not count may lie in `[since, until)`. */

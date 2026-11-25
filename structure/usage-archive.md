@@ -133,7 +133,10 @@ prefix is a segment named with the live ledger's inode (no trim of that file pub
 publish renames a new ledger into place), one whose label is the live head's (a ledger restored onto
 a new inode keeps its head, so a different inode is no evidence), and, while the live head has no
 timed row among its first 64, any untimed one. Only a different first row is evidence of
-disjointness. Ambiguous segments are read only to
+disjointness from another segment. A restore can also put archived rows back into the live ledger
+under any label, so a counted segment whose rows reach the live ledger's first row or later (or whose
+span is unknown, or a live ledger with no timed head to compare) is withheld as well
+(`mayDuplicateLiveLedger`): a published segment's rows all precede the live ledger's first row. Ambiguous segments are read only to
 learn their span and are reported: a window one may reach lists it in `coverage.ambiguousSegments`
 (the deprecated `coverage.duplicateSegments` keeps the archive-wide count for existing callers)
 and answers `complete: false` with no numbers (the rows route answers `incomplete: true` and does not

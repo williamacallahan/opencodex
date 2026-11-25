@@ -12,7 +12,8 @@
 import { REQUEST_HISTORY_MAX_PAGE_SIZE } from "../../routing/history/indexer";
 import { answerArchiveTotals, type ArchiveFilter } from "../../usage/archive-answer";
 import {
-  ambiguousWindowSegments, loadWindowSegments, missingWindowSegments, queueMissingTotals, readArchiveListing, type ArchiveSegmentState,
+  ambiguousWindowSegments, loadWindowSegments, mayDuplicateLiveLedger, missingWindowSegments, queueMissingTotals, readArchiveListing,
+  type ArchiveSegmentState,
 } from "../../usage/archive-query";
 import { inArchiveRowsReadQueue, readArchivedRows, type ArchivedRowsQuery } from "../../usage/archive-rows";
 import { ARCHIVE_DIMENSIONS, MAX_DATE_MS, type ArchiveDimension } from "../../usage/archive-totals";
@@ -109,7 +110,7 @@ async function archiveTotalsResponse(ctx: ManagementContext): Promise<Response> 
   const listing = await readArchiveListing();
   const answer = await answerArchiveTotals(listing, since, until, filter);
   queueMissingTotals(answer.windowSegments);
-  const ambiguous = await ambiguousWindowSegments(listing, since, until);
+  const ambiguous = [...await ambiguousWindowSegments(listing, since, until), ...answer.liveDuplicateSegments];
   const missing = await missingWindowSegments(listing, since, until);
   const complete = answer.pendingSegments.length === 0 && answer.failedSegments.length === 0 && answer.inexactSegments.length === 0
     && ambiguous.length === 0 && missing.length === 0;
@@ -199,11 +200,16 @@ async function archiveRowsResponse(ctx: ManagementContext): Promise<Response> {
     } catch (error) {
       if (!deadline.aborted) throw error;
       // The listing ran out of time: nothing was read, which the reader reports as the deadline.
-      listing = { segments: [], ambiguous: [], missing: [], liveLedgerSince: null };
+      listing = { segments: [], ambiguous: [], missing: [], liveLedgerSince: null, liveLedgerPresent: false };
     }
-    const states = await loadWindowSegments(listing, query.since, query.until, deadline);
-    queueMissingTotals(states);
-    const ambiguous = await ambiguousWindowSegments(listing, query.since, query.until, deadline);
+    const loaded = await loadWindowSegments(listing, query.since, query.until, deadline);
+    queueMissingTotals(loaded);
+    // A segment the live ledger may also hold is withheld and reported, like an ambiguous one.
+    const states = loaded.filter(state => !state.built || !mayDuplicateLiveLedger(state, listing));
+    const ambiguous = [
+      ...await ambiguousWindowSegments(listing, query.since, query.until, deadline),
+      ...loaded.filter(state => state.built && mayDuplicateLiveLedger(state, listing)),
+    ];
     const missing = await missingWindowSegments(listing, query.since, query.until, deadline);
     return { listing, ambiguous, missing, result: await readArchivedRows(states, query, deadline) };
   }, abandoned);
