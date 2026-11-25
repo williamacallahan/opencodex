@@ -500,8 +500,6 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
           && typeof (unnormalizedBody as { model?: unknown }).model === "string"
           ? { ...(unnormalizedBody as Record<string, unknown>), model: stripBracketedModelSuffix((unnormalizedBody as { model: string }).model) }
           : unnormalizedBody;
-      // After defaults are filled and the wire model is final, on this attempt's copy only.
-      finalBody = stripRejectedSamplingParams(finalBody, provider, parsed.modelId);
       if (isMetaAiResponsesDestination(url)) {
         const originalChoice = isPlainObject(parsed._rawBody) ? parsed._rawBody.tool_choice : undefined;
         finalBody = normalizeMuseToolChoice(finalBody, originalChoice);
@@ -556,6 +554,9 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         wireBody = stripInternalReasoningEnabled(wireBody);
       }
       wireBody = poolReserveWireBody(wireBody, provider);
+      // After defaults are filled and the wire model is final (bracket strip, Reserve move), on
+      // this attempt's copy only; the pre-rewrite catalog ids still match their list entries.
+      wireBody = stripRejectedSamplingParams(wireBody, provider, [parsed.modelId, parsed._openAiVirtualSelectedModelId]);
       if (isCanonicalOpenAiForwardProvider(provider)) {
         const routingHeaders = new Headers(headers);
         applyCodexRoutingHint(routingHeaders, wireBody);

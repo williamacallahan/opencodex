@@ -197,10 +197,11 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
             };
           }
         }
-        if (parsed.options.presencePenalty !== undefined && !modelInList(provider.noPenaltyModels, parsed.modelId)) {
+        const penaltiesDenied = modelIdsInList(provider.noPenaltyModels, [parsed.modelId, String(body.model)]);
+        if (parsed.options.presencePenalty !== undefined && !penaltiesDenied) {
           body.presence_penalty = parsed.options.presencePenalty;
         }
-        if (parsed.options.frequencyPenalty !== undefined && !modelInList(provider.noPenaltyModels, parsed.modelId)) {
+        if (parsed.options.frequencyPenalty !== undefined && !penaltiesDenied) {
           body.frequency_penalty = parsed.options.frequencyPenalty;
         }
         if (provider.promptCacheKey && parsed.options.promptCacheKey !== undefined) {

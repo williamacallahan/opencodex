@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { ADAPTER_REGISTRY } from "../../src/adapters/registry";
 import { getDefaultConfig } from "../../src/config";
-import { handleResponses } from "../../src/server/responses";
+import { createRequestExecutionBudget } from "../../src/lib/request-execution-budget";
+import { createTranslatorBudget } from "../../src/lib/translator-budget";
+import { handleResponses, handleResponsesCompact } from "../../src/server/responses";
+import { runWithCompactionRecovery } from "../../src/server/responses/compaction-recovery";
 import type { AdapterEvent, OcxConfig, OcxParsedRequest } from "../../src/types";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 
@@ -23,8 +26,8 @@ function settings(): OcxConfig {
   };
 }
 
-function request(payload: Record<string, unknown>): Request {
-  return new Request("http://localhost/v1/responses", {
+function request(payload: Record<string, unknown>, path = "responses"): Request {
+  return new Request(`http://localhost/v1/${path}`, {
     method: "POST", headers: { "content-type": "application/json", session_id: "isolation-fixture" },
     body: JSON.stringify(payload),
   });
@@ -93,4 +96,38 @@ test("an operator routing override's effort reaches the initial target, not the 
   const effortOf = (parsed: OcxParsedRequest) => (parsed._rawBody as { reasoning?: { effort?: unknown } } | undefined)?.reasoning?.effort;
   expect(effortOf(calls[0]!.parsed)).toBe("high");
   expect(effortOf(calls[1]!.parsed)).toBeUndefined();
+});
+
+test("a routed v1 compact rescue replays the caller's effort, not the override's", async () => {
+  const config = settings();
+  config.compactionRouting = { model: "source/swe-2", reasoningEffort: "high" };
+  const payload = body("source/normal", { reasoning: { effort: "low" }, client_metadata: {
+    "x-codex-turn-metadata": JSON.stringify({ request_kind: "compaction", compaction: { trigger: "manual" } }),
+  } });
+  const response = await handleResponsesCompact(request(payload, "responses/compact"), config, { model: "", provider: "" });
+  await response.text();
+  expect(calls.map(call => call.model)).toEqual(["swe-2", "rescue"]);
+  const effortOf = (parsed: OcxParsedRequest) => (parsed._rawBody as { reasoning?: { effort?: unknown } } | undefined)?.reasoning?.effort;
+  expect(effortOf(calls[0]!.parsed)).toBe("high");
+  expect(effortOf(calls[1]!.parsed)).toBe("low");
+});
+
+test("a repeated body observation keeps one snapshot charge, released before the budget is disposed", async () => {
+  const translatorBudget = createTranslatorBudget();
+  try {
+    const observed = body("source/swe-2");
+    const response = await runWithCompactionRecovery(
+      request(observed), settings(), { model: "", provider: "" },
+      { translatorBudget, sendBudget: createRequestExecutionBudget() },
+      async (_sent, _config, _log, options) => {
+        options.onRequestBodyAsSent?.(structuredClone(observed));
+        options.onRequestBodyAsSent?.({ ...structuredClone(observed), model: "source/other" });
+        return Response.json({ id: "resp_fixture", status: "completed", output: [] });
+      },
+    );
+    await response.text();
+    expect(translatorBudget.snapshot().currentBytes).toBe(0);
+  } finally {
+    translatorBudget.dispose();
+  }
 });

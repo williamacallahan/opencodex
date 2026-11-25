@@ -253,6 +253,7 @@ import { redactHostedImageDisplayPaths } from "../responses-hosted-image-display
 import { warnEagerCodexToolCatalog } from "./codex-tool-catalog";
 
 import { compactHandoffRoute, forgetCompactHandoffRoute, rememberCompactHandoffRoute } from "./compact-handoff-route";
+import { stripBracketedModelSuffix } from "../../adapters/openai-chat/wire";
 export { clearCompactHandoffRoutesForTests } from "./compact-handoff-route";
 
 export const COMPACT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
@@ -637,6 +638,10 @@ export async function handleResponsesCompact(
   // Compaction forwards client history upstream too; keep local artifact paths out of it.
   redactHostedImageDisplayPaths(body);
   const claudeBridgePoolSession = resolveClaudeBridgePoolSession({ ingress: req.headers, replay: req.headers, admission });
+  // The emergency rescue replays the caller's selection, not the override's model or effort.
+  const callerSelection = typeof (body as { model?: unknown }).model === "string"
+    ? { model: (body as { model: string }).model, reasoning: structuredClone((body as { reasoning?: unknown }).reasoning) }
+    : undefined;
   if (!options.compactionRoutingOverride) {
     options = { ...options, compactionRoutingOverride: applyCompactionRoutingOverride(body, req.headers, config, { endpoint: "compact", claudeBridgePoolSession }) };
   }
@@ -1215,9 +1220,11 @@ export async function handleResponsesCompact(
           ).body as typeof replayBody;
           validateFinalCustomToolCompatibility(replayBody, sendProvider.supportsResponsesCustomTools);
         }
-        // The adapter's per-model sampling filter, for this physical send's provider and model.
-        const filtered = stripRejectedSamplingParams({ ...replayBody as typeof compactBody, model: route.modelId }, sendProvider, route.modelId);
-        return poolReserveWireBody(filtered as typeof compactBody, sendProvider);
+        // The adapter's wire-model projection, then its per-model sampling filter for this physical
+        // send, matched against the final model and the catalog ids from before any rewrite.
+        const wireModel = sendProvider.modelSuffixBracketStrip ? stripBracketedModelSuffix(route.modelId) : route.modelId;
+        const projected = poolReserveWireBody({ ...replayBody as typeof compactBody, model: wireModel }, sendProvider);
+        return stripRejectedSamplingParams(projected, sendProvider, [selectedModelId, route.modelId]) as typeof compactBody;
       };
       const doFetch = (upstreamRecovery?: UpstreamSendRecovery) => fetchWithHeaderTimeout(
         compactUrl,
@@ -1837,7 +1844,7 @@ export async function handleResponsesCompact(
     // fallback spend four more.
     // internalReq keeps only FORWARD_HEADERS, so the caller principal is resolved from req.
     const replayPrincipal = { clientPrincipalId: resolveContextPrincipal(req, config, admission) };
-    const response = await handleResponses(internalReq, config, logCtx, { clientModelLabel: options.clientModelLabel, abortSignal: req.signal, turnAdmissionLease, sendBudget, compactionRecoveryKind: "compaction-v1", compactionRoutingOverride: options.compactionRoutingOverride, advisorAdmissionPolicy: options.advisorAdmissionPolicy, replayPrincipal, ...(admission ? { admission } : {}) });
+    const response = await handleResponses(internalReq, config, logCtx, { clientModelLabel: options.clientModelLabel, abortSignal: req.signal, turnAdmissionLease, sendBudget, compactionRecoveryKind: "compaction-v1", compactionRoutingOverride: options.compactionRoutingOverride, ...(callerSelection ? { compactionCallerSelection: callerSelection } : {}), advisorAdmissionPolicy: options.advisorAdmissionPolicy, replayPrincipal, ...(admission ? { admission } : {}) });
     if (req.signal.aborted) {
       void response.body?.cancel(req.signal.reason).catch(() => undefined);
       return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");

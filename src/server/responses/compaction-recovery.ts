@@ -138,6 +138,14 @@ export async function runWithCompactionRecovery(
           const copy = copyPlainData(body);
           if (!copy.ok) return;
           snapshot = copy.value;
+          // A v1 compact turn was built after its routing override: restore the caller's selection,
+          // keeping the prepared history and synthetic trigger.
+          const caller = options.compactionCallerSelection;
+          if (caller) {
+            snapshot.model = caller.model;
+            if (caller.reasoning === undefined) delete snapshot.reasoning;
+            else snapshot.reasoning = caller.reasoning;
+          }
           snapshotBytes = bytes;
           reservation.commitRetained();
         } finally { reservation.release(); }

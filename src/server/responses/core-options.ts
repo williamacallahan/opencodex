@@ -139,6 +139,11 @@ export interface HandleResponsesOptions {
   compactionRecoveryAttempted?: boolean;
   compactionRecoveryPermit?: SingleUseDispatchPermit;
   compactionRecoveryKind?: "compaction-v1" | "compaction-v2";
+  /**
+   * The caller's redacted model and reasoning from before a v1 compact routing override. Only the
+   * emergency snapshot uses them; the initial send keeps the overridden body.
+   */
+  compactionCallerSelection?: Readonly<{ model: string; reasoning: unknown }>;
   onCompactionRecoveryRoute?: (route: RouteResult) => void;
   onCompactionRecoveryAdapterEvent?: (event: AdapterEvent) => void;
   /** Physical-send reports already delivered to the shared ledger, including exact booking settlement. */

@@ -338,18 +338,19 @@ export function stripCanonicalOnlyInputItems(body: unknown): unknown {
  * grok-4.20-multi-agent-0309 answers Chat Completions with 400), so the Chat adapter's omission
  * cannot cover them. A combo or policy route keeps the caller's temperature and top_p in its shared
  * body for later candidates, so this per-target copy is where a rejecting model loses them. Lists
- * name catalog ids, so both the routed id and the serialized `model` are matched, and the filter
- * runs on every auth mode: a custom forward gateway declares its own lists.
+ * name catalog ids, so the pre-rewrite catalog ids and the final serialized `model` are matched;
+ * callers run it after the last wire-model projection (bracket suffix, virtual model, Reserve
+ * move). It runs on every auth mode: a custom forward gateway declares its own lists.
  * Returns the input unchanged when nothing is removed, so the caller-owned raw body is never
  * mutated.
  */
 export function stripRejectedSamplingParams(
   body: unknown,
   provider: { noTemperatureModels?: string[]; noTopPModels?: string[]; noStopModels?: string[]; noPenaltyModels?: string[] },
-  catalogModelId: string,
+  catalogModelIds: readonly (string | undefined)[],
 ): unknown {
   if (!isPlainObject(body)) return body;
-  const ids = [catalogModelId, typeof body.model === "string" ? body.model : undefined];
+  const ids = [...catalogModelIds, typeof body.model === "string" ? body.model : undefined];
   const dropped = [
     ...(Object.hasOwn(body, "temperature") && modelIdsInList(provider.noTemperatureModels, ids) ? ["temperature"] : []),
     ...(Object.hasOwn(body, "top_p") && modelIdsInList(provider.noTopPModels, ids) ? ["top_p"] : []),
