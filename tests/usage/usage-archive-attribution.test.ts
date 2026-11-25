@@ -179,6 +179,27 @@ describe("archive attribution matches the live summary", () => {
     }
   });
 
+  test("two attempts in one provider and model bucket give the live estimated cost under a provider filter", async () => {
+    const row = {
+      requestId: "same-bucket", timestamp: AT, provider: "openai", model: "gpt-5.5", status: 200, durationMs: 200,
+      usageStatus: "unmetered", client: "codex_cli",
+      attempts: [
+        attempt(1, { provider: "openai", model: "gpt-5.5", usage: { inputTokens: 30_000, outputTokens: 3_000 } }),
+        attempt(2, { provider: "openai", model: "gpt-5.5", status: 499, usageStatus: "unreported" }),
+      ],
+    };
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), jsonl([row]));
+    await writeArchiveTotals(writeSegment(join(home, "usage-archive"), "905", jsonl([row]), "2026-11-20T10-05-00.000Z"));
+    const hour = Math.floor(AT / HOUR) * HOUR;
+    const live = await get<LiveBody>(`/api/usage?range=all&since=${hour}&until=${hour + HOUR - 1}&provider=openai`);
+    retireLiveLedger();
+    const archive = await get<ArchiveBody & { complete: boolean }>(`/api/usage/archive?since=${hour}&until=${hour + HOUR}&provider=openai`);
+    expect(archive.complete).toBe(true);
+    expect(pricing(archive.summary as unknown as Pricing)).toEqual(pricing(live.summary as unknown as Pricing));
+    expect(archive.summary!.estimatedCostUsd).toBe(0);
+  });
+
   test("a row retried on a second account of the same provider counts once for that provider", async () => {
     const retried = {
       requestId: "account-retry", timestamp: AT, provider: "openai", model: "gpt-5.5", status: 200, durationMs: 200, usageStatus: "reported",

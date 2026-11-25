@@ -642,7 +642,8 @@ The answer comes only from precomputed hourly totals, never from the rows themse
   `cacheCreationInputTokens`, `totalTokens`, and `estimatedCostUsd` with its `pricedRequests`,
   `unpricedRequests`, and `unmeteredRequests`, computed with the same rules as `/api/usage`:
   requests count each request once, and a `provider`, `model`, or `account` filter sums only the
-  matching attempts, as the live filter does.
+  matching attempts' tokens, as the live filter does, while `estimatedCostUsd` stays each matching
+  request's own recorded cost.
 - Per archive file, each dimension keeps its first 1,000 distinct values and counts later ones as
   `(other)`, like `/api/usage`, and a file keeps at most 5,000 combinations, counting further ones
   in an all-`(other)` entry for their hour. Unfiltered totals stay exact; `coverage.capped` is
@@ -657,12 +658,14 @@ The answer comes only from precomputed hourly totals, never from the rows themse
   could not be read, may be in the window), `overlap-dropped` (a multi-attempt request might count
   twice), `folded-keys` (the filter selects a value it counted as `(other)`), or `split-overlap` (a
   `provider`, `model`, or `account` filter selects some but not all attempts of a request, whose
-  pricing figures the totals cannot rebuild). Likewise, when one request's attempts fall under
-  several keys of `byProvider`, `byModel`, or `byAccount`, that breakdown's `pricedRequests`,
-  `unpricedRequests`, and `unmeteredRequests` are `null` and it is listed in
-  `coverage.unpricedBreakdowns`; its other figures are exact. `summary`, `byHour`, and every breakdown are then
-  `null` instead of numbers that would look exact. An archive file whose totals have not been read
-  yet counts as possibly in the window.
+  pricing figures the totals cannot rebuild). When `complete` is `false`, `summary`, `byHour`, and
+  every breakdown are `null` instead of numbers that would look exact. An archive file whose
+  totals have not been read yet counts as possibly in the window.
+- A complete answer can still withhold one breakdown's pricing counts: when one request's attempts
+  fall under several keys of `byProvider`, `byModel`, or `byAccount`, that breakdown's
+  `pricedRequests`, `unpricedRequests`, and `unmeteredRequests` are `null` and it is listed in
+  `coverage.unpricedBreakdowns`. Its other figures, the summary, and every other breakdown stay
+  exact numbers.
 - `byHour` is a time series: one entry (`key`, the hour's ISO start, plus the same sums) for every
   UTC hour in the window that has rows, oldest first, never capped.
 - `byProvider`, `byModel`, `byHarness`, `byWorkloadLauncher`, `byWorkloadSource`, `byClientHost`,

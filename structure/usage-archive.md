@@ -194,7 +194,11 @@ never recorded the dimension.
 
 Provider, model and account breakdowns sum attempt-level figures. The summary, `byHour` and the row
 dimensions' breakdowns sum row-level figures, except under a provider, model or account filter,
-where, like the live projection to matching attempts, they sum the matching attempts' figures.
+where, like the live projection to matching attempts, they sum the matching attempts' tokens and
+the matched rows' once-recorded `estimatedCostUsd`. That cost is the row's, not the sum of its known
+attempt costs: the live summary leaves a row with an unmeasured attempt unpriced at $0 even when
+another attempt was measured. The `split-overlap` check below guarantees every matched row's buckets
+all matched, so each row's cost is counted exactly once.
 Requests count each row once in every total, through the overlap records. `byHour` is every hour with
 rows in chronological order; every other breakdown keeps its 200 top keys and reports the rest as
 `truncated`. `coverage` sums `overflowRows`, `foldedRows` and `overlapRowsDropped` over the window's

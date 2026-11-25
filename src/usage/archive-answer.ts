@@ -46,6 +46,15 @@ function attemptView(bucket: ArchiveHourBucket): ArchiveSums {
   };
 }
 
+/**
+ * A bucket as an attribution-filtered total: its attempts' tokens, with the cost its rows recorded once.
+ * A row's cost is not the sum of its known attempt costs: an unmeasured leg can leave the row unpriced at $0.
+ * The proper-subset check makes a total inexact when a filter selects only some of a row's buckets.
+ */
+function filteredTotalView(bucket: ArchiveHourBucket): ArchiveSums {
+  return { ...attemptView(bucket), estimatedCostUsd: bucket.rowEstimatedCostUsd };
+}
+
 /** A bucket as rows' figures: the usage and cost of the rows whose final attempt it holds. */
 function rowView(bucket: ArchiveHourBucket): ArchiveSums {
   return {
@@ -162,7 +171,7 @@ export async function answerArchiveTotals(
   const matchesFilter = (bucket: ArchiveHourBucket): boolean => filters.every(([dimension, wanted]) =>
     dimension === "provider" || dimension === "model" ? lower(bucket[dimension]) === lower(wanted) : bucket[dimension] === wanted);
   const attributionFiltered = ATTRIBUTION_DIMENSIONS.some(dimension => filter[dimension] !== undefined);
-  const totalView = attributionFiltered ? attemptView : rowView;
+  const totalView = attributionFiltered ? filteredTotalView : rowView;
   const isAttribution = (dimension: ArchiveDimension): boolean => (ATTRIBUTION_DIMENSIONS as readonly string[]).includes(dimension);
 
   const summary = blankArchiveSums();
