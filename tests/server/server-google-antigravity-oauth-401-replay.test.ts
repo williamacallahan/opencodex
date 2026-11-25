@@ -13,6 +13,7 @@ import { ADAPTER_REGISTRY } from "../../src/adapters/registry";
 import * as requestPacing from "../../src/providers/request-pacing";
 import { createRequestExecutionBudget } from "../../src/lib/request-execution-budget";
 import { ANTIGRAVITY_VALIDATION_REQUIRED_PREFIX } from "../../src/adapters/google-errors";
+import { bindNativeHarnessConfig } from "../../src/lib/native-harness";
 import { readUsageEntries } from "../../src/usage/log";
 import { clearGenericFailoverHealth, eligibleFailoverAccounts, genericFailoverRetryAfterSeconds, rotateAntigravityAccountOnAuthRefusal } from "../../src/oauth/generic-account-failover";
 import {
@@ -43,6 +44,9 @@ let originalFetch: typeof fetch;
 
 beforeEach(() => {
   clearGenericFailoverHealth();
+  // A server an earlier file started stays bound after it stops; one with nativeHarnessOnly on refuses the
+  // direct handleResponses cases below before they reach an upstream.
+  bindNativeHarnessConfig(null);
   originalFetch = globalThis.fetch;
   previousHome = process.env.OPENCODEX_HOME;
   isolatedCodexHome = installIsolatedCodexHome("ocx-google-401-codex-");
