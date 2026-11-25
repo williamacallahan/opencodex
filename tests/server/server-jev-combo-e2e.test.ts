@@ -100,7 +100,7 @@ type ChildHandler = (
 function dispatchers(handler: ChildHandler): ResponsesDispatchers {
   return {
     async handleResponses(request, _config, logCtx, options) {
-      return handler(await request.json() as Record<string, unknown>, logCtx, options);
+      return handler((options?.preParsedBody ?? await request.json()) as Record<string, unknown>, logCtx, options);
     },
     async handleComboResponses() {
       throw new Error("nested combo dispatch is not expected");

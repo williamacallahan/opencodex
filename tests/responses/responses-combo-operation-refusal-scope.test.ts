@@ -26,8 +26,8 @@ const config: OcxConfig = {
 
 const served: string[] = [];
 let threadARefusalCode = "";
-async function upstream(req: Request): Promise<Response> {
-  const body = await req.clone().json() as { model?: string; input?: unknown };
+async function upstream(req: Request, _config: OcxConfig, _log: unknown, options?: { preParsedBody?: unknown }): Promise<Response> {
+  const body = (options?.preParsedBody ?? await req.clone().json()) as { model?: string; input?: unknown };
   const provider = String(body.model).split("/")[0];
   const thread = JSON.stringify(body.input).includes("thread A") ? "A" : "B";
   served.push(`${provider}:${thread}`);

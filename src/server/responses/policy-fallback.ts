@@ -304,6 +304,9 @@ export async function handleResponsesWithPolicyFallback(
       try {
         const nextResponse = await runCore(retryRequest, config, logCtx, {
           ...coreOptions,
+          // The retry body is the clean snapshot serialized above. An inherited in-memory body is
+          // the first attempt's object, which preparation already rewrote in place.
+          preParsedBody: undefined, preParsedBodyBytes: undefined, preParsedBodyCharged: false,
           policyFallbackCandidate: next,
           // A shadow-intercepted request retried on a candidate keeps helper isolation and
           // its suppressed selector label; a first-party policy request leaves the flag unset.

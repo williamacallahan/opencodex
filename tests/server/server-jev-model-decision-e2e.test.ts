@@ -80,7 +80,7 @@ async function run(config: OcxConfig, decisionReply: (seen: Seen) => Response, p
   const targets: Array<Record<string, unknown>> = [];
   const dispatchers: ResponsesDispatchers = {
     async handleResponses(request, _config, _logCtx, options) {
-      const body = await request.json() as Record<string, unknown>;
+      const body = (options?.preParsedBody ?? await request.json()) as Record<string, unknown>;
       if (options?.internalDecisionCall) {
         expect(request.headers.get("x-user-id")).toBe("opencodex:hub-internal");
         const seen = { body, headers: request.headers, options };

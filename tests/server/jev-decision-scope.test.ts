@@ -43,7 +43,7 @@ async function run(config: OcxConfig) {
     }), body, "auto", config, { model: "", provider: "" }, { translatorBudget: budget, admission }, {
       async handleResponses(request, _config, _log, options) {
         expect(options?.admission).toEqual(admission);
-        const child = await request.json() as { model: string };
+        const child = (options?.preParsedBody ?? await request.json()) as { model: string };
         children.push(child.model);
         return Response.json({ id: "resp_fixture", object: "response", status: "completed", output: [] });
       },
