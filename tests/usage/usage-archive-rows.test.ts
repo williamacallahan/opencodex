@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { closeRequestHistoryIndex } from "../../src/routing/history/indexer";
 import { handleManagementAPI } from "../../src/server/management-api";
-import { loadWindowSegments, readArchiveListing } from "../../src/usage/archive-query";
+import { loadTotals, loadWindowSegments, readArchiveListing } from "../../src/usage/archive-query";
 import { noteArchiveChanged } from "../../src/usage/archive-segments";
 import { inArchiveRowsReadQueue, readArchivedRows } from "../../src/usage/archive-rows";
 import * as ledgerScannerModule from "../../src/usage/ledger-scanner";
@@ -331,6 +331,56 @@ describe("GET /api/usage/archive/rows", () => {
     }
     // The interrupted listing was not kept: the next read lists every segment.
     expect((await rowsGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR))).body.coverage.pendingSegments).toHaveLength(20);
+  });
+
+  test("a deadline that fires during a segment's stat starts no stat of its totals file", async () => {
+    const path = await builtSegment("622", archiveRows(2));
+    noteArchiveChanged();
+    const deadline = new AbortController();
+    const realStat = fsPromises.stat;
+    const statted: string[] = [];
+    const spy = spyOn(fsPromises, "stat").mockImplementation((async (...args: Parameters<typeof fsPromises.stat>) => {
+      statted.push(String(args[0]));
+      const result = await realStat(...args);
+      if (String(args[0]) === path) deadline.abort();
+      return result;
+    }) as typeof fsPromises.stat);
+    try {
+      await expect(readArchiveListing(undefined, deadline.signal)).rejects.toBeDefined();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(statted.slice(statted.indexOf(path) + 1)).toEqual([]);
+  });
+
+  test("a deadline that fires while totals are being loaded starts no read of them, and is not remembered against the file", async () => {
+    const path = await builtSegment("623", archiveRows(2));
+    const listing = await readArchiveListing();
+    const entry = listing.segments.find(segment => segment.path === path)!;
+    const totalsPath = path.replace(/\.jsonl$/, ".hourly.json");
+    const deadline = new AbortController();
+    const realStat = fsPromises.stat;
+    const realReadFile = fsPromises.readFile;
+    let totalsStats = 0;
+    let readsAfterAbort = 0;
+    const stats = spyOn(fsPromises, "stat").mockImplementation((async (...args: Parameters<typeof fsPromises.stat>) => {
+      const result = await realStat(...args);
+      if (String(args[0]) === totalsPath && ++totalsStats === 2) deadline.abort();
+      return result;
+    }) as typeof fsPromises.stat);
+    const reads = spyOn(fsPromises, "readFile").mockImplementation((async (...args: Parameters<typeof fsPromises.readFile>) => {
+      if (deadline.signal.aborted && String(args[0]) === totalsPath) readsAfterAbort += 1;
+      return realReadFile(...args);
+    }) as typeof fsPromises.readFile);
+    try {
+      await loadTotals(entry, deadline.signal);
+    } finally {
+      stats.mockRestore();
+      reads.mockRestore();
+    }
+    expect(readsAfterAbort).toBe(0);
+    // The cancelled load says nothing about the file: an uncancelled one serves it.
+    expect((await loadTotals(entry))?.rows).toBe(2);
   });
 
   test("an in-window row appended after rows hours later is still returned", async () => {

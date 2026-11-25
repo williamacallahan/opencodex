@@ -341,10 +341,11 @@ export function uncountedCoverage(totals: ArchiveTotalsFile): "exact" | "anywher
  * another format version, or built from a different length: each of those means it must be rebuilt.
  * The read is asynchronous; parsing and validating are bounded by the per-segment caps.
  */
-export async function readArchiveTotals(segmentPath: string, segmentBytes: number): Promise<ArchiveTotalsFile | undefined> {
+export async function readArchiveTotals(segmentPath: string, segmentBytes: number, signal?: AbortSignal): Promise<ArchiveTotalsFile | undefined> {
   let text: string;
   try {
-    text = await readFile(archiveTotalsPath(segmentPath), "utf8");
+    // A cancelled read throws, like any I/O error: it is never a verdict on the file.
+    text = await readFile(archiveTotalsPath(segmentPath), { encoding: "utf8", ...(signal ? { signal } : {}) });
   } catch (error) {
     // Missing: the build that writes it is the handling. Any other I/O error is not a verdict on the
     // file's contents and propagates, so a caller never remembers an unreadable file as invalid.

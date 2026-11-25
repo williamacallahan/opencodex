@@ -161,6 +161,7 @@ async function listDirectory(directory: string, directoryMtimeMs: number, now: n
     const path = join(directory, segment.name);
     try {
       const segmentStat = await stat(path, { bigint: true });
+      signal?.throwIfAborted();
       const totalsName = archiveTotalsName(segment.name);
       const totalsRevisionNow = present.has(totalsName) ? await totalsRevision(join(directory, totalsName)) : undefined;
       entries.push({
@@ -389,18 +390,20 @@ export async function loadTotals(entry: ArchiveSegmentEntry, signal?: AbortSigna
     cachedBuckets -= cached.totals.buckets.length;
   }
   // A corrupt or incompatible totals file is read once per revision, not on every request.
-  const revision = await totalsRevision(key);
+  const revision = totalsNow;
   const unusable = unusableTotals.get(key);
   if (revision !== undefined && unusable?.revision === revision && unusable.bytes === entry.bytes) return undefined;
   archiveTotalsReads.count += 1;
   let totals: ArchiveTotalsFile | undefined;
   try {
-    totals = await readArchiveTotals(entry.path, entry.bytes);
+    totals = await readArchiveTotals(entry.path, entry.bytes, signal);
   } catch {
-    // An I/O error says nothing about the contents, so it is never remembered: the next request reads again.
+    // An I/O error or a cancellation says nothing about the contents, so it is never remembered: the
+    // next request reads again.
     unusableTotals.delete(key);
     return undefined;
   }
+  if (signal?.aborted) return undefined;
   if (!totals) {
     if (revision !== undefined) unusableTotals.set(key, { revision, bytes: entry.bytes });
     else unusableTotals.delete(key);
@@ -474,7 +477,7 @@ export async function missingWindowSegments(listing: ArchiveListing, since: numb
     let span: { firstRowAt: number | null; lastRowAt: number | null } | null = null;
     const named = parseArchiveSegmentName(missing.segment);
     try {
-      const totals = named ? await readArchiveTotals(join(dirname(missing.totalsPath), missing.segment), named.bytes) : undefined;
+      const totals = named ? await readArchiveTotals(join(dirname(missing.totalsPath), missing.segment), named.bytes, signal) : undefined;
       if (totals) span = rowCoverage({ ...totals, uncounted: uncountedCoverage(totals) });
     } catch {
       // Unreadable: it cannot say where its rows were.
