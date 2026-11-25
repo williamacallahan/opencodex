@@ -49,7 +49,8 @@ describe("WS endpoint re-framer (120/132)", () => {
     // stayed in serve-options, so read all four. The one assertion whose SHAPE changed is
     // the handler block: it used to be an inline "websocket: {" object and is now a factory
     // call, so it is pinned in its new form. The invariant is unchanged -- the serve options
-    // declare an explicit websocket idle timeout rather than inheriting a default.
+    // declare an explicit websocket idle timeout rather than inheriting a default. The
+    // terminal log status is behavior, asserted by ws-replay-refusal-attribution.test.ts.
     const source = [
       "src/server/index.ts",
       "src/server/index/live-sideband.ts",
@@ -59,7 +60,6 @@ describe("WS endpoint re-framer (120/132)", () => {
     expect(source).toContain("const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;");
     expect(source).toContain("websocket: createWebsocketHandler(ctx, requestMetrics),");
     expect(source).toContain("idleTimeout: WEBSOCKET_IDLE_TIMEOUT_SECONDS,");
-    expect(source).toContain("finalizeLog(httpStatusForRequestLogTerminal(status, logCtx), {");
     expect(source).toContain("if (!logged) finalizeLog(turnAbort.signal.aborted ? 499 : response.status);");
   });
 
