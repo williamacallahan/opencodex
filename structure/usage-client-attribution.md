@@ -99,8 +99,9 @@ index path (`liveObservations`), whether or not it issued a ticket. Before any S
 (`observeLiveRevision`), the first sight of the file sets a baseline, same-file growth advances it,
 and a shrink below it, or a same-length rewrite, issues a ticket at once. A truncation a process
 sees while another connection holds the index locked is therefore kept, even in a process whose
-earlier reads only saw the full file. A sample that no metadata has been compared with stays
-unresolved, and a later, larger EOF never erases it. After a successful metadata read
+earlier reads only saw the full file. Every sample, growth included, stays unresolved until a
+metadata comparison, since a file longer than this process last saw can still be shorter than
+another process indexed it, and a later, larger EOF never erases it. After a successful metadata read
 (`observeAgainstIndex`, also in `refreshOnce` before it chooses an append), the unresolved sample and
 the live revision are compared with the persisted source revision. A sample shorter than it
 declines that generation, which covers a process whose first read happened under the lock. A ticket

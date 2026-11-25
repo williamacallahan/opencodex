@@ -1860,13 +1860,15 @@ function observeLiveRevision(path: string, revision: UsageLogRevision | null): v
     }
     return;
   }
+  // Every sample waits for a metadata comparison, growth included: a file longer than this process
+  // last saw can still be shorter than another process indexed it.
+  known.unresolved = shorterOf(known.unresolved, revision);
   if (revision.size > known.observed.size) {
     known.observed = revision;
     return;
   }
   if (usageLogRevisionKey(revision) === usageLogRevisionKey(known.observed)) return;
   known.observed = revision;
-  known.unresolved = shorterOf(known.unresolved, revision);
   known.declined = null;
   issueDeclineTicket(path);
 }

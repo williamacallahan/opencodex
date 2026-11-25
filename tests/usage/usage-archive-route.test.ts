@@ -68,6 +68,50 @@ async function rowsGet(query: string): Promise<{ status: number; body: { incompl
   return { status: response.status, body: await response.json() as { incomplete: boolean; coverage: { missingSegments: string[] } } };
 }
 
+/**
+ * A separate bun process reading this home's usage filter index (`usage-index-reader-worker.ts`),
+ * which shares nothing with this one but the files: `ask` sends one command and waits for its answer.
+ */
+function indexReaderProcess(): { ask: <T>(command: string) => Promise<T>; close: () => Promise<void> } {
+  const worker = Bun.spawn([process.execPath, helperPath("usage-index-reader-worker.ts")], {
+    env: { ...process.env, OPENCODEX_HOME: home }, stdin: "pipe", stdout: "pipe", stderr: "inherit",
+  });
+  const lines = worker.stdout.pipeThrough(new TextDecoderStream()).getReader();
+  let buffered = "";
+  const ask = async <T>(command: string): Promise<T> => {
+    worker.stdin.write(`${command}\n`);
+    await worker.stdin.flush();
+    for (;;) {
+      const newline = buffered.indexOf("\n");
+      if (newline >= 0) {
+        const next = buffered.slice(0, newline);
+        buffered = buffered.slice(newline + 1);
+        if (next.startsWith("@@")) return JSON.parse(next.slice(2)) as T;
+        continue;
+      }
+      const chunk = await lines.read();
+      if (chunk.done) throw new Error(`the worker exited before answering ${command}`);
+      buffered += chunk.value;
+    }
+  };
+  const close = async (): Promise<void> => {
+    worker.stdin.write("exit\n");
+    await worker.stdin.end();
+    await worker.exited;
+  };
+  return { ask, close };
+}
+
+/** Hold the usage filter index exclusively, as another connection's write can, until `release`. */
+function lockIndexExclusively(): { release: () => void } {
+  const holder = new Database(usageFilterIndexPath(home));
+  holder.exec("PRAGMA locking_mode = EXCLUSIVE");
+  holder.exec("BEGIN EXCLUSIVE");
+  holder.exec("CREATE TABLE IF NOT EXISTS lock_probe (held INTEGER)");
+  holder.exec("COMMIT");
+  return { release: () => holder.close() };
+}
+
 /** Ask until `coverage.liveLedgerSince` is `expected`, while the filter index catches up in the background. */
 async function untilLiveLedgerSince(query: string, expected: string, timeoutMs = 10_000): Promise<TotalsBody> {
   let body = (await archiveGet(query)).body;
@@ -619,42 +663,18 @@ describe("GET /api/usage/archive", () => {
     expect((await untilLiveLedgerSince(query, iso(at(8, 0)))).coverage.liveLedgerSince).toBe(iso(at(8, 0)));
 
     // A fresh process, sharing nothing with this one but the files.
-    const worker = Bun.spawn([process.execPath, helperPath("usage-index-reader-worker.ts")], {
-      env: { ...process.env, OPENCODEX_HOME: home }, stdin: "pipe", stdout: "pipe", stderr: "inherit",
-    });
-    const lines = worker.stdout.pipeThrough(new TextDecoderStream()).getReader();
-    let buffered = "";
-    const ask = async <T>(command: string): Promise<T> => {
-      worker.stdin.write(`${command}\n`);
-      await worker.stdin.flush();
-      for (;;) {
-        const newline = buffered.indexOf("\n");
-        if (newline >= 0) {
-          const next = buffered.slice(0, newline);
-          buffered = buffered.slice(newline + 1);
-          if (next.startsWith("@@")) return JSON.parse(next.slice(2)) as T;
-          continue;
-        }
-        const chunk = await lines.read();
-        if (chunk.done) throw new Error(`the worker exited before answering ${command}`);
-        buffered += chunk.value;
-      }
-    };
+    const { ask, close } = indexReaderProcess();
     const passive = reader === "candidate" ? "passive-candidate" : `passive-minimum ${query}`;
     try {
       if (variant === "after a successful read") {
         expect(await ask<Record<string, unknown>>(passive)).toEqual(reader === "candidate" ? { read: true } : { liveLedgerSince: iso(at(8, 0)) });
       }
       truncateSync(usageLogPath(), 421);
-      const holder = new Database(usageFilterIndexPath(home));
-      holder.exec("PRAGMA locking_mode = EXCLUSIVE");
-      holder.exec("BEGIN EXCLUSIVE");
-      holder.exec("CREATE TABLE IF NOT EXISTS lock_probe (held INTEGER)");
-      holder.exec("COMMIT");
+      const lock = lockIndexExclusively();
       try {
         expect(await ask<Record<string, unknown>>(passive)).toEqual(reader === "candidate" ? { read: false } : { liveLedgerSince: null });
       } finally {
-        holder.close();
+        lock.release();
       }
       writeFileSync(usageLogPath(), headB + tail + line({ ...archiveRow(0), requestId: "appended", timestamp: at(13, 0) }, 700));
       expect(await ask<{ candidates: number }>(`count ${at(1, 0)} ${at(2, 0)}`)).toEqual({ candidates: 1 });
@@ -662,9 +682,51 @@ describe("GET /api/usage/archive", () => {
       expect(body.coverage.liveLedgerSince).toBe(iso(b[1]!.timestamp));
       expect(body).toMatchObject({ complete: false, summary: null, coverage: { ambiguousSegments: [basename(segmentB)] } });
     } finally {
-      worker.stdin.write("exit\n");
-      await worker.stdin.end();
-      await worker.exited;
+      await close();
+    }
+  }, 60_000);
+
+  test.each([
+    ["candidate", "locked"], ["candidate", "readable"], ["minimum", "locked"], ["minimum", "readable"],
+  ] as const)("another process that saw a shorter ledger still declines a generation extended past it when a %s read sees a truncation it thinks is growth, with the index %s", async (reader, indexState) => {
+    const day = Date.UTC(2026, 10, 14);
+    const at = (hour: number, minute: number) => day + hour * HOUR + minute * 60_000;
+    const b = archiveRows(3, 60_000).map((row, index) => ({ ...row, requestId: `b-${index}`, timestamp: at(1, index) }));
+    const segmentB = await builtSegment("540", b, iso(b[0]!.timestamp).replaceAll(":", "-"));
+    const line = (row: object, length: number): string => {
+      const bare = JSON.stringify({ ...row, padding: "" });
+      return `${JSON.stringify({ ...row, padding: "x".repeat(length - bare.length) })}\n`;
+    };
+    const headA = line({ ...archiveRow(0), requestId: "a-0", timestamp: at(8, 0) }, 800);
+    const headB = line(b[1]!, 800);
+    const tail = archiveRows(400, 60_000, 50).map((row, index) => line({ ...row, timestamp: at(12, 0) + index * 1_000 }, 700)).join("");
+    const query = window(at(1, 0), at(2, 0));
+    // The index starts on a one-row ledger, which the other process reads.
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), headA);
+    expect((await untilLiveLedgerSince(query, iso(at(8, 0)))).coverage.liveLedgerSince).toBe(iso(at(8, 0)));
+    const { ask, close } = indexReaderProcess();
+    const passive = reader === "candidate" ? "passive-candidate" : `passive-minimum ${query}`;
+    try {
+      expect(await ask<Record<string, unknown>>(passive)).toEqual(reader === "candidate" ? { read: true } : { liveLedgerSince: iso(at(8, 0)) });
+      // This process appends, and the same generation is extended past what the other one saw.
+      appendFileSync(usageLogPath(), tail);
+      expect((await untilLiveLedgerSince(query, iso(at(8, 0)))).coverage.liveLedgerSince).toBe(iso(at(8, 0)));
+      // Truncated to a length above the other process's last sight of the file but below the index.
+      truncateSync(usageLogPath(), Buffer.byteLength(headA) + 42);
+      const lock = indexState === "locked" ? lockIndexExclusively() : null;
+      try {
+        await ask(passive);
+      } finally {
+        lock?.release();
+      }
+      writeFileSync(usageLogPath(), headB + tail + line({ ...archiveRow(0), requestId: "appended", timestamp: at(13, 0) }, 700));
+      expect(await ask<{ candidates: number }>(`count ${at(1, 0)} ${at(2, 0)}`)).toEqual({ candidates: 1 });
+      const body = await ask<TotalsBody>(`archive-until ${query} ${iso(b[1]!.timestamp)}`);
+      expect(body.coverage.liveLedgerSince).toBe(iso(b[1]!.timestamp));
+      expect(body).toMatchObject({ complete: false, summary: null, coverage: { ambiguousSegments: [basename(segmentB)] } });
+    } finally {
+      await close();
     }
   }, 60_000);
 
