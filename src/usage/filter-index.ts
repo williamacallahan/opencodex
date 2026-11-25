@@ -75,7 +75,7 @@ import {
   type UsageLedgerScanResult,
 } from "./ledger-scanner";
 import { LINKED_CLIENT_FOLDED_CLIENTS, USAGE_CODEX_CLIENT_LABELS, type UsageSourceFields, type UsageSourceFilter } from "./source-filter";
-import { noteUsageRevision, setDestructiveUsageRevisionListener } from "./revision-observation";
+import { noteUsageRevision, setDestructiveUsageRevisionListener, usageRevisionIsDestructive } from "./revision-observation";
 import { usageAttributions } from "./summary";
 import type { UsageTimeWindow } from "./time-range";
 
@@ -1102,7 +1102,8 @@ function recordSourceInvalidation(revision: UsageLogRevision | null): void {
 }
 
 function persistSourceInvalidation(dir: string, path: string, ticket: number, delayMs: number): void {
-  if (pendingInvalidations.get(path) !== ticket) return; // superseded by a newer one or a replacement
+  const pending = pendingInvalidations.get(path);
+  if (pending === undefined || pending < ticket) return; // superseded by a replacement
   try {
     const db = openIndexForWrite(dir, path, 0);
     try {
@@ -1815,6 +1816,12 @@ export async function readUsageFilterCandidatesPassive(
 ): Promise<UsageFilterCandidateRead | null> {
   const path = indexPathForCurrentHome();
   if (!existsSync(path)) return null;
+  // Writes nothing: a destructive change seen here declines the generation in this process only,
+  // and the next writer-owned refresh records it for every process.
+  if (usageRevisionIsDestructive(currentUsageLogRevision())) {
+    pendingInvalidations.set(path, ++invalidationTicket);
+    return null;
+  }
   let db: Database;
   try {
     db = new Database(path, { readonly: true });
@@ -1830,8 +1837,6 @@ export async function readUsageFilterCandidatesPassive(
       || !tables.has("usage_filter_index_writers")) {
       throw new UsageFilterIndexForeignError();
     }
-    // Recorded before the snapshot below, so a destructive change seen now is part of its verdict.
-    noteUsageRevision(currentUsageLogRevision());
     db.exec("BEGIN");
     try {
       const meta = readMeta(db);

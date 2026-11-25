@@ -66,6 +66,13 @@ export function noteUsageRevision(revision: UsageLogRevision | null): number {
   return mark.epoch;
 }
 
+/** Whether `revision` is destructive against its file's mark, recording nothing; for read-only paths. */
+export function usageRevisionIsDestructive(revision: UsageLogRevision | null): boolean {
+  const mark = highWater.get(usageLogIdentityKey(revision));
+  const size = revision?.size ?? 0;
+  return mark !== undefined && (size < mark.size || (size === mark.size && usageLogRevisionKey(revision) !== mark.revisionKey));
+}
+
 /** An answer's observation; `epoch` is the one its build started under. */
 export function observedUsageRevision(revision: UsageLogRevision | null, epoch: number = usageRevisionEpoch(revision)): ObservedUsageRevision {
   return { identityKey: usageLogIdentityKey(revision), size: revision?.size ?? 0, revisionKey: usageLogRevisionKey(revision), epoch };

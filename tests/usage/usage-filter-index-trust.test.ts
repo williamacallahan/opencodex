@@ -9,6 +9,7 @@ import { settleUsageColdRebuildForTests, UsageColdReadPendingError } from "../..
 import { UsageLedgerRebuildRequiredError } from "../../src/usage/ledger-scanner";
 import {
   readUsageFilterCandidates,
+  readUsageFilterCandidatesPassive,
   requestUsageFilterIndexRebuild,
   usageFilterIndexPath,
   setUsageFilterIndexTestHooksForTests,
@@ -237,6 +238,21 @@ describe("filtered usage index generation trust", () => {
       process.env.OPENCODEX_HOME = testDir;
       rmSync(homeB, { recursive: true, force: true });
     }
+  });
+
+  test("a passive read that sees a destructive change declines without writing the index", async () => {
+    writeFileSync(ledgerPath(), row("r-0", "openai", "key-a") + filler);
+    await getFilteredUsageAggregate({ apiKeyId: "key-b" });
+    appendFileSync(ledgerPath(), grown);
+    noteUsageRevision(currentUsageLogRevision());
+    writeFileSync(ledgerPath(), rewritten);
+    const indexFiles = () => ["", "-wal"].map(suffix => Bun.file(`${usageFilterIndexPath(testDir)}${suffix}`))
+      .map(file => `${file.size}:${file.lastModified}`).join(" ");
+    const before = indexFiles();
+    expect(await readUsageFilterCandidatesPassive({ provider: null, model: null, apiKeyId: "key-b" })).toBeNull();
+    expect(indexFiles()).toBe(before);
+    // The next writer-owned read records the change and serves the rewritten ledger.
+    expect((await getFilteredUsageAggregate({ apiKeyId: "key-b" })).accumulator.summarize("all", Date.now()).summary.requests).toBe(1);
   });
 
   test("an invalidation another process committed ends a picker hit and an open pager", async () => {
