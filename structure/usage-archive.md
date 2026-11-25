@@ -174,12 +174,14 @@ account filter matches a row when any of its attributions matches. Reads run one
 `inArchiveRowsReadQueue` in `src/usage/archive-rows.ts`; a request that waits longer than the
 five-second deadline answers 503 `archive_rows_busy` with `Retry-After: 1`, and the request's own
 abort signal ends its wait or its read at once. Each segment is read from `archiveSeekOffset` (the
-smallest `hourOffsets` offset among hours at or after the hour before `since`'s) and stops at
-`archiveStopOffset`: the first-row offset of an hour an hour or more past `until` that lies after
-the first rows of every hour the read covers, so one stray far-future row cannot end it early. It
-also stops at `limit + 1` matching rows or the deadline. A segment without current totals is never
+smallest `hourOffsets` offset among hours at or after the hour before `since`'s) to its end: a row is
+stamped when its request starts and appended when it ends, and no setting bounds a request's
+duration, so a row in the window can follow rows stamped hours later and no offset can prove the
+window's rows are over. A read also stops at `limit + 1` matching rows or the deadline, and a segment
+replaced or shortened while it is read ends as `segment-changed`; each of those answers
+`incomplete: true`. A segment without current totals is never
 scanned from its start: it is reported pending (or failed) and its build is queued, and the answer
 sets `incomplete: true`. Rows go through the same `requestLogEntryFromPersistedUsage` and
 `requestLogDto` projection as `/api/request-history`. `tests/usage/usage-archive-rows.test.ts` covers
-the window, filters, the seek and stop, pending segments, the row shape, the limit, a mid-scan
+the window, filters, the seek, an in-window row appended after rows hours later, pending segments, the row shape, the limit, a mid-scan
 deadline, and the read queue with abandoned and throwing reads.

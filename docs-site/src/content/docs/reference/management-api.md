@@ -685,18 +685,19 @@ not widened, `until` is exclusive, and it may span at most six hours. One row re
 request that waits more than five seconds for its turn answers 503 `archive_rows_busy` with
 `Retry-After: 1`. `entries` holds the rows oldest first, in the same shape and
 with the same redaction as `GET /api/request-history`. Each archive file is read from the first
-row of the hour before `since`, using the offsets its totals record, and up to an hour past
-`until`, so a row logged slightly out of order is still found; every row is then filtered by its
-own time. A `provider`, `model`, or `account` filter matches a request when any of its attempts
+row of the hour before `since`, using the offsets its totals record, to the end of the file: a
+request is logged when it finishes, so a long one can follow rows stamped hours later. Every row is
+then filtered by its own time. A `provider`, `model`, or `account` filter matches a request when any of its attempts
 matches. An archive file whose totals are not built yet is not read: it is listed in
 `coverage.pendingSegments` with `coverage.pending: true`, its build is asked for and refused while
 trimming is suspended (the next answer lists it under `coverage.failed` as `publishing-suspended`),
 and `incomplete` is `true`. Closing the request stops its read at once.
 `coverage.segments` lists each file read with the byte offset it started from (`fromByte`) and why
-its read ended (`endedBy`: `window-end`, `segment-end`, `limit`, or `deadline`). The top-level
-`endedBy` is `window-end` when every file was read through the window, `limit` when more rows
-matched than were returned, or `deadline` when the read stopped after five seconds with the rows it
-had; `truncated` is `true` for the last two, and `incomplete` is `true` then too.
+its read ended (`endedBy`: `segment-end`, `limit`, `deadline`, or `segment-changed` when the file
+was replaced or shortened during the read). The top-level `endedBy` is `window-end` when every file
+was read to its end, `limit` when more rows matched than were returned, `deadline` when the read
+stopped after five seconds with the rows it had, or `segment-changed`; `truncated` is `true` for the
+last three, and `incomplete` is `true` then too.
 
 :::caution
 Storage cleanup endpoints can move or permanently remove archived session data. Always preview

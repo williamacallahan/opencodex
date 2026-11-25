@@ -2,14 +2,15 @@
  * Individual archived rows for a short window, for forensic questions the hourly totals cannot
  * answer (which request, which session).
  *
- * Bounded four ways: the route caps the window and the row count; each segment is read from the
- * first-row offset its totals file records for the hour before `since`, not from its start; the read
- * stops once it is past the index's first-row offset of the first hour an hour or more after `until`;
- * and an overall deadline, combined with the request's own signal, stops it with what it has. Rows
- * are appended in arrival order but a retry can log one slightly out of time order, which is what the
- * hour of slack on each side absorbs; every row is still filtered by its own timestamp. A segment
- * without current totals has no offsets, so it is reported pending rather than scanned from its start.
- * Segments are read oldest first under the totals' counting rule, so a row is returned once.
+ * Bounded three ways: the route caps the window and the row count; each segment is read from the
+ * first-row offset its totals file records for the earliest hour the window can hold, not from its
+ * start; and an overall deadline, combined with the request's own signal, stops it with what it has
+ * and says so. A row is stamped when its request starts and appended when it ends, and no setting
+ * bounds how long a request runs, so a row in the window can follow rows stamped hours later: no
+ * offset after the start can prove the window's rows are over, and a segment is read to its end.
+ * Every row is filtered by its own timestamp. A segment without current totals has no offsets, so it
+ * is reported pending rather than scanned from its start. Segments are read oldest first under the
+ * totals' counting rule, so a row is returned once.
  */
 import { segmentOverlaps, type ArchiveSegmentBuilt, type ArchiveSegmentState } from "./archive-query";
 import type { ArchiveFilter } from "./archive-answer";
@@ -32,11 +33,11 @@ export interface ArchivedRowsQuery {
 }
 
 /**
- * Why a read stopped. `window-end`: it passed the window's end in the hour index; `segment-end`: the
- * segment ended first; `limit`: more rows matched than the limit; `deadline`: it ran out of time or the
- * request was abandoned.
+ * Why a segment's read stopped. `segment-end`: it was read to its end; `limit`: more rows matched than
+ * the limit; `deadline`: it ran out of time or the request was abandoned; `segment-changed`: the file
+ * was replaced or shortened while it was read, so its later rows were not read.
  */
-export type ArchiveReadEnd = "window-end" | "segment-end" | "limit" | "deadline";
+export type ArchiveReadEnd = "segment-end" | "limit" | "deadline" | "segment-changed";
 
 export interface ArchiveSegmentRead {
   segment: string;
@@ -46,8 +47,11 @@ export interface ArchiveSegmentRead {
 
 export interface ArchivedRowsResult {
   rows: PersistedUsageEntry[];
-  /** `limit` and `deadline` mean rows may be missing; `window-end` means every segment was read through the window. */
-  endedBy: Exclude<ArchiveReadEnd, "segment-end">;
+  /**
+   * `window-end`: every segment in the window was read to its end; `limit` and `deadline` mean rows may
+   * be missing, and so does `segment-changed`, a segment that changed while it was read.
+   */
+  endedBy: "window-end" | Exclude<ArchiveReadEnd, "segment-end">;
   segments: ArchiveSegmentRead[];
   /** Segments in the window whose totals, and so their offsets, are not built yet. */
   pending: ArchiveSegmentState[];
@@ -84,26 +88,6 @@ export function archiveSeekOffset(built: ArchiveSegmentBuilt, since: number): nu
     if (entry.hour >= fromHour) offset = Math.min(offset ?? entry.offset, entry.offset);
   }
   return offset;
-}
-
-/**
- * Where reading may stop: the first-row offset of an hour starting an hour or more past `until` that
- * lies after the first rows of every hour the read covers. Taken from the index rather than from one
- * row, so a stray row stamped far ahead and appended early cannot end the read before the window's own
- * rows. Undefined when no such hour exists: the segment is then read to its end.
- */
-export function archiveStopOffset(built: ArchiveSegmentBuilt, since: number, until: number): number | undefined {
-  const fromHour = Math.floor(since / HOUR_MS) * HOUR_MS - OUT_OF_ORDER_SLACK_MS;
-  const stopHour = until + OUT_OF_ORDER_SLACK_MS;
-  let latestInside = -1;
-  for (const entry of built.hourOffsets) {
-    if (entry.hour >= fromHour && entry.hour < stopHour) latestInside = Math.max(latestInside, entry.offset);
-  }
-  let stop: number | undefined;
-  for (const entry of built.hourOffsets) {
-    if (entry.hour >= stopHour && entry.offset > latestInside) stop = Math.min(stop ?? entry.offset, entry.offset);
-  }
-  return stop;
 }
 
 let rowsReadTail: Promise<void> = Promise.resolve();
@@ -158,6 +142,7 @@ export async function readArchivedRows(
   const pending: ArchiveSegmentState[] = [];
   const full = new AbortController();
   let outOfTime = false;
+  let changed = false;
   for (const state of states) {
     if (!segmentOverlaps(state, query.since, query.until)) continue;
     if (!state.built) {
@@ -171,8 +156,6 @@ export async function readArchivedRows(
     }
     const fromByte = archiveSeekOffset(state.built, query.since);
     if (fromByte === undefined) continue;
-    const stopByte = archiveStopOffset(state.built, query.since, query.until);
-    const pastWindow = new AbortController();
     const read: ArchiveSegmentRead = { segment: state.name, fromByte, endedBy: "segment-end" };
     segments.push(read);
     let stopped = false;
@@ -180,14 +163,10 @@ export async function readArchivedRows(
       await scanUsageLedgerCooperatively({
         path: state.path,
         startAtBytes: fromByte,
-        signal: AbortSignal.any([deadline, full.signal, pastWindow.signal]),
+        signal: AbortSignal.any([deadline, full.signal]),
         ...(options.chunkBytes !== undefined ? { chunkBytes: options.chunkBytes } : {}),
-        onEntry: (entry, rowStartBytes) => {
-          if (full.signal.aborted || pastWindow.signal.aborted) return;
-          if (stopByte !== undefined && rowStartBytes >= stopByte) {
-            pastWindow.abort();
-            return;
-          }
+        onEntry: entry => {
+          if (full.signal.aborted) return;
           if (!matches(entry, query)) return;
           rows.push(entry);
           if (rows.length > query.limit) full.abort();
@@ -195,13 +174,19 @@ export async function readArchivedRows(
       });
     } catch (error) {
       stopped = true;
-      // Pruned or replaced while it was read: the rows already read are still archived rows.
-      if (!(error instanceof UsageLedgerRebuildRequiredError) && !deadline.aborted && !full.signal.aborted && !pastWindow.signal.aborted) throw error;
+      // Replaced or shortened while it was read: the rows already read are still archived rows, but
+      // its later ones were not read, which the answer reports.
+      if (error instanceof UsageLedgerRebuildRequiredError && !deadline.aborted && !full.signal.aborted) {
+        read.endedBy = "segment-changed";
+        changed = true;
+        continue;
+      }
+      if (!deadline.aborted && !full.signal.aborted) throw error;
     }
-    // The limit and the window end are decided in onEntry; only a thrown scan can mean the deadline.
-    read.endedBy = full.signal.aborted ? "limit" : pastWindow.signal.aborted ? "window-end" : stopped && deadline.aborted ? "deadline" : "segment-end";
+    // The limit is decided in onEntry; only a thrown scan can mean the deadline.
+    read.endedBy = full.signal.aborted ? "limit" : stopped && deadline.aborted ? "deadline" : "segment-end";
     outOfTime ||= read.endedBy === "deadline";
   }
   if (full.signal.aborted) return { rows: rows.slice(0, query.limit), endedBy: "limit", segments, pending };
-  return { rows, endedBy: outOfTime ? "deadline" : "window-end", segments, pending };
+  return { rows, endedBy: outOfTime ? "deadline" : changed ? "segment-changed" : "window-end", segments, pending };
 }

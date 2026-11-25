@@ -34,7 +34,7 @@ interface RowsBody {
 
 async function managementGet<T>(path: string): Promise<{ status: number; body: T }> {
   const req = new ManagementRequest(`http://localhost${path}`, { method: "GET" });
-  const response = await handleManagementAPI(req, new URL(req.url), config, { refreshCodexCatalog: async () => {} });
+  const response = await handleManagementAPI(req, new URL(req.url), config, {});
   if (!response) throw new Error(`no management route for ${path}`);
   return { status: response.status, body: await response.json() as T };
 }
@@ -100,9 +100,9 @@ describe("GET /api/usage/archive/rows", () => {
     expect(body.entries.map(entry => entry.requestId)).toEqual(expected.map(row => row.requestId));
     expect(body.entries.map(entry => entry.requestId)).toContain("late-hour-4");
 
-    // A window that ends well inside the segment stops an hour past its end instead of reading on.
+    // A window that ends well inside the segment still reads it to its end: a later offset proves nothing.
     const early = await rowsGet(window(day + HOUR, day + 2 * HOUR));
-    expect(early.body.coverage.segments).toEqual([{ segment: expect.stringContaining(label), fromByte: 0, endedBy: "window-end" }]);
+    expect(early.body.coverage.segments).toEqual([{ segment: expect.stringContaining(label), fromByte: 0, endedBy: "segment-end" }]);
     expect(early.body.endedBy).toBe("window-end");
   });
 
@@ -209,6 +209,20 @@ describe("GET /api/usage/archive/rows", () => {
     const expected = rows.filter(row => row.timestamp >= day + HOUR && row.timestamp < day + 2 * HOUR);
     expect(expected.length).toBeGreaterThan(0);
     expect(body.entries.map(entry => entry.requestId)).toEqual(expected.map(row => row.requestId));
+  });
+
+  test("an in-window row appended after rows hours later is still returned", async () => {
+    // A long request is stamped when it starts and appended when it ends, after rows of later hours.
+    const day = Date.UTC(2026, 10, 5);
+    const rows: ArchiveFixtureRow[] = [
+      { ...archiveRow(0), requestId: "in-window-early", timestamp: day + HOUR + 10 * 60_000 },
+      ...Array.from({ length: 6 }, (_, index) => ({ ...archiveRow(index + 1), requestId: `later-${index}`, timestamp: day + (4 + index) * HOUR })),
+      { ...archiveRow(7), requestId: "in-window-late", timestamp: day + HOUR + 20 * 60_000 },
+    ];
+    await builtSegment("614", rows, iso(day + HOUR).replaceAll(":", "-"));
+    const { body } = await rowsGet(window(day + HOUR, day + 2 * HOUR));
+    expect(body.entries.map(entry => entry.requestId)).toEqual(["in-window-early", "in-window-late"]);
+    expect(body).toMatchObject({ endedBy: "window-end", incomplete: false });
   });
 
   test.each([
