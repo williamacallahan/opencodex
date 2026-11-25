@@ -114,7 +114,14 @@ async function archiveTotalsResponse(ctx: ManagementContext): Promise<Response> 
   const complete = answer.pendingSegments.length === 0 && answer.failedSegments.length === 0 && answer.inexactSegments.length === 0
     && ambiguous.length === 0 && missing.length === 0;
   const capped = answer.foldedRows > 0 || answer.overlapRowsDropped > 0 || ARCHIVE_DIMENSIONS.some(dimension => answer.overflowRows[dimension] > 0);
-  const breakdowns = Object.fromEntries(ARCHIVE_DIMENSIONS.map(dimension => [breakdownName(dimension), answer.byDimension[dimension]]));
+  // A breakdown whose pricing classes cannot be rebuilt carries them as null rather than a guess.
+  const unpriced = new Set(answer.unpricedBreakdowns);
+  const breakdowns = Object.fromEntries(ARCHIVE_DIMENSIONS.map(dimension => {
+    const breakdown = answer.byDimension[dimension];
+    return [breakdownName(dimension), unpriced.has(dimension)
+      ? { ...breakdown, rows: breakdown.rows.map(row => ({ ...row, pricedRequests: null, unpricedRequests: null, unmeteredRequests: null })) }
+      : breakdown];
+  }));
   return jsonResponse({
     since: new Date(since).toISOString(),
     until: new Date(until).toISOString(),
@@ -128,6 +135,7 @@ async function archiveTotalsResponse(ctx: ManagementContext): Promise<Response> 
       pendingSegments: answer.pendingSegments.map(state => state.name),
       failed: failedCoverage(answer.failedSegments),
       inexact: answer.inexactSegments,
+      unpricedBreakdowns: answer.unpricedBreakdowns.map(breakdownName),
       // Read only to report: neither counted nor skipped, since nothing proves which copy is archived once.
       ambiguousSegments: ambiguous.map(entry => entry.name),
       // Deprecated: the archive-wide count of those files, kept for existing callers; it decides nothing.

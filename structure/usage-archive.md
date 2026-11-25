@@ -190,8 +190,11 @@ undercount. `coverage.inexact` lists each segment whose totals cannot make the w
 reason: `uncounted-rows` (its uncounted rows may lie in the window), `overlap-dropped` (it holds
 multi-attempt rows whose once-only count was not recorded, so `requests` could count them twice), or
 `folded-keys` (a filter selects a dimension it folded into `(other)`), or `split-overlap` (a provider,
-model or account filter matches some attempts of a multi-attempt request but not the final one, so
-its pricing class and row cost cannot be rebuilt; a version-4 overlap has no `final`). When any segment that may
+model or account filter matches some but not all of a multi-attempt request's buckets: its pricing
+class is kept once, so no proper subset can rebuild it, whichever bucket holds it). For the same
+reason, a provider, model or account breakdown whose keys split one request's buckets carries
+`pricedRequests`, `unpricedRequests` and `unmeteredRequests` as `null` and is listed in
+`coverage.unpricedBreakdowns`; its other figures stay exact. When any segment that may
 overlap the window has no usable totals or is inexact, the answer sets `complete: false` and carries
 `summary`, `byHour` and every breakdown as `null`, because a number would look exact; otherwise it
 sets `complete: true`. A segment without

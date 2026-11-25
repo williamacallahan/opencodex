@@ -93,6 +93,12 @@ export type ArchiveInexactReason = "uncounted-rows" | "overlap-dropped" | "folde
 
 export interface ArchiveTotalsAnswer {
   summary: ArchiveSums;
+  /**
+   * Attribution breakdowns whose pricing classes (`pricedRequests`, `unpricedRequests`,
+   * `unmeteredRequests`) cannot be rebuilt, because one request's attempts fall under several of their
+   * keys and its class is kept once.
+   */
+  unpricedBreakdowns: ArchiveDimension[];
   /** Segments in the window whose totals were read but cannot make its figures exact, each with why. */
   inexactSegments: Array<{ segment: string; reason: ArchiveInexactReason }>;
   /** Every counted segment that may overlap the window, with its span, hour index and build failure. */
@@ -158,6 +164,7 @@ export async function answerArchiveTotals(
   const isAttribution = (dimension: ArchiveDimension): boolean => (ATTRIBUTION_DIMENSIONS as readonly string[]).includes(dimension);
 
   const summary = blankArchiveSums();
+  const unpricedBreakdowns = new Set<ArchiveDimension>();
   const byHour = new Map<number, ArchiveSums>();
   const byDimension = perArchiveDimension(() => new Map<string, ArchiveSums>());
   const overflowRows = perArchiveDimension(() => 0);
@@ -200,10 +207,15 @@ export async function answerArchiveTotals(
     let split = false;
     for (const overlap of totals.overlaps) {
       const matchedIndexes = overlap.buckets.filter(index => matched[index] === 1);
-      if (attributionFiltered && matchedIndexes.length > 0 && matchedIndexes.length < overlap.buckets.length
-        && (overlap.final === undefined || matched[overlap.final] !== 1)) split = true;
+      // A request's pricing class is kept once, on one of its buckets, so a filter selecting only some
+      // of them cannot rebuild it, whichever ones it selects.
+      if (attributionFiltered && matchedIndexes.length > 0 && matchedIndexes.length < overlap.buckets.length) split = true;
       const members = matchedIndexes.map(index => totals.buckets[index]!);
       if (members.length < 2) continue;
+      // Likewise a provider, model or account breakdown whose keys split one request's buckets.
+      for (const dimension of ATTRIBUTION_DIMENSIONS) {
+        if (new Set(members.map(member => member[dimension])).size > 1) unpricedBreakdowns.add(dimension);
+      }
       summary.requests -= overlap.count * (members.length - 1);
       uncount(byHour, members[0]!.hour, overlap.count * (members.length - 1));
       for (const dimension of ARCHIVE_DIMENSIONS) {
@@ -231,6 +243,7 @@ export async function answerArchiveTotals(
     earliestRowAt: span.earliestRowAt,
     latestRowAt: span.latestRowAt,
     spanApproximate: span.approximate,
+    unpricedBreakdowns: [...unpricedBreakdowns],
     byHour: [...byHour].sort(([left], [right]) => left - right).map(([hour, sums]) => ({ key: new Date(hour).toISOString(), ...sums })),
     byDimension: breakdowns,
   };

@@ -656,8 +656,11 @@ The answer comes only from precomputed hourly totals, never from the rows themse
   `uncounted-rows` (rows it could not count, such as one past its 744-hour span or one whose time
   could not be read, may be in the window), `overlap-dropped` (a multi-attempt request might count
   twice), `folded-keys` (the filter selects a value it counted as `(other)`), or `split-overlap` (a
-  `provider`, `model`, or `account` filter selects only earlier attempts of a request, whose
-  pricing figures the totals cannot rebuild). `summary`, `byHour`, and every breakdown are then
+  `provider`, `model`, or `account` filter selects some but not all attempts of a request, whose
+  pricing figures the totals cannot rebuild). Likewise, when one request's attempts fall under
+  several keys of `byProvider`, `byModel`, or `byAccount`, that breakdown's `pricedRequests`,
+  `unpricedRequests`, and `unmeteredRequests` are `null` and it is listed in
+  `coverage.unpricedBreakdowns`; its other figures are exact. `summary`, `byHour`, and every breakdown are then
   `null` instead of numbers that would look exact. An archive file whose totals have not been read
   yet counts as possibly in the window.
 - `byHour` is a time series: one entry (`key`, the hour's ISO start, plus the same sums) for every

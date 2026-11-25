@@ -113,10 +113,15 @@ describe("archive attribution matches the live summary", () => {
     expect(byKey(archive.byModel.rows, row => row.key)["gpt-reserve"]).toEqual({ requests: 1, totalTokens: 220 });
     expect(archive.byProvider.rows.map(row => row.key)).not.toContain("combo");
 
-    const archiveOpenai = await get<ArchiveBody>(`/api/usage/archive?${archiveWindow}&provider=openai`);
-    expect(pick(archiveOpenai.summary)).toEqual(pick(liveOpenai.summary));
-    expect(pricing(archiveOpenai.summary as unknown as Pricing)).toEqual(pricing(liveOpenai.summary as unknown as Pricing));
-    expect(archiveOpenai.summary.requests).toBe(1);
+    // The filter selects one attempt of the failover request, whose pricing class the totals keep once:
+    // the answer is the live one or declined.
+    const archiveOpenai = await get<ArchiveBody & { complete: boolean }>(`/api/usage/archive?${archiveWindow}&provider=openai`);
+    if (archiveOpenai.complete) {
+      expect(pick(archiveOpenai.summary)).toEqual(pick(liveOpenai.summary));
+      expect(pricing(archiveOpenai.summary as unknown as Pricing)).toEqual(pricing(liveOpenai.summary as unknown as Pricing));
+    } else {
+      expect(archiveOpenai.summary).toBeNull();
+    }
   });
 
   test("a filter to a request's first, unmetered attempt gives the live pricing figures or declines them", async () => {
@@ -132,6 +137,45 @@ describe("archive attribution matches the live summary", () => {
       expect(pricing(archive.summary as unknown as Pricing)).toEqual(pricing(live.summary as unknown as Pricing));
     } else {
       expect(archive.summary).toBeNull();
+    }
+  });
+
+  test.each([
+    ["the measured attempt first and the unmetered one last", [
+      { provider: "alpha", model: "gpt-5.5", usage: { inputTokens: 40, outputTokens: 4 } },
+      { provider: "beta", model: "unpriced-model", status: 429, usageStatus: "unreported" },
+    ]],
+    ["the unmetered attempt first and the measured one last", [
+      { provider: "alpha", model: "unpriced-model", status: 429, usageStatus: "unreported" },
+      { provider: "beta", model: "gpt-5.5", usage: { inputTokens: 40, outputTokens: 4 } },
+    ]],
+  ])("with %s, every filtered and per-attempt pricing figure is the live one or declined", async (_label, attempts) => {
+    const row = {
+      requestId: "two-attempts", timestamp: AT, provider: "combo", model: "team-combo", requestedModel: "team-combo", status: 200,
+      durationMs: 100, usageStatus: "reported", usage: { inputTokens: 40, outputTokens: 4 }, client: "codex_cli",
+      attempts: attempts.map((fields, index) => attempt(index + 1, fields)),
+    };
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), jsonl([row]));
+    await writeArchiveTotals(writeSegment(join(home, "usage-archive"), "904", jsonl([row]), "2026-11-20T10-05-00.000Z"));
+    const hour = Math.floor(AT / HOUR) * HOUR;
+    const live = await get<LiveBody>(`/api/usage?range=all&since=${hour}&until=${hour + HOUR - 1}`);
+    const liveByProvider = Object.fromEntries(await Promise.all(["alpha", "beta"].map(async provider =>
+      [provider, await get<LiveBody>(`/api/usage?range=all&since=${hour}&until=${hour + HOUR - 1}&provider=${provider}`)] as const)));
+    retireLiveLedger();
+    for (const provider of ["alpha", "beta"]) {
+      const archive = await get<ArchiveBody & { complete: boolean }>(`/api/usage/archive?since=${hour}&until=${hour + HOUR}&provider=${provider}`);
+      if (archive.complete) expect(pricing(archive.summary as unknown as Pricing)).toEqual(pricing(liveByProvider[provider]!.summary as unknown as Pricing));
+      else expect(archive.summary).toBeNull();
+    }
+    // Per-provider rows of the unfiltered answer: the live figure, or no pricing figure at all.
+    const archive = await get<ArchiveBody & { complete: boolean }>(`/api/usage/archive?since=${hour}&until=${hour + HOUR}`);
+    expect(archive.complete).toBe(true);
+    for (const rowOfProvider of archive.byProvider.rows as unknown as Array<{ key: string } & Partial<Pricing>>) {
+      const liveRow = (live.providers as unknown as Array<{ provider: string } & Partial<Pricing>>).find(entry => entry.provider === rowOfProvider.key);
+      for (const field of ["pricedRequests", "unpricedRequests", "unmeteredRequests"] as const) {
+        if (rowOfProvider[field] !== null) expect(rowOfProvider[field]).toBe(liveRow?.[field] ?? 0);
+      }
     }
   });
 
