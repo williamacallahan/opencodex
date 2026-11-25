@@ -410,12 +410,10 @@ export async function resolveEmptyLunaReserveStart(args: {
   const relayEligible = (target: ComboTarget) => targetKey(target) === plan.relayKey && args.targetEligible(target);
   const ordinaryNow = () => hasOrdinaryLunaCapacity(args.config, args.hasCallerAuth === true);
   const successor = await args.pickWithWait({
-    eligible: relayEligible, cooldownReprobeTargets, now, waitForCooldownMs: 0,
-    ...(includedAvailable ? { allowCooldownReprobe: false } : {}),
+    eligible: relayEligible, cooldownReprobeTargets, now, waitForCooldownMs: 0, allowCooldownReprobe: false,
   }) ?? (includedAvailable ? null : await args.pickWithWait({
-    exclude: [plan.nativeKey],
-    eligible: target => relayEligible(target) || (!ordinaryNow() && args.targetEligible(target)),
-    cooldownReprobeTargets, allowCooldownReprobe: false, now: Date.now(),
+    eligible: target => targetKey(target) !== plan.nativeKey && (relayEligible(target) || (!ordinaryNow() && args.targetEligible(target))),
+    cooldownReprobeTargets, allowCooldownReprobe: !ordinaryNow(), now: Date.now(),
   }));
   const relayPick = successor && targetKey(successor.target) === plan.relayKey ? successor : null;
   const nativeNow = (reserve: boolean) => args.pickWithWait({

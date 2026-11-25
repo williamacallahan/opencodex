@@ -1870,10 +1870,15 @@ export async function executeComboResponses(
     }
     const activeLunaLegs = lunaLegs;
     const hasReserveNow = () => createPoolReserveWalk(config).remaining.size > 0;
+    const hasOrdinaryNow = () => hasOrdinaryLunaCapacity(config, callerOrdinaryLunaAuth);
+    const reconsiderOrdinary = activeLunaLegs !== undefined && lunaStage === "relay" && evaluatedStrictReserve
+      && failedTargetKey === activeLunaLegs.relayKey && unavailableOrdinaryTarget !== activeLunaLegs.nativeKey
+      && combo.cooldownWaitPolicy === "before-last-resort";
     const relayHopEligible = activeLunaLegs && lunaStage === "relay"
       ? (target: NonNullable<typeof combo>["targets"][number]) => targetEligible(target) && (targetKey(target) !== activeLunaLegs.nativeKey
-        || (!evaluatedStrictReserve && unavailableOrdinaryTarget !== activeLunaLegs.nativeKey
-          && (isComboTargetInCooldown(comboId, target) || hasReserveNow())))
+        || (unavailableOrdinaryTarget !== activeLunaLegs.nativeKey && (evaluatedStrictReserve
+          ? reconsiderOrdinary && !target.lastResort && hasOrdinaryNow()
+          : isComboTargetInCooldown(comboId, target) || hasReserveNow())))
       : targetEligible;
     const hopEligible = legIntent === "reserve-only" && activeLunaLegs
       ? (target: NonNullable<typeof combo>["targets"][number]) => targetKey(target) === activeLunaLegs.relayKey && targetEligible(target)
@@ -1898,14 +1903,14 @@ export async function executeComboResponses(
       },
     });
     // Only untried targets can use the original probe reservation. A same-target retry waits for expiry.
-    const carriedReprobe: ComboPick["cooldownReprobeTargets"] = pick.cooldownReprobeTargets;
+    const carriedReprobe = pick.cooldownReprobeTargets ? Object.entries(pick.cooldownReprobeTargets) : undefined;
     if (nextPick) {
       pick = nextPick;
     } else {
       pick = await pickWithWait({
-        exclude: pick.attempted,
+        exclude: reconsiderOrdinary ? pick.attempted.filter(key => key !== activeLunaLegs.nativeKey) : pick.attempted,
         eligible: relayHopEligible,
-        cooldownReprobeTargets: carriedReprobe ? Object.entries(carriedReprobe) : undefined,
+        cooldownReprobeTargets: reconsiderOrdinary ? carriedReprobe?.filter(([key]) => key !== activeLunaLegs.nativeKey) : carriedReprobe,
         now: failureNow, allowReserveCooldownRelease: !evaluatedStrictReserve,
       });
       // Drop the attempted-target exclusion for one same-target retry. The picker rechecks
@@ -1935,8 +1940,8 @@ export async function executeComboResponses(
       ({ lunaStage, evaluatedStrictReserve, pick } = await advanceLunaLegAfterFailure({
         lunaStage, evaluatedStrictReserve, failedTargetKey, legs: activeLunaLegs, pick, unavailableOrdinaryTarget, attemptedTargets,
         aborted: Boolean(options.abortSignal?.aborted),
-        pickReserve: exclude => pickWithWait({ exclude, allowCooldownReprobe: false, waitForCooldownMs: nextPick ? undefined : 0, eligible: target => nativeEligible(target) && hasReserveNow() }),
-        pickOrdinary: exclude => pickWithWait({ exclude, allowCooldownReprobe: false, allowReserveCooldownRelease: false, waitForCooldownMs: 0, eligible: target => nativeEligible(target) && hasOrdinaryLunaCapacity(config, callerOrdinaryLunaAuth) }),
+        pickReserve: exclude => pickWithWait({ exclude, cooldownReprobeTargets: carriedReprobe, allowCooldownReprobe: false, waitForCooldownMs: nextPick ? undefined : 0, eligible: target => nativeEligible(target) && hasReserveNow() }),
+        pickOrdinary: exclude => pickWithWait({ exclude, allowCooldownReprobe: false, allowReserveCooldownRelease: false, waitForCooldownMs: 0, eligible: target => nativeEligible(target) && hasOrdinaryNow() }),
       }));
       if (prevLunaStage === "relay" && lunaStage === "reserve" && reserveWalk) reserveWalk = createPoolReserveWalk(config);
     }
@@ -1951,7 +1956,7 @@ export async function executeComboResponses(
         const recoveredTarget = await pickWithWait({
           exclude: attemptedTargets,
           eligible: recoveryEligible,
-          cooldownReprobeTargets: carriedReprobe ? Object.entries(carriedReprobe) : undefined,
+          cooldownReprobeTargets: carriedReprobe,
           now: failureNow,
         });
         if (recoveredTarget && await recoverUnreadableEncryptedTask()) {

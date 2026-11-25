@@ -1832,8 +1832,12 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(logCtx.attempts?.[0]).toMatchObject({ provider: "metered", sendCount: 1 });
 
     calls.length = 0;
-    cfg.combos!.luna!.targets = cfg.combos!.luna!.targets.slice(0, 2);
     cfg.combos!.luna!.cooldownReprobe = { enabled: true };
+    expect((await post(cfg, { store: false })).text).toContain("response.completed");
+    expect(calls).toEqual(["metered:gpt-6-luna"]);
+
+    calls.length = 0;
+    cfg.combos!.luna!.targets = cfg.combos!.luna!.targets.slice(0, 2);
     expect((await post(cfg, { store: false })).text).toContain("response.completed");
     expect(calls).toEqual(["relay:gpt-6-luna"]);
   });
@@ -1909,6 +1913,35 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(unavailRes.status).toBe(503);
     expect(unavailRes.text).toContain("target 1 (openai): reserve-cooldown");
     expect(unavailRes.text).toContain("target 2 (relay): cooldown");
+  });
+
+  test("a relay refusal preserves this request's native Reserve cooldown probe", async () => {
+    const cfg = config({}, [{ provider: "openai", model: "gpt-6-luna", lastResort: true }, { provider: "relay", model: "gpt-6-luna" }]);
+    cfg.combos!.luna!.cooldownWaitPolicy = "before-last-resort";
+    cfg.combos!.luna!.cooldownReprobe = { enabled: true };
+    seats(true);
+    for (const provider of ["openai", "relay"]) coolComboTarget("luna", { provider, model: "gpt-6-luna" }, { now, status: 503, cooldownMs: 60_000 });
+    relay = reserveRefused;
+    expect((await post(cfg, { store: false })).text).toContain("response.completed");
+    expect(calls).toEqual(["relay:gpt-6-luna", "native:gpt-reserve"]);
+  });
+
+  test("a safe relay refusal waits for normal native ordinary Luna before an emergency target", async () => {
+    const cfg = config();
+    cfg.combos!.luna!.cooldownWaitPolicy = "before-last-resort";
+    cfg.combos!.luna!.waitForCooldownMs = 500;
+    cfg.combos!.luna!.targets[2]!.lastResort = true;
+    seats(true);
+    native = body => body.model === "gpt-reserve"
+      ? new Response("Reserve unavailable", { status: 503, headers: { "x-should-retry": "false" } })
+      : sse(body.model, "ok");
+    relay = () => {
+      coolComboTarget("luna", { provider: "openai", model: "gpt-6-luna" }, { now, status: 503, cooldownMs: 100 });
+      setTimeout(() => { now += 150; }, 10);
+      return reserveRefused();
+    };
+    expect((await post(cfg, { store: false })).text).toContain("response.completed");
+    expect(calls).toEqual(["native:gpt-reserve", "relay:gpt-6-luna", "native:gpt-6-luna"]);
   });
 
   test("relay start when native target is cooling re-enters strict Reserve once native cooldown lifts, and never when Reserve is empty", async () => {
