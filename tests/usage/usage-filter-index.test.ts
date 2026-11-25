@@ -1428,6 +1428,7 @@ describe("filtered usage index availability", () => {
       nextPage() {
         throw new UsageFilterIndexPageError(new Error("SQLITE_CORRUPT"));
       },
+      nextIndexedRows: () => ({ rows: [], done: true }),
       close() {},
     }));
     try {
@@ -1497,6 +1498,7 @@ describe("filtered usage index availability", () => {
       nextPage() {
         throw new UsageFilterIndexPageError(new Error("SQLITE_CORRUPT"));
       },
+      nextIndexedRows: () => ({ rows: [], done: true }),
       close() {},
     }));
     const realScan = ledgerScannerModule.scanUsageLedgerCooperatively;
@@ -1542,6 +1544,7 @@ describe("filtered usage index availability", () => {
       nextPage() {
         throw new UsageFilterIndexPageError(new Error("SQLITE_CORRUPT"));
       },
+      nextIndexedRows: () => ({ rows: [], done: true }),
       close() {},
     }));
     const realScan = ledgerScannerModule.scanUsageLedgerCooperatively;
