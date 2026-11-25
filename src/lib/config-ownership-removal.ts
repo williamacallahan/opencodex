@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync, rmdirSync, statSync, unlinkSync, type Stats } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync, rmdirSync, unlinkSync, type Stats } from "node:fs";
 import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
 import { isWindowsReparsePoint, nativeReparseProbeApplies } from "./private-sqlite-path";
 import { isCurrentWindowsProcessElevated } from "./windows-elevation";
@@ -277,102 +277,124 @@ export interface OwnedRemovalOptions {
   elevatedUid?: number;
   /** The root's identity when it was resolved; every check also requires the root to still be it. */
   rootIdentity?: RootIdentity;
-  /** The run's usage-history guard, read once; without it each call reads its own. */
-  usageHistory?: UsageHistoryGuard;
 }
 
 /**
  * The usage ledger and its archive outlive uninstall: the operator's order keeps identified request
  * records at least 30 days, and older manifests list `usage-archive` (and possibly its children) as
- * disposable. {@link usageHistoryGuard} decides which manifest entries those are; the caller reports
- * what it kept among the files that remain.
+ * disposable. Only the exact names are preserved; {@link usageHistoryRefusal} refuses the whole run
+ * first whenever that name rule might not be enough.
  */
 export const PRESERVED_USAGE_HISTORY = ["usage.jsonl", "usage-archive"] as const;
 
-export interface UsageHistoryGuard {
-  /** Whether removing the entry `parts` could remove usage history; it is then left in place. */
-  protects(parts: readonly string[]): boolean;
+/** `usage.jsonl` at the top level, or `usage-archive` and anything recorded below it, by exact name. */
+export function isPreservedUsageHistory(parts: readonly string[]): boolean {
+  const [first] = parts;
+  return first === "usage-archive" || (parts.length === 1 && first === "usage.jsonl");
 }
 
-type FileIdentity = { dev: bigint; ino: bigint };
+/** How deep and how many entries the archive walk inspects before it gives up and refuses. */
+const USAGE_ARCHIVE_WALK_MAX_DEPTH = 8;
+const USAGE_ARCHIVE_WALK_MAX_ENTRIES = 100_000;
 
-function identityOf(path: string, follow: boolean): FileIdentity | undefined {
-  try {
-    const entry = follow ? statSync(path, { bigint: true }) : lstatSync(path, { bigint: true });
-    return { dev: entry.dev, ino: entry.ino };
-  } catch {
-    return undefined;
-  }
-}
-
-/** Case-folded and NFC-normalized, so a case- or normalization-insensitive volume's aliases compare equal. */
-const folded = (name: string): string => name.normalize("NFC").toLowerCase();
+const REMOVE_YOURSELF = "Move the usage history out of the config directory (or resolve the link) and run 'ocx uninstall' again; nothing was removed.";
 
 /**
- * Recognize every spelling of the usage history below `rootPath`, read once at the start of a run:
- * a first component that names `usage-archive` (any depth) or `usage.jsonl` (top level) under case
- * and Unicode folding, a first component that is the same file as either (an alias spelling on a
- * case-insensitive volume, or a hard link), and an entry at or inside the physical location either
- * resolves to (`usage-archive` may be a link to a directory elsewhere in the root). Name matches are
- * decided before any filesystem lookup, so a child entry below a linked archive never reaches the
- * link checks. Folding on a case-sensitive volume can keep a file whose name differs only in case;
- * that file is reported as remaining, never removed by mistake.
+ * Why uninstall must not run here, or null. Name-based preservation is safe only for a plain
+ * `usage.jsonl` file and a plain `usage-archive` directory holding real files and directories: a
+ * link could lead history into state the run removes, and an alias spelling on a case-insensitive
+ * volume could reach the history under a name the rule does not know. So before anything is removed
+ * the run is refused when either entry is a link or not the expected kind, when any entry inside the
+ * archive is a link or not a regular file or directory (walked with lstat, at most
+ * {@link USAGE_ARCHIVE_WALK_MAX_DEPTH} levels and {@link USAGE_ARCHIVE_WALK_MAX_ENTRIES} entries,
+ * refusing past either), when a protected path cannot be inspected for a reason other than absence,
+ * or when a manifest entry's first component matches a protected name only case-insensitively.
  */
-export function usageHistoryGuard(rootPath: string): UsageHistoryGuard {
-  const identities: FileIdentity[] = [];
-  const physical: string[] = [];
-  for (const name of PRESERVED_USAGE_HISTORY) {
-    const path = join(rootPath, name);
-    for (const identity of [identityOf(path, false), identityOf(path, true)]) if (identity) identities.push(identity);
-    try {
-      physical.push(folded(realpathSync.native(path)));
-    } catch { /* absent or dangling: nothing to overlap */ }
+export function usageHistoryRefusal(rootPath: string, manifestPaths: readonly string[]): string | null {
+  for (const rel of manifestPaths) {
+    const first = rel.split("/")[0] ?? "";
+    const alias = PRESERVED_USAGE_HISTORY.find(name => first !== name && first.toLowerCase() === name);
+    if (alias !== undefined) {
+      return `the uninstall manifest records ${join(rootPath, first)}, another spelling of ${alias}, which may be the same entry on this volume. ${REMOVE_YOURSELF}`;
+    }
   }
-  const sameFile = (identity: FileIdentity | undefined): boolean =>
-    identity !== undefined && identities.some(known => known.dev === identity.dev && known.ino === identity.ino);
-  return {
-    protects(parts) {
-      const [first] = parts;
-      if (first === undefined) return false;
-      if (folded(first) === "usage-archive" || (parts.length === 1 && folded(first) === "usage.jsonl")) return true;
-      if (sameFile(identityOf(join(rootPath, first), false))) return true;
-      const path = join(rootPath, ...parts);
-      if (sameFile(identityOf(path, false))) return true;
-      let location: string;
-      try {
-        location = folded(join(realpathSync.native(dirname(path)), basename(path)));
-      } catch {
-        return false;
-      }
-      return physical.some(target => location === target || location.startsWith(target + sep));
-    },
+  const inspect = (path: string): Stats | null | string => {
+    try {
+      return lstatSync(path);
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") return null;
+      return `${path} could not be inspected (${String(errorCode(error) ?? "unknown error")}).`;
+    }
   };
+  const ledgerPath = join(rootPath, "usage.jsonl");
+  const ledger = inspect(ledgerPath);
+  if (typeof ledger === "string") return `${ledger} ${REMOVE_YOURSELF}`;
+  if (ledger && (isLinkEntry(ledgerPath, ledger) || !ledger.isFile())) {
+    return `${ledgerPath} is a link or not a regular file, so uninstall cannot tell what keeping it would keep. ${REMOVE_YOURSELF}`;
+  }
+  const archivePath = join(rootPath, "usage-archive");
+  const archive = inspect(archivePath);
+  if (typeof archive === "string") return `${archive} ${REMOVE_YOURSELF}`;
+  if (!archive) return null;
+  if (isLinkEntry(archivePath, archive) || !archive.isDirectory()) {
+    return `${archivePath} is a link or not a directory, so uninstall cannot tell what keeping it would keep. ${REMOVE_YOURSELF}`;
+  }
+  let seen = 0;
+  const pending: Array<{ path: string; depth: number }> = [{ path: archivePath, depth: 0 }];
+  while (pending.length > 0) {
+    const { path, depth } = pending.pop()!;
+    let names: string[];
+    try {
+      names = readdirSync(path);
+    } catch (error) {
+      return `${path} could not be listed (${String(errorCode(error) ?? "unknown error")}). ${REMOVE_YOURSELF}`;
+    }
+    for (const name of names) {
+      seen += 1;
+      if (seen > USAGE_ARCHIVE_WALK_MAX_ENTRIES) {
+        return `${archivePath} holds more than ${USAGE_ARCHIVE_WALK_MAX_ENTRIES} entries, too many to check for links. ${REMOVE_YOURSELF}`;
+      }
+      const child = join(path, name);
+      const entry = inspect(child);
+      if (typeof entry === "string") return `${entry} ${REMOVE_YOURSELF}`;
+      if (!entry) continue;
+      if (isLinkEntry(child, entry)) {
+        return `${child} is a link inside the usage archive; removing other owned state could delete what it points to. ${REMOVE_YOURSELF}`;
+      }
+      if (entry.isDirectory()) {
+        if (depth + 1 >= USAGE_ARCHIVE_WALK_MAX_DEPTH) {
+          return `${child} is nested more than ${USAGE_ARCHIVE_WALK_MAX_DEPTH} levels inside the usage archive, too deep to check for links. ${REMOVE_YOURSELF}`;
+        }
+        pending.push({ path: child, depth: depth + 1 });
+      } else if (!entry.isFile()) {
+        return `${child} inside the usage archive is not a regular file or directory. ${REMOVE_YOURSELF}`;
+      }
+    }
+  }
+  return null;
 }
 
 /**
  * Remove the recorded entry `parts` below the canonical `rootPath`. A final-component link is
  * unlinked itself, never its target; a directory is emptied and removed with the chain rechecked for
- * every child and before the rmdir. An entry the guard protects is left in place, and so is every
- * directory above it, which keeps the rest of the run going: returns false when anything was kept.
+ * every child and before the rmdir. The usage history is never removed (the caller skips it, and
+ * recursion from a recorded directory cannot reach a top-level name).
  */
-export function removeOwnedEntry(rootPath: string, parts: readonly string[], options: OwnedRemovalOptions = {}): boolean {
-  if ((options.usageHistory ?? usageHistoryGuard(rootPath)).protects(parts)) return false;
+export function removeOwnedEntry(rootPath: string, parts: readonly string[], options: OwnedRemovalOptions = {}): void {
+  if (isPreservedUsageHistory(parts)) return;
   assertRealDirectoryChain(rootPath, parts.slice(0, -1), options);
   const path = join(rootPath, ...parts);
   const entry = lstatSync(path);
   if (entry.isSymbolicLink() || !entry.isDirectory()) {
     unlinkSync(path);
-    return true;
+    return;
   }
   assertRealDirectoryChain(rootPath, parts, options);
   const names = readdirSync(path);
   directoryListedHookForTests?.(path);
-  let removedAll = true;
-  for (const name of names) if (!removeOwnedEntry(rootPath, [...parts, name], options)) removedAll = false;
-  if (!removedAll) return false;
+  for (const name of names) removeOwnedEntry(rootPath, [...parts, name], options);
   assertRealDirectoryChain(rootPath, parts, options);
   rmdirSync(path);
-  return true;
 }
 
 /**

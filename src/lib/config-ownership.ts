@@ -18,9 +18,9 @@ import {
   canonicalRootUnchanged,
   elevatedRemovalRefusal,
   ownedEntryPresent,
+  isPreservedUsageHistory,
   removeOwnedEntry,
-  usageHistoryGuard,
-  type UsageHistoryGuard,
+  usageHistoryRefusal,
   rootIdentity,
   uninstallRunsElevated,
   type RootIdentity,
@@ -814,6 +814,24 @@ export function uninstallPrivilegeRefusal(configDir: string): string | null {
   return privilegeCheck(configDir)?.refusal ?? null;
 }
 
+/**
+ * Read-only check `ocx uninstall` runs before its first teardown step, beside the privilege check:
+ * why the usage history makes this home unsafe to uninstall (`usageHistoryRefusal`), or null. The
+ * remover repeats it under the lock, before the tombstone.
+ */
+export function uninstallUsageHistoryRefusal(configDir: string): string | null {
+  if (!existsSync(configDir)) return null;
+  let root: string;
+  try {
+    root = canonicalRoot(configDir);
+  } catch {
+    return null;
+  }
+  // Without ownership metadata the remover leaves the whole home untouched, so nothing to check.
+  const ownership = loadOwnershipForUninstall(root);
+  return ownership ? usageHistoryRefusal(root, ownership.manifest.paths) : null;
+}
+
 export function removeOwnedConfigState(configDir: string): ConfigRemovalResult {
   ownershipCache.delete(ownershipCacheKey(configDir));
   lockedManifestIdentity.delete(ownershipCacheKey(configDir));
@@ -847,9 +865,6 @@ function callerSpelling(path: string, canonical: string, configDir: string): str
 }
 
 function removeCanonicalOwnedConfigState(configDir: string, identity: RootIdentity): ConfigRemovalResult {
-  // Set under the lock by the removal loop; the residual report after the lock reuses the same guard.
-  let historyGuard: UsageHistoryGuard | undefined;
-  let keptHistory = false;
   // `configDir` is the canonical root resolved once by the caller, and `identity` the directory it
   // named then. It is never resolved again: each step below that acts on it first confirms it is still
   // that directory, a real one resolving to itself. A change before anything is written is refused;
@@ -917,6 +932,9 @@ function removeCanonicalOwnedConfigState(configDir: string, identity: RootIdenti
       // tree may all have changed since the unlocked check.
       const lockedRefusal = privilege ? elevatedRemovalRefusal(configDir) : null;
       if (lockedRefusal) return { status: "refused", reason: lockedRefusal, residualPaths: [configDir] };
+      // Before the tombstone and every removal: a refusal leaves the manifest and every file as they are.
+      const historyRefusal = usageHistoryRefusal(configDir, ownership.manifest.paths);
+      if (historyRefusal) return { status: "refused", reason: historyRefusal, residualPaths: [configDir] };
       if (!canonicalRootUnchanged(configDir, identity)) return rootChanged;
       if (ownership.manifest.uninstallStartedAt === undefined) {
         writeManifest(configDir, { ...ownership.manifest, uninstallStartedAt: Date.now() });
@@ -925,23 +943,15 @@ function removeCanonicalOwnedConfigState(configDir: string, identity: RootIdenti
       removeAbandonedMetadataTemps(configDir, ownership.owner);
       const rootPath = configDir;
       const elevatedUid = process.platform !== "win32" && uninstallRunsElevated() ? process.geteuid?.() : undefined;
-      const usageHistory = usageHistoryGuard(rootPath);
-      historyGuard = usageHistory;
       for (const rel of ownership.manifest.paths) {
         const parts = rel.split("/");
         const path = join(configDir, ...parts);
-        // Before any lookup: a child entry below a linked archive would otherwise fail the link check
-        // and end every rerun at the same entry.
-        if (usageHistory.protects(parts)) {
-          // Every manifest lists usage.jsonl; only history that is there was kept.
-          try { lstatSync(path); keptHistory = true; } catch { /* absent: nothing kept here */ }
-          continue;
-        }
+        // Before any lookup, so a recorded child of the archive never reaches the presence checks.
+        if (isPreservedUsageHistory(parts)) continue;
         try {
           // lstat-based: a listed symlink whose target is gone is still ours to unlink, and a link on
           // the way to an entry is reported rather than read as absence.
-          if (ownedEntryPresent(rootPath, parts)
-            && !removeOwnedEntry(rootPath, parts, { elevatedUid, rootIdentity: identity, usageHistory })) keptHistory = true;
+          if (ownedEntryPresent(rootPath, parts)) removeOwnedEntry(rootPath, parts, { elevatedUid, rootIdentity: identity });
         } catch (error) {
           return {
             status: "partial",
@@ -983,11 +993,10 @@ function removeCanonicalOwnedConfigState(configDir: string, identity: RootIdenti
   // The lock holder retired its own lock file on release; one that remains (Windows) is reported.
   const residualPaths = readdirSync(configDir).map(name => join(configDir, name));
   if (residualPaths.length > 0) {
-    const guard = historyGuard;
-    const history = keptHistory || (guard !== undefined && residualPaths.some(path => guard.protects([basename(path)])));
+    const keptHistory = residualPaths.some(path => isPreservedUsageHistory([basename(path)]));
     return {
       status: "partial",
-      reason: history
+      reason: keptHistory
         ? "the usage ledger and usage archive were kept so request history survives uninstall; remove them yourself when it is no longer needed"
         : "unowned files remain in the config directory",
       residualPaths,

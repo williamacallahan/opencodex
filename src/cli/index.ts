@@ -160,7 +160,7 @@ import { productionDesktopColdStartDeps, runDesktopColdStart } from "./ensure-de
 import { refreshOwnedCatalogIntegrations } from "../integrations/catalog-refresh";
 import { loadExportModels } from "../server/management/model-rows";
 import { removeOwnedConfigAfterDesktopCleanup } from "./uninstall-client-state";
-import { uninstallPrivilegeRefusal } from "../lib/config-ownership";
+import { uninstallPrivilegeRefusal, uninstallUsageHistoryRefusal } from "../lib/config-ownership";
 import { withProcessRuntimeProvenance } from "../lib/bun-runtime";
 import { startArgv } from "../lib/self-launch-argv";
 import { initializeNodeLauncherContext } from "./launcher-context";
@@ -1528,9 +1528,9 @@ async function handleStopUnlocked(snapshot?: GuardedStopSnapshot) {
 }
 
 async function handleUninstall() {
-  // Before every teardown step: an elevated run must not act on a home another account can change.
-  const privilegeRefusal = uninstallPrivilegeRefusal(getConfigDir());
-  if (privilegeRefusal) { console.error(`❌ ${privilegeRefusal}`); process.exit(1); }
+  // Before every teardown step: an elevated run must not act on a home another account can change, and usage history a name rule cannot safely keep stops the run.
+  const preflightRefusal = uninstallPrivilegeRefusal(getConfigDir()) ?? uninstallUsageHistoryRefusal(getConfigDir());
+  if (preflightRefusal) { console.error(`❌ ${preflightRefusal}`); process.exit(1); }
   /** Definitive "nothing is answering" on the endpoint this home would serve. */
   const proxyEndpointProvenDown = async (): Promise<boolean> => {
     try {

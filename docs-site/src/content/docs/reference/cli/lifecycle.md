@@ -313,6 +313,12 @@ Uninstall keeps the request history: `usage.jsonl` and the `usage-archive` direc
 config directory, are listed as remaining paths, and the run ends as a partial uninstall. Delete them
 yourself once you no longer need the history.
 
+Uninstall keeps that history only when `usage.jsonl` is a plain file and `usage-archive` a plain
+directory of files and folders. If either is a link, anything inside `usage-archive` is a link, one of
+them cannot be read, or the uninstall record names one of them in a different letter case, uninstall
+stops before it changes anything and names the path. Move the history out of the config directory, or
+replace the link with the real file or directory, then run `ocx uninstall` again.
+
 Both commands accept no arguments. Unsupported flags (including `--dry-run` and `--yes`)
 exit with usage status 2 before preflight or teardown; no changes are made.
 For help, run `ocx help uninstall` or `ocx help remove`.

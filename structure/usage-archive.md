@@ -24,6 +24,18 @@ totals build and the startup pass over an archive holding a valid-looking segmen
 temp-style name, a nested directory, an operator file and a link, and checks every byte, the link and
 its target, and the ledger are unchanged.
 
+## Known gaps until slice 2
+
+The read side is not yet exact in these cases; the totals route's `complete: false` covers only a
+segment with no usable totals.
+
+- The span cache is keyed on totals path and mtime, so a totals file replaced with the same mtime keeps
+  serving the old span.
+- A segment whose rows are all unparsable has a null span and is treated as outside every window.
+- The first read after a restart reads every segment's totals file once, with no budget on that cold
+  pass.
+- A segment's byte length is taken from its name, not its actual size, when matching its totals.
+
 ## Attribution
 
 `src/usage/archive-row-attribution.ts` counts a row exactly as the live summary does, by reusing
