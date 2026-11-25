@@ -1,10 +1,11 @@
 import {
   currentUsageLogRevision,
-  usageLogIdentityKey,
   type PersistedUsageEntry,
+  type UsageLogRevision,
 } from "../../usage/log";
 import { scanUsageLedgerCooperatively } from "../../usage/ledger-scanner";
-import { awaitUsageColdRebuild, startUsageColdRebuild, UsageColdReadPendingError } from "../../usage/cold-rebuild-slot";
+import { startUsageColdRebuild } from "../../usage/cold-rebuild-slot";
+import { observedUsageRevision, observeUsageRevision, type ObservedUsageRevision } from "../../usage/revision-observation";
 
 /**
  * Per-key usage as the API tab renders it.
@@ -137,7 +138,14 @@ export function createApiKeyUsageAccumulator(
  * create/rename/delete. The compact rollup is a handful of counters per key, so
  * caching it costs nothing; a new row changes the revision and invalidates it.
  */
-let rollupCache: { revisionKey: string; expiresAt: number; builtAt: number; lastSeenSize?: number; snapshot: ApiKeyUsageSnapshot } | null = null;
+let rollupCache: {
+  idsKey: string;
+  /** The last ledger revision a read compared this rollup with; see `observeUsageRevision`. */
+  observed: ObservedUsageRevision;
+  expiresAt: number;
+  builtAt: number;
+  snapshot: ApiKeyUsageSnapshot;
+} | null = null;
 const rollupFlights = new Map<string, Promise<ApiKeyUsageSnapshot>>();
 
 /**
@@ -158,52 +166,19 @@ export function clearApiKeyUsageCacheForTests(): void {
   rollupFlights.clear();
 }
 
-/**
- * Reads the durable usage snapshot the way /api/usage does, then rolls it up.
- *
- * Never throws: an unreadable snapshot yields empty rollups and no
- * `attributionSince`. Key management working matters more than usage numbers
- * being present, and the GUI already treats an absent field as "no data".
- */
-export function cacheApiKeyUsageFromSnapshot(
-  entries: PersistedUsageEntry[],
-  configuredIds: string[],
-  identityKey: string,
-  lastSeenSize: number,
-  truncated: boolean,
-  maxReadBytes: number | undefined,
-  now: number = Date.now(),
-): ApiKeyUsageSnapshot {
-  const idsKey = JSON.stringify([configuredIds, maxReadBytes]);
-  const rolled = {
-    ...rollupApiKeyUsage(entries, configuredIds, now),
-    ...(truncated ? { historyTruncated: true as const } : {}),
-  };
-  rollupCache = {
-    revisionKey: `${identityKey}|${idsKey}`,
-    expiresAt: now + ROLLUP_CACHE_TTL_MS,
-    builtAt: now,
-    lastSeenSize,
-    snapshot: rolled,
-  };
-  return rolled;
-}
-
-/** Seed the API-key cache from the accumulator already fed by `/api/usage`. */
+/** Seed the API-key cache from a completed whole-ledger pass, such as the one `/api/usage` runs. */
 export function cacheApiKeyUsageFromRollup(
   snapshot: ApiKeyUsageSnapshot,
   configuredIds: string[],
-  identityKey: string,
-  lastSeenSize: number,
+  revision: UsageLogRevision | null,
   maxReadBytes: number | undefined,
   now: number = Date.now(),
 ): ApiKeyUsageSnapshot {
-  const idsKey = JSON.stringify([configuredIds, maxReadBytes]);
   rollupCache = {
-    revisionKey: `${identityKey}|${idsKey}`,
+    idsKey: JSON.stringify([configuredIds, maxReadBytes]),
+    observed: observedUsageRevision(revision),
     expiresAt: now + ROLLUP_CACHE_TTL_MS,
     builtAt: now,
-    lastSeenSize,
     snapshot,
   };
   return snapshot;
@@ -213,9 +188,11 @@ export function cacheApiKeyUsageFromRollup(
  * The per-key rollup, or `null` when no completed rollup can be served: a caller then omits usage
  * rather than reporting zero, because only a completed scan establishes that a key was unused.
  *
- * `background` is for request handlers. A rollup older than its TTL is served as it stood (`asOf`)
- * while its replacement builds in the cold-rebuild slot; with none for this ledger file and key set,
- * the rebuild starts there and the answer is `null`. A request never waits for the ledger scan.
+ * A cached rollup is dropped the moment the ledger is seen to shrink, be replaced, or change without
+ * growing, since a row it counted may now belong to another key. `background` is for request
+ * handlers: past its TTL a rollup is served as it stood (`asOf`) while its replacement builds in the
+ * cold-rebuild slot; without one the build is registered there and the answer is `null` at once. A
+ * request never waits for, or races, the ledger scan.
  */
 export async function readApiKeyUsageRollup(
   configuredIds: string[],
@@ -240,8 +217,7 @@ export async function readApiKeyUsageRollup(
           ...(scan.oversizedRows > 0 ? { usageIncomplete: true as const, usageIncompleteReason: "oversized_rows" as const } : {}),
         },
         configuredIds,
-        usageLogIdentityKey(scan.revision),
-        scan.revision?.size ?? 0,
+        scan.revision,
         maxReadBytes,
         builtAt,
       );
@@ -252,23 +228,15 @@ export async function readApiKeyUsageRollup(
     return flight;
   };
   try {
-    const observed = currentUsageLogRevision();
-    const cached = rollupCache;
-    const matches = cached?.revisionKey === `${usageLogIdentityKey(observed)}|${idsKey}`
-      && (observed?.size ?? 0) >= (cached.lastSeenSize ?? 0);
-    if (matches && now < cached!.expiresAt) return { ...cached!.snapshot, asOf: cached!.builtAt };
+    let cached = rollupCache?.idsKey === idsKey ? rollupCache : null;
+    if (cached && observeUsageRevision(cached.observed, currentUsageLogRevision()) === "rewritten") {
+      rollupCache = null;
+      cached = null;
+    }
+    if (cached && now < cached.expiresAt) return { ...cached.snapshot, asOf: cached.builtAt };
     if (cold === "background") {
-      if (matches) {
-        startUsageColdRebuild(`api-key-rollup:${idsKey}`, build);
-        return { ...cached!.snapshot, asOf: cached!.builtAt };
-      }
-      try {
-        const snapshot = await awaitUsageColdRebuild(`api-key-rollup:${idsKey}`, build);
-        return { ...snapshot, asOf: rollupCache?.builtAt ?? now };
-      } catch (error) {
-        if (error instanceof UsageColdReadPendingError) return null;
-        throw error;
-      }
+      startUsageColdRebuild(`api-key-rollup:${idsKey}`, build);
+      return cached ? { ...cached.snapshot, asOf: cached.builtAt } : null;
     }
     const snapshot = await build();
     return { ...snapshot, asOf: rollupCache?.builtAt ?? now };

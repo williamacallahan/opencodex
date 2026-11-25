@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,6 +23,7 @@ import type { OcxConfig } from "../../src/types/config";
 import { resetUsageReadCacheForTests, type PersistedUsageEntry } from "../../src/usage/log";
 import * as usageLedgerScannerModule from "../../src/usage/ledger-scanner";
 import { getUsageSourceFacets, resetUsageSourceFacetsForTests } from "../../src/server/management/usage-source-facets";
+import { settleUsageColdRebuildForTests, UsageColdReadPendingError } from "../../src/usage/cold-rebuild-slot";
 import { createSourceFacetAccumulator } from "../../src/usage/source-facets";
 import { rangeWindow } from "../../src/usage/summary";
 import { refreshUserCostOverlays } from "../../src/usage/user-cost-overlays";
@@ -115,7 +116,7 @@ describe("retained usage aggregate cache", () => {
     expect((await getFilteredUsageAggregate(filter)).usageInvalidRows).toBe(true);
   });
 
-  test("picker facets fold from the index, equal the raw rows, and a reopened picker reads no ledger bytes", async () => {
+  test("picker facets fold from the index's own columns, equal the raw rows, and a reopened picker reads nothing", async () => {
     const path = join(testDir, "usage.jsonl");
     const at = Date.now() - 60_000;
     const row = (requestId: string, over: Record<string, unknown>) => `${JSON.stringify({ ...entry(requestId), timestamp: at, ...over })}\n`;
@@ -133,38 +134,98 @@ describe("retained usage aggregate cache", () => {
       const { apps, devices } = accumulator.snapshot();
       return { apps, devices };
     };
-    const want = await expected(["key-a", "key-b"]);
-    const first = await getUsageSourceFacets(source, ["key-a", "key-b"]);
-    expect({ apps: first.apps, devices: first.devices }).toEqual(want);
-    const fullScans = spyOn(usageLedgerScannerModule, "scanUsageLedgerCooperatively");
+    const facets = async (ids: string[]) => {
+      // The request never reads: the first call answers pending and the fold runs afterwards.
+      expect(() => getUsageSourceFacets(source, ids)).toThrow(UsageColdReadPendingError);
+      await settleUsageColdRebuildForTests();
+      return getUsageSourceFacets(source, ids);
+    };
+    const rowReads = spyOn(usageLedgerScannerModule, "readUsageLedgerRowsAtOffsets");
     try {
+      const first = await facets(["key-a", "key-b"]);
+      expect({ apps: first.apps, devices: first.devices }).toEqual(await expected(["key-a", "key-b"]));
       expect(first.devices.find(device => device.device.kind === "all")?.requests).toBe(3);
-      const rowReads = spyOn(usageLedgerScannerModule, "readUsageLedgerRowsAtOffsets");
+      // The fold paged usage_rows; no JSONL row was read back at its offset.
+      expect(rowReads).not.toHaveBeenCalled();
+      const fullScans = spyOn(usageLedgerScannerModule, "scanUsageLedgerCooperatively");
       try {
         // A late append inside the 15 s reuse window keeps the completed counts and reads nothing.
         appendFileSync(path, row("late", { client: "codex" }));
-        expect(await getUsageSourceFacets(source, ["key-a", "key-b"])).toEqual(first);
-        expect(rowReads).not.toHaveBeenCalled();
-        // A changed key inventory never reuses, and sees the late row too.
-        const changed = await getUsageSourceFacets(source, ["key-a"]);
-        expect(rowReads).toHaveBeenCalled();
-        // The index ingests only the appended suffix; nothing rescans the ledger from its first byte.
-        const ingests = fullScans.mock.calls.map(([options]) => options.startAtBytes ?? 0);
-        expect(ingests.every(start => start > 0)).toBe(true);
-        fullScans.mockRestore();
-        expect({ apps: changed.apps, devices: changed.devices }).toEqual(await expected(["key-a"]));
+        expect(getUsageSourceFacets(source, ["key-a", "key-b"])).toEqual(first);
+        expect(fullScans).not.toHaveBeenCalled();
       } finally {
-        rowReads.mockRestore();
+        fullScans.mockRestore();
       }
-      // A replaced ledger is a different key, never served from the old file's counts.
-      writeFileSync(`${path}.next`, row("replacement", { client: "claude_code" }));
-      rmSync(path);
-      writeFileSync(path, readFileSync(`${path}.next`));
-      const replaced = await getUsageSourceFacets(source, ["key-a", "key-b"]);
-      expect(replaced.devices.find(device => device.device.kind === "all")?.requests).toBe(1);
-      expect({ apps: replaced.apps, devices: replaced.devices }).toEqual(await expected(["key-a", "key-b"]));
+      // A changed key inventory never reuses, and sees the late row too.
+      const changed = await facets(["key-a"]);
+      expect({ apps: changed.apps, devices: changed.devices }).toEqual(await expected(["key-a"]));
+      expect(rowReads).not.toHaveBeenCalled();
     } finally {
-      fullScans.mockRestore();
+      rowReads.mockRestore();
+    }
+  });
+
+  test("a same-length in-place rewrite is never served from the picker cache", async () => {
+    const path = join(testDir, "usage.jsonl");
+    const at = Date.now() - 60_000;
+    const row = (apiKeyId: string) => `${JSON.stringify({ ...entry("r"), timestamp: at, client: "codex", apiKeyId, admissionKind: "configured" })}\n`;
+    writeFileSync(path, row("key-a"));
+    const source = { client: "all" as const, device: { kind: "all" as const } };
+    const count = (facets: ReturnType<typeof getUsageSourceFacets>, id: string) =>
+      facets.devices.find(device => device.device.kind === "key" && device.device.id === id)?.requests;
+    expect(() => getUsageSourceFacets(source, ["key-a", "key-b"])).toThrow(UsageColdReadPendingError);
+    await settleUsageColdRebuildForTests();
+    const before = getUsageSourceFacets(source, ["key-a", "key-b"]);
+    expect([count(before, "key-a"), count(before, "key-b")]).toEqual([1, 0]);
+    await Bun.sleep(5);
+    writeFileSync(path, row("key-b")); // same inode, same length, A reassigned to B
+    expect(() => getUsageSourceFacets(source, ["key-a", "key-b"])).toThrow(UsageColdReadPendingError);
+    await settleUsageColdRebuildForTests();
+    const after = getUsageSourceFacets(source, ["key-a", "key-b"]);
+    expect([count(after, "key-a"), count(after, "key-b")]).toEqual([0, 1]);
+  });
+
+  test("a filtered read with a usable index is admitted to the background slot, never read on the request", async () => {
+    writeFileSync(join(testDir, "usage.jsonl"), line("a") + line("b"));
+    const filter = { provider: "openai" };
+    const ingests = spyOn(usageLedgerScannerModule, "scanUsageLedgerCooperatively");
+    const rowReads = spyOn(usageLedgerScannerModule, "readUsageLedgerRowsAtOffsets");
+    try {
+      await expect(getFilteredUsageAggregate(filter, undefined, "background")).rejects.toBeInstanceOf(UsageColdReadPendingError);
+      expect(ingests).not.toHaveBeenCalled();
+      expect(rowReads).not.toHaveBeenCalled();
+      await settleUsageColdRebuildForTests();
+      const served = await getFilteredUsageAggregate(filter, undefined, "background");
+      expect(requests(served)).toBe(2);
+    } finally {
+      ingests.mockRestore();
+      rowReads.mockRestore();
+    }
+  });
+
+  test("a streaming fallback answer is reused while the file is unchanged and dropped when it shrinks", async () => {
+    const path = join(testDir, "usage.jsonl");
+    writeFileSync(path, line("a"));
+    // A directory where the index file belongs makes the index unusable, so the filter streams.
+    mkdirSync(join(testDir, "usage-filter-index.sqlite"));
+    const filter = { provider: "openai" };
+    const scans = spyOn(usageLedgerScannerModule, "scanUsageLedgerCooperatively");
+    try {
+      await expect(getFilteredUsageAggregate(filter, undefined, "background")).rejects.toBeInstanceOf(UsageColdReadPendingError);
+      await settleUsageColdRebuildForTests();
+      expect(scans).toHaveBeenCalledTimes(1);
+      for (let poll = 0; poll < 3; poll += 1) {
+        const result = await getFilteredUsageAggregate(filter, undefined, "background");
+        expect(result.update).toBe("unchanged");
+        expect(requests(result)).toBe(1);
+      }
+      expect(scans).toHaveBeenCalledTimes(1);
+      writeFileSync(path, "");
+      await expect(getFilteredUsageAggregate(filter, undefined, "background")).rejects.toBeInstanceOf(UsageColdReadPendingError);
+      await settleUsageColdRebuildForTests();
+      expect(requests(await getFilteredUsageAggregate(filter, undefined, "background"))).toBe(0);
+    } finally {
+      scans.mockRestore();
     }
   });
 

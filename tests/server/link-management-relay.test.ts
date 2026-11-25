@@ -5,6 +5,7 @@
  * path or refresh query is a 404 before a handler runs, and the prefix does not exist on the
  * public listener at all. The Codex settings document is what a Child applies when it syncs.
  */
+import { settledUsageResponse } from "../helpers/usage-cold-read";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as childProcess from "node:child_process";
 import * as fs from "node:fs";
@@ -254,7 +255,7 @@ describe("Remote Link management relay on the Home", () => {
       "?client=codex&device=key&apiKeyId=linked-key&apiKeyId=other-key",
     ];
     for (const method of ["GET", "HEAD"]) {
-      const allowed = await get(base, own, LINKED_KEY, { method });
+      const allowed = await settledUsageResponse(() => get(base, own, LINKED_KEY, { method }));
       expect(allowed.status).toBe(200);
       if (method === "GET") {
         const body = await allowed.json() as { snapshotWindowStart: number; snapshotWindowEnd: number };
@@ -263,11 +264,22 @@ describe("Remote Link management relay on the Home", () => {
       for (const query of forbidden) {
         expect((await get(base, `/v1/link-management/api/usage${query}`, LINKED_KEY, { method })).status).toBe(403);
       }
-      expect((await get(base, "/v1/link-management/api/usage", LINKED_KEY, { method })).status).toBe(200);
+      expect((await settledUsageResponse(() => get(base, "/v1/link-management/api/usage", LINKED_KEY, { method }))).status).toBe(200);
     }
     const { handleLinkManagementRequest } = await import("../../src/server/index/link-management");
     const url = new URL(`http://127.0.0.1${own}`);
     expect((await handleLinkManagementRequest(new Request(url), url, config(), {}, undefined, undefined)).status).toBe(403);
+  });
+
+  test("a pending usage read keeps its Retry-After through the relay", async () => {
+    const base = await linkBase();
+    writeFileSync(join(testHome, "usage.jsonl"), `${JSON.stringify({
+      requestId: "pending", timestamp: Date.now(), provider: "mock", model: "test-model", status: 200, durationMs: 1, usageStatus: "unreported",
+    })}\n`);
+    const pending = await get(base, "/v1/link-management/api/usage?range=30d", LINKED_KEY);
+    expect(pending.status).toBe(503);
+    expect(pending.headers.get("retry-after")).toBe("5");
+    await pending.body?.cancel();
   });
 
   test("admits allowlisted reads only with the link key", async () => {
@@ -483,7 +495,7 @@ describe("passive management reads (#6959)", () => {
       const before = runs();
       for (const method of ["GET", "HEAD"]) {
         for (const query of ["", "?range=7d", "?range=30d"]) {
-          const response = await get(await linkBase(), `/v1/link-management/api/usage${query}`, LINKED_KEY, { method });
+          const response = await settledUsageResponse(async () => get(await linkBase(), `/v1/link-management/api/usage${query}`, LINKED_KEY, { method }));
           expect(response.status).toBe(200);
           await response.body?.cancel();
         }

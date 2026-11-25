@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import { settledUsageResponse } from "../helpers/usage-cold-read";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -129,9 +130,9 @@ test("real management usage owner preserves exact-key projection and unknown-key
       baseUrl: "http://localhost",
       fetchImpl: (async (input, init) => {
         const url = new URL(String(input));
-        const response = await handleManagementAPI(new ManagementRequest(url, init), url, config);
-        expect(response?.status).toBe(200);
-        return response!;
+        const response = await settledUsageResponse(() => handleManagementAPI(new ManagementRequest(url, init), url, config));
+        expect(response.status).toBe(200);
+        return response;
       }) as typeof fetch,
     })).toBe(0);
     const body = JSON.parse(String(out.mock.calls[0]![0]));

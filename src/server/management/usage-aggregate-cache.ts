@@ -35,7 +35,8 @@ import {
   type JevStatsAccumulator,
 } from "../../usage/jev-stats";
 
-import { awaitUsageColdRebuild, startUsageColdRebuild } from "../../usage/cold-rebuild-slot";
+import { requestUsageColdRebuild, startUsageColdRebuild } from "../../usage/cold-rebuild-slot";
+import { observedUsageRevision, observeUsageRevision, type ObservedUsageRevision } from "../../usage/revision-observation";
 import {
   cacheApiKeyUsageFromRollup,
   createApiKeyUsageAccumulator,
@@ -97,6 +98,8 @@ export interface UsageAggregateOptions {
    * since they read only the suffix since the last answer.
    */
   cold?: "await" | "background";
+  /** Background mode: receives the finished build, so the caller can publish the answer its retry reads. */
+  onBuilt?: (result: UsageAggregateResult) => void;
 }
 
 export interface JevStatsAggregateResult {
@@ -213,8 +216,7 @@ async function rebuildAggregate(options: UsageAggregateOptions): Promise<UsageAg
             ...(state.usageIncomplete ? { usageIncomplete: true as const, usageIncompleteReason: "oversized_rows" as const } : {}),
           },
           options.configuredApiKeyIds,
-          state.identityKey,
-          state.revision?.size ?? 0,
+          state.revision,
           options.managementUsageMaxReadBytes,
           options.now,
         );
@@ -297,7 +299,11 @@ async function appendAggregate(
 
 function rebuildOrPending(options: UsageAggregateOptions): Promise<UsageAggregateResult> {
   if (options.cold !== "background") return rebuildAggregate(options);
-  return awaitUsageColdRebuild("base", () => rebuildAggregate({ ...options, cold: "await" }));
+  return requestUsageColdRebuild("base", async () => {
+    // Built first, then offered: an optional call skips evaluating its arguments when absent.
+    const built = await rebuildAggregate({ ...options, cold: "await" });
+    options.onBuilt?.(built);
+  });
 }
 
 async function refreshAggregate(options: UsageAggregateOptions): Promise<UsageAggregateResult> {
@@ -342,6 +348,7 @@ export async function getFilteredUsageAggregate(
   filter: UsageSummaryFilterInput,
   window?: UsageTimeWindow,
   cold: UsageAggregateOptions["cold"] = "await",
+  onBuilt?: UsageAggregateOptions["onBuilt"],
 ): Promise<UsageAggregateResult> {
   const fixedWindow = window ? Object.freeze({ ...window }) : undefined;
   const normalizedFilter = {
@@ -368,7 +375,7 @@ export async function getFilteredUsageAggregate(
     throw new Error("too many concurrent filtered usage aggregates");
   }
 
-  const flight = refreshFilteredAggregate(key, normalizedFilter, fixedWindow, cold);
+  const flight = refreshFilteredAggregate(key, normalizedFilter, fixedWindow, cold, onBuilt);
   filteredFlights.set(key, flight);
   try {
     return await flight;
@@ -390,7 +397,20 @@ type NormalizedUsageFilter = {
  * A retained filtered projection plus the index generation its candidates came from.
  * `null` means it was built by the streaming fallback and cannot be extended incrementally.
  */
-type RetainedFilteredAggregate = RetainedUsageAggregate & { indexGeneration: string | null };
+type RetainedFilteredAggregate = RetainedUsageAggregate & {
+  indexGeneration: string | null;
+  /** The ledger revision last seen by a read of this result; a shrink or non-growing change below it drops it. */
+  lastObserved: ObservedUsageRevision;
+  /** A background build's result is kept from trimming and memory eviction until its retry can read it. */
+  protectedUntil?: number;
+};
+
+/** Covers the Retry-After a pending answer sends, with room for a slow client. */
+const PUBLISHED_RESULT_HOLD_MS = 15_000;
+
+function isProtected(state: RetainedFilteredAggregate): boolean {
+  return state.protectedUntil !== undefined && Date.now() < state.protectedUntil;
+}
 
 /** The derived index and the ledger disagree about where a row starts. */
 class UsageFilterIndexCorruptError extends Error {}
@@ -446,6 +466,7 @@ function filteredStateFrom(
     timeZone,
     retainedAt: Date.now(),
     indexGeneration: snapshot.generation,
+    lastObserved: observedUsageRevision(snapshot.revision),
   };
 }
 
@@ -469,6 +490,7 @@ function streamingStateFrom(
     timeZone,
     retainedAt: Date.now(),
     indexGeneration: null,
+    lastObserved: observedUsageRevision(scan.revision),
   };
 }
 
@@ -557,7 +579,7 @@ async function withFilterIndexRetry<T>(run: () => Promise<T>): Promise<T> {
 function trimRetainedFilteredAggregates(): void {
   while (retainedFilteredAggregates.size > MAX_RETAINED_FILTERED_AGGREGATES) {
     const oldest = [...retainedFilteredAggregates]
-      .filter(([, state]) => !pinnedAggregates.has(state))
+      .filter(([, state]) => !pinnedAggregates.has(state) && !isProtected(state))
       .sort(([, left], [, right]) => left.retainedAt - right.retainedAt)[0];
     if (!oldest) return;
     retainedFilteredAggregates.delete(oldest[0]);
@@ -586,8 +608,9 @@ async function rebuildFilteredAggregate(
   timeZone: string,
   cold: UsageAggregateOptions["cold"],
 ): Promise<UsageAggregateResult> {
+  if (cold === "background") return admitFilteredBuild(key, filter, window);
   const read = await readCandidates(filterQuery(filter, window));
-  if (!read) return streamingOrPending(key, filter, window, cold);
+  if (!read) return rebuildFilteredAggregateStreaming(key, filter, window, overlayVersion, timeZone);
   const accumulator = createUsageSummaryAccumulator({
     filter,
     mode: "row-unique",
@@ -606,30 +629,59 @@ async function rebuildFilteredAggregate(
 }
 
 /**
- * The whole-ledger fallback for a filter the index cannot serve. In the background mode a completed
- * streaming answer for the same ledger file, prices and time zone is served as `dated` while its
- * replacement builds in the cold-rebuild slot; without one the request is told to retry.
+ * Admit a full filtered build (index ingest and candidate pages, or the streaming fallback) into the
+ * cold-rebuild slot and answer pending. The build runs this same refresh in await mode, so a switch to
+ * streaming inside it does not ask for the slot again; its result is protected until the retry.
  */
-function streamingOrPending(
+function admitFilteredBuild(
   key: string,
   filter: NormalizedUsageFilter,
   window: UsageTimeWindow | undefined,
-  cold: UsageAggregateOptions["cold"],
-): Promise<UsageAggregateResult> {
-  const overlayVersion = userCostOverlayVersion();
-  const timeZone = currentTimeZone();
-  const build = () => rebuildFilteredAggregateStreaming(key, filter, window, overlayVersion, timeZone);
-  if (cold !== "background") return build();
+  onBuilt?: UsageAggregateOptions["onBuilt"],
+): never {
+  return requestUsageColdRebuild(`filtered:${key}`, () => buildFilteredInBackground(key, filter, window, onBuilt));
+}
+
+async function buildFilteredInBackground(
+  key: string,
+  filter: NormalizedUsageFilter,
+  window: UsageTimeWindow | undefined,
+  onBuilt?: UsageAggregateOptions["onBuilt"],
+): Promise<void> {
+  const result = await refreshFilteredAggregate(key, filter, window, "await");
+  const published = retainedFilteredAggregates.get(key);
+  if (published) published.protectedUntil = Date.now() + PUBLISHED_RESULT_HOLD_MS;
+  onBuilt?.(result);
+}
+
+/**
+ * Background mode's decision before any ledger or index read: an exact revision match is unchanged;
+ * a different file, a shrink or a non-growing change drops the result and admits a rebuild; growth
+ * extends an indexed result by its appended rows (`null`: continue the ordinary refresh), and refreshes
+ * a streaming result in the slot while serving it dated.
+ */
+function backgroundFilteredAnswer(
+  key: string,
+  filter: NormalizedUsageFilter,
+  window: UsageTimeWindow | undefined,
+  onBuilt?: UsageAggregateOptions["onBuilt"],
+): UsageAggregateResult | null {
   const state = retainedFilteredAggregates.get(key);
-  if (state
-    && state.indexGeneration === null
-    && state.overlayVersion === overlayVersion
-    && state.timeZone === timeZone
-    && state.identityKey === usageLogIdentityKey(currentUsageLogRevision())) {
-    startUsageColdRebuild(`filtered:${key}`, build);
-    return Promise.resolve({ ...resultFrom(state, "dated"), snapshotAt: state.retainedAt });
+  if (!state || state.overlayVersion !== userCostOverlayVersion() || state.timeZone !== currentTimeZone()) {
+    return admitFilteredBuild(key, filter, window, onBuilt);
   }
-  return awaitUsageColdRebuild(`filtered:${key}`, build);
+  const observation = observeUsageRevision(state.lastObserved, currentUsageLogRevision());
+  if (observation === "rewritten") {
+    retainedFilteredAggregates.delete(key);
+    return admitFilteredBuild(key, filter, window, onBuilt);
+  }
+  if (state.indexGeneration !== null) return null;
+  if (observation === "same") {
+    state.retainedAt = Date.now();
+    return resultFrom(state, "unchanged");
+  }
+  startUsageColdRebuild(`filtered:${key}`, () => buildFilteredInBackground(key, filter, window, onBuilt));
+  return { ...resultFrom(state, "dated"), snapshotAt: state.retainedAt };
 }
 
 async function rebuildFilteredAggregateStreaming(
@@ -695,7 +747,12 @@ async function refreshFilteredAggregate(
   filter: NormalizedUsageFilter,
   window: UsageTimeWindow | undefined,
   cold: UsageAggregateOptions["cold"],
+  onBuilt?: UsageAggregateOptions["onBuilt"],
 ): Promise<UsageAggregateResult> {
+  if (cold === "background") {
+    const answer = backgroundFilteredAnswer(key, filter, window, onBuilt);
+    if (answer) return answer;
+  }
   try {
     return await withFilterIndexRetry(async () => {
       const overlayVersion = userCostOverlayVersion();
@@ -755,7 +812,9 @@ async function refreshFilteredAggregate(
       // A page failed after its reader was handed out: the index cannot serve this query,
       // so answer from the authoritative ledger scan instead of failing the request.
       retainedFilteredAggregates.delete(key);
-      return withFilterIndexRetry(() => streamingOrPending(key, filter, window, cold));
+      if (cold === "background") return admitFilteredBuild(key, filter, window, onBuilt);
+      return withFilterIndexRetry(() =>
+        rebuildFilteredAggregateStreaming(key, filter, window, userCostOverlayVersion(), currentTimeZone()));
     }
     throw error;
   }
@@ -962,7 +1021,7 @@ export function discardRetainedUsageAggregate(): number {
       ? [{ kind: "base" as const, key: null, state: retainedAggregate }]
       : []),
     ...[...retainedFilteredAggregates]
-      .filter(([, state]) => !pinnedAggregates.has(state))
+      .filter(([, state]) => !pinnedAggregates.has(state) && !isProtected(state))
       .map(([key, state]) => ({ kind: "filtered" as const, key, state })),
     ...[...retainedJevStatsAggregates]
       .filter(([, state]) => !pinnedAggregates.has(state))

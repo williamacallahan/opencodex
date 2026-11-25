@@ -30,9 +30,11 @@ export class UsageReadFailedError extends Error {
  * Not a failure and not an empty report: keep the last valid snapshot and ask again after the delay.
  */
 export class UsageRebuildingError extends Error {
-  constructor(readonly retryAfterSeconds: number) {
+  readonly retryAfterSeconds: number;
+  constructor(retryAfterSeconds: number) {
     super("Usage is still being read from the usage log; it will refresh shortly.");
     this.name = "UsageRebuildingError";
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 

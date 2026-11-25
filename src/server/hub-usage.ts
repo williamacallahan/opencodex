@@ -50,6 +50,8 @@ export async function handleHubUsage(req: Request, config: OcxConfig, policy: Re
       // The linked client reads newer client labels as `unknown`, so its `unknown` filter selects them too.
       ...(client !== null ? { sourceFilter: { client: client as UsageSourceClient, device: { kind: "key", id: keyId }, linkedClientRoster: true } } : {}),
     }, window, "background");
+    // The hub report has no as-of field, so a dated answer is not served as current: the client retries.
+    if (aggregate.update === "dated") throw new UsageColdReadPendingError("running");
     const capacity = query.get("include") === "capacity"
       ? await (await import("../quota-pool/client")).readClientCapacity(config, admission) : undefined;
     const current = resolveDataPlaneAdmissionSecret(token, config, source, options);

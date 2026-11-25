@@ -1,4 +1,5 @@
 import { enforceAppOwnedMemoryBudgetIfNeeded, type RetainedStoreSnapshot } from "../../lib/app-owned-memory";
+import type { ObservedUsageRevision } from "../../usage/revision-observation";
 import type { UsageSummary } from "../../usage/summary";
 
 export type CachedUsageSummary = UsageSummary & {
@@ -24,7 +25,8 @@ export interface UsageSummaryCacheEntry {
   expiresAt: number;
   /** Generation freshness: ignore size/mtime until this instant. */
   freshUntil: number;
-  lastSeenSize: number;
+  /** The ledger revision last observed with this summary; a shrink or non-growing change drops it. */
+  observed: ObservedUsageRevision;
   summary: CachedUsageSummary;
   revisionReadAt: number;
   sizeBytes: number;
@@ -78,6 +80,29 @@ export function setUsageSummaryCacheEntry(
   enforceAppOwnedMemoryBudgetIfNeeded();
 }
 
+/**
+ * The summary a background rebuild published for the request that started it, kept for that
+ * request's retry even when the memory budget evicts the cache above: without it a full budget turns
+ * every completed rebuild into another 503 and another scan of the same revision. Bounded by count
+ * and by one retry interval, so it never grows with usage history.
+ */
+const HELD_SUMMARY_MS = 15_000;
+const MAX_HELD_SUMMARIES = 8;
+const heldSummaries = new Map<string, { entry: Omit<UsageSummaryCacheEntry, "sizeBytes">; until: number }>();
+
+export function holdUsageSummaryForRetry(key: string, entry: Omit<UsageSummaryCacheEntry, "sizeBytes">): void {
+  heldSummaries.delete(key);
+  heldSummaries.set(key, { entry, until: Date.now() + HELD_SUMMARY_MS });
+  while (heldSummaries.size > MAX_HELD_SUMMARIES) heldSummaries.delete(heldSummaries.keys().next().value!);
+}
+
+export function heldUsageSummary(key: string): Omit<UsageSummaryCacheEntry, "sizeBytes"> | undefined {
+  const held = heldSummaries.get(key);
+  if (held && Date.now() < held.until) return held.entry;
+  heldSummaries.delete(key);
+  return undefined;
+}
+
 export function usageSummaryRetainedStoreSnapshot(): RetainedStoreSnapshot {
   return {
     count: usageSummaryCache.size,
@@ -94,6 +119,7 @@ export function evictOldestUsageSummaryForBudget(): number {
 
 export function resetUsageSummaryCacheForTests(): void {
   usageSummaryCache.clear();
+  heldSummaries.clear();
   usageSummaryCacheBytes = 0;
   oldestUsageSummaryKey = undefined;
   oldestUsageSummaryAt = null;

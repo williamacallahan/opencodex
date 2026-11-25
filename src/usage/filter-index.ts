@@ -73,7 +73,7 @@ import {
   UsageLedgerRebuildRequiredError,
   type UsageLedgerScanResult,
 } from "./ledger-scanner";
-import { LINKED_CLIENT_FOLDED_CLIENTS, USAGE_CODEX_CLIENT_LABELS, type UsageSourceFilter } from "./source-filter";
+import { LINKED_CLIENT_FOLDED_CLIENTS, USAGE_CODEX_CLIENT_LABELS, type UsageSourceFields, type UsageSourceFilter } from "./source-filter";
 import { usageAttributions } from "./summary";
 import type { UsageTimeWindow } from "./time-range";
 
@@ -264,11 +264,19 @@ export interface UsageFilterCandidateRead {
   /** Returns the next bounded page of ascending row-start offsets. */
   nextPage(): number[];
   /**
+   * Returns the next bounded page of the window's indexed rows as their projected source fields,
+   * in ascending offset order, without reading `usage.jsonl`; empty at the end. Like `nextPage()`,
+   * each page re-checks schema and generation. Independent of the candidate pager's cursor.
+   */
+  nextIndexedRows(): UsageSourceFields[];
+  /**
    * Closes the database handle. Pages are not read from one long snapshot: each `nextPage()`
    * re-checks schema and generation inside its own short transaction.
    */
   close(): void;
 }
+
+
 
 /**
  * Counts a caller can assert on.
@@ -1367,6 +1375,51 @@ function rowAccessIndexWithoutClient(query: UsageFilterIndexQuery): string | nul
 export const CANDIDATE_PAGE_SIZE = 2_000;
 
 /**
+ * Pages `usage_rows` for one published generation in offset order over `idx_usage_rows_window`,
+ * bounded by the snapshot's indexed offset and the query window. Rows without a usable timestamp
+ * are excluded by the window, exactly as an accumulator skips them.
+ */
+function indexedRowPager(
+  db: Database,
+  snapshot: UsageFilterIndexSnapshot,
+  query: UsageFilterIndexQuery,
+): () => UsageSourceFields[] {
+  const statement = db.query(
+    "SELECT byte_offset AS byteOffset, timestamp, api_key_id AS apiKeyId, client, surface, admission_kind AS admissionKind"
+    + " FROM usage_rows WHERE generation = ? AND byte_offset > ? AND byte_offset < ?"
+    + " AND timestamp IS NOT NULL AND timestamp >= ? AND timestamp <= ? ORDER BY byte_offset LIMIT ?",
+  );
+  const since = query.window?.since ?? Number.MIN_SAFE_INTEGER;
+  const until = query.window?.until ?? Number.MAX_SAFE_INTEGER;
+  let cursor = (query.afterOffset ?? 0) - 1;
+  return () => {
+    db.exec("BEGIN");
+    try {
+      const meta = readMeta(db);
+      if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || meta.generation !== snapshot.generation) {
+        throw new UsageLedgerRebuildRequiredError("content_changed");
+      }
+      const rows = statement.all(snapshot.generation, cursor, snapshot.indexedOffset, since, until, CANDIDATE_PAGE_SIZE) as Array<{
+        byteOffset: number; timestamp: number; apiKeyId: string | null; client: string | null; surface: string | null; admissionKind: string | null;
+      }>;
+      db.exec("COMMIT");
+      const last = rows.at(-1);
+      if (last) cursor = last.byteOffset;
+      return rows.map(row => ({
+        timestamp: row.timestamp,
+        ...(row.apiKeyId !== null ? { apiKeyId: row.apiKeyId } : {}),
+        ...(row.client !== null ? { client: row.client } : {}),
+        ...(row.surface !== null ? { surface: row.surface } : {}),
+        ...(row.admissionKind !== null ? { admissionKind: row.admissionKind } : {}),
+      }));
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch { /* nothing to roll back */ }
+      throw error;
+    }
+  };
+}
+
+/**
  * The page statements behind the candidate pager: each branch seeks from the page cursor and
  * stops at the page size, so a late page reads at most `CANDIDATE_PAGE_SIZE` rows per branch and
  * never sorts. The pager merges the branch pages by offset; the cursor value is appended at the
@@ -1528,6 +1581,7 @@ async function readActive(
         snapshot,
         get candidateRows() { return pager.candidateRows; },
         nextPage: () => pager.nextPage(),
+        nextIndexedRows: indexedRowPager(db, snapshot, query),
         close: () => db.close(),
       };
     } catch (error) {
@@ -1658,6 +1712,7 @@ export async function readUsageFilterCandidatesPassive(
         snapshot,
         get candidateRows() { return pager.candidateRows; },
         nextPage: () => pager.nextPage(),
+        nextIndexedRows: indexedRowPager(db, snapshot, query),
         close: () => db.close(),
       };
     } catch (error) {
@@ -1668,6 +1723,29 @@ export async function readUsageFilterCandidatesPassive(
     try { db.exec("ROLLBACK"); } catch { /* transaction may not have started */ }
     db.close();
     return null;
+  }
+}
+
+/**
+ * The generation the index currently publishes, from its metadata alone (no ingest, no row read), or
+ * null when there is no usable index. A cached answer tagged with another generation is stale.
+ */
+export function publishedUsageFilterIndexGeneration(): string | null {
+  const path = indexPathForCurrentHome();
+  if (!existsSync(path)) return null;
+  let db: Database;
+  try {
+    db = new Database(path, { readonly: true });
+  } catch {
+    return null;
+  }
+  try {
+    const meta = readMeta(db);
+    return meta.schemaVersion === USAGE_FILTER_INDEX_SCHEMA_VERSION ? meta.generation ?? null : null;
+  } catch {
+    return null;
+  } finally {
+    db.close();
   }
 }
 

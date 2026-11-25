@@ -1,4 +1,3 @@
-import type { PersistedUsageEntry } from "./log";
 
 export const USAGE_SOURCE_CLIENTS = [
   "all", "codex", "claude_code", "claude_desktop", "grok", "opencode", "aside", "pi", "amp", "antigravity_cli", "other", "unknown",
@@ -37,12 +36,21 @@ export function snapshotConfiguredKeyIds(ids: readonly string[]): string[] {
   return [...new Set(ids)].sort();
 }
 
+/** The fields a source filter classifies a row by; the usage filter index keeps exactly these per row. */
+export interface UsageSourceFields {
+  timestamp: number;
+  apiKeyId?: string;
+  client?: string;
+  surface?: string;
+  admissionKind?: string;
+}
+
 /** Old rows in the historic Codex surface are disclosed as unclassified, never as a subtype. */
-export function isLegacyCodexUsage(entry: PersistedUsageEntry): boolean {
+export function isLegacyCodexUsage(entry: UsageSourceFields): boolean {
   return entry.client === undefined && entry.surface === undefined;
 }
 
-export function matchesUsageSource(entry: PersistedUsageEntry, filter: UsageSourceFilter, configuredIds?: ReadonlySet<string>): boolean {
+export function matchesUsageSource(entry: UsageSourceFields, filter: UsageSourceFilter, configuredIds?: ReadonlySet<string>): boolean {
   const device = filter.device;
   if (device.kind === "no-key" && entry.apiKeyId !== undefined) return false;
   if (device.kind === "key" && entry.apiKeyId !== device.id) return false;

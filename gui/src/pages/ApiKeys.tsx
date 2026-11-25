@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Notice } from "../ui";
 import { readUsageMetadata, type UsageReadMetadata } from "../usage-summary-resource";
 import { useI18n, LOCALES } from "../i18n/shared";
@@ -36,6 +36,10 @@ import {
 
 interface KeysResponse extends UsageReadMetadata {
   usageIncluded?: boolean;
+  /** The server is still reading the usage log for these keys; ask again shortly. */
+  usagePending?: boolean;
+  /** When the served per-key usage was completed. */
+  usageAsOf?: string;
   // Only an explicit minimal response may omit usage; missing statistics are not zeroes.
   keys?: Array<Omit<ApiKeyEntry, "usage"> & { usage?: ApiKeyEntry["usage"] }>;
   attributionSince?: string;
@@ -60,9 +64,14 @@ interface StartRotationResponse extends CreateKeyResponse {
   rotationId?: unknown;
 }
 
+/** The server's Retry-After for a pending usage read (USAGE_COLD_READ_RETRY_AFTER_SECONDS). */
+const KEY_USAGE_PENDING_RETRY_MS = 5_000;
+
 type CachedKeysShape = UsageReadMetadata & {
   keys: ApiKeyEntry[];
   usageIncluded?: boolean;
+  usagePending?: true;
+  usageAsOf?: string;
   endpoints: ApiEndpointInfo;
   claudeCodeEnabled: boolean;
   /** Absent when the server predates API surface settings. */
@@ -182,6 +191,8 @@ export default function ApiKeys({ apiBase, active = true }: { apiBase: string; a
       // read — and every reader downstream would believe it.
       keys: validatedKeys,
       ...(data.usageIncluded === false ? { usageIncluded: false } : {}),
+      ...(data.usagePending === true ? { usagePending: true as const } : {}),
+      ...(typeof data.usageAsOf === "string" ? { usageAsOf: data.usageAsOf } : {}),
       endpoints: {
         baseUrl: data.baseUrl ?? derived.baseUrl,
         responses: data.responsesEndpoint ?? data.endpoint ?? DEFAULT_ENDPOINTS.responses,
@@ -244,6 +255,16 @@ export default function ApiKeys({ apiBase, active = true }: { apiBase: string; a
     `api-key-usage:${apiBase}`, [apiBase], fetchKeyUsage,
     { isEmpty: data => data.keys.length === 0, enabled: active && keysResource.state.data?.usageIncluded === false },
   );
+  // Usage still being read is not "no usage": ask once more after the server's retry interval,
+  // cancelled when the page deactivates. A further pending answer arms the next one.
+  const keyUsagePending = keyUsageResource.state.data?.usagePending === true;
+  const keyUsageRefreshing = keyUsageResource.state.refreshing;
+  const refreshKeyUsage = keyUsageResource.refresh;
+  useEffect(() => {
+    if (!active || !keyUsagePending || keyUsageRefreshing) return;
+    const timer = setTimeout(() => refreshKeyUsage(), KEY_USAGE_PENDING_RETRY_MS);
+    return () => clearTimeout(timer);
+  }, [active, keyUsagePending, keyUsageRefreshing, refreshKeyUsage]);
   const modelsResource = useDataSurface<ExternalModelRow[]>(
     modelsResourceKey,
     [apiBase],

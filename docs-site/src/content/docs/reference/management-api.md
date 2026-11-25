@@ -392,6 +392,11 @@ speed; it is distinct from the reasoning-effort `effort_downgrade` class. `rate_
 differs: wait out the limit, move to another account, change the prompt, or drop stale encrypted
 state. A rejected opaque reasoning blob counts as `ciphertext` rather than `payload`.
 
+`GET /api/keys` never waits for the usage log either: until a per-key rollup has been read it lists
+the keys without `usage`, with `usageIncluded: false` and `usagePending: true` (ask again after a few
+seconds); a served rollup carries `usageAsOf`, the time it was completed. A key is reported unused only
+from a completed rollup.
+
 If a scanned row exceeds the existing parser size limit, `GET /api/usage` and `GET /api/keys`
 keep the readable-row aggregates and add `usageIncomplete: true` with
 `usageIncompleteReason: "oversized_rows"` at response level. This diagnostic survives cached

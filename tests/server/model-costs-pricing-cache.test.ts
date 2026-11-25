@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { settledUsageResponse } from "../helpers/usage-cold-read";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -68,7 +69,7 @@ test("policy-only API writes refresh warm estimate, summary and aggregate caches
     const summaryUrl = new URL("/api/usage?range=all", server.url);
     const priceUrl = new URL("/api/providers/openai/model-costs", server.url);
     const summarize = async () => {
-      const response = await managementFetch(summaryUrl);
+      const response = await settledUsageResponse(() => managementFetch(summaryUrl));
       expect(response.status).toBe(200);
       return response.json();
     };

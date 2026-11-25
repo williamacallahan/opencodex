@@ -7,7 +7,8 @@ import { startServer } from "../../src/server";
 import { AUTH_MATRIX } from "../../src/server/auth-cors";
 import { clearApiKeyUsageCacheForTests, readApiKeyUsageRollup, rollupApiKeyUsage } from "../../src/server/management/api-key-usage";
 import { resetUsageAggregateCacheForTests } from "../../src/server/management/usage-aggregate-cache";
-import { settleUsageColdRebuildForTests, USAGE_COLD_READ_WAIT_MS } from "../../src/usage/cold-rebuild-slot";
+import { resetUsageColdRebuildForTests, settleUsageColdRebuildForTests } from "../../src/usage/cold-rebuild-slot";
+import { settledUsageResponse } from "../helpers/usage-cold-read";
 import * as usageLedgerScannerModule from "../../src/usage/ledger-scanner";
 import { appendUsageEntry, normalizeUsageEntryForTest, usageLogPath, type PersistedUsageEntry } from "../../src/usage/log";
 import type { OcxConfig } from "../../src/types";
@@ -42,11 +43,18 @@ function usageRows(): PersistedUsageEntry[] {
     .map(line => JSON.parse(line) as PersistedUsageEntry);
 }
 
-async function keysGet(server: { url: URL }): Promise<Record<string, unknown>> {
-  const res = await fetch(new URL("/api/keys", server.url), {
+/**
+ * The key list as the dashboard ends up seeing it: a `usagePending` answer is read again once the
+ * background rollup has finished. `settle: false` returns the first answer as sent.
+ */
+async function keysGet(server: { url: URL }, settle = true): Promise<Record<string, unknown>> {
+  const read = async () => await (await fetch(new URL("/api/keys", server.url), {
     headers: { "x-opencodex-api-key": ADMIN_TOKEN },
-  });
-  return await res.json() as Record<string, unknown>;
+  })).json() as Record<string, unknown>;
+  const first = await read();
+  if (!settle || first.usagePending !== true) return first;
+  await settleUsageColdRebuildForTests();
+  return read();
 }
 
 beforeEach(() => {
@@ -58,7 +66,11 @@ beforeEach(() => {
   resetUsageAggregateCacheForTests();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // A background build left running would finish inside the next case and count against it.
+  await settleUsageColdRebuildForTests();
+  resetUsageColdRebuildForTests();
+  clearApiKeyUsageCacheForTests();
   resetUsageAggregateCacheForTests();
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
@@ -91,9 +103,9 @@ describe("attribution reaches usage.jsonl", () => {
     const server = startServer(0);
     try {
       for (const [token, status] of [["ocx_data_attributionone", 401], [ADMIN_TOKEN, 403]] as const) {
-        const response = await fetch(new URL("/api/usage?client=all&device=unconfigured", server.url), {
+        const response = await settledUsageResponse(() => fetch(new URL("/api/usage?client=all&device=unconfigured", server.url), {
           headers: { "x-opencodex-api-key": token },
-        });
+        }));
         expect(response.status).toBe(status);
       }
     } finally {
@@ -110,9 +122,9 @@ describe("attribution reaches usage.jsonl", () => {
     appendUsageEntry({ ...base, requestId: "keyed", client: "codex_cli", apiKeyId: "key-one" });
     appendUsageEntry({ ...base, requestId: "unknown", client: "unknown" });
     const server = startServer(0);
-    const get = (query: string) => fetch(new URL(`/api/usage?${query}`, server.url), {
+    const get = (query: string) => settledUsageResponse(() => fetch(new URL(`/api/usage?${query}`, server.url), {
       headers: { "x-opencodex-api-key": ADMIN_TOKEN },
-    });
+    }));
     try {
       const response = await get("range=7d&surface=all&client=codex&device=no-key");
       expect(response.status).toBe(200);
@@ -458,9 +470,9 @@ describe("attribution reaches usage.jsonl", () => {
     });
     const server = startServer(0);
     try {
-      const usage = await fetch(new URL("/api/usage?range=all", server.url), {
+      const usage = await settledUsageResponse(() => fetch(new URL("/api/usage?range=all", server.url), {
         headers: { "x-opencodex-api-key": ADMIN_TOKEN },
-      }).then(response => response.json()) as Record<string, unknown>;
+      })).then(response => response.json()) as Record<string, unknown>;
       expect(usage.historyTruncated).toBe(false);
       expect(scans).toBe(1);
 
@@ -483,7 +495,7 @@ describe("attribution reaches usage.jsonl", () => {
       // A directory where the log should be: the read throws. Usage numbers are worth less than the
       // ability to revoke a key, but a zero would tell the operator an active key was never used.
       mkdirSync(usageLogPath(), { recursive: true });
-      const payload = await keysGet(server);
+      const payload = await keysGet(server, false);
       const rows = payload.keys as Array<Record<string, unknown>>;
       expect(rows).toHaveLength(2);
       expect(rows[0]).not.toHaveProperty("usage");
@@ -494,35 +506,52 @@ describe("attribution reaches usage.jsonl", () => {
     }
   });
 
-  test("a rollup still scanning the ledger does not hold /api/keys, and the completed one is served next", async () => {
+  test("a cold rollup answers keys without usage at once, and the completed one is served next", async () => {
     saveConfig(remoteConfig());
     appendUsageEntry({
       requestId: "pending-rollup", timestamp: Date.now(), provider: "p", model: "m",
       status: 200, durationMs: 1, usageStatus: "exact", admissionKind: "configured", apiKeyId: "key-one",
     } as PersistedUsageEntry);
     const originalScan = usageLedgerScannerModule.scanUsageLedgerCooperatively;
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const scanSpy = spyOn(usageLedgerScannerModule, "scanUsageLedgerCooperatively").mockImplementation(async options => {
-      await gate;
-      return originalScan(options);
-    });
+    const scanSpy = spyOn(usageLedgerScannerModule, "scanUsageLedgerCooperatively").mockImplementation(options => originalScan(options));
     const server = startServer(0);
     try {
-      const started = Date.now();
-      const pending = await keysGet(server);
-      expect(Date.now() - started).toBeLessThan(USAGE_COLD_READ_WAIT_MS + 1_000);
+      const pending = await keysGet(server, false);
+      // The scan had not started when the response was built: it begins on a later timer turn.
+      expect(scanSpy).not.toHaveBeenCalled();
       expect(pending).toMatchObject({ usageIncluded: false, usagePending: true });
       expect((pending.keys as Array<Record<string, unknown>>)[0]).not.toHaveProperty("usage");
-      release();
       await settleUsageColdRebuildForTests();
       const completed = await keysGet(server);
       expect(completed).not.toHaveProperty("usagePending");
       expect(typeof completed.usageAsOf).toBe("string");
       expect((completed.keys as Array<{ usage?: { totalRequests: number } }>)[0]!.usage?.totalRequests).toBe(1);
     } finally {
-      release();
       scanSpy.mockRestore();
+      await settleUsageColdRebuildForTests();
+      await server.stop(true);
+    }
+  });
+
+  test("a row reassigned from one key to another in place is never served from the cached rollup", async () => {
+    saveConfig(remoteConfig());
+    const row = (apiKeyId: string) => `${JSON.stringify({
+      requestId: "moved", timestamp: Date.now(), provider: "p", model: "m",
+      status: 200, durationMs: 1, usageStatus: "exact", admissionKind: "configured", apiKeyId,
+    })}\n`;
+    writeFileSync(usageLogPath(), row("key-one"));
+    const server = startServer(0);
+    const totals = (payload: Record<string, unknown>) => (payload.keys as Array<{ id: string; usage?: { totalRequests: number } }>)
+      .map(key => [key.id, key.usage?.totalRequests]);
+    try {
+      expect(totals(await keysGet(server))).toEqual([["key-one", 1], ["key-two", 0]]);
+      await Bun.sleep(5);
+      writeFileSync(usageLogPath(), row("key-two")); // same inode, same length
+      const rewritten = await keysGet(server, false);
+      expect(rewritten).toMatchObject({ usagePending: true });
+      await settleUsageColdRebuildForTests();
+      expect(totals(await keysGet(server))).toEqual([["key-one", 0], ["key-two", 1]]);
+    } finally {
       await settleUsageColdRebuildForTests();
       await server.stop(true);
     }
@@ -558,9 +587,9 @@ describe("attribution reaches usage.jsonl", () => {
     const server = startServer(0);
     try {
       if (order === "usage-first") {
-        const usage = await fetch(new URL("/api/usage?range=all", server.url), {
+        const usage = await settledUsageResponse(() => fetch(new URL("/api/usage?range=all", server.url), {
           headers: { "x-opencodex-api-key": ADMIN_TOKEN },
-        }).then(res => res.json());
+        })).then(res => res.json());
         expect(usage).toMatchObject({ usageIncomplete: true });
       }
       const payload = await keysGet(server);

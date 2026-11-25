@@ -182,6 +182,9 @@ function responseMessage(body: unknown, status: number, integrationRoute = false
   return [parts.join("\n").slice(0, 1200), ...recovery].join("\n");
 }
 
+/** About a minute at the proxy's five-second Retry-After: longer than a cold read of a 5 GB ledger. */
+const USAGE_REBUILD_MAX_ROUNDS = 12;
+
 export async function runtimeRequest<T = unknown>(
   path: string,
   init: RequestInit = {},
@@ -210,20 +213,30 @@ export async function runtimeRequest<T = unknown>(
   for (const [key, value] of new Headers(init.headers).entries()) headers.set(key, value);
   const fetchImpl = deps.fetchImpl ?? fetch;
   let response: Response;
-  try {
-    response = await fetchImpl(`${baseUrl}${path.startsWith("/") ? path : `/${path}`}`, { ...init, headers });
-  } catch (error) {
-    throw new RuntimeApiError(
-      `Management API is unreachable: ${error instanceof Error ? error.message : String(error)}`,
-      503,
-      null,
-    );
-  }
-  const text = await response.text();
   let body: unknown = null;
-  if (text) {
-    try { body = JSON.parse(text); }
-    catch { body = text; }
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      response = await fetchImpl(`${baseUrl}${path.startsWith("/") ? path : `/${path}`}`, { ...init, headers });
+    } catch (error) {
+      throw new RuntimeApiError(
+        `Management API is unreachable: ${error instanceof Error ? error.message : String(error)}`,
+        503,
+        null,
+      );
+    }
+    const text = await response.text();
+    body = null;
+    if (text) {
+      try { body = JSON.parse(text); }
+      catch { body = text; }
+    }
+    // A usage read the proxy is still building in the background: a command waits for it, at the
+    // proxy's own Retry-After, for a bounded number of rounds, rather than reporting a failure.
+    const retryAfter = Number(response.headers.get("retry-after"));
+    const rebuilding = response.status === 503 && (init.method ?? "GET").toUpperCase() === "GET"
+      && typeof body === "object" && body !== null && (body as { error?: unknown }).error === "usage_rebuilding";
+    if (!rebuilding || attempt + 1 >= USAGE_REBUILD_MAX_ROUNDS || init.signal?.aborted) break;
+    await new Promise(resolve => setTimeout(resolve, (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 5) * 1_000));
   }
   if (!response.ok) {
     throw new RuntimeApiError(responseMessage(body, response.status, isIntegrationRoute(path, response)), response.status, body);

@@ -1,7 +1,7 @@
 import { useCallback, useEffect } from "react";
 import { denyUsageSession, usageSessionSnapshot, USAGE_SOURCE_INVENTORY_CHANGED, sourceInventoryEventMatches } from "../../api";
 import { useDataSurface } from "../../data-surface";
-import { readUsageResponseJson } from "../../usage-summary-resource";
+import { readUsageResponseJson, UsageRebuildingError } from "../../usage-summary-resource";
 import { matchesSource, noStore, sourceQuery, type SourceFilter } from "./usage-source";
 import { isUsageReport } from "./usage-validation";
 import type { Range, UsageResponse } from "./usage-model";
@@ -38,6 +38,14 @@ export function useUsageReport(apiBase: string, range: Range, filter: SourceFilt
     const timer = setTimeout(() => refresh({ forceLoading: true }), 15_000);
     return () => clearTimeout(timer);
   }, [volatile, session.blocked, refreshing, resource.state.kind, refresh]);
+  // The proxy is still reading the whole usage log: ask once more after its Retry-After, cancelled when
+  // the resource, session or component changes. A further pending answer arms the next retry.
+  const rebuilding = resource.state.error instanceof UsageRebuildingError ? resource.state.error : null;
+  useEffect(() => {
+    if (!rebuilding || session.blocked || refreshing) return;
+    const timer = setTimeout(() => refresh(), rebuilding.retryAfterSeconds * 1_000);
+    return () => clearTimeout(timer);
+  }, [rebuilding, session.blocked, refreshing, refresh]);
   useEffect(() => {
     if (!volatile || session.blocked) return;
     const reload = () => refresh({ forceLoading: true });

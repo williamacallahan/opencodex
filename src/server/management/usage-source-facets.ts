@@ -1,13 +1,13 @@
 import { getConfigDir } from "../../config/paths";
-import { awaitUsageColdRebuild } from "../../usage/cold-rebuild-slot";
-import { readUsageFilterCandidates, requestUsageFilterIndexRebuild } from "../../usage/filter-index";
-import { readUsageLedgerRowsAtOffsets } from "../../usage/ledger-scanner";
-import { currentUsageLogRevision, usageLogIdentityKey, usageLogRevisionKey } from "../../usage/log";
+import { requestUsageColdRebuild } from "../../usage/cold-rebuild-slot";
+import { publishedUsageFilterIndexGeneration, readUsageFilterCandidates } from "../../usage/filter-index";
+import { currentUsageLogRevision } from "../../usage/log";
+import { observedUsageRevision, observeUsageRevision, type ObservedUsageRevision } from "../../usage/revision-observation";
 import { createSourceFacetAccumulator } from "../../usage/source-facets";
 import { snapshotConfiguredKeyIds, type UsageSourceFilter } from "../../usage/source-filter";
 import { rangeWindow } from "../../usage/summary";
 
-/** The derived index cannot answer right now (unusable, or disagrees with the ledger); one refresh is running. */
+/** The derived index cannot answer right now; the route reports it unavailable while the index refreshes. */
 export class SourceFacetsUnavailableError extends Error {}
 
 type SourceFacets = ReturnType<ReturnType<typeof createSourceFacetAccumulator>["snapshot"]> & {
@@ -17,82 +17,78 @@ type SourceFacets = ReturnType<ReturnType<typeof createSourceFacetAccumulator>["
 };
 
 /**
- * A picker reopened within this long reuses the completed counts, so it reads no ledger bytes. Rows
- * appended meanwhile wait for expiry; a replaced ledger, another home, a changed key inventory or time
- * zone, and local midnight (which moves the 30-day window's start) are different keys and never reuse.
+ * A picker reopened within this long reuses the completed counts, so it reads no ledger byte and no
+ * index row. Rows appended meanwhile wait for expiry. A replaced, shrunk or rewritten ledger, a newly
+ * published index generation, another home, key inventory or time zone, and local midnight (which
+ * moves the 30-day window's start) never reuse an answer.
  */
 const COMPLETED_FACETS_MS = 15_000;
 const MAX_COMPLETED_FACETS = 4;
-const completedFacets = new Map<string, { at: number; facets: SourceFacets }>();
+const completedFacets = new Map<string, { at: number; facets: SourceFacets; generation: string; observed: ObservedUsageRevision }>();
 
 export function resetUsageSourceFacetsForTests(): void {
   completedFacets.clear();
 }
 
+function reusableFacets(key: string, now: number): SourceFacets | null {
+  const hit = completedFacets.get(key);
+  if (!hit) return null;
+  const valid = now - hit.at >= 0 && now - hit.at < COMPLETED_FACETS_MS
+    && rangeWindow("30d", now).since === hit.facets.window.since
+    && observeUsageRevision(hit.observed, currentUsageLogRevision()) !== "rewritten"
+    && publishedUsageFilterIndexGeneration() === hit.generation;
+  if (!valid) completedFacets.delete(key);
+  return valid ? hit.facets : null;
+}
+
 /**
- * The 30-day app and key counts for the source picker, folded from the candidate index's rows for the
- * window in bounded pages against one published index generation. Never a per-picker full scan: an
- * unusable index answers unavailable, and a fold that outlasts the cold-rebuild wait answers pending
- * (both a 503 at the route) while it finishes in the background and fills the cache.
+ * The 30-day app and key counts for the source picker. A request answers from a completed result or
+ * registers one build in the cold-rebuild slot and answers pending (a 503 at the route) at once; it
+ * never reads the ledger or the index itself.
  */
-export async function getUsageSourceFacets(filter: UsageSourceFilter, configuredIds: readonly string[]): Promise<SourceFacets> {
+export function getUsageSourceFacets(filter: UsageSourceFilter, configuredIds: readonly string[]): SourceFacets {
   const ids = snapshotConfiguredKeyIds(configuredIds);
   const captured: UsageSourceFilter = { client: filter.client, device: { ...filter.device } };
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const now = Date.now();
-  const since = rangeWindow("30d", now).since!;
-  const key = JSON.stringify([getConfigDir(), captured, ids, timeZone, since, usageLogIdentityKey(currentUsageLogRevision())]);
-  const hit = completedFacets.get(key);
-  if (hit && now - hit.at >= 0 && now - hit.at < COMPLETED_FACETS_MS) return hit.facets;
-  return awaitUsageColdRebuild(`facets:${key}`, async () => {
-    const facets = await foldFacetsFromIndex(captured, ids, since, timeZone);
+  const key = JSON.stringify([getConfigDir(), captured, ids, timeZone]);
+  const reused = reusableFacets(key, Date.now());
+  if (reused) return reused;
+  return requestUsageColdRebuild(`facets:${key}`, async () => {
+    const built = await foldFacetsFromIndex(captured, ids, timeZone);
     completedFacets.delete(key);
-    completedFacets.set(key, { at: Date.now(), facets });
+    completedFacets.set(key, { at: Date.now(), ...built });
     while (completedFacets.size > MAX_COMPLETED_FACETS) completedFacets.delete(completedFacets.keys().next().value!);
-    return facets;
   });
 }
 
-async function foldFacetsFromIndex(
-  captured: UsageSourceFilter,
-  ids: readonly string[],
-  since: number,
-  timeZone: string,
-): Promise<SourceFacets> {
+/**
+ * Folds the window's rows from the index's own columns (`usage_rows`) in bounded pages against one
+ * published generation, each page re-checking it; ingest has already validated those rows against
+ * the ledger, so no JSONL row is read here.
+ */
+async function foldFacetsFromIndex(captured: UsageSourceFilter, ids: readonly string[], timeZone: string) {
   const until = Date.now();
+  const since = rangeWindow("30d", until).since!;
   const read = await readUsageFilterCandidates({ provider: null, model: null, apiKeyId: null, window: { since, until } });
   if (!read) throw new SourceFacetsUnavailableError("usage filter index unavailable");
   const accumulator = createSourceFacetAccumulator(captured, ids, { since, until });
   try {
-    for (let first = true; ; first = false) {
-      if (!first) await new Promise<void>(resolve => setTimeout(resolve, 0));
-      const offsets = read.nextPage();
-      // An empty first page still validates the ledger against the snapshot before reporting zeros.
-      if (!first && offsets.length === 0) break;
-      const rows = await readUsageLedgerRowsAtOffsets({
-        offsets,
-        expectedIdentityKey: read.snapshot.identityKey,
-        expectedRevisionKey: usageLogRevisionKey(read.snapshot.revision),
-        expectedProcessedThroughBytes: read.snapshot.indexedOffset,
-        expectedProcessedThroughDigest: read.snapshot.processedThroughDigest,
-        expectedFileSize: read.snapshot.revision?.size,
-      });
-      if (rows.unreadableOffsets.length > 0) {
-        // Counting only the rows that parsed would under-report a facet; rebuild the index instead.
-        requestUsageFilterIndexRebuild();
-        throw new SourceFacetsUnavailableError("usage filter index disagrees with the ledger");
-      }
-      for (const entry of rows.entries) accumulator.add(entry);
-      if (offsets.length === 0) break;
+    for (let rows = read.nextIndexedRows(); rows.length > 0; rows = read.nextIndexedRows()) {
+      for (const row of rows) accumulator.add(row);
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
     }
   } finally {
     read.close();
   }
   if (Intl.DateTimeFormat().resolvedOptions().timeZone !== timeZone) throw new Error("time zone changed");
   return {
-    ...accumulator.snapshot(),
-    sourceFilter: captured,
-    window: { since, until, timeZone },
-    usageIncomplete: read.snapshot.oversizedRows > 0 || read.snapshot.invalidRows > 0,
+    generation: read.snapshot.generation,
+    observed: observedUsageRevision(read.snapshot.revision),
+    facets: {
+      ...accumulator.snapshot(),
+      sourceFilter: captured,
+      window: { since, until, timeZone },
+      usageIncomplete: read.snapshot.oversizedRows > 0 || read.snapshot.invalidRows > 0,
+    } satisfies SourceFacets,
   };
 }

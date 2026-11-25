@@ -22,7 +22,8 @@ import { packageVersion } from "../../lib/package-version";
 import { parseUsageSource } from "../../usage/source-filter";
 
 const VERSION = packageVersion("0.0.0");
-const KEPT_RESPONSE_HEADERS = ["content-type", "content-language", "etag", "last-modified"];
+// `retry-after` carries a pending usage read's retry time; dropping it leaves the child polling blind.
+const KEPT_RESPONSE_HEADERS = ["content-type", "content-language", "etag", "last-modified", "retry-after"];
 const REPORT_READ_TIMEOUT_MS = 5_000;
 
 function notFound(): Response {

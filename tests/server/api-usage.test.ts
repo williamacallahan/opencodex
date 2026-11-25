@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { managementFetch as fetch } from "../helpers/management-auth";
+import { settledUsageResponse } from "../helpers/usage-cold-read";
+
+/** A dashboard read that, like the GUI, retries once a pending whole-ledger rebuild has finished. */
+const usageFetch = (input: URL, init?: RequestInit) => settledUsageResponse(() => fetch(input, init));
 import { appendFileSync, closeSync, mkdirSync, mkdtempSync, openSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,7 +17,7 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { resetUsageReadCacheForTests, setManagementUsageMaxEntriesForTests, usageReadCacheStatsForTests } from "../../src/usage/log";
 import * as usageLogModule from "../../src/usage/log";
 import * as usageLedgerScannerModule from "../../src/usage/ledger-scanner";
-import { settleUsageColdRebuildForTests, USAGE_COLD_READ_RETRY_AFTER_SECONDS, USAGE_COLD_READ_WAIT_MS } from "../../src/usage/cold-rebuild-slot";
+import { resetUsageColdRebuildForTests, settleUsageColdRebuildForTests, USAGE_COLD_READ_RETRY_AFTER_SECONDS } from "../../src/usage/cold-rebuild-slot";
 import { getUsageSummaryCacheEntry, resetUsageSummaryCacheForTests } from "../../src/server/management/usage-summary-cache";
 import * as usageAggregateCacheModule from "../../src/server/management/usage-aggregate-cache";
 
@@ -94,7 +98,9 @@ beforeEach(() => {
   saveConfig(baseConfig());
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await settleUsageColdRebuildForTests();
+  resetUsageColdRebuildForTests();
   // Belt-and-suspenders: server.stop should release the reconciler lease, but a
   // wedged shutdown on Linux CI must not leave the 5s poll timer keeping the
   // isolate worker alive for later shard files (e.g. cli-restore-back).
@@ -159,7 +165,7 @@ describe("GET /api/usage", () => {
     writeFileSync(join(testDir, "usage.jsonl"), `${rows.map(row => JSON.stringify(row)).join("\n")}\n`);
     const server = startServer(0);
     try {
-      const response = await fetch(new URL("/api/usage?jev=1&comboId=jev-auto&range=30d", server.url));
+      const response = await usageFetch(new URL("/api/usage?jev=1&comboId=jev-auto&range=30d", server.url));
       expect(response.status).toBe(200);
       const stats = await response.json();
       expect(stats).toMatchObject({
@@ -192,7 +198,7 @@ describe("GET /api/usage", () => {
         entriesTruncated: false,
       });
       expect(stats.generatedAt).toBeGreaterThanOrEqual(now);
-      const invalid = await fetch(new URL(`/api/usage?jev=1&comboId=${"x".repeat(129)}`, server.url));
+      const invalid = await usageFetch(new URL(`/api/usage?jev=1&comboId=${"x".repeat(129)}`, server.url));
       expect(invalid.status).toBe(400);
       expect(await invalid.json()).toEqual({ error: "invalid comboId" });
     } finally {
@@ -217,10 +223,10 @@ describe("GET /api/usage", () => {
     writeFileSync(join(testDir, "usage.jsonl"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
     const server = startServer(0);
     try {
-      const preset = await (await fetch(new URL("/api/usage?range=all", server.url))).json();
+      const preset = await (await usageFetch(new URL("/api/usage?range=all", server.url))).json();
       const params = new URLSearchParams({ range: "today", since: new Date(since).toISOString(), until: String(until), surface: "codex" });
       const before = Date.now();
-      const response = await fetch(new URL(`/api/usage?${params}`, server.url));
+      const response = await usageFetch(new URL(`/api/usage?${params}`, server.url));
       expect(response.status).toBe(200);
       const custom = await response.json();
       expect(custom).toMatchObject({ range: "today", surface: "codex", customWindow: true, since, until });
@@ -234,21 +240,21 @@ describe("GET /api/usage", () => {
       expect(custom.snapshotWindowStart).toBe(since - 1);
       expect(custom.snapshotWindowEnd).toBe(until + 1);
       params.set("apiKeyId", "Key-A");
-      const byKey = await (await fetch(new URL(`/api/usage?${params}`, server.url))).json();
+      const byKey = await (await usageFetch(new URL(`/api/usage?${params}`, server.url))).json();
       expect(byKey.summary.requests).toBe(1);
       expect(byKey.accounts[0].requests).toBe(1);
       expect(byKey.filter).toMatchObject({ apiKeyId: "Key-A", matched: true });
       params.set("provider", "OpenAI");
       params.set("model", "GPT-5.5");
-      const combined = await (await fetch(new URL(`/api/usage?${params}`, server.url))).json();
+      const combined = await (await usageFetch(new URL(`/api/usage?${params}`, server.url))).json();
       expect(combined.filter).toMatchObject({ provider: "openai", model: "gpt-5.5", apiKeyId: "Key-A", matched: true });
       expect(combined.summary.requests).toBe(1);
       expect(combined.accounts).toEqual([]);
       params.set("since", String(until));
-      const noMatch = await (await fetch(new URL(`/api/usage?${params}`, server.url))).json();
+      const noMatch = await (await usageFetch(new URL(`/api/usage?${params}`, server.url))).json();
       expect(noMatch.summary.requests).toBe(0);
       expect(noMatch.filter.matched).toBe(false);
-      const after = await (await fetch(new URL("/api/usage?range=all", server.url))).json();
+      const after = await (await usageFetch(new URL("/api/usage?range=all", server.url))).json();
       expect(after.summary).toEqual(preset.summary);
       expect(after.summary.requests).toBe(5);
       expect(after.customWindow).toBeUndefined();
@@ -268,7 +274,7 @@ describe("GET /api/usage", () => {
         "since=0&until=2026-02-30T12:00:00Z", "since=0&until=2026-09-01T12:00:00",
         "since=0&until=2026-09-01T12:00:00.0001Z",
       ]) {
-        const response = await fetch(new URL(`/api/usage?${query}`, server.url));
+        const response = await usageFetch(new URL(`/api/usage?${query}`, server.url));
         expect(response.status).toBe(400);
         expect((await response.json()).error).toBeTruthy();
       }
@@ -283,7 +289,7 @@ describe("GET /api/usage", () => {
     const server = startServer(0);
     const url = new URL("/api/usage?range=today&since=0&until=0", server.url);
     try {
-      const empty = await (await fetch(url)).json();
+      const empty = await (await usageFetch(url)).json();
       expect(empty).toMatchObject({ customWindow: true, since: 0, until: 0, summary: { requests: 0 } });
       expect(empty.days).toHaveLength(1);
       expect(empty.error).toBeUndefined();
@@ -303,7 +309,8 @@ describe("GET /api/usage", () => {
           usageStatus: "reported",
         })}\n`, { mode: 0o600 });
         url.searchParams.set("until", "1");
-        const response = await fetch(url);
+        // The read fails in the background build; the retry the pending answer asked for reports it.
+        const response = await usageFetch(url);
         expect(response.status).toBe(500);
         expect(await response.json()).toEqual({ error: "read_failed" });
       } finally {
@@ -314,55 +321,7 @@ describe("GET /api/usage", () => {
     }
   });
 
-  test("concurrent cold requests share one base-ledger scan", async () => {
-    writeFixture(Date.now());
-    const originalScan = usageLedgerScannerModule.scanUsageLedgerCooperatively;
-    const originalGetAggregate = usageAggregateCacheModule.getUsageAggregate;
-    let releaseScan!: () => void;
-    const scanGate = new Promise<void>(resolve => { releaseScan = resolve; });
-    let scannerEntered!: () => void;
-    const scannerStarted = new Promise<void>(resolve => { scannerEntered = resolve; });
-    let aggregateCalls = 0;
-    let secondAggregateCall!: () => void;
-    const bothRequestsEntered = new Promise<void>(resolve => { secondAggregateCall = resolve; });
-    const scanSpy = spyOn(usageLedgerScannerModule, "scanUsageLedgerCooperatively")
-      .mockImplementation(async options => {
-        scannerEntered();
-        await scanGate;
-        return originalScan(options);
-      });
-    const aggregateSpy = spyOn(usageAggregateCacheModule, "getUsageAggregate")
-      .mockImplementation(options => {
-        aggregateCalls += 1;
-        if (aggregateCalls === 2) secondAggregateCall();
-        return originalGetAggregate(options);
-      });
-    const server = startServer(0);
-    try {
-      const first = fetch(new URL("/api/usage?range=30d", server.url));
-      await scannerStarted;
-      const second = fetch(new URL("/api/usage?range=7d", server.url));
-      await bothRequestsEntered;
-      expect(aggregateCalls).toBe(2);
-      expect(scanSpy).toHaveBeenCalledTimes(1);
-      releaseScan();
-
-      const [firstBody, secondBody] = await Promise.all([
-        first.then(response => response.json()),
-        second.then(response => response.json()),
-      ]);
-      expect(firstBody.summary.requests).toBe(3);
-      expect(secondBody.summary.requests).toBe(2);
-      expect(scanSpy).toHaveBeenCalledTimes(1);
-    } finally {
-      releaseScan();
-      aggregateSpy.mockRestore();
-      scanSpy.mockRestore();
-      await server.stop(true);
-    }
-  });
-
-  test("a cold rebuild that outlasts the wait answers 503 with Retry-After, never zero, and the next read serves it", async () => {
+  test("concurrent cold requests share one base-ledger scan and never wait for it", async () => {
     writeFixture(Date.now());
     const originalScan = usageLedgerScannerModule.scanUsageLedgerCooperatively;
     let releaseScan!: () => void;
@@ -373,17 +332,26 @@ describe("GET /api/usage", () => {
     });
     const server = startServer(0);
     try {
-      const started = Date.now();
-      const pending = await fetch(new URL("/api/usage?range=30d", server.url));
-      expect(Date.now() - started).toBeLessThan(USAGE_COLD_READ_WAIT_MS + 1_000);
-      expect(pending.status).toBe(503);
-      expect(pending.headers.get("retry-after")).toBe(String(USAGE_COLD_READ_RETRY_AFTER_SECONDS));
-      expect(await pending.json()).toEqual({ error: "usage_rebuilding" });
+      const started = performance.now();
+      const [first, second] = await Promise.all([
+        fetch(new URL("/api/usage?range=30d", server.url)),
+        fetch(new URL("/api/usage?range=7d", server.url)),
+      ]);
+      // Both answered while the scan was still held, without a bounded wait on it either.
+      expect(performance.now() - started).toBeLessThan(250);
+      expect([first.status, second.status]).toEqual([503, 503]);
+      expect(first.headers.get("retry-after")).toBe(String(USAGE_COLD_READ_RETRY_AFTER_SECONDS));
+      expect(await first.json()).toEqual({ error: "usage_rebuilding" });
       releaseScan();
       await settleUsageColdRebuildForTests();
-      const completed = await fetch(new URL("/api/usage?range=30d", server.url));
-      expect(completed.status).toBe(200);
-      expect((await completed.json()).summary.requests).toBe(3);
+      expect(scanSpy).toHaveBeenCalledTimes(1);
+      // The finished build published every range's summary; the retries read them without scanning.
+      const [firstBody, secondBody] = await Promise.all([
+        fetch(new URL("/api/usage?range=30d", server.url)).then(response => response.json()),
+        fetch(new URL("/api/usage?range=7d", server.url)).then(response => response.json()),
+      ]);
+      expect(firstBody.summary.requests).toBe(3);
+      expect(secondBody.summary.requests).toBe(2);
       expect(scanSpy).toHaveBeenCalledTimes(1);
     } finally {
       releaseScan();
@@ -393,11 +361,47 @@ describe("GET /api/usage", () => {
     }
   });
 
+  test("a finished rebuild's answer survives for the retry even when the accumulator is evicted", async () => {
+    writeFixture(Date.now());
+    const server = startServer(0);
+    try {
+      expect((await fetch(new URL("/api/usage?range=30d", server.url))).status).toBe(503);
+      await settleUsageColdRebuildForTests();
+      // Memory pressure drops the full accumulator; the bounded per-range summaries remain.
+      while (usageAggregateCacheModule.discardRetainedUsageAggregate() > 0) { /* evict every retained aggregate */ }
+      const retry = await fetch(new URL("/api/usage?range=30d", server.url));
+      expect(retry.status).toBe(200);
+      expect((await retry.json()).summary.requests).toBe(3);
+    } finally {
+      await settleUsageColdRebuildForTests();
+      await server.stop(true);
+    }
+  });
+
+  test("an in-place rewrite of the same length is never served from the cached summary", async () => {
+    const path = join(testDir, "usage.jsonl");
+    const row = (provider: string) => `${JSON.stringify({ requestId: "r", timestamp: Date.now() - 1_000, provider, model: "m", status: 200, durationMs: 1, usageStatus: "reported", usage: { inputTokens: 1, outputTokens: 1 } })}\n`;
+    writeFileSync(path, row("openai"));
+    const server = startServer(0);
+    try {
+      const first = await (await usageFetch(new URL("/api/usage?range=30d", server.url))).json();
+      expect(JSON.stringify(first.providers)).toContain("openai");
+      await Bun.sleep(5); // a distinct mtime for the rewrite
+      writeFileSync(path, row("google")); // same length, same inode
+      const body = await (await usageFetch(new URL("/api/usage?range=30d", server.url))).json();
+      expect(JSON.stringify(body.providers)).not.toContain("openai");
+      expect(JSON.stringify(body.providers)).toContain("google");
+    } finally {
+      await settleUsageColdRebuildForTests();
+      await server.stop(true);
+    }
+  });
+
   test("returns documented shape with summary, days, models, providers, and accounts", async () => {
     writeFixture(Date.now());
     const server = startServer(0);
     try {
-      const res = await fetch(new URL("/api/usage", server.url));
+      const res = await usageFetch(new URL("/api/usage", server.url));
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body).toHaveProperty("range");
@@ -423,8 +427,8 @@ describe("GET /api/usage", () => {
     saveConfig({ ...baseConfig(), managementUsageMaxReadBytes: 256 });
     const server = startServer(0);
     try {
-      const first = await fetch(new URL("/api/usage?range=all", server.url)).then(response => response.json());
-      const second = await fetch(new URL("/api/usage?range=all", server.url)).then(response => response.json());
+      const first = await usageFetch(new URL("/api/usage?range=all", server.url)).then(response => response.json());
+      const second = await usageFetch(new URL("/api/usage?range=all", server.url)).then(response => response.json());
       expect(first.summary).toMatchObject({ requests: 3, totalTokens: 165 });
       expect(second).toMatchObject({
         historyTruncated: false,
@@ -450,7 +454,7 @@ describe("GET /api/usage", () => {
       saveConfig({ ...baseConfig(), managementUsageMaxReadBytes: 256 });
       const server = startServer(0);
       try {
-        const body = await fetch(new URL("/api/usage?range=30d", server.url)).then(r => r.json());
+        const body = await usageFetch(new URL("/api/usage?range=30d", server.url)).then(r => r.json());
         expect(body.historyTruncated).toBe(false);
         expect(body.truncatedPrefixBytes).toBe(0);
         expect(body.summary.requests).toBe(3);
@@ -519,9 +523,9 @@ describe("GET /api/usage", () => {
       saveConfig({ ...baseConfig(), managementUsageMaxReadBytes: tailBytes + 8 });
       const server = startServer(0);
       try {
-        const all = await fetch(new URL("/api/usage?range=all", server.url)).then(r => r.json());
-        const thirty = await fetch(new URL("/api/usage?range=30d", server.url)).then(r => r.json());
-        const claude = await fetch(new URL("/api/usage?range=all&surface=claude", server.url)).then(r => r.json());
+        const all = await usageFetch(new URL("/api/usage?range=all", server.url)).then(r => r.json());
+        const thirty = await usageFetch(new URL("/api/usage?range=30d", server.url)).then(r => r.json());
+        const claude = await usageFetch(new URL("/api/usage?range=all&surface=claude", server.url)).then(r => r.json());
 
         expect(all.historyTruncated).toBe(false);
         expect(all.summary.requests).toBe(43);
@@ -547,7 +551,7 @@ describe("GET /api/usage", () => {
       writeFixture(now);
       const server = startServer(0);
       try {
-        const body = await fetch(new URL("/api/usage?range=all", server.url)).then(r => r.json());
+        const body = await usageFetch(new URL("/api/usage?range=all", server.url)).then(r => r.json());
         expect(body.historyTruncated).toBe(false);
         // The oldest fixture row is 10 days back; an unbounded read must include it.
         expect(body.snapshotWindowStart).toBeLessThanOrEqual(now - 10 * 86_400_000 + 1000);
@@ -561,7 +565,7 @@ describe("GET /api/usage", () => {
       writeFileSync(join(testDir, "usage.jsonl"), "");
       const server = startServer(0);
       try {
-        const body = await fetch(new URL("/api/usage?range=all", server.url)).then(r => r.json());
+        const body = await usageFetch(new URL("/api/usage?range=all", server.url)).then(r => r.json());
         expect(body.snapshotWindowStart).toBeNull();
         expect(body.snapshotWindowEnd).toBeNull();
       } finally {
@@ -574,9 +578,9 @@ describe("GET /api/usage", () => {
       saveConfig({ ...baseConfig(), managementUsageMaxReadBytes: 256 });
       const server = startServer(0);
       try {
-        const first = await fetch(new URL("/api/usage?range=all", server.url)).then(r => r.json());
+        const first = await usageFetch(new URL("/api/usage?range=all", server.url)).then(r => r.json());
         expect(getUsageSummaryCacheEntry("all:all")).toBeDefined();
-        const second = await fetch(new URL("/api/usage?range=all", server.url)).then(r => r.json());
+        const second = await usageFetch(new URL("/api/usage?range=all", server.url)).then(r => r.json());
         expect(typeof first.snapshotWindowStart).toBe("number");
         expect(typeof first.snapshotWindowEnd).toBe("number");
         expect(second.snapshotWindowStart).toBe(first.snapshotWindowStart);
@@ -597,8 +601,8 @@ describe("GET /api/usage", () => {
     });
     const server = startServer(0);
     try {
-      const first = await fetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
-      const second = await fetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
+      const first = await usageFetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
+      const second = await usageFetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
       expect(second.summary).toEqual(first.summary);
       expect(getUsageSummaryCacheEntry("30d:all")?.summary.summary).toEqual(first.summary);
 
@@ -613,13 +617,13 @@ describe("GET /api/usage", () => {
         usage: { inputTokens: 1, outputTokens: 1 },
         totalTokens: 2,
       })}\n`);
-      const stale = await fetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
+      const stale = await usageFetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
       expect(stale.summary.requests).toBe(first.summary.requests);
 
       const originalNow = Date.now();
       const clock = spyOn(Date, "now").mockReturnValue(originalNow + 60_001);
       try {
-        const changed = await fetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
+        const changed = await usageFetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
         expect(changed.summary.requests).toBe(first.summary.requests + 1);
         expect(scanStarts).toHaveLength(2);
         expect(scanStarts[0]).toBe(0);
@@ -642,8 +646,8 @@ describe("GET /api/usage", () => {
     refreshUserCostOverlays({ providers: {} } as unknown as OcxConfig);
     const server = startServer(0);
     try {
-      const first = await fetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
-      const second = await fetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
+      const first = await usageFetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
+      const second = await usageFetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
       expect(second.summary).toEqual(first.summary);
       const cachedOverlayVersion = getUsageSummaryCacheEntry("30d:all")?.overlayVersion ?? -1;
       // A modelCosts save refreshes the overlay registry and bumps its version;
@@ -657,7 +661,7 @@ describe("GET /api/usage", () => {
           },
         },
       } as unknown as OcxConfig);
-      const changed = await fetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
+      const changed = await usageFetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
       expect(changed.summary.requests).toBe(first.summary.requests);
       expect(getUsageSummaryCacheEntry("30d:all")?.overlayVersion).toBeGreaterThan(cachedOverlayVersion);
     } finally {
@@ -675,11 +679,11 @@ describe("GET /api/usage", () => {
     writeFixture(Date.now());
     const server = startServer(0);
     try {
-      await fetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
+      await usageFetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
       expect(getUsageSummaryCacheEntry("30d:all")?.timeZone).toBe("UTC");
 
       process.env.TZ = "America/Los_Angeles";
-      await fetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
+      await usageFetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
       expect(getUsageSummaryCacheEntry("30d:all")?.timeZone).toBe("America/Los_Angeles");
     } finally {
       if (previousTimeZone === undefined) delete process.env.TZ;
@@ -723,7 +727,7 @@ describe("GET /api/usage", () => {
     });
     const server = startServer(0);
     try {
-      const raced = await fetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
+      const raced = await usageFetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
       expect(bumped).toBe(true);
       expect(userCostOverlayVersion()).toBeGreaterThan(versionBefore);
       // The retained rebuild detects the changed pricing input and retries the
@@ -740,7 +744,7 @@ describe("GET /api/usage", () => {
       // change the version the settled scan used; the next request must either
       // reuse that exact version or rebuild under a newer one.
       const nextRequestVersion = userCostOverlayVersion();
-      const settled = await fetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
+      const settled = await usageFetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
       expect(settled.summary).toEqual(raced.summary);
       expect(getUsageSummaryCacheEntry("30d:all")?.overlayVersion)
         .toBeGreaterThanOrEqual(nextRequestVersion);
@@ -758,7 +762,7 @@ describe("GET /api/usage", () => {
     writeFixture(Date.now());
     const server = startServer(0);
     try {
-      const res = await fetch(new URL("/api/usage?range=7d", server.url));
+      const res = await usageFetch(new URL("/api/usage?range=7d", server.url));
       const body = await res.json();
       expect(body.range).toBe("7d");
       expect(body.summary.requests).toBe(2);
@@ -772,7 +776,7 @@ describe("GET /api/usage", () => {
     writeFixture(Date.now());
     const server = startServer(0);
     try {
-      const res = await fetch(new URL("/api/usage", server.url));
+      const res = await usageFetch(new URL("/api/usage", server.url));
       const body = await res.json();
       expect(body.range).toBe("30d");
       expect(body.summary.requests).toBe(3);
@@ -789,7 +793,7 @@ describe("GET /api/usage", () => {
     writeFixture(Date.now());
     const server = startServer(0);
     try {
-      const res = await fetch(new URL("/api/usage?range=quarter", server.url));
+      const res = await usageFetch(new URL("/api/usage?range=quarter", server.url));
       const body = await res.json();
       expect(body.range).toBe("30d");
     } finally {
@@ -802,13 +806,13 @@ describe("GET /api/usage", () => {
     writeFixture(now);
     const server = startServer(0);
     try {
-      const body = await fetch(new URL("/api/usage?range=today", server.url)).then(res => res.json());
+      const body = await usageFetch(new URL("/api/usage?range=today", server.url)).then(res => res.json());
       expect(body.range).toBe("today");
       // A range that missed its rangeWindow branch would fall through to the
       // all-history window and report since: null while looking plausible.
       expect(body.since).not.toBeNull();
       expect(body.days).toHaveLength(1);
-      const thirtyDay = await fetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
+      const thirtyDay = await usageFetch(new URL("/api/usage?range=30d", server.url)).then(res => res.json());
       expect(body.summary.requests).toBeLessThan(thirtyDay.summary.requests);
     } finally {
       await server.stop(true);
@@ -819,7 +823,7 @@ describe("GET /api/usage", () => {
     writeFixture(Date.now());
     const server = startServer(0);
     try {
-      const body = await fetch(new URL("/api/usage?range=1d", server.url)).then(res => res.json());
+      const body = await usageFetch(new URL("/api/usage?range=1d", server.url)).then(res => res.json());
       expect(body.range).toBe("today");
     } finally {
       await server.stop(true);
@@ -830,7 +834,7 @@ describe("GET /api/usage", () => {
     writeFixture(Date.now());
     const server = startServer(0);
     try {
-      const body = await fetch(new URL("/api/usage?range=all&provider=openai", server.url)).then(res => res.json());
+      const body = await usageFetch(new URL("/api/usage?range=all&provider=openai", server.url)).then(res => res.json());
       expect(body.filter).toMatchObject({ provider: "openai", model: null, matched: true });
       expect(body.models.every((row: { provider: string }) => row.provider === "openai")).toBe(true);
       expect(body.providers.every((row: { provider: string }) => row.provider === "openai")).toBe(true);
@@ -849,7 +853,7 @@ describe("GET /api/usage", () => {
     writeFixture(Date.now());
     const server = startServer(0);
     try {
-      const upper = await fetch(new URL("/api/usage?range=all&provider=OPENAI", server.url)).then(res => res.json());
+      const upper = await usageFetch(new URL("/api/usage?range=all&provider=OPENAI", server.url)).then(res => res.json());
       expect(upper.filter.matched).toBe(true);
       expect(upper.models.length).toBeGreaterThan(0);
     } finally {
@@ -861,7 +865,7 @@ describe("GET /api/usage", () => {
     writeFixture(Date.now());
     const server = startServer(0);
     try {
-      const body = await fetch(new URL("/api/usage?range=all&provider=&model=gpt-5.5", server.url)).then(res => res.json());
+      const body = await usageFetch(new URL("/api/usage?range=all&provider=&model=gpt-5.5", server.url)).then(res => res.json());
       expect(body.filter).toMatchObject({ provider: null, model: "gpt-5.5", matched: true });
       expect(body.summary.requests).toBe(2);
       expect(body.models.every((row: { model: string }) => row.model === "gpt-5.5")).toBe(true);
@@ -875,7 +879,7 @@ describe("GET /api/usage", () => {
     writeFixture(Date.now());
     const server = startServer(0);
     try {
-      const body = await fetch(new URL("/api/usage?range=all&provider=no-such-provider", server.url)).then(res => res.json());
+      const body = await usageFetch(new URL("/api/usage?range=all&provider=no-such-provider", server.url)).then(res => res.json());
       expect(body.filter).toMatchObject({ provider: "no-such-provider", matched: false });
       expect(body.models).toEqual([]);
       expect(body.providers).toEqual([]);
@@ -893,10 +897,10 @@ describe("GET /api/usage", () => {
     try {
       // A filtered scan never writes the range:surface cache. Otherwise the
       // dashboard could be served one provider's totals as the whole window.
-      const filtered = await fetch(new URL("/api/usage?range=all&provider=no-such-provider", server.url)).then(res => res.json());
+      const filtered = await usageFetch(new URL("/api/usage?range=all&provider=no-such-provider", server.url)).then(res => res.json());
       expect(filtered.summary.requests).toBe(0);
 
-      const unfiltered = await fetch(new URL("/api/usage?range=all", server.url)).then(res => res.json());
+      const unfiltered = await usageFetch(new URL("/api/usage?range=all", server.url)).then(res => res.json());
       expect(unfiltered.filter).toBeUndefined();
       expect(unfiltered.summary.requests).toBeGreaterThan(0);
       expect(unfiltered.models.length).toBeGreaterThan(0);
@@ -917,22 +921,22 @@ describe("GET /api/usage", () => {
     writeFileSync(join(testDir, "usage.jsonl"), `${rows.map(row => JSON.stringify(row)).join("\n")}\n`);
     const server = startServer(0);
     try {
-      const own = await fetch(new URL("/api/usage?range=all&apiKeyId=Key-A", server.url)).then(res => res.json());
+      const own = await usageFetch(new URL("/api/usage?range=all&apiKeyId=Key-A", server.url)).then(res => res.json());
       expect(own.filter).toMatchObject({ apiKeyId: "Key-A", provider: null, model: null, matched: true });
       expect(own.summary.requests).toBe(2);
 
-      const combined = await fetch(new URL("/api/usage?range=all&apiKeyId=Key-A&provider=openai&model=gpt-5.5", server.url)).then(res => res.json());
+      const combined = await usageFetch(new URL("/api/usage?range=all&apiKeyId=Key-A&provider=openai&model=gpt-5.5", server.url)).then(res => res.json());
       expect(combined.summary.requests).toBe(1);
       expect(combined.models).toHaveLength(1);
 
-      const exactCase = await fetch(new URL("/api/usage?range=all&apiKeyId=key-a", server.url)).then(res => res.json());
+      const exactCase = await usageFetch(new URL("/api/usage?range=all&apiKeyId=key-a", server.url)).then(res => res.json());
       expect(exactCase.summary.requests).toBe(1);
 
-      const missing = await fetch(new URL("/api/usage?range=all&apiKeyId=missing", server.url)).then(res => res.json());
+      const missing = await usageFetch(new URL("/api/usage?range=all&apiKeyId=missing", server.url)).then(res => res.json());
       expect(missing.filter).toMatchObject({ apiKeyId: "missing", matched: false });
       expect(missing.summary.requests).toBe(0);
 
-      const unfiltered = await fetch(new URL("/api/usage?range=all", server.url)).then(res => res.json());
+      const unfiltered = await usageFetch(new URL("/api/usage?range=all", server.url)).then(res => res.json());
       expect(unfiltered.filter).toBeUndefined();
       expect(unfiltered.summary.requests).toBe(4);
     } finally {
@@ -947,10 +951,10 @@ describe("GET /api/usage", () => {
       // Warm the cache first, then filter. A projection wired only into the
       // fresh-compute path would work until the cache warmed and then silently
       // return unfiltered rows.
-      await fetch(new URL("/api/usage?range=all", server.url)).then(res => res.json());
+      await usageFetch(new URL("/api/usage?range=all", server.url)).then(res => res.json());
       expect(getUsageSummaryCacheEntry("all:all")).toBeDefined();
 
-      const filtered = await fetch(new URL("/api/usage?range=all&provider=openai", server.url)).then(res => res.json());
+      const filtered = await usageFetch(new URL("/api/usage?range=all&provider=openai", server.url)).then(res => res.json());
       expect(filtered.filter).toMatchObject({ provider: "openai", matched: true });
       expect(filtered.models.every((row: { provider: string }) => row.provider === "openai")).toBe(true);
       expect(filtered.accounts).toEqual([]);
@@ -963,19 +967,19 @@ describe("GET /api/usage", () => {
     writeFixture(Date.now());
     const server = startServer(0);
     try {
-      const codex = await fetch(new URL("/api/usage?range=all&surface=codex", server.url)).then(res => res.json());
+      const codex = await usageFetch(new URL("/api/usage?range=all&surface=codex", server.url)).then(res => res.json());
       expect(codex.surface).toBe("codex");
       expect(codex.summary).toMatchObject({ requests: 2, totalTokens: 165 });
       expect(codex.models.map((model: { model: string }) => model.model)).toEqual(["gpt-5.5"]);
       expect(codex.providers.map((provider: { provider: string }) => provider.provider)).toEqual(["openai"]);
 
-      const claude = await fetch(new URL("/api/usage?range=all&surface=claude", server.url)).then(res => res.json());
+      const claude = await usageFetch(new URL("/api/usage?range=all&surface=claude", server.url)).then(res => res.json());
       expect(claude.surface).toBe("claude");
       expect(claude.summary).toMatchObject({ requests: 1, totalTokens: 0 });
       expect(claude.models.map((model: { model: string }) => model.model)).toEqual(["claude-x"]);
       expect(claude.providers.map((provider: { provider: string }) => provider.provider)).toEqual(["anthropic"]);
 
-      const fallback = await fetch(new URL("/api/usage?range=all&surface=unknown", server.url)).then(res => res.json());
+      const fallback = await usageFetch(new URL("/api/usage?range=all&surface=unknown", server.url)).then(res => res.json());
       expect(fallback.surface).toBe("all");
       expect(fallback.summary).toMatchObject({ requests: 3, totalTokens: 165 });
     } finally {
@@ -987,7 +991,7 @@ describe("GET /api/usage", () => {
     mkdirSync(join(testDir, "usage.jsonl"));
     const server = startServer(0);
     try {
-      const res = await fetch(new URL("/api/usage?surface=claude", server.url));
+      const res = await usageFetch(new URL("/api/usage?surface=claude", server.url));
       expect(res.status).toBe(500);
       const body = await res.json();
       expect(body).toEqual({ error: "read_failed" });
@@ -1025,7 +1029,7 @@ describe("GET /api/usage", () => {
     const server = startServer(0);
     try {
       for (const query of ["range=all", "range=all", "range=7d", "range=all&model=gpt-5.5"]) {
-        const response = await fetch(new URL(`/api/usage?${query}`, server.url));
+        const response = await usageFetch(new URL(`/api/usage?${query}`, server.url));
         expect(response.status).toBe(200);
         const body = await response.json();
         expect(body.error).toBeUndefined();
@@ -1044,7 +1048,7 @@ describe("GET /api/usage", () => {
   test("missing usage.jsonl returns zeroed summary, not 500", async () => {
     const server = startServer(0);
     try {
-      const res = await fetch(new URL("/api/usage", server.url));
+      const res = await usageFetch(new URL("/api/usage", server.url));
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.summary.requests).toBe(0);
@@ -1060,7 +1064,7 @@ describe("GET /api/usage", () => {
     writeFixture(Date.now());
     const server = startServer(0);
     try {
-      await fetch(new URL("/api/usage?range=7d&surface=claude", server.url)).then(res => res.json());
+      await usageFetch(new URL("/api/usage?range=7d&surface=claude", server.url)).then(res => res.json());
       for (const range of ["today", "7d", "30d", "all"]) {
         for (const surface of ["all", "codex", "claude", "grok"]) {
           expect(getUsageSummaryCacheEntry(`${range}:${surface}`)).toBeDefined();
@@ -1096,7 +1100,7 @@ describe("GET /api/usage", () => {
     writeFileSync(join(testDir, "usage.jsonl"), `${rows.map(row => JSON.stringify(row)).join("\n")}\n`);
     const server = startServer(0);
     try {
-      const body = await fetch(new URL("/api/usage?range=all", server.url)).then(res => res.json());
+      const body = await usageFetch(new URL("/api/usage?range=all", server.url)).then(res => res.json());
       const expectedTokens = 120_000_000_000;
       expect(body.summary).toMatchObject({ requests: 30, totalTokens: expectedTokens });
       expect(body.models[0].totalTokens).toBe(expectedTokens);

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { UsageColdReadPendingError } from "../../usage/cold-rebuild-slot";
+import { observedUsageRevision, observeUsageRevision } from "../../usage/revision-observation";
 import { readFileSync } from "node:fs";
 import type { CatalogModel } from "../../codex/catalog";
 import { catalogModelSlug, invalidateCodexModelsCache, nativeModelRows, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
@@ -86,6 +87,8 @@ import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 import {
   discardUsageSummaryCacheEntry,
   getUsageSummaryCacheEntry,
+  heldUsageSummary,
+  holdUsageSummaryForRetry,
   setUsageSummaryCacheEntry,
 } from "./usage-summary-cache";
 import {
@@ -334,24 +337,21 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
       const cacheKey = `${range}:${surface}`;
       const effectiveReadLimit = config.managementUsageMaxReadBytes ?? 64 * 1024 * 1024;
       const observed = currentUsageLogRevision();
-      const identityKey = `${usageLogIdentityKey(observed)}\0${effectiveReadLimit}`;
-      const observedSize = observed?.size ?? 0;
       const observedTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const cached = getUsageSummaryCacheEntry(cacheKey);
-      if (cached
-        // Filtered responses have their own full-scan singleflight and never
-        // read or write this cache.
-        && !filterRequested
-        && cached.identityKey === identityKey
+      // Filtered responses never read or write this cache. A cached summary stays valid while the
+      // ledger only grows past the revision last observed with it; a shrink, a replacement or a
+      // same-length rewrite drops it before any ordinary or dated hit.
+      const cached = filterRequested ? undefined : getUsageSummaryCacheEntry(cacheKey) ?? heldUsageSummary(cacheKey);
+      const cachedValid = cached !== undefined
         && cached.maxReadBytes === effectiveReadLimit
         && cached.overlayVersion === userCostOverlayVersion()
         && cached.timeZone === observedTimeZone
-        && now < cached.freshUntil
         && now < cached.expiresAt
-        && observedSize >= cached.lastSeenSize) {
+        && observeUsageRevision(cached.observed, observed) !== "rewritten";
+      if (cached && cachedValid && now < cached.freshUntil) {
         return jsonResponse(refreshedUsageSummary(cached.summary, range, now));
       }
-      if (cached && !filterRequested) discardUsageSummaryCacheEntry(cacheKey);
+      if (cached && !cachedValid) discardUsageSummaryCacheEntry(cacheKey);
       if (filterRequested) {
         const filteredAggregate = await getFilteredUsageAggregate(filter, window, "background");
         if (sessionGuard) {
@@ -379,68 +379,66 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
       }
 
       const configuredApiKeyIds = (config.apiKeys ?? []).map(key => key.id);
-      const aggregate = await getUsageAggregate({
-        now,
-        configuredApiKeyIds,
-        managementUsageMaxReadBytes: effectiveReadLimit,
-        cold: "background",
-      });
-      const baseAccumulator = aggregate.accumulator;
-      const revisionReadAt = Date.now();
-      const freshUntil = now + 60_000;
-      const snapshotIdentity = `${usageLogIdentityKey(aggregate.revision)}\0${effectiveReadLimit}`;
-      const revisionKey = `${usageLogRevisionKey(aggregate.revision)}\0${effectiveReadLimit}`;
-      const lastSeenSize = aggregate.revision?.size ?? 0;
-      const baseReadMetadata = {
-        ...(aggregate.usageIncomplete ? { usageIncomplete: true as const, usageIncompleteReason: "oversized_rows" as const } : {}),
-        historyTruncated: false,
-        truncatedPrefixBytes: 0,
-        entriesTruncated: false,
-        entriesDropped: 0,
-        snapshotWindowStart: baseAccumulator.snapshotWindow.start,
-        snapshotWindowEnd: baseAccumulator.snapshotWindow.end,
-      } as const;
-      const requestedSummary = {
-        ...baseAccumulator.summarize(range, now, surface),
-        ...baseReadMetadata,
-      };
-      const currentOverlayVersion = userCostOverlayVersion();
-      const currentTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      if (currentOverlayVersion !== aggregate.overlayVersion
-        || currentTimeZone !== aggregate.timeZone) {
-        // The aggregate is internally consistent, but an input changed after
-        // its scan. Serve it uncached and let the next request rebuild.
-        return jsonResponse(requestedSummary);
-      }
-      // Derived from the canonical constants rather than re-listed: a subset
-      // literal type-checks perfectly happily, so a range added to the union
-      // and forgotten here would never be warmed and never invalidated
-      // alongside its siblings.
-      const ranges: readonly UsageRange[] = USAGE_RANGES;
-      const surfaces: readonly UsageSurface[] = USAGE_SURFACES;
-      for (const nextRange of ranges) {
-        for (const nextSurface of surfaces) {
-          const nextSummary = nextRange === range && nextSurface === surface
-              ? requestedSummary
-              : {
-                ...baseAccumulator.summarize(nextRange, now, nextSurface),
-                ...baseReadMetadata,
-              };
-          setUsageSummaryCacheEntry(`${nextRange}:${nextSurface}`, {
-            revisionKey,
-            identityKey: snapshotIdentity,
-            maxReadBytes: effectiveReadLimit,
-            overlayVersion: aggregate.overlayVersion,
-            timeZone: aggregate.timeZone,
-            expiresAt: usageSummaryExpiresAt(nextRange, nextSurface, now),
-            freshUntil,
-            lastSeenSize,
-            revisionReadAt,
-            summary: nextSummary,
-          });
+      // Every range and surface summary of one completed aggregate, cached together. A background
+      // rebuild publishes them on completion, so the retry its 503 asks for finds a bounded answer even
+      // if the full accumulator was evicted meanwhile.
+      const cacheBaseSummaries = (aggregate: Awaited<ReturnType<typeof getUsageAggregate>>, at: number, holdForRetry = false) => {
+        const baseAccumulator = aggregate.accumulator;
+        const baseReadMetadata = {
+          ...(aggregate.usageIncomplete ? { usageIncomplete: true as const, usageIncompleteReason: "oversized_rows" as const } : {}),
+          historyTruncated: false,
+          truncatedPrefixBytes: 0,
+          entriesTruncated: false,
+          entriesDropped: 0,
+          snapshotWindowStart: baseAccumulator.snapshotWindow.start,
+          snapshotWindowEnd: baseAccumulator.snapshotWindow.end,
+        } as const;
+        const requestedSummary = { ...baseAccumulator.summarize(range, at, surface), ...baseReadMetadata };
+        // An input changed after the scan: the aggregate is internally consistent, so serve it uncached.
+        if (userCostOverlayVersion() !== aggregate.overlayVersion
+          || Intl.DateTimeFormat().resolvedOptions().timeZone !== aggregate.timeZone) return requestedSummary;
+        const revisionReadAt = Date.now();
+        // Derived from the canonical constants rather than re-listed: a subset literal type-checks
+        // perfectly happily, so a range added to the union would never be warmed or invalidated.
+        for (const nextRange of USAGE_RANGES as readonly UsageRange[]) {
+          for (const nextSurface of USAGE_SURFACES as readonly UsageSurface[]) {
+            const entry = {
+              revisionKey: `${usageLogRevisionKey(aggregate.revision)}\0${effectiveReadLimit}`,
+              identityKey: `${usageLogIdentityKey(aggregate.revision)}\0${effectiveReadLimit}`,
+              maxReadBytes: effectiveReadLimit,
+              overlayVersion: aggregate.overlayVersion,
+              timeZone: aggregate.timeZone,
+              expiresAt: usageSummaryExpiresAt(nextRange, nextSurface, at),
+              freshUntil: at + 60_000,
+              observed: observedUsageRevision(aggregate.revision),
+              revisionReadAt,
+              summary: nextRange === range && nextSurface === surface
+                ? requestedSummary
+                : { ...baseAccumulator.summarize(nextRange, at, nextSurface), ...baseReadMetadata },
+            };
+            if (holdForRetry && nextRange === range && nextSurface === surface) holdUsageSummaryForRetry(cacheKey, entry);
+            setUsageSummaryCacheEntry(`${nextRange}:${nextSurface}`, entry);
+          }
         }
+        return requestedSummary;
+      };
+      let aggregate: Awaited<ReturnType<typeof getUsageAggregate>>;
+      try {
+        aggregate = await getUsageAggregate({
+          now,
+          configuredApiKeyIds,
+          managementUsageMaxReadBytes: effectiveReadLimit,
+          cold: "background",
+          onBuilt: built => { cacheBaseSummaries(built, Date.now(), true); },
+        });
+      } catch (failure) {
+        // While the rebuild runs, a summary still valid for this file is the dated answer.
+        if (failure instanceof UsageColdReadPendingError && cached && cachedValid) {
+          return jsonResponse({ ...refreshedUsageSummary(cached.summary, range, now), snapshotAt: new Date(cached.revisionReadAt).toISOString() });
+        }
+        throw failure;
       }
-      return jsonResponse(requestedSummary);
+      return jsonResponse(cacheBaseSummaries(aggregate, now));
     } catch (failure) {
       if (sessionGuard && sessionGuard(ctx, "dashboard")) return expiredUsageSession();
       if (failure instanceof UsageColdReadPendingError) {
