@@ -101,18 +101,21 @@ describe("reconcileCodexPlansFromTokens", () => {
       planSource: "wham", planCredentialGeneration: whamGeneration,
     }] };
     saveConfig(config);
-    // A refresh, whose token WHAM's plan already describes, lands after the first record read.
+    // A refresh, whose token WHAM's plan already describes, lands right after the first record
+    // read: that read returns the pre-refresh record, and every later read sees the refresh.
     const real = accountStore.readCodexAccountRecord;
     let reads = 0;
     const read = spyOn(accountStore, "readCodexAccountRecord").mockImplementation(id => {
-      if (++reads === 2) saveCodexAccountCredential("pool-race", credential("pro"));
-      return real(id);
+      const record = real(id);
+      if (++reads === 1) saveCodexAccountCredential("pool-race", credential("pro"));
+      return record;
     });
     try {
       reconcileCodexPlansFromTokens(config);
     } finally {
       read.mockRestore();
     }
+    expect(accountStore.readCodexAccountRecord("pool-race")!.generation).toBeGreaterThan(whamGeneration);
     expect(loadConfig().codexAccounts?.[0]?.plan).toBe("pro");
   });
 
