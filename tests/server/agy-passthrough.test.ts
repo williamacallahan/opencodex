@@ -10,6 +10,7 @@ import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 import { saveConfig } from "../../src/config";
 import { clearGenericFailoverHealth } from "../../src/oauth/generic-account-failover";
 import { getAccountSet, saveCredential, setAccountPaused } from "../../src/oauth/store";
@@ -106,7 +107,7 @@ describe("agy pass-through public HTTP lane", () => {
     proxy = (await import("../../src/server")).startServer(0);
   }
 
-  function post(method: string, body: string, headers: Record<string, string> = {}, key = hubKey, path = `/agy/${key}/v1internal:${method}`): Promise<Answer> {
+  function post(method: string, body: string | Uint8Array, headers: Record<string, string> = {}, key = hubKey, path = `/agy/${key}/v1internal:${method}`): Promise<Answer> {
     return new Promise((resolve, reject) => {
       const outgoing = request({ host: "127.0.0.1", port: proxy!.port, path, method: "POST", headers: {
         "content-type": "application/json", "accept-encoding": "gzip", "user-agent": agyAgent, authorization: "Bearer caller-own-token",
@@ -154,15 +155,15 @@ describe("agy pass-through public HTTP lane", () => {
       project: "synthetic-project-two", requestId: "per-request-1", model: "gemini-3.8-flash-low",
       request: { contents: [{ role: "user", parts: [{ text: "hi" }] }], ...request },
     });
-    async function recorded(method: string, body: string) {
+    async function recorded(method: string, body: string | Uint8Array, headers: Record<string, string> = {}) {
       clearRequestLogsForTests();
-      const response = await post(method, body);
+      const response = await post(method, body, headers);
       expect(response.status).toBe(200);
       const sent = calls.at(-1)!;
       // A pass-through stays one: Google receives agy's exact bytes and headers.
-      expect(sent.bytes).toEqual(new TextEncoder().encode(body));
+      expect(sent.bytes).toEqual(typeof body === "string" ? new TextEncoder().encode(body) : body);
       expect([...sent.headers.keys()].sort()).toEqual(
-        ["accept-encoding", "authorization", "connection", "content-length", "content-type", "host", "user-agent", "x-future-client"]);
+        ["accept-encoding", "authorization", "connection", "content-length", "content-type", "host", "user-agent", "x-future-client", ...Object.keys(headers)].sort());
       // The row is finalized when the relayed stream ends, which can trail the response by a moment.
       for (let waited = 0; waited < 2_000 && getRequestLogEntries().length === 0; waited += 10) await Bun.sleep(10);
       const [row] = getRequestLogEntries();
@@ -191,6 +192,36 @@ describe("agy pass-through public HTTP lane", () => {
       await launch();
       const row = await recorded("streamGenerateContent?alt=sse", generation({ sessionId: "1234567890123456789" }));
       expect(row).toMatchObject({ harnessSessionId: "1234567890123456789", workload: "antigravity:1234567890123456789", workloadSource: "harness" });
+    });
+
+    test("the Cloud Code session id with its leading minus names the session by its digits", async () => {
+      await launch();
+      const row = await recorded("streamGenerateContent?alt=sse", generation({ sessionId: "-1234567890123456789" }));
+      expect(row).toMatchObject({ harnessSessionId: "1234567890123456789", workload: "antigravity:1234567890123456789" });
+    });
+
+    test("a gzip-compressed body names its session, and Google still receives the compressed bytes", async () => {
+      await launch();
+      const compressed = gzipSync(Buffer.from(generation({ labels: { trajectory_id: trajectory, cascade_id: cascade, root_cascade_id: root } })));
+      const row = await recorded("streamGenerateContent?alt=sse", new Uint8Array(compressed), { "content-encoding": "gzip" });
+      expect(row).toMatchObject({ harnessSessionId: trajectory, harnessAgentId: cascade });
+    });
+
+    test("labels after a large contents array and a string that spells out labels are read correctly", async () => {
+      await launch();
+      const decoy = `"request":{"labels":{"trajectory_id":"${cascade}"}}`;
+      const late = await recorded("streamGenerateContent?alt=sse", generation({
+        contents: [{ role: "user", parts: [{ text: `${decoy}${"x".repeat(2_000_000)}` }] }], labels: { trajectory_id: trajectory },
+      }));
+      expect(late.harnessSessionId).toBe(trajectory);
+      const spelled = await recorded("streamGenerateContent?alt=sse", generation({ contents: [{ role: "user", parts: [{ text: decoy }] }] }));
+      expect(spelled).not.toHaveProperty("harnessSessionId");
+    });
+
+    test("a writeTrajectoryAcls call names its session by its top-level trajectoryId", async () => {
+      await launch();
+      const row = await recorded("writeTrajectoryAcls", JSON.stringify({ trajectoryId: trajectory, acls: [] }));
+      expect(row).toMatchObject({ harnessSessionId: trajectory, workload: `antigravity:${trajectory}` });
     });
 
     test("a malformed, label-less or non-JSON body keeps the hub's label", async () => {

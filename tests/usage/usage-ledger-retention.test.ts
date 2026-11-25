@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import {
   appendFileSync, chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync,
   writeFileSync,
@@ -14,6 +14,7 @@ import {
 } from "../../src/usage/retention-contract";
 import { appendUsageEntry, usageLogPath } from "../../src/usage/log";
 import { setUsageLedgerRetention } from "../../src/server/usage-ledger-retention";
+import { clearRequestLogsForTests, getRequestLogEntries, hydrateRequestLogsFromDisk } from "../../src/server/request-log";
 import { CONFIG_UNINSTALL_MANIFEST, initializeConfigOwnership } from "../../src/lib/config-ownership";
 
 let home: string;
@@ -31,13 +32,14 @@ function archiveFiles(): string[] {
 }
 
 /** Rows of a known size, each carrying a field no normalizer in this build knows about. */
-function writeRows(count: number, padding: number): string[] {
+function writeRows(count: number, padding: number, extra: Record<string, unknown> = {}): string[] {
   const path = usageLogPath();
   mkdirSync(dirname(path), { recursive: true });
   const lines = Array.from({ length: count }, (_, index) => JSON.stringify({
     requestId: `req-${index}`,
     timestamp: FIRST_ROW_AT + index * 1000,
     aFieldThisBuildDoesNotKnow: "x".repeat(padding),
+    ...extra,
   }));
   writeFileSync(path, lines.map(line => `${line}\n`).join(""), { encoding: "utf-8", mode: 0o600 });
   return lines;
@@ -261,6 +263,66 @@ describe("usage ledger archive", () => {
     const rows = Buffer.concat([archived, readFileSync(usageLogPath())]).toString("utf8").trim().split("\n")
       .map(line => (JSON.parse(line) as { requestId: string }).requestId);
     expect(new Set(rows).size).toBe(rows.length);
+  });
+
+  /** A young leftover of an earlier trim of this ledger: a prefix of it, which the cleanup after a publish tries to delete. */
+  function writeUnreadableLeftover(): string {
+    const ino = statSync(usageLogPath(), { bigint: true }).ino.toString();
+    const head = readFileSync(usageLogPath());
+    const leftover = head.subarray(0, head.indexOf(0x0a) + 1);
+    const path = join(archiveDirectory(), `2026-11-01T08-30-15.250Z_${ino}-${leftover.byteLength}.jsonl`);
+    writeFileSync(path, leftover);
+    chmodSync(path, 0o000);
+    return path;
+  }
+
+  test("a leftover the cleanup cannot read leaves the published trim published, and says which file and why", () => {
+    writeRows(200, 16 * 1024);
+    const leftover = writeUnreadableLeftover();
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
+      expect(statSync(usageLogPath()).size).toBeLessThanOrEqual(MIN_USAGE_LEDGER_MAX_BYTES);
+      const [message] = warn.mock.calls.map(call => String(call[0])).filter(text => text.includes("superseded archive segment"));
+      expect(message).toContain(leftover);
+      expect(message).toContain("EACCES");
+      expect(message).not.toContain("req-");
+    } finally {
+      warn.mockRestore();
+      chmodSync(leftover, 0o600);
+    }
+  });
+
+  test("the Logs ring is rebuilt from the trimmed ledger even when the superseded-segment cleanup throws", async () => {
+    writeRows(200, 16 * 1024, { provider: "example", model: "m", status: 200, durationMs: 1 });
+    clearRequestLogsForTests();
+    hydrateRequestLogsFromDisk();
+    expect(getRequestLogEntries().some(row => row.requestId === "req-0")).toBe(true);
+    const leftover = writeUnreadableLeftover();
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      setUsageLedgerRetention(MIN_USAGE_LEDGER_MAX_BYTES);
+      const deadline = Date.now() + 5_000;
+      while (statSync(usageLogPath()).size > MIN_USAGE_LEDGER_MAX_BYTES && Date.now() < deadline) await Bun.sleep(50);
+      await Bun.sleep(100);
+      expect(getRequestLogEntries().some(row => row.requestId === "req-0")).toBe(false);
+      expect(getRequestLogEntries().some(row => row.requestId === "req-199")).toBe(true);
+      expect(warn.mock.calls.some(call => String(call[0]).includes("could not enforce"))).toBe(false);
+    } finally {
+      setUsageLedgerRetention(undefined);
+      warn.mockRestore();
+      chmodSync(leftover, 0o600);
+    }
+  });
+
+  test("another writer's in-flight temp file is never treated as a leftover segment", () => {
+    writeRows(200, 16 * 1024);
+    const ino = statSync(usageLogPath(), { bigint: true }).ino.toString();
+    const head = readFileSync(usageLogPath());
+    const inFlight = join(archiveDirectory(), `2026-11-01T08-30-15.250Z_${ino}-1.jsonl.ocx.4242.1.tmp`);
+    writeFileSync(inFlight, head.subarray(0, head.indexOf(0x0a) + 1));
+    expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
+    expect(readdirSync(archiveDirectory())).toContain(inFlight.slice(archiveDirectory().length + 1));
   });
 
   test("a trim whose ledger was replaced by something else keeps its segment, which may be the only copy of those rows", () => {

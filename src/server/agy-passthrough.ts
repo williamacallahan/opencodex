@@ -174,51 +174,83 @@ function skipVal(bytes: Uint8Array, start: number): number {
   return pos > start ? pos : -1;
 }
 
-/** The byte range `[start, end)` of one top-level member's value in a JSON object, without building an AST. */
-function topLevelJsonValue(bytes: Uint8Array, field: string): { start: number; end: number } | undefined {
-  let pos = skipWs(bytes, 0);
-  if (bytes[pos] !== 0x7B) return undefined;
-  pos += 1;
-  const fieldBytes = Buffer.from(field, "utf8");
-  while (pos < bytes.length) {
-    pos = skipWs(bytes, pos);
-    if (bytes[pos] === 0x7D) return undefined;
-    const keyToken = scanStr(bytes, pos);
-    if (!keyToken) return undefined;
-    let matched = false;
-    if (!keyToken.escaped) {
-      const rawKeyLen = keyToken.end - (pos + 1);
-      if (rawKeyLen === fieldBytes.length) {
-        matched = true;
-        for (let i = 0; i < rawKeyLen; i += 1) {
-          if (bytes[pos + 1 + i] !== fieldBytes[i]) {
-            matched = false;
-            break;
-          }
-        }
-      }
-    } else {
-      try {
-        matched = JSON.parse(utf8Decoder.decode(bytes.subarray(pos, keyToken.end + 1))) === field;
-      } catch {
-        return undefined;
+interface WantedKeys {
+  readonly names: readonly string[];
+  readonly encoded: readonly Uint8Array[];
+}
+const wantKeys = (...names: string[]): WantedKeys => ({ names, encoded: names.map(name => Buffer.from(name, "utf8")) });
+
+/** Which wanted key the string token at `keyStart` spells: its index, -1 for none, -2 for an unreadable escape. */
+function wantedIndex(bytes: Uint8Array, keyStart: number, token: { end: number; escaped: boolean }, wanted: WantedKeys): number {
+  if (token.escaped) {
+    try {
+      const name: unknown = JSON.parse(utf8Decoder.decode(bytes.subarray(keyStart, token.end + 1)));
+      return typeof name === "string" ? wanted.names.indexOf(name) : -1;
+    } catch {
+      return -2;
+    }
+  }
+  const length = token.end - (keyStart + 1);
+  for (let index = 0; index < wanted.encoded.length; index += 1) {
+    const candidate = wanted.encoded[index]!;
+    if (candidate.length !== length) continue;
+    let same = true;
+    for (let i = 0; i < length; i += 1) {
+      if (bytes[keyStart + 1 + i] !== candidate[i]) {
+        same = false;
+        break;
       }
     }
+    if (same) return index;
+  }
+  return -1;
+}
+
+/**
+ * Walk the members of the JSON object whose `{` is at `start`, once, without building an AST. A member whose
+ * key is in `wanted` goes to `visit(index, valueStart)`, which consumes the value and returns the position after
+ * it (a nested walk is how a caller descends instead of skipping); every other value is skipped. Returns the
+ * position after this object's `}`, or -1 when the object is malformed or `visit` returned -1 to stop early.
+ */
+function walkMembers(bytes: Uint8Array, start: number, wanted: WantedKeys, visit: (index: number, valueStart: number) => number): number {
+  if (bytes[start] !== 0x7B) return -1;
+  let pos = start + 1;
+  while (pos < bytes.length) {
+    pos = skipWs(bytes, pos);
+    if (bytes[pos] === 0x7D) return pos + 1;
+    const keyToken = scanStr(bytes, pos);
+    if (!keyToken) return -1;
+    const index = wantedIndex(bytes, pos, keyToken, wanted);
+    if (index === -2) return -1;
     pos = skipWs(bytes, keyToken.end + 1);
-    if (bytes[pos] !== 0x3A) return undefined;
+    if (bytes[pos] !== 0x3A) return -1;
     pos = skipWs(bytes, pos + 1);
-    if (pos >= bytes.length) return undefined;
-    const valueEnd = skipVal(bytes, pos);
-    if (valueEnd < 0) return undefined;
-    if (matched) return { start: pos, end: valueEnd };
+    if (pos >= bytes.length) return -1;
+    const valueEnd = index >= 0 ? visit(index, pos) : skipVal(bytes, pos);
+    if (valueEnd < 0) return -1;
     pos = skipWs(bytes, valueEnd);
     if (bytes[pos] === 0x2C) {
       pos += 1;
       continue;
     }
-    return undefined;
+    return bytes[pos] === 0x7D ? pos + 1 : -1;
   }
-  return undefined;
+  return -1;
+}
+
+/** The value at `start` when it is a non-empty string, and the position after the value (-1 when unterminated). */
+function captureString(bytes: Uint8Array, start: number): { value?: string; end: number } {
+  if (bytes[start] !== 0x22) return { end: skipVal(bytes, start) };
+  const token = scanStr(bytes, start);
+  if (!token) return { end: -1 };
+  const end = token.end + 1;
+  if (!token.escaped) return token.end === start + 1 ? { end } : { value: utf8Decoder.decode(bytes.subarray(start + 1, token.end)), end };
+  try {
+    const value: unknown = JSON.parse(utf8Decoder.decode(bytes.subarray(start, end)));
+    return typeof value === "string" && value.length > 0 ? { value, end } : { end };
+  } catch {
+    return { end };
+  }
 }
 
 /**
@@ -226,46 +258,120 @@ function topLevelJsonValue(bytes: Uint8Array, field: string): { start: number; e
  * an AST or decoding the whole request buffer into UTF-16.
  */
 export function extractTopLevelJsonStringField(bytes: Uint8Array, field: string): string | undefined {
-  const range = topLevelJsonValue(bytes, field);
-  if (!range || bytes[range.start] !== 0x22) return undefined;
-  const valToken = scanStr(bytes, range.start);
-  if (!valToken) return undefined;
-  if (!valToken.escaped) {
-    if (valToken.end === range.start + 1) return undefined;
-    return utf8Decoder.decode(bytes.subarray(range.start + 1, valToken.end));
-  }
-  try {
-    const value: unknown = JSON.parse(utf8Decoder.decode(bytes.subarray(range.start, valToken.end + 1)));
-    return typeof value === "string" && value.length > 0 ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** One top-level member's object value as its own bytes, for a nested lookup; undefined when it is not an object. */
-function topLevelJsonObject(bytes: Uint8Array, field: string): Uint8Array | undefined {
-  const range = topLevelJsonValue(bytes, field);
-  return range && bytes[range.start] === 0x7B ? bytes.subarray(range.start, range.end) : undefined;
+  let found: string | undefined;
+  walkMembers(bytes, skipWs(bytes, 0), wantKeys(field), (_, valueStart) => {
+    const captured = captureString(bytes, valueStart);
+    found = captured.value;
+    return -1;
+  });
+  return found;
 }
 
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const DECIMAL_SESSION = /^[0-9]{1,32}$/;
+/** Cloud Code writes its session id as a leading `-` and digits (`antigravitySessionId`); only the digits are kept. */
+const DECIMAL_SESSION = /^-?([0-9]{1,32})$/;
 const matching = (pattern: RegExp, raw: string | undefined): string | undefined => raw !== undefined && pattern.test(raw) ? raw : undefined;
 
+const TOP_KEYS = wantKeys("project", "request");
+const TOP_ACL_KEYS = wantKeys("project", "request", "trajectoryId");
+const REQUEST_KEYS = wantKeys("labels", "sessionId");
+const LABEL_KEYS = wantKeys("trajectory_id", "cascade_id", "root_cascade_id");
+
 /**
- * The agy session agy itself names in its body, since it sends no identifying header: the trajectory id,
- * else the decimal `request.sessionId`, else a `writeTrajectoryAcls` call's `trajectoryId`; and the
- * cascade id as the agent when it is not the root cascade. Per-request ids and `project` are never read.
+ * One walk over the decoded body, which stops once everything this call needs is found: the `project` it names
+ * for account routing, and the agy session for the hub's own log row, which agy sends no header for. The session
+ * is the trajectory id in `request.labels`, else the decimal `request.sessionId`, else a `writeTrajectoryAcls`
+ * call's top-level `trajectoryId`; the cascade id is the agent only when the root cascade is another UUID.
+ * The first occurrence of each key wins. Request ids are never read, and nothing is copied out of the body
+ * but the few short values returned.
  */
-function agyBodySession(plain: Uint8Array, method: string): { session?: string; agent?: string } {
-  const request = topLevelJsonObject(plain, "request");
-  const labels = request && topLevelJsonObject(request, "labels");
-  const session = (labels && matching(CANONICAL_UUID, extractTopLevelJsonStringField(labels, "trajectory_id")))
-    ?? (request && matching(DECIMAL_SESSION, extractTopLevelJsonStringField(request, "sessionId")))
-    ?? (method === "/v1internal:writeTrajectoryAcls" ? matching(CANONICAL_UUID, extractTopLevelJsonStringField(plain, "trajectoryId")) : undefined);
-  const cascade = labels && matching(CANONICAL_UUID, extractTopLevelJsonStringField(labels, "cascade_id"));
-  const root = labels && extractTopLevelJsonStringField(labels, "root_cascade_id");
-  return { ...(session ? { session } : {}), ...(cascade && cascade !== root ? { agent: cascade } : {}) };
+export function scanAgyBody(plain: Uint8Array, method: string): { project?: string; session?: string; agent?: string } {
+  const acl = method === "/v1internal:writeTrajectoryAcls";
+  let project: string | undefined;
+  let projectSeen = false;
+  let requestSeen = false;
+  let requestDone = false;
+  let aclTrajectory: string | undefined;
+  let aclSeen = false;
+  let labelsSeen = false;
+  let labelsRead = false;
+  const labelValues: (string | undefined)[] = [undefined, undefined, undefined];
+  const labelSeen = [false, false, false];
+  let sessionIdSeen = false;
+  let sessionId: string | undefined;
+  const satisfied = () => projectSeen && requestDone && (!acl || aclSeen);
+
+  const visitLabel = (index: number, valueStart: number): number => {
+    const captured = captureString(plain, valueStart);
+    if (!labelSeen[index]) {
+      labelSeen[index] = true;
+      labelValues[index] = captured.value;
+    }
+    return captured.end;
+  };
+  const visitRequest = (index: number, valueStart: number): number => {
+    let end: number;
+    if (index === 0 && !labelsSeen) {
+      labelsSeen = true;
+      if (plain[valueStart] === 0x7B) {
+        end = walkMembers(plain, valueStart, LABEL_KEYS, visitLabel);
+        labelsRead = end >= 0;
+      } else {
+        end = skipVal(plain, valueStart);
+      }
+    } else if (index === 1 && !sessionIdSeen) {
+      sessionIdSeen = true;
+      const captured = captureString(plain, valueStart);
+      sessionId = captured.value;
+      end = captured.end;
+    } else {
+      end = skipVal(plain, valueStart);
+    }
+    if (end < 0) return -1;
+    if (labelsSeen && (sessionIdSeen || matching(CANONICAL_UUID, labelValues[0]))) {
+      requestDone = true;
+      if (satisfied()) return -1;
+    }
+    return end;
+  };
+  const visitTop = (index: number, valueStart: number): number => {
+    let end: number;
+    if (index === 0 && !projectSeen) {
+      projectSeen = true;
+      const captured = captureString(plain, valueStart);
+      project = captured.value;
+      end = captured.end;
+    } else if (index === 1 && !requestSeen) {
+      requestSeen = true;
+      if (plain[valueStart] === 0x7B) {
+        end = walkMembers(plain, valueStart, REQUEST_KEYS, visitRequest);
+        requestDone = true;
+      } else {
+        end = skipVal(plain, valueStart);
+        requestDone = true;
+      }
+    } else if (index === 2 && !aclSeen) {
+      aclSeen = true;
+      const captured = captureString(plain, valueStart);
+      aclTrajectory = captured.value;
+      end = captured.end;
+    } else {
+      end = skipVal(plain, valueStart);
+    }
+    return end < 0 || satisfied() ? -1 : end;
+  };
+  walkMembers(plain, skipWs(plain, 0), acl ? TOP_ACL_KEYS : TOP_KEYS, visitTop);
+
+  const trajectory = labelsRead ? matching(CANONICAL_UUID, labelValues[0]) : undefined;
+  const decimal = sessionId !== undefined ? DECIMAL_SESSION.exec(sessionId)?.[1] : undefined;
+  const session = trajectory ?? decimal ?? (acl ? matching(CANONICAL_UUID, aclTrajectory) : undefined);
+  const cascade = labelsRead ? matching(CANONICAL_UUID, labelValues[1]) : undefined;
+  const root = labelsRead ? matching(CANONICAL_UUID, labelValues[2]) : undefined;
+  return {
+    ...(project !== undefined ? { project } : {}),
+    ...(session ? { session } : {}),
+    ...(cascade && root && cascade.toLowerCase() !== root.toLowerCase() ? { agent: cascade } : {}),
+  };
 }
 
 /** Decode a copy for reading only; null when the coding is one this lane does not read. */
@@ -286,15 +392,13 @@ export async function decodeBoundedPayload(bytes: Uint8Array, contentEncoding: s
 }
 
 /**
- * Read-only view of the body, decoded once: the `project` it names for account routing, and the agy
- * session for the hub's own log row. The forwarded bytes stay the originals; null for an unread coding.
+ * Read-only view of the body, decoded once and walked once (`scanAgyBody`). The forwarded bytes stay the
+ * originals; null for a content coding this lane does not read.
  */
 async function agyBodyView(bytes: Uint8Array, contentEncoding: string | null, method: string): Promise<{ project?: string; session?: string; agent?: string } | null> {
   const plain = await decodeBoundedPayload(bytes, contentEncoding);
   if (plain === null) return null;
-  if (plain.byteLength === 0) return {};
-  const project = extractTopLevelJsonStringField(plain, "project");
-  return { ...(project !== undefined ? { project } : {}), ...agyBodySession(plain, method) };
+  return plain.byteLength === 0 ? {} : scanAgyBody(plain, method);
 }
 
 /**

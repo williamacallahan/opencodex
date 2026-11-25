@@ -26,10 +26,13 @@ session id from the first native header present (`X-Claude-Code-Session-Id`, `X-
 headers before any session rewriting, and its agent or thread id as `harnessAgentId`
 (`X-Claude-Code-Agent-Id`, else a Codex `thread-id` that differs from the session). Both must pass
 `safeCallerSessionId`; a failing value is dropped, never shortened. agy sends no identifying header, so
-the `/agy` pass-through reads its session in the same single pass over the decoded body that finds the
-routing `project` (`agyBodyView` in `src/server/agy-passthrough.ts`): `request.labels.trajectory_id` when a
-canonical UUID, else a decimal `request.sessionId`, else a `writeTrajectoryAcls` call's `trajectoryId`, with
-`request.labels.cascade_id` as the agent when it differs from `root_cascade_id`. `withBodyHarnessSession`
+the `/agy` pass-through reads its session during the one walk over the decoded body that also finds the
+routing `project` (`scanAgyBody` in `src/server/agy-passthrough.ts`; it descends into `request` and
+`request.labels` instead of skipping and re-reading them, and stops once the call's fields are found):
+`request.labels.trajectory_id` when a canonical UUID, else a decimal `request.sessionId` (Cloud Code's
+leading `-` accepted and dropped), else a `writeTrajectoryAcls` call's `trajectoryId`, with
+`request.labels.cascade_id` as the agent only when `root_cascade_id` is a different canonical UUID
+(compared case-insensitively). `withBodyHarnessSession`
 records them on the hub's own row only (workload `antigravity:<session>`); the forwarded bytes are agy's,
 and `project` and the per-request ids are never recorded. `metadata.user_id`,
 `x-codex-installation-id` and the agy body's `project` are never read for this. The row's

@@ -146,10 +146,13 @@ function segmentTimeLabel(fd: number, end: number, now: Date): string {
  * still the ledger's own prefix, and never while it is young enough to be another process's trim
  * that has not reached its rename yet.
  */
+/** Another writer's temp file, named by `atomicWriteFileStreamed` while it copies; its rename is still ahead. */
+const isInFlightTemp = (name: string): boolean => name.endsWith(".tmp");
+
 function removeUnpublishedSegments(directory: string, sourceFd: number, sourceIno: string, sourceSize: number, now: number): void {
   const marker = `_${sourceIno}-`;
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.includes(marker)) continue;
+    if (!entry.isFile() || !entry.name.includes(marker) || isInFlightTemp(entry.name)) continue;
     const path = join(directory, entry.name);
     const stat = statSync(path);
     if (stat.size > sourceSize || now - stat.mtimeMs < UNPUBLISHED_SEGMENT_MIN_AGE_MS) continue;
@@ -171,7 +174,7 @@ function removeSupersededSegments(archivePath: string, sourceIno: string): void 
     const archiveSize = Number(fstatSync(archiveFd).size);
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
-      if (!entry.isFile() || !entry.name.includes(marker) || path === archivePath) continue;
+      if (!entry.isFile() || !entry.name.includes(marker) || isInFlightTemp(entry.name) || path === archivePath) continue;
       const size = statSync(path).size;
       if (size <= archiveSize && isPrefixOf(path, size, archiveFd)) unlinkSync(path);
     }
@@ -326,7 +329,16 @@ export function enforceUsageLedgerSizeLimit(
       if (currentUsageLogRevision()?.ino === captured.ino) rmSync(archivePath, { force: true });
       throw error;
     }
-    removeSupersededSegments(archivePath, captured.ino);
+    // The ledger is already replaced, so a leftover this cannot delete is only a stale duplicate row range: the
+    // trim stays published and the caller still invalidates its readers.
+    try {
+      removeSupersededSegments(archivePath, captured.ino);
+    } catch (error) {
+      const detail = error instanceof Error ? error : undefined;
+      const code = detail && "code" in detail && typeof detail.code === "string" ? detail.code : detail?.name ?? "unknown";
+      const failedPath = detail && "path" in detail && typeof detail.path === "string" ? detail.path : archivePath;
+      console.warn(`[usage-retention] the ledger was trimmed but a superseded archive segment could not be removed (${code}): ${failedPath}`);
+    }
     return { kind: "replaced", currentBytes: captured.size - start, removedBytes: start };
   } catch (error) {
     if (error instanceof UsageLedgerRevisionChangedError) {
