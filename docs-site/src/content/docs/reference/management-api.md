@@ -683,8 +683,9 @@ row of the hour before `since`, using the offsets its totals record, and up to a
 `until`, so a row logged slightly out of order is still found; every row is then filtered by its
 own time. A `provider`, `model`, or `account` filter matches a request when any of its attempts
 matches. An archive file whose totals are not built yet is not read: it is listed in
-`coverage.pendingSegments` with `coverage.pending: true`, its build starts in the background, and
-`incomplete` is `true`. Closing the request stops its read at once.
+`coverage.pendingSegments` with `coverage.pending: true`, its build is asked for and refused while
+trimming is suspended (the next answer lists it under `coverage.failed` as `publishing-suspended`),
+and `incomplete` is `true`. Closing the request stops its read at once.
 `coverage.segments` lists each file read with the byte offset it started from (`fromByte`) and why
 its read ended (`endedBy`: `window-end`, `segment-end`, `limit`, or `deadline`). The top-level
 `endedBy` is `window-end` when every file was read through the window, `limit` when more rows

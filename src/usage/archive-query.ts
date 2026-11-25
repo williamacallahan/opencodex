@@ -256,7 +256,14 @@ export async function loadTotals(entry: ArchiveSegmentEntry): Promise<ArchiveTot
   const unusable = unusableTotals.get(key);
   if (revision !== undefined && unusable?.revision === revision && unusable.bytes === entry.bytes) return undefined;
   archiveTotalsReads.count += 1;
-  const totals = await readArchiveTotals(entry.path, entry.bytes);
+  let totals: ArchiveTotalsFile | undefined;
+  try {
+    totals = await readArchiveTotals(entry.path, entry.bytes);
+  } catch {
+    // An I/O error says nothing about the contents, so it is never remembered: the next request reads again.
+    unusableTotals.delete(key);
+    return undefined;
+  }
   if (!totals) {
     if (revision !== undefined) unusableTotals.set(key, { revision, bytes: entry.bytes });
     else unusableTotals.delete(key);

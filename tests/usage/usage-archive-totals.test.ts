@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import {
   archiveRows, bruteForce, hourOf, jsonl, writeArchiveTotals, writeSegment,
@@ -63,7 +63,7 @@ describe("usage archive hourly totals", () => {
   test("a segment's totals equal a plain sum of its rows in every dimension", async () => {
     const archived = archiveRows(200);
     const segmentPath = writeSegment(archiveDirectory(), "4240", jsonl(archived));
-    const segment = segmentPath.split("/").at(-1);
+    const segment = basename(segmentPath);
     const totals = (await buildArchiveTotals(segmentPath))!;
 
     expect(totals).toMatchObject({
@@ -108,7 +108,7 @@ describe("usage archive hourly totals", () => {
       await Bun.sleep(50);
       expect(archiveTotalsBuildFailure(path)).toBeUndefined();
       expect(await waitFor(() => archiveTotalsBuildFailure(path))).toEqual({ reason: "publishing-suspended" });
-      expect(readdirSync(archiveDirectory())).toEqual([path.split("/").at(-1)]);
+      expect(readdirSync(archiveDirectory())).toEqual([basename(path)]);
     } finally {
       warn.mockRestore();
       stopArchiveTotalsStartupBuild();

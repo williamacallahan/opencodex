@@ -262,16 +262,25 @@ function isOverflowCounts(value: unknown): value is ArchiveTotalsFile["overflowR
 }
 
 /**
- * The totals file for a segment of `segmentBytes`, or undefined when it is missing, unreadable, from
+ * The totals file for a segment of `segmentBytes`, or undefined when it is missing, invalid, from
  * another format version, or built from a different length: each of those means it must be rebuilt.
  * The read is asynchronous; parsing and validating are bounded by the per-segment caps.
  */
 export async function readArchiveTotals(segmentPath: string, segmentBytes: number): Promise<ArchiveTotalsFile | undefined> {
+  let text: string;
+  try {
+    text = await readFile(archiveTotalsPath(segmentPath), "utf8");
+  } catch (error) {
+    // Missing: the build that writes it is the handling. Any other I/O error is not a verdict on the
+    // file's contents and propagates, so a caller never remembers an unreadable file as invalid.
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return undefined;
+    throw error;
+  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await readFile(archiveTotalsPath(segmentPath), "utf8"));
+    parsed = JSON.parse(text);
   } catch {
-    // Missing or torn: the build that rewrites it is the handling.
+    // Torn: the build that rewrites it is the handling.
     return undefined;
   }
   if (typeof parsed !== "object" || parsed === null) return undefined;

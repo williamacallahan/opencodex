@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { handleManagementAPI } from "../../src/server/management-api";
@@ -172,6 +172,25 @@ describe("GET /api/usage/archive", () => {
     const repaired = await archiveGet(query);
     expect(repaired.body.complete).toBe(true);
     expect(repaired.body.summary).toMatchObject(plainSummary(rows));
+  });
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)("a totals file that cannot be read is not remembered as invalid once access is restored", async () => {
+    const rows = archiveRows(20);
+    const path = await builtSegment("507", rows);
+    const query = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 6 * HOUR);
+    chmodSync(archiveTotalsPath(path), 0o000);
+    try {
+      const denied = await archiveGet(query);
+      expect(denied.body).toMatchObject({ complete: false, summary: null });
+      const reads = archiveTotalsReads.count;
+      await archiveGet(query);
+      expect(archiveTotalsReads.count).toBeGreaterThan(reads);
+    } finally {
+      chmodSync(archiveTotalsPath(path), 0o644);
+    }
+    const restored = await archiveGet(query);
+    expect(restored.body.complete).toBe(true);
+    expect(restored.body.summary).toMatchObject(plainSummary(rows));
   });
 
   test("each breakdown keeps the 200 keys with the most requests and counts the rest", async () => {

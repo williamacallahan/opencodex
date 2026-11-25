@@ -21,7 +21,7 @@ services:
       - ocx-state:/home/bun/.opencodex
       - codex-state:/home/bun/.codex
       # Usage rows earlier releases trimmed by usageLedgerMaxBytes. Trimming is suspended: nothing
-      # is written, pruned or deleted here now, and uninstall keeps it.
+      # is written, pruned or deleted here now.
       - ocx-usage-archive:/home/bun/.opencodex/usage-archive
     tmpfs:
       - /tmp:size=64m,mode=1777

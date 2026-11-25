@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { closeRequestHistoryIndex } from "../../src/routing/history/indexer";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { loadWindowSegments, readArchiveListing } from "../../src/usage/archive-query";
@@ -110,17 +110,17 @@ describe("GET /api/usage/archive/rows", () => {
     const path = writeSegment(archiveDirectory(), "611", jsonl(archiveRows(10)));
     const query = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR);
     const { body } = await rowsGet(query);
-    expect(body).toMatchObject({ entries: [], incomplete: true, coverage: { segments: [], pending: true, pendingSegments: [path.split("/").at(-1)] } });
+    expect(body).toMatchObject({ entries: [], incomplete: true, coverage: { segments: [], pending: true, pendingSegments: [basename(path)] } });
     // The read asked for a build, which is refused while the archive trim is suspended.
     const again = await rowsGet(query);
     expect(again.body).toMatchObject({
       entries: [], incomplete: true,
-      coverage: { pending: false, pendingSegments: [], failed: [{ segment: path.split("/").at(-1), reason: "publishing-suspended" }] },
+      coverage: { pending: false, pendingSegments: [], failed: [{ segment: basename(path), reason: "publishing-suspended" }] },
     });
     // The refusal is remembered: a later read reports it again without asking for another build.
     const third = await rowsGet(query);
     expect(third.body.coverage.failed).toEqual(again.body.coverage.failed);
-    expect(readdirSync(archiveDirectory())).toEqual([path.split("/").at(-1)]);
+    expect(readdirSync(archiveDirectory())).toEqual([basename(path)]);
     await writeArchiveTotals(path);
     expect((await rowsGet(query)).body.entries).toHaveLength(9);
   });
