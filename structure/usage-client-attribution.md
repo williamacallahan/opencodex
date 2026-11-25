@@ -162,8 +162,12 @@ reclaimer (`scheduleRetiredGenerationReclaim` in `src/usage/filter-index.ts`), s
 publish or a failed attempt and whenever a refresh notices a leftover; neither publication nor a
 refresh deletes rows itself. Deleting a whole generation in one write transaction stalled the event
 loop for seconds (1.7 s, 1.3 s and a 1.3 s commit on a 725,946-row index), so the reclaimer removes
-at most 2,000 rows per table per transaction in primary-key order, commits, and yields a timer turn
-before the next batch; the registry and lease rows go with the last batch. A generation whose writer
+at most 2,000 rows per table per transaction in primary-key order (for attributions the whole
+`(byte_offset, provider, model)` key, since one ledger row can carry thousands), commits, and yields a
+timer turn before the next batch; the registry and lease rows go with the last batch. Another
+writer's lock fails a batch at once (busy timeout 0, so the event loop never waits on it); the
+reclaimer closes its connection and tries again after a backoff from 50 ms capped at 2 s, so the
+backlog drains after the lock is released without another index read. A generation whose writer
 is alive is never reclaimed. The registry row and the lease commit together, and every batch re-reads
 the published generation and the lease inside its own write transaction before deleting, so a
 generation that registered, or was published, after the candidate check is never treated as retired;
