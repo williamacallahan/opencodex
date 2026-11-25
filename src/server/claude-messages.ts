@@ -1142,7 +1142,11 @@ async function handleClaudeMessagesWithBudget(
     if (directEncodersApply(config, route)) {
       clientEncoder = { protocol: "messages", stream, model: clientFacingModelText(clientModelLabel), inputTokenFloor: claudeRequestTokenFloor() };
     }
-    if (route.provider.adapter === "openai-responses") {
+    // A combo or policy route settles its concrete target later in the Responses pipeline, so
+    // the ingress pick below is only its first candidate. Shaping the shared body for it would
+    // strip controls a later candidate accepts; the final adapter shapes each target instead.
+    const ingressTargetIsFinal = !route.combo && route.routeKind !== "policy";
+    if (ingressTargetIsFinal && route.provider.adapter === "openai-responses") {
       // max_output_tokens is the caller's spend cap: the adapter strips it only for the canonical
       // ChatGPT backend that rejects it (#5753), so other Responses gateways keep the cap.
       delete internalBody.temperature;
@@ -1162,7 +1166,7 @@ async function handleClaudeMessagesWithBudget(
     // effort (CLAUDE_CODE_ALWAYS_ENABLE_EFFORT) would leak reasoning params to routes
     // that affirmatively expose NO effort control. Strip only on a definitive [] from
     // supportedLadderFor; unknown (undefined) passes through untouched.
-    if (internalBody.reasoning !== undefined) {
+    if (ingressTargetIsFinal && internalBody.reasoning !== undefined) {
       const { supportedLadderFor } = await import("./effort-policy");
       const ladder = supportedLadderFor({ provider: route.provider, modelId: route.modelId });
       if (ladder !== undefined && ladder.length === 0) delete internalBody.reasoning;
