@@ -30,6 +30,14 @@ its target, and the ledger are unchanged.
 - The design's catalog-backed listing is deferred, a deliberate deviation: its reader lands with the
   first catalog writer, before cutover is enabled. Until then only the legacy listing exists, and it
   tells an absent segment from an ambiguous or missing one and declines exactness when it cannot.
+- Archive segments and their totals files never change once written, and nothing writes the archive
+  today (the trim is suspended and every totals build is refused). Replacing or modifying archive
+  files while a read or build runs is therefore unsupported until the catalog brings the only writer,
+  with exclusive creation and fixed object ids. Reads check for static inconsistencies a restore or an
+  operator can leave on disk (above), but not for these races, each a requirement for that writer:
+  a segment swapped for another of equal size between a read's path check and its open; a segment
+  replaced while its totals are built; a version-4 segment replaced after it was listed; and a
+  cached span used while a totals file is removed partway through one read.
 - Before new totals are published again, they must record each hour's last exclusive row end as
   observed while building, so a rows read can stop where the window's rows end. Until then a rows
   read runs to the segment's end (Rows route); legacy or unknown coverage keeps that fallback, and the
