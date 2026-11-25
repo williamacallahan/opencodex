@@ -581,6 +581,7 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/update/supervised-recovery.mjs` | [`ops/update-supervised-recovery.md`](ops/update-supervised-recovery.md) |
 | `src/usage/` | [`runtime.md`](runtime.md)<br>[`providers/jev-decision.md`](providers/jev-decision.md)<br>[`gui-and-management-api.md`](gui-and-management-api.md)<br>[`dashboard-and-usage.md`](dashboard-and-usage.md)<br>[`companion.md`](companion.md) |
 | `src/usage/archive-query.ts` | [`usage-archive.md`](usage-archive.md) |
+| `src/usage/archive-rows.ts` | [`usage-archive.md`](usage-archive.md) |
 | `src/usage/archive-segments.ts` | [`usage-archive.md`](usage-archive.md) |
 | `src/usage/archive-totals.ts` | [`usage-archive.md`](usage-archive.md) |
 | `src/usage/client.ts` | [`usage-client-attribution.md`](usage-client-attribution.md) |

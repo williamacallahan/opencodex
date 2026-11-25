@@ -75,7 +75,8 @@ export function workloadLauncher(workload: string | undefined): string {
   return workload === undefined ? "" : workload.split(":", 1)[0]!;
 }
 
-function bucketKeys(entry: PersistedUsageEntry): { [dimension in ArchiveDimension]: string } {
+/** The value a row holds for every dimension, as buckets key it and filters compare it. */
+export function archiveDimensionValues(entry: PersistedUsageEntry): { [dimension in ArchiveDimension]: string } {
   return {
     provider: entry.provider,
     model: entry.model ?? "",
@@ -125,7 +126,7 @@ export async function buildArchiveTotals(segmentPath: string, options: ArchiveTo
       rows += 1;
       firstRowAt = firstRowAt === null ? entry.timestamp : Math.min(firstRowAt, entry.timestamp);
       lastRowAt = lastRowAt === null ? entry.timestamp : Math.max(lastRowAt, entry.timestamp);
-      const keys = { hour: Math.floor(entry.timestamp / HOUR_MS) * HOUR_MS, ...bucketKeys(entry) };
+      const keys = { hour: Math.floor(entry.timestamp / HOUR_MS) * HOUR_MS, ...archiveDimensionValues(entry) };
       const key = JSON.stringify(keys);
       let bucket = buckets.get(key);
       if (!bucket) {

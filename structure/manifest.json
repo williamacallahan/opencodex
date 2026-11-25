@@ -1052,6 +1052,7 @@
       "scope": "Hourly totals built for usage archive segments and the management reads answered from them.",
       "documents": [
         "src/usage/archive-query.ts",
+        "src/usage/archive-rows.ts",
         "src/usage/archive-segments.ts",
         "src/usage/archive-totals.ts",
         "src/server/management/usage-archive-routes.ts",

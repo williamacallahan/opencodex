@@ -75,3 +75,19 @@ includes rows still in `usage.jsonl`; `coverage.liveLedgerSince` is the live led
 row. Each breakdown keeps the 200 keys with the most requests and reports the rest as `truncated`.
 `tests/usage/usage-archive-route.test.ts` covers hour widening, filters, the 400 cases, pending and
 rebuilt totals, the cap, and the counting rule.
+
+## Rows route
+
+`GET /api/usage/archive/rows`, in the same route file, reads archived rows for a window of at most
+six hours (not widened, `until` exclusive) with the same filters plus an exact `workload`, and a
+`limit` of 1 to 500 (default 100). `src/usage/archive-rows.ts` reads the counted segments that may
+overlap the window, oldest first, through `scanUsageLedgerCooperatively` with an abort signal that
+combines the limit and a five-second deadline (`AbortSignal.timeout`; no management route shares a
+deadline constant). It keeps at most `limit + 1` matching rows, so `truncatedReason: "limit"` means
+more matched; a deadline abort returns the rows read so far with `truncatedReason: "deadline"`. A
+segment pruned or replaced mid-read keeps the rows already read. Rows go through the same
+`requestLogEntryFromPersistedUsage` and `requestLogDto` projection as `/api/request-history`, so an
+archived row exposes exactly the fields, and the redaction, of a live one. Without a byte index into
+a segment, a narrow window still scans each overlapping segment from its start; the deadline is what
+bounds that. `tests/usage/usage-archive-rows.test.ts` covers the window, filters, the row shape
+against `/api/request-history`, the limit, the deadline, and the 400 cases.

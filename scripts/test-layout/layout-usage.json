@@ -36,5 +36,6 @@
   "cli-telemetry.test.ts": "cli",
   "docs-telemetry-dashboard.test.ts": "ci-workflows",
   "usage-archive-totals.test.ts": "usage",
-  "usage-archive-route.test.ts": "usage"
+  "usage-archive-route.test.ts": "usage",
+  "usage-archive-rows.test.ts": "usage"
 }

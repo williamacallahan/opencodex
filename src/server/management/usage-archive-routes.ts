@@ -2,15 +2,21 @@
  * Reads over the usage archive, the rows a ledger trim moved out of `usage.jsonl` (31 days).
  *
  * - `GET /api/usage/archive` - totals for a window, answered only from the hourly totals files.
+ * - `GET /api/usage/archive/rows` - the archived rows of a window of at most six hours, bounded by
+ *   a row limit and a deadline.
  *
  * Neither route includes rows still in the live ledger: `coverage.liveLedgerSince` says where it
  * begins, and `/api/usage` answers for it.
  */
 import { answerArchiveTotals, readArchiveListing, type ArchiveFilter } from "../../usage/archive-query";
+import { readArchivedRows, type ArchivedRowsQuery } from "../../usage/archive-rows";
 import { ARCHIVE_DIMENSIONS, archiveTotalsBuildQueued, buildArchiveTotalsInBackground, type ArchiveDimension } from "../../usage/archive-totals";
 import { parseUsageTimeWindow } from "../../usage/time-range";
 import { jsonResponse } from "../auth-cors";
+import { requestLogEntryFromPersistedUsage } from "../request-log";
+import { upstreamDiagnosticLogProjection } from "../request-log-terminal-status";
 import type { ManagementContext } from "./context";
+import { requestLogDto } from "./shared";
 
 const HOUR_MS = 60 * 60 * 1000;
 /** The archive keeps 31 days; a day more lets a caller ask for the whole of it without arithmetic. */
@@ -104,8 +110,55 @@ function archiveTotalsResponse(ctx: ManagementContext): Response {
   }, 200, ctx.req, ctx.config);
 }
 
+const MAX_ROWS_WINDOW_MS = 6 * HOUR_MS;
+const MAX_ROWS_LIMIT = 500;
+const DEFAULT_ROWS_LIMIT = 100;
+/** No management route shares a deadline constant; this bounds a read of several 100 MB segments. */
+const ARCHIVE_ROWS_DEADLINE_MS = 5_000;
+
+function parseRowsLimit(params: URLSearchParams): number {
+  const raw = params.get("limit");
+  if (raw === null) return DEFAULT_ROWS_LIMIT;
+  const limit = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_ROWS_LIMIT) {
+    throw new ArchiveQueryError("invalid_limit", `limit must be an integer from 1 to ${MAX_ROWS_LIMIT}`);
+  }
+  return limit;
+}
+
+async function archiveRowsResponse(ctx: ManagementContext): Promise<Response> {
+  const params = ctx.url.searchParams;
+  let query: ArchivedRowsQuery;
+  try {
+    assertKnownParameters(params, ["since", "until", "limit", "workload", ...ARCHIVE_DIMENSIONS]);
+    const window = parseArchiveWindow(params, MAX_ROWS_WINDOW_MS);
+    const workload = params.get("workload");
+    query = { ...window, filter: parseArchiveFilter(params), limit: parseRowsLimit(params), ...(workload !== null ? { workload } : {}) };
+  } catch (error) {
+    if (error instanceof ArchiveQueryError) return archiveQueryErrorResponse(ctx, error);
+    throw error;
+  }
+  const listing = readArchiveListing();
+  const result = await readArchivedRows(listing, query, AbortSignal.timeout(ARCHIVE_ROWS_DEADLINE_MS));
+  const projectDiagnostics = upstreamDiagnosticLogProjection();
+  return jsonResponse({
+    since: new Date(query.since).toISOString(),
+    until: new Date(query.until).toISOString(),
+    // The request-history DTO and its redaction, so an archived row exposes exactly what a live one does.
+    entries: result.rows.map(row => requestLogDto(requestLogEntryFromPersistedUsage(row, { projectDiagnostics }), { includeDecodeRate: false, projectDiagnostics })),
+    truncated: result.truncated !== false,
+    ...(result.truncated !== false ? { truncatedReason: result.truncated } : {}),
+    coverage: {
+      segments: result.segmentsRead,
+      duplicateSegments: listing.skipped.length,
+      liveLedgerSince: isoOrNull(listing.liveLedgerSince),
+    },
+  }, 200, ctx.req, ctx.config);
+}
+
 export async function handleUsageArchiveRoutes(ctx: ManagementContext): Promise<Response | undefined> {
   const { req, url } = ctx;
   if (url.pathname === "/api/usage/archive" && req.method === "GET") return archiveTotalsResponse(ctx);
+  if (url.pathname === "/api/usage/archive/rows" && req.method === "GET") return archiveRowsResponse(ctx);
   return undefined;
 }

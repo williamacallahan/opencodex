@@ -349,6 +349,7 @@ timing method unknown)** and a visible explanation of the timing method when a r
 | `GET /api/usage?jev=1` | Project persisted JEV decisions and their physical target sends. Optional `comboId` selects one Combo; `range` accepts `7d`, `30d`, or `all` (default `30d`). | 400 invalid `comboId`; 500 `{ "error": "read_failed" }` if the ledger cannot be read |
 | `GET /api/usage/timeline` | Bucketed usage by model/account; accepts `hours`, `bucketMinutes`, `metric`, `aggregation`, `grouping`, comma-separated `models` and repeated `hiddenProvider` filters | 400 invalid query or limits |
 | `GET /api/usage/archive` | Usage totals for a window of the 31-day usage archive, from precomputed hourly totals; see [Archived usage](#archived-usage) | 400 `invalid_window` or `invalid_parameter` |
+| `GET /api/usage/archive/rows` | Archived request rows of a window of at most six hours, in the request-history row shape; see [Archived usage](#archived-usage) | 400 `invalid_window`, `invalid_limit`, or `invalid_parameter` |
 | `GET /api/metrics` | Return process-local Prometheus text metrics for requests and cached Kiro quota. Kiro accounts use bounded opaque digest labels; raw account and credential identifiers are never exported. | 404 when `metricsExport.enabled` was not true at startup; ordinary management authentication is required and data-plane credentials grant no access |
 | `GET /api/storage` | Scan Codex storage usage by bucket | Returns an `error: "scan_failed"` payload on scan failure |
 | `POST /api/storage/cleanup/preview` | Preview archived-session cleanup and return a binding digest | 400 `invalid_json` or `invalid_percent` |
@@ -638,6 +639,14 @@ The answer comes only from precomputed hourly totals, never from the rows themse
   what is available, so a pending answer is incomplete; ask again shortly.
 - `coverage.duplicateSegments` counts leftover archive files skipped because their rows are
   already counted from another file or are still in `usage.jsonl`, so no row is counted twice.
+
+`GET /api/usage/archive/rows` returns the archived rows themselves, for questions such as which
+requests one workload sent. It takes the same `since`, `until`, and filters, plus an exact
+`workload` and `limit` (1 to 500, default 100). The window is not widened, `until` is exclusive,
+and it may span at most six hours. `entries` holds the rows oldest first, in the same shape and
+with the same redaction as `GET /api/request-history`. The read scans the archive files in the
+window and stops after five seconds: `truncated: true` with `truncatedReason` `limit` means more
+rows matched than were returned, and `deadline` means the read stopped early with the rows it had.
 
 :::caution
 Storage cleanup endpoints can move or permanently remove archived session data. Always preview
