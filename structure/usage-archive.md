@@ -185,8 +185,13 @@ Its span must also agree with what it counted (`spanConsistent` in `readArchiveT
 need ordered, non-null `firstRowAt` and `lastRowAt` whose hours are the first and last of the
 buckets' hours. The buckets and `hourOffsets` must cover the same set of hours, with offsets rising
 inside the segment. A file with no counted rows has no extrema, buckets, overlaps or offsets. Any
-other combination is no file a build wrote, and its span cannot say which windows its rows reach,
-so the file is unusable: a counted segment's answer is incomplete, and a totals file left without
+other combination is no file a build wrote, and its span cannot say which windows its rows reach.
+The same holds for a version-5 file's excluded rows (`isUncounted`, `unparsableReconciles`). Their
+counts must be whole numbers, with no more untimed rows than rows. Their times must be present and in
+order exactly when a timed row was excluded. `unparsableRows` must equal the excluded, oversized and
+malformed rows plus at most one torn final row. Otherwise `uncountedCoverage` could call a file
+`exact` that is not. In every such case the file is unusable: a counted segment's answer is
+incomplete, and a totals file left without
 its segment reaches every window. A totals file left without its segment is a missing source: `missingWindowSegments` lets it rule a
 window out only when it validates as that segment's totals (its own name, a supported version, the
 length the name records) with known coverage; otherwise, and for a window it may reach, it is listed

@@ -314,11 +314,32 @@ function isOverflowCounts(value: unknown): value is ArchiveTotalsFile["overflowR
   return ARCHIVE_DIMENSIONS.every(dimension => isCount(counts[dimension]));
 }
 
+const isRowCount = (value: unknown): value is number => isCount(value) && Number.isSafeInteger(value);
+
+/**
+ * The excluded rows as a build records them: whole counts, no more untimed rows than rows, and times
+ * exactly when a timed row was excluded, in order. Any other record cannot say where they lie.
+ */
 function isUncounted(value: unknown): value is ArchiveUncountedRows {
   if (typeof value !== "object" || value === null) return false;
   const uncounted = value as Record<string, unknown>;
-  const finiteOrNull = (at: unknown): boolean => at === null || (typeof at === "number" && Number.isFinite(at));
-  return isCount(uncounted.rows) && isCount(uncounted.untimedRows) && finiteOrNull(uncounted.firstAt) && finiteOrNull(uncounted.lastAt);
+  if (!isRowCount(uncounted.rows) || !isRowCount(uncounted.untimedRows) || uncounted.untimedRows > uncounted.rows) return false;
+  const { firstAt, lastAt } = uncounted;
+  if (uncounted.rows === uncounted.untimedRows) return firstAt === null && lastAt === null;
+  return typeof firstAt === "number" && Number.isFinite(firstAt) && typeof lastAt === "number" && Number.isFinite(lastAt)
+    && firstAt <= lastAt;
+}
+
+/**
+ * A version-5 file's unparsable rows are its excluded, oversized and malformed rows, plus one torn
+ * final row, which a build counts as unparsable but not as malformed. A count no exclusion explains
+ * is no file a build wrote.
+ */
+function unparsableReconciles(file: Record<string, unknown>): boolean {
+  const uncounted = file.uncounted as ArchiveUncountedRows;
+  if (!isRowCount(file.unparsableRows) || !isRowCount(file.oversizedRows) || !isRowCount(file.malformedRows)) return false;
+  const torn = file.unparsableRows - (uncounted.rows + file.oversizedRows + file.malformedRows);
+  return torn === 0 || torn === 1;
 }
 
 /**
@@ -398,7 +419,7 @@ export async function readArchiveTotals(segmentPath: string, segmentBytes: numbe
   // A totals file names the segment it was built for; one copied beside another segment is not its own.
   if (file.segment !== basename(segmentPath)) return undefined;
   if (file.version === ARCHIVE_TOTALS_FORMAT_VERSION
-    && (!isUncounted(file.uncounted) || !isCount(file.oversizedRows) || !isCount(file.malformedRows) || typeof file.source !== "string")) return undefined;
+    && (!isUncounted(file.uncounted) || !unparsableReconciles(file) || typeof file.source !== "string")) return undefined;
   if ((file.version !== ARCHIVE_TOTALS_FORMAT_VERSION && file.version !== ARCHIVE_TOTALS_LEGACY_VERSION) || file.bytes !== segmentBytes
     || !isCount(file.rows) || !isCount(file.unparsableRows) || !isInstant(file.firstRowAt) || !isInstant(file.lastRowAt)
     || !Array.isArray(file.buckets) || !file.buckets.every(isBucket)

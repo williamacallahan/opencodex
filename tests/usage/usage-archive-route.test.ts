@@ -54,6 +54,13 @@ async function archiveGet(query: string): Promise<{ status: number; body: Totals
   return { status: response.status, body: await response.json() as TotalsBody };
 }
 
+async function rowsGet(query: string): Promise<{ status: number; body: { incomplete: boolean; coverage: { missingSegments: string[] } } }> {
+  const req = new ManagementRequest(`http://localhost/api/usage/archive/rows?${query}`, { method: "GET" });
+  const response = await handleManagementAPI(req, new URL(req.url), config, {});
+  if (!response) throw new Error("no management route for /api/usage/archive/rows");
+  return { status: response.status, body: await response.json() as { incomplete: boolean; coverage: { missingSegments: string[] } } };
+}
+
 const window = (since: number, until: number, extra = ""): string =>
   `since=${encodeURIComponent(iso(since))}&until=${encodeURIComponent(iso(until))}${extra}`;
 
@@ -530,6 +537,22 @@ describe("GET /api/usage/archive", () => {
     ["places its span outside its bucket and offset hours", (totals: Record<string, unknown>) => ({
       ...totals, firstRowAt: (totals.firstRowAt as number) + 48 * HOUR, lastRowAt: (totals.lastRowAt as number) + 48 * HOUR,
     })],
+    ...((): Array<[string, (totals: Record<string, unknown>) => Record<string, unknown>]> => {
+      // Five days after the fixture's rows: the window every case below asks about.
+      const later = ARCHIVE_FIRST_ROW_AT + 5 * 24 * HOUR;
+      return [
+        ["records an excluded row whose times are reversed", totals => ({
+          ...totals, unparsableRows: 1, uncounted: { rows: 1, untimedRows: 0, firstAt: later + 2 * HOUR, lastAt: later - 2 * HOUR },
+        })],
+        ["records excluded-row times with no excluded row", totals => ({
+          ...totals, uncounted: { rows: 0, untimedRows: 0, firstAt: later, lastAt: later },
+        })],
+        ["counts unparsable rows that no exclusion explains", totals => ({ ...totals, unparsableRows: 3 })],
+        ["counts a fractional excluded row", totals => ({
+          ...totals, unparsableRows: 0.5, uncounted: { rows: 0.5, untimedRows: 0, firstAt: later - 2 * HOUR, lastAt: later - 2 * HOUR },
+        })],
+      ];
+    })(),
   ])("a totals file left without its segment that %s cannot rule a window out", async (_label, alter) => {
     const rows = archiveRows(3);
     const path = await builtSegment("530", rows);
@@ -542,6 +565,8 @@ describe("GET /api/usage/archive", () => {
     const { body } = await archiveGet(window(later, later + HOUR));
     expect(body).toMatchObject({ complete: false, summary: null });
     expect(body.coverage.missingSegments).toEqual([basename(path)]);
+    const rowsRead = await rowsGet(window(later, later + HOUR));
+    expect(rowsRead.body).toMatchObject({ incomplete: true, coverage: { missingSegments: [basename(path)] } });
   });
 
   test("a counted segment whose totals place its span outside its bucket hours is not answered from them", async () => {
