@@ -248,6 +248,23 @@ describe("GET /api/usage/archive/rows", () => {
     expect(body.incomplete).toBe(true);
   });
 
+  test("a malformed row the read had to omit makes the answer incomplete, and a torn final write does not", async () => {
+    const at = ARCHIVE_FIRST_ROW_AT;
+    const good = jsonl([{ ...archiveRow(0), timestamp: at }]);
+    const malformed = writeSegment(archiveDirectory(), "620", `${good}{"requestId": not json\n`);
+    await writeArchiveTotals(malformed);
+    const withMalformed = await rowsGet(window(at, at + HOUR));
+    expect(withMalformed.body.entries).toHaveLength(1);
+    expect(withMalformed.body.incomplete).toBe(true);
+    rmSync(malformed);
+    rmSync(malformed.replace(/\.jsonl$/, ".hourly.json"));
+    await writeArchiveTotals(writeSegment(archiveDirectory(), "621", `${good}{"requestId":"torn"`));
+    noteArchiveChanged();
+    const withTorn = await rowsGet(window(at, at + HOUR));
+    expect(withTorn.body).toMatchObject({ incomplete: false });
+    expect(withTorn.body.entries).toHaveLength(1);
+  });
+
   test("the deadline starts when the read takes its turn, so slow preparation answers incomplete", async () => {
     await builtSegment("618", archiveRows(10));
     const realTimeout = AbortSignal.timeout.bind(AbortSignal);

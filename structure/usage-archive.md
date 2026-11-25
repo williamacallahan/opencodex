@@ -217,8 +217,8 @@ window's rows are over. A read also stops at `limit + 1` matching rows or the de
 bound to the segment revision the listing recorded (`archiveFileRevision`: device, inode, size and
 nanosecond mtime and ctime), checked before the scan, against the size the scan opened, and after it;
 a segment removed, replaced, grown or shortened since it was listed ends as `segment-changed`. A row
-over the 1 MiB ceiling is skipped and counted in the segment's `skippedRows`, since it could have
-matched. The five-second deadline starts when the read takes its turn, so listing, loading totals and
+over the 1 MiB ceiling, or an LF-complete row that fails to parse or the row schema, is skipped and
+counted in the segment's `skippedRows`, since it could have matched; a torn final write is not. The five-second deadline starts when the read takes its turn, so listing, loading totals and
 the ambiguity check spend it too: each checks it before starting new I/O, and a listing it interrupts
 is discarded rather than cached. Any of these answers `incomplete: true`. A segment without current totals is never
 scanned from its start: it is reported pending (or failed) and its build is queued, and the answer

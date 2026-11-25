@@ -43,7 +43,10 @@ export interface ArchiveSegmentRead {
   segment: string;
   fromByte: number;
   endedBy: ArchiveReadEnd;
-  /** Rows over the 1 MiB ceiling the read skipped; any of them could have matched. */
+  /**
+   * Rows the read skipped that could have matched: over the 1 MiB ceiling, or LF-complete rows that
+   * failed to parse or the row schema. A torn final write is not one.
+   */
   skippedRows?: number;
 }
 
@@ -57,7 +60,7 @@ export interface ArchivedRowsResult {
   segments: ArchiveSegmentRead[];
   /** Segments in the window whose totals, and so their offsets, are not built yet. */
   pending: ArchiveSegmentState[];
-  /** Oversized rows skipped across all segments read; a positive count means rows may be missing. */
+  /** Oversized and malformed rows skipped across all segments read; a positive count means rows may be missing. */
   skippedRows: number;
 }
 
@@ -205,9 +208,10 @@ export async function readArchivedRows(
       changed = true;
       continue;
     }
-    if (scan && scan.oversizedRows > 0) {
-      read.skippedRows = scan.oversizedRows;
-      skippedRows += scan.oversizedRows;
+    const skipped = scan ? scan.oversizedRows + scan.invalidRows - (scan.tornSuffix ? 1 : 0) : 0;
+    if (skipped > 0) {
+      read.skippedRows = skipped;
+      skippedRows += skipped;
     }
     outOfTime ||= read.endedBy === "deadline";
   }

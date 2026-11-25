@@ -713,7 +713,7 @@ at once.
 `coverage.segments` lists each file read with the byte offset it started from (`fromByte`) and why
 its read ended (`endedBy`: `segment-end`, `limit`, `deadline`, or `segment-changed` when the file
 was removed, replaced, grown, or shortened after the proxy listed it), and `skippedRows` when it
-skipped rows over 1 MiB, which also makes the answer incomplete. The top-level `endedBy` is `window-end` when every file
+skipped rows it could not read (over 1 MiB, or malformed), which also makes the answer incomplete. The top-level `endedBy` is `window-end` when every file
 was read to its end, `limit` when more rows matched than were returned, `deadline` when the read
 stopped five seconds after the read's turn began (listing and preparation included) with the rows it
 had, or `segment-changed`; `truncated` is `true` for the
