@@ -7,11 +7,13 @@ import { getFilteredUsageAggregate, getUsageAggregate, resetUsageAggregateCacheF
 import {
   readUsageFilterCandidates,
   requestUsageFilterIndexRebuild,
+  usageFilterIndexPath,
   setUsageFilterIndexTestHooksForTests,
   settleUsageFilterIndexReclaimForTests,
 } from "../../src/usage/filter-index";
 import { currentUsageLogRevision, resetUsageReadCacheForTests } from "../../src/usage/log";
 import { noteUsageRevision } from "../../src/usage/revision-observation";
+import { Database } from "bun:sqlite";
 import { repoPath } from "../helpers/repo-root";
 
 // Whether a published index generation may be extended or served is decided from the index
@@ -198,5 +200,39 @@ describe("filtered usage index generation trust", () => {
     }
     expect(candidates).toBe(1);
     expect(await keyB()).toBe(1);
+  });
+
+  test("a destructive change observed for another home's ledger is recorded in that home's index only", async () => {
+    const homeB = mkdtempSync(join(tmpdir(), "ocx-usage-filter-trust-b-"));
+    const recorded = (home: string) => {
+      const db = new Database(usageFilterIndexPath(home), { readonly: true });
+      try {
+        const found = db.query("SELECT value FROM usage_filter_index_meta WHERE key = 'source_invalidations'").get() as { value: string } | null;
+        return Number(found?.value ?? 0);
+      } finally {
+        db.close();
+      }
+    };
+    try {
+      writeFileSync(ledgerPath(), row("r-0", "openai", "key-a") + filler);
+      await getFilteredUsageAggregate({ apiKeyId: "key-b" });
+      process.env.OPENCODEX_HOME = homeB;
+      resetUsageAggregateCacheForTests();
+      const ledgerB = join(homeB, "usage.jsonl");
+      writeFileSync(ledgerB, row("r-0", "openai", "key-a") + filler);
+      await getFilteredUsageAggregate({ apiKeyId: "key-b" });
+      appendFileSync(ledgerB, grown);
+      noteUsageRevision(currentUsageLogRevision());
+      writeFileSync(ledgerB, rewritten);
+      const shrunkB = currentUsageLogRevision();
+      // The observation arrives in a process whose default home is A.
+      process.env.OPENCODEX_HOME = testDir;
+      noteUsageRevision(shrunkB);
+      expect(recorded(homeB)).toBe(1);
+      expect(recorded(testDir)).toBe(0);
+    } finally {
+      process.env.OPENCODEX_HOME = testDir;
+      rmSync(homeB, { recursive: true, force: true });
+    }
   });
 });

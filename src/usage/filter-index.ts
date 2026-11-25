@@ -51,6 +51,7 @@
 import { constants as sqliteConstants, Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync } from "node:fs";
+import { dirname } from "node:path";
 import { getConfigDir } from "../config";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
 import {
@@ -937,10 +938,9 @@ let reclaimRun: { path: string; promise: Promise<void> } | null = null;
 let reclaimAgain = false;
 
 /**
- * Remove retired, failed and abandoned generations in the background, a bounded primary-key batch
- * per table per transaction, committing each batch before yielding. Publication and refresh only
- * record retirement; a whole-generation DELETE under the write lock stalled the event loop for
- * seconds (1.7 s, 1.3 s and a 1.3 s COMMIT on a 725,946-row index).
+ * Remove retired, failed and abandoned generations in the background, one bounded primary-key batch
+ * per table per committed transaction: a whole-generation DELETE under the write lock stalled the
+ * event loop for seconds (1.7 s, 1.3 s and a 1.3 s COMMIT on a 725,946-row index).
  */
 function scheduleRetiredGenerationReclaim(dir: string, path: string): void {
   if (reclaimRun?.path === path) {
@@ -1101,11 +1101,11 @@ function generationValidated(db: Database, path: string, meta: IndexMeta): boole
   return meta.validatedInvalidations === sourceInvalidations(db) && !pendingInvalidations.has(path);
 }
 
-function recordSourceInvalidation(): void {
-  const dir = getConfigDir();
+function recordSourceInvalidation(revision: UsageLogRevision | null): void {
+  if (!revision) return;
+  const dir = dirname(revision.path); // the observed ledger's home, not necessarily this process's
   const path = usageFilterIndexPath(dir);
-  // No index yet: the first ingest reads the file as it is now.
-  if (!existsSync(path)) return;
+  if (!existsSync(path)) return; // no index yet: its first ingest reads the file as it is now
   invalidationTicket += 1;
   pendingInvalidations.set(path, invalidationTicket);
   persistSourceInvalidation(dir, path, invalidationTicket, RECLAIM_BUSY_FIRST_DELAY_MS);
