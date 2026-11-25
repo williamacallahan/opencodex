@@ -1102,6 +1102,9 @@ export async function executeComboResponses(
   let zeroOutputLimitFailure: { childLog: RequestLogContext; usage?: OcxUsage } | undefined;
   let lastFailureUpstreamCode: string | undefined;
   const wantsStream = (rawBody as { stream?: unknown } | null)?.stream === true || (body as { stream?: unknown } | null)?.stream === true;
+  const contextOverflowResponse = (localMessage?: string) => (rawBody as { stream?: unknown } | null)?.stream === true
+    ? streamingContextOverflowResponse(responseModel, options.translatorBudget, localMessage)
+    : jsonContextOverflowResponse(localMessage);
   // Local input admission refusals (#1524), while every failed target so far was one: such a
   // target sent nothing, so an exhausted ladder must not be reported as a provider rejection.
   let localAdmissionRefusals: string[] | undefined = [];
@@ -1766,12 +1769,7 @@ export async function executeComboResponses(
       // Keep the spent Pool budget sticky even after a recovered routed child:
       // no later failure may reopen ordinary combo/native account hopping.
       adoptFailedChildLog(childLog);
-      if (classifyOverflow && failureDecision === "stop") {
-        return wantsStream
-          ? streamingContextOverflowResponse(responseModel, options.translatorBudget)
-          : jsonContextOverflowResponse();
-      }
-      return lastFailure;
+      return classifyOverflow && failureDecision === "stop" ? contextOverflowResponse() : lastFailure;
     }
     const fresh = boundTargetKey && !hardRefusal && !spentReplacement && attempt.sendCount === 0
       && isUnavailableTurnOwner(failure.response) && !comboSendScope?.ambiguousResendSpent ? rebuildTurn() : undefined;
@@ -1807,12 +1805,7 @@ export async function executeComboResponses(
     }
     if (failureDecision === "stop") {
       adoptFailedChildLog(childLog);
-      if (classifyOverflow) {
-        return wantsStream
-          ? streamingContextOverflowResponse(responseModel, options.translatorBudget)
-          : jsonContextOverflowResponse();
-      }
-      return lastFailure;
+      return classifyOverflow ? contextOverflowResponse() : lastFailure;
     }
     // Retain a confirmed target context refusal when later retryable failures exhaust the ladder.
     // Hard stops above still return their own verdict, and every attempt keeps its own usage.
@@ -1994,9 +1987,7 @@ export async function executeComboResponses(
       ? `opencodex refused this turn locally; nothing was sent upstream. No target of this combo `
         + `that was tried can fit its input: ${localAdmissionRefusals.join(" ")} Compact the conversation before retrying.`
       : undefined;
-    return (rawBody as { stream?: unknown } | null)?.stream === true
-      ? streamingContextOverflowResponse(responseModel, options.translatorBudget, localMessage)
-      : jsonContextOverflowResponse(localMessage);
+    return contextOverflowResponse(localMessage);
   }
   return failure;
 }
