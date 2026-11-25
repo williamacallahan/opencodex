@@ -1,4 +1,5 @@
 import { admittedLane } from "../helpers/combo-recall-admission";
+import { settledUsageResponse } from "../helpers/usage-cold-read";
 import { rememberComboForLane } from "../../src/server/responses/combo-session-recall";
 import { captureConfigGeneration } from "../../src/lib/state-store-sweeper";
 import { createPoolRetryHarness, POOL_RETRY_MODEL } from "../helpers/codex-pool-retry";
@@ -3970,7 +3971,7 @@ describe("server local API auth", () => {
         },
       });
 
-      const usage = await fetch(new URL("/api/usage?range=all&surface=codex", server.url), { headers: managementHeaders() }).then(r => r.json()) as {
+      const usage = await settledUsageResponse(() => fetch(new URL("/api/usage?range=all&surface=codex", server.url), { headers: managementHeaders() })).then(r => r.json()) as {
         surface: string;
         summary: { requests: number; reportedRequests: number; totalTokens: number };
         models: Array<{ provider: string; model: string; reportedRequests: number; totalTokens: number }>;
@@ -3984,7 +3985,7 @@ describe("server local API auth", () => {
         totalTokens: 18,
       });
 
-      const claudeUsage = await fetch(new URL("/api/usage?range=all&surface=claude", server.url), { headers: managementHeaders() }).then(r => r.json()) as {
+      const claudeUsage = await settledUsageResponse(() => fetch(new URL("/api/usage?range=all&surface=claude", server.url), { headers: managementHeaders() })).then(r => r.json()) as {
         surface: string;
         summary: { requests: number };
       };

@@ -1,4 +1,5 @@
 import { expect } from "bun:test";
+import { settledUsageResponse } from "../helpers/usage-cold-read";
 import { installEndpointHooks, test, fetch, startServer, serveUpstream, ownCleanup, caseSignal, testDir, isolatedCodexHome, originalFetch } from "../helpers/claude-endpoint-lifetime";
 import { logsFromApiBody } from "../helpers/logs-api";
 import { createHash } from "node:crypto";
@@ -128,7 +129,7 @@ test("POST /v1/messages?beta=true streams an Anthropic-shaped turn end to end", 
     expect(row!.usage?.inputTokens).toBe(12);
     expect(row!.usage?.outputTokens).toBe(3);
 
-    const claudeUsage = await fetch(new URL("/api/usage?range=all&surface=claude", server.url)).then(res => res.json()) as {
+    const claudeUsage = await settledUsageResponse(() => fetch(new URL("/api/usage?range=all&surface=claude", server.url))).then(res => res.json()) as {
       surface: string;
       summary: { requests: number; totalTokens: number };
       models: Array<{ model: string }>;
@@ -137,7 +138,7 @@ test("POST /v1/messages?beta=true streams an Anthropic-shaped turn end to end", 
     expect(claudeUsage.summary).toMatchObject({ requests: 1, totalTokens: 15 });
     expect(claudeUsage.models).toEqual([expect.objectContaining({ model: "test-model" })]);
 
-    const codexUsage = await fetch(new URL("/api/usage?range=all&surface=codex", server.url)).then(res => res.json()) as {
+    const codexUsage = await settledUsageResponse(() => fetch(new URL("/api/usage?range=all&surface=codex", server.url))).then(res => res.json()) as {
       surface: string;
       summary: { requests: number };
     };

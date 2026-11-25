@@ -576,10 +576,11 @@ async function withFilterIndexRetry<T>(run: () => Promise<T>): Promise<T> {
   throw lastError ?? new Error("filtered usage aggregate did not settle");
 }
 
-function trimRetainedFilteredAggregates(): void {
+/** Trims the oldest unpinned, unprotected results, never `keep`: the result being published now. */
+function trimRetainedFilteredAggregates(keep?: string): void {
   while (retainedFilteredAggregates.size > MAX_RETAINED_FILTERED_AGGREGATES) {
     const oldest = [...retainedFilteredAggregates]
-      .filter(([, state]) => !pinnedAggregates.has(state) && !isProtected(state))
+      .filter(([key, state]) => key !== keep && !pinnedAggregates.has(state) && !isProtected(state))
       .sort(([, left], [, right]) => left.retainedAt - right.retainedAt)[0];
     if (!oldest) return;
     retainedFilteredAggregates.delete(oldest[0]);
@@ -593,7 +594,7 @@ function publishFilteredAggregate(
   read: UsageFilterCandidateRead | null,
 ): UsageAggregateResult {
   retainedFilteredAggregates.set(key, state);
-  trimRetainedFilteredAggregates();
+  trimRetainedFilteredAggregates(key);
   enforceAppOwnedMemoryBudgetIfNeeded();
   return read
     ? { ...resultFrom(state, update), filterIndex: filterStats(read, update) }

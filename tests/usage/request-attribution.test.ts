@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { settledUsageResponse } from "../helpers/usage-cold-read";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -172,9 +173,8 @@ describe("request attribution on log rows", () => {
 
 async function managementGet(path: string, config: OcxConfig = loopbackConfig): Promise<Response> {
   const req = new ManagementRequest(`http://localhost${path}`, { method: "GET" });
-  const response = await handleManagementAPI(req, new URL(req.url), config, { refreshCodexCatalog: async () => {} });
-  if (!response) throw new Error(`no management route for ${path}`);
-  return response;
+  // Read like a client: a pending whole-ledger rebuild is retried once it has finished.
+  return settledUsageResponse(() => handleManagementAPI(req, new URL(req.url), config, { refreshCodexCatalog: async () => {} }));
 }
 
 describe("gateway opt-in in the provider listing", () => {
