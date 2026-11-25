@@ -160,8 +160,10 @@ ingests in full, the active reader and every candidate or projected-row page re-
 their own read transaction (a page of an invalidated generation throws rather than return partial
 counts), the published-generation lookup behind cached filtered and picker answers returns no
 generation, an extend-only refresh and `usageFilterIndexExtendable` refuse, and the passive read
-returns no answer. The passive read writes nothing: on a destructive change it declines the
-generation in its own process, and the next writer-owned refresh records the change. Until its
+returns no answer. A passive read (a Remote Link request, and the background work it starts)
+writes nothing to the index: a destructive change it observes, in the passive index read or in any
+usage cache lookup, is only marked in memory, which declines the generation in that process, and the
+next writer-owned index refresh records the mark in the database. Until its
 increment commits (the write uses busy timeout 0 and retries with backoff), the observing process
 also declines the generation itself.
 

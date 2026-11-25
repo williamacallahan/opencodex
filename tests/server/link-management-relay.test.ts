@@ -22,6 +22,9 @@ import { parseHomeCodexSettingsDocument } from "../../src/link/codex-settings";
 import { LINK_MANAGEMENT_READ_PATHS } from "../../src/link/management-routes";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { Database } from "bun:sqlite";
+import { settleUsageColdRebuildForTests } from "../../src/usage/cold-rebuild-slot";
+import { usageFilterIndexPath } from "../../src/usage/filter-index";
 
 const ENV_KEY = "link-mgmt-env-admission";
 const OTHER_KEY = "link-mgmt-other-admission";
@@ -296,6 +299,42 @@ describe("Remote Link management relay on the Home", () => {
     expect(head.status).toBe(200);
     expect(await head.text()).toBe("");
   });
+
+  test.each(["warm summary", "warm key filter", "cold key filter"])(
+    "a relayed usage read after a truncation leaves the usage index untouched (%s)", async scenario => {
+      const usage = (requestId: string, apiKeyId: string) => `${JSON.stringify({ requestId, apiKeyId, timestamp: Date.now() - 60_000,
+        provider: "mock", model: "test-model", status: 200, durationMs: 1, usageStatus: "unreported", client: "codex_cli" })}\n`;
+      const rows = Array.from({ length: 40 }, (_, index) => usage(`r-${index}`, index % 2 === 0 ? LINKED_ID : "other-key"));
+      const ledger = join(testHome, "usage.jsonl");
+      writeFileSync(ledger, rows.join(""));
+      const admin = { headers: { "x-opencodex-api-key": ADMIN_KEY } };
+      const homeRead = async (query: string) => settledUsageResponse(() => get(server!.url.origin, `/api/usage${query}`, undefined, admin));
+      const own = "?client=codex&device=key&apiKeyId=linked-key";
+      // The Home's own reads build its summary and the usage index before the ledger shrinks.
+      expect((await homeRead("?range=30d")).status).toBe(200);
+      expect((await homeRead(scenario === "cold key filter" ? "?range=30d&apiKeyId=other-key" : own)).status).toBe(200);
+      writeFileSync(ledger, rows.slice(0, 10).join(""));
+      const indexPath = usageFilterIndexPath(testHome);
+      const indexBytes = () => ["", "-wal"].map(suffix => {
+        const file = `${indexPath}${suffix}`;
+        return fs.existsSync(file) ? new Bun.CryptoHasher("sha256").update(fs.readFileSync(file)).digest("hex") : "absent";
+      }).join(" ");
+      const before = indexBytes();
+      const relayed = await get(await linkBase(), `/v1/link-management/api/usage${scenario === "warm summary" ? "?range=30d" : own}`, LINKED_KEY);
+      await relayed.body?.cancel();
+      expect(indexBytes()).toBe(before);
+      await settleUsageColdRebuildForTests();
+      expect(indexBytes()).toBe(before);
+      // The Home's next own read that refreshes the index records the change and counts the shorter ledger.
+      const after = await homeRead("?range=30d&apiKeyId=linked-key");
+      expect((await after.json() as { summary: { requests: number } }).summary.requests).toBe(5);
+      const db = new Database(indexPath, { readonly: true });
+      try {
+        expect(Number((db.query("SELECT value FROM usage_filter_index_meta WHERE key = 'source_invalidations'").get() as { value: string }).value)).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
 
   test("relays a masked projection and never a provider credential", async () => {
     const providers = await get(await linkBase(), "/v1/link-management/api/providers", LINKED_KEY, {

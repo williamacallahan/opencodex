@@ -54,6 +54,7 @@ import { chmodSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { getConfigDir } from "../config";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
+import { isPassiveRead } from "../lib/passive-read";
 import {
   preparePrivateSqliteDatabase,
   SQLITE_SIDECAR_SUFFIXES,
@@ -282,10 +283,9 @@ export interface UsageFilterCandidateRead {
   /** Returns the next bounded page of ascending row-start offsets. */
   nextPage(): number[];
   /**
-   * Returns the next page of at most {@link CANDIDATE_PAGE_SIZE} physical indexed rows, in ascending
-   * offset order, as their projected source fields, without reading `usage.jsonl`. The page bounds
-   * the rows examined, not the rows returned: the window is the caller's to apply, so a page can
-   * hold no row in it, and only `done` marks the end. Each page re-checks schema and generation.
+   * The next page of at most {@link CANDIDATE_PAGE_SIZE} physical indexed rows by ascending offset, as
+   * projected source fields, without reading `usage.jsonl`. The caller applies the window, so a page
+   * can hold no row in it and only `done` ends; each page re-checks schema and generation validity.
    */
   nextIndexedRows(): { rows: UsageSourceFields[]; done: boolean };
   /**
@@ -906,11 +906,7 @@ function endLease(db: Database, generation: string): void {
   db.query("DELETE FROM usage_filter_index_writers WHERE generation = ?").run(generation);
 }
 
-/**
- * Generations whose rows may be removed: registered, not published, not owned by a live writer. A
- * staging generation leases before its first row; a retired one keeps its registry row (the retirement
- * record) with no lease. A live writer's staging is never a candidate, which prevents multi-writer row loss.
- */
+/** Removable generations: registered, not published, and not leased by a live writer (staging leases before its first row). */
 function retiredGenerationCandidates(db: Database, published: string): { candidates: string[]; orphanLease: boolean } {
   const generations = db.query(
     "SELECT g.generation AS generation, w.pid AS pid FROM usage_filter_index_generations g LEFT JOIN usage_filter_index_writers w ON w.generation = g.generation",
@@ -986,8 +982,7 @@ async function reclaimRetiredGenerations(dir: string, path: string): Promise<voi
       for (const generation of candidates) {
         db.exec("BEGIN IMMEDIATE");
         try {
-          // Eligibility is decided again under the write lock: a writer may have registered its
-          // lease, or a publish may have made this generation current, since the check above.
+          // Rechecked under the write lock: a lease or a publish may have landed since the check above.
           const lease = db.query("SELECT pid FROM usage_filter_index_writers WHERE generation = ?")
             .get(generation) as { pid: number } | null;
           if (generation !== metaText(db, META_KEYS.generation) && !(lease && processAlive(lease.pid))) {
@@ -1057,9 +1052,8 @@ function publish(
       return false;
     }
     writeMetaStatements(db, next);
-    // A published staging generation no longer needs its writer lease. The generation this one
-    // replaces keeps its registry row with no lease: that row is the retirement record, and its
-    // rows are reclaimed in bounded batches after this commit, never in it.
+    // The replaced generation keeps its registry row with no lease (the retirement record); its rows
+    // are reclaimed in bounded batches after this commit, never in it.
     endLease(db, next.generation);
     db.exec("COMMIT");
     return true;
@@ -1076,11 +1070,12 @@ function assertHomeUnchanged(dir: string): void {
 /**
  * Generation validity lives in the index database, so restarted, peer and passive readers agree. An
  * append is judged by size and boundary digest, blind to a shrink another cache saw before regrowth:
- * every observer of a destructive change (`revision-observation.ts`) increments `source_invalidations`,
- * and a full ingest publishes the count it started under, fenced, as `validated_invalidations`. Equal
- * counts mean valid (adopted by any process); until its increment commits, the observer declines too.
+ * every writer-owned observer of a destructive change (`revision-observation.ts`) increments
+ * `source_invalidations`, and a full ingest publishes the count it started under, fenced, as
+ * `validated_invalidations`; equal counts mean valid. Until its increment commits the observer declines
+ * too (`pendingInvalidations`); a passive read only marks it, with `home`, for the next writer to record.
  */
-const pendingInvalidations = new Map<string, number>();
+const pendingInvalidations = new Map<string, { ticket: number; home?: string }>();
 let invalidationTicket = 0;
 
 function sourceInvalidations(db: Database): number {
@@ -1096,13 +1091,14 @@ function recordSourceInvalidation(revision: UsageLogRevision | null): void {
   const dir = dirname(revision.path); // the observed ledger's home, not necessarily this process's
   const path = usageFilterIndexPath(dir);
   if (!existsSync(path)) return; // no index yet: its first ingest reads the file as it is now
-  invalidationTicket += 1;
-  pendingInvalidations.set(path, invalidationTicket);
-  persistSourceInvalidation(dir, path, invalidationTicket, RECLAIM_BUSY_FIRST_DELAY_MS);
+  const ticket = ++invalidationTicket;
+  // A passive read opens no write connection and schedules nothing: the mark waits for a writer.
+  pendingInvalidations.set(path, isPassiveRead() ? { ticket, home: dir } : { ticket });
+  if (!isPassiveRead()) persistSourceInvalidation(dir, path, ticket, RECLAIM_BUSY_FIRST_DELAY_MS);
 }
 
 function persistSourceInvalidation(dir: string, path: string, ticket: number, delayMs: number): void {
-  const pending = pendingInvalidations.get(path);
+  const pending = pendingInvalidations.get(path)?.ticket;
   if (pending === undefined || pending < ticket) return; // superseded by a replacement
   try {
     const db = openIndexForWrite(dir, path, 0);
@@ -1110,7 +1106,7 @@ function persistSourceInvalidation(dir: string, path: string, ticket: number, de
       db.query(`INSERT INTO ${META_TABLE} (key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1`)
         .run(META_KEYS.sourceInvalidations);
     } finally { db.close(); }
-    if (pendingInvalidations.get(path) === ticket) pendingInvalidations.delete(path);
+    if (pendingInvalidations.get(path)?.ticket === ticket) pendingInvalidations.delete(path);
   } catch (error) {
     if (!isBusyError(error)) {
       // Left pending: this process keeps declining the generation until it publishes a replacement.
@@ -1132,7 +1128,7 @@ async function rebuild(
   // A destructive change seen now is recorded before the count this ingest is validated against.
   noteUsageRevision(currentUsageLogRevision());
   const validatedAgainst = sourceInvalidations(db);
-  const pendingAtStart = pendingInvalidations.get(path);
+  const pendingAtStart = pendingInvalidations.get(path)?.ticket;
   const staging = randomUUID();
   beginStaging(db, path, staging);
   let published = false;
@@ -1164,7 +1160,7 @@ async function rebuild(
     const live = currentUsageLogRevision();
     noteUsageRevision(live);
     if (usageLogIdentityKey(live) !== usageLogIdentityKey(result.scan.revision)
-      || pendingInvalidations.get(path) !== pendingAtStart) {
+      || pendingInvalidations.get(path)?.ticket !== pendingAtStart) {
       return null;
     }
     if (!publish(db, { generation: prior.generation, indexedOffset: prior.indexedOffset, invalidations: validatedAgainst }, next)) {
@@ -1172,7 +1168,7 @@ async function rebuild(
     }
     published = true;
     // An observation this process could not record yet predates this ingest, which supersedes it.
-    if (pendingAtStart !== undefined && pendingInvalidations.get(path) === pendingAtStart) pendingInvalidations.delete(path);
+    if (pendingAtStart !== undefined && pendingInvalidations.get(path)?.ticket === pendingAtStart) pendingInvalidations.delete(path);
     scheduleRetiredGenerationReclaim(dir, path);
     await testHooks?.afterPublish?.({ dbPath: path, generation: staging });
     hardenSidecars(path);
@@ -1235,8 +1231,13 @@ async function refreshOnce(
   extendOnly = false,
 ): Promise<UsageFilterIndexSnapshot | null> {
   assertHomeUnchanged(dir);
+  // A change only a passive read marked is recorded here: the high-water mark has already moved on.
+  const marked = pendingInvalidations.get(path);
+  if (marked?.home !== undefined && !isPassiveRead()) {
+    pendingInvalidations.set(path, { ticket: marked.ticket });
+    persistSourceInvalidation(marked.home, path, marked.ticket, RECLAIM_BUSY_FIRST_DELAY_MS);
+  }
   const meta = readMeta(db);
-  // A refresh only notices leftovers; removing them is the background reclaimer's bounded work.
   const leftovers = retiredGenerationCandidates(db, meta.generation);
   if (leftovers.candidates.length > 0 || leftovers.orphanLease) scheduleRetiredGenerationReclaim(dir, path);
   const revision = currentUsageLogRevision();
@@ -1524,10 +1525,9 @@ function rowAccessIndexWithoutClient(query: UsageFilterIndexQuery): string | nul
 export const CANDIDATE_PAGE_SIZE = 2_000;
 
 /**
- * Pages `usage_rows` for one published generation by physical offset (the primary key's order),
- * bounded by the snapshot's indexed offset. No window predicate sits in the statement: one placed
- * before the LIMIT made a page scan every row outside the window in one synchronous step (954 ms
- * on 725,946 rows to return none). The cursor advances past every row examined.
+ * Pages `usage_rows` for one generation by physical offset up to the snapshot's indexed offset. No
+ * window predicate: one before the LIMIT made a page scan every row outside the window in one
+ * synchronous step (954 ms on 725,946 rows to return none). The cursor passes every row examined.
  */
 function indexedRowPager(
   db: Database,
@@ -1819,7 +1819,7 @@ export async function readUsageFilterCandidatesPassive(
   // Writes nothing: a destructive change seen here declines the generation in this process only,
   // and the next writer-owned refresh records it for every process.
   if (usageRevisionIsDestructive(currentUsageLogRevision())) {
-    pendingInvalidations.set(path, ++invalidationTicket);
+    pendingInvalidations.set(path, { ticket: ++invalidationTicket, home: getConfigDir() });
     return null;
   }
   let db: Database;
@@ -1888,9 +1888,9 @@ export async function readUsageFilterCandidatesPassive(
 }
 
 /**
- * Whether the index publishing `generation` can answer `revision` by ingesting appended rows only,
- * judged from its metadata without opening the ledger: the same file, at least as long as indexed
- * (an equal length must be the identical revision), no rebuild requested and no ingest running.
+ * Whether the index publishing a valid `generation` can answer `revision` by ingesting appended rows
+ * only, from metadata alone: the same file, at least as long as indexed (an equal length must be the
+ * identical revision), no rebuild requested and no ingest running.
  */
 export function usageFilterIndexExtendable(generation: string, revision: UsageLogRevision | null): boolean {
   const path = indexPathForCurrentHome();
