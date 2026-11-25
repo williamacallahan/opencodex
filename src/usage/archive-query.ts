@@ -287,21 +287,29 @@ export function entryMayOverlap(entry: ArchiveSegmentEntry, since: number, until
 
 /**
  * Whether both of a listed segment's files are still the revisions the listing recorded. A changed one
- * drops the listing, so the next read relists; until then its span and totals prove nothing.
+ * drops the listing, so the next read relists; until then its span and totals prove nothing. With
+ * `signal`, no stat starts once it aborts, and an aborted check answers undefined: a cancellation is no
+ * verdict on either file.
  */
-export async function listedRevisionsCurrent(entry: ArchiveSegmentEntry): Promise<boolean> {
-  const current = await archiveFileRevision(entry.path) === entry.segmentRevision
-    && await archiveFileRevision(totalsPathOf(entry)) === entry.totalsRevision;
-  if (!current) invalidateListing();
-  return current;
+export async function listedRevisionsCurrent(entry: ArchiveSegmentEntry, signal?: AbortSignal): Promise<boolean | undefined> {
+  if (signal?.aborted) return undefined;
+  const segmentNow = await archiveFileRevision(entry.path);
+  if (signal?.aborted) return undefined;
+  if (segmentNow === entry.segmentRevision) {
+    const totalsNow = await archiveFileRevision(totalsPathOf(entry));
+    if (signal?.aborted) return undefined;
+    if (totalsNow === entry.totalsRevision) return true;
+  }
+  invalidateListing();
+  return false;
 }
 
 /**
  * {@link entryMayOverlap} for a decision that skips a segment: a span only rules a segment out while
- * both of its files are the revisions the span was learned from.
+ * both of its files are the revisions the span was learned from. A cancelled check rules nothing out.
  */
-export async function segmentMayOverlapNow(entry: ArchiveSegmentEntry, since: number, until: number): Promise<boolean> {
-  return entryMayOverlap(entry, since, until) || !await listedRevisionsCurrent(entry);
+export async function segmentMayOverlapNow(entry: ArchiveSegmentEntry, since: number, until: number, signal?: AbortSignal): Promise<boolean> {
+  return entryMayOverlap(entry, since, until) || await listedRevisionsCurrent(entry, signal) !== true;
 }
 
 export function segmentOverlaps(state: ArchiveSegmentState, since: number, until: number): boolean {
@@ -373,7 +381,6 @@ function totalsDescribe(entry: ArchiveSegmentEntry, totals: ArchiveTotalsFile): 
   const identity = sourceIdentity(entry.segmentRevision);
   if (totals.source !== undefined) return totals.source === identity;
   const seen = firstSeenSource.get(entry.path);
-  if (seen === undefined) firstSeenSource.set(entry.path, identity);
   return seen === undefined || seen === identity;
 }
 
@@ -426,11 +433,15 @@ export async function loadTotals(entry: ArchiveSegmentEntry, signal?: AbortSigna
     else unusableTotals.delete(key);
     return undefined;
   }
-  if (!totalsDescribe(entry, totals) || !await listedRevisionsCurrent(entry)) {
+  const current = totalsDescribe(entry, totals) && await listedRevisionsCurrent(entry, signal);
+  // Cancelled during the last check: nothing is learned about the files, so nothing is cached.
+  if (current === undefined || signal?.aborted) return undefined;
+  if (!current) {
     if (revision !== undefined) unusableTotals.set(key, { revision, bytes: entry.bytes });
     return undefined;
   }
   unusableTotals.delete(key);
+  if (totals.source === undefined && !firstSeenSource.has(entry.path)) firstSeenSource.set(entry.path, sourceIdentity(entry.segmentRevision));
   const revisions = { segmentRevision: entry.segmentRevision, totalsRevision: entry.totalsRevision };
   spanCache.set(key, { ...revisions, span: rowCoverage({ ...totals, uncounted: uncountedCoverage(totals) }) });
   totalsCache.set(key, { ...revisions, totals });
@@ -459,7 +470,7 @@ export async function loadWindowSegments(listing: ArchiveListing, since: number,
   for (const entry of listing.segments) {
     // A caller past its deadline stops here; its reader reports the deadline.
     if (signal?.aborted) break;
-    if (!await segmentMayOverlapNow(entry, since, until)) continue;
+    if (!await segmentMayOverlapNow(entry, since, until, signal)) continue;
     const state = segmentState(entry, await loadTotals(entry, signal));
     // The span its totals now give decides, as it does for a later read that knew it before loading.
     if (segmentOverlaps(state, since, until)) states.push(state);
@@ -476,7 +487,7 @@ export async function ambiguousWindowSegments(listing: ArchiveListing, since: nu
   const reached: ArchiveSegmentEntry[] = [];
   for (const entry of listing.ambiguous) {
     if (signal?.aborted) break;
-    if (!await segmentMayOverlapNow(entry, since, until)) continue;
+    if (!await segmentMayOverlapNow(entry, since, until, signal)) continue;
     if (segmentOverlaps(segmentState(entry, await loadTotals(entry, signal)), since, until)) reached.push(entry);
     await yieldToEventLoop();
   }

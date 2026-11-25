@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { closeRequestHistoryIndex } from "../../src/routing/history/indexer";
 import { handleManagementAPI } from "../../src/server/management-api";
-import { loadTotals, loadWindowSegments, readArchiveListing } from "../../src/usage/archive-query";
+import { knownSpan, loadTotals, loadWindowSegments, readArchiveListing, segmentMayOverlapNow } from "../../src/usage/archive-query";
 import { noteArchiveChanged } from "../../src/usage/archive-segments";
 import { inArchiveRowsReadQueue, readArchivedRows } from "../../src/usage/archive-rows";
 import * as ledgerScannerModule from "../../src/usage/ledger-scanner";
@@ -409,6 +409,58 @@ describe("GET /api/usage/archive/rows", () => {
     expect(readsAfterAbort).toBe(0);
     // The cancelled load says nothing about the file: an uncancelled one serves it.
     expect((await loadTotals(entry))?.rows).toBe(2);
+  });
+
+  test("a deadline that fires during the last revision check of a totals load starts no stat after it and caches no span", async () => {
+    const path = await builtSegment("624", archiveRows(2));
+    const entry = (await readArchiveListing()).segments.find(segment => segment.path === path)!;
+    const deadline = new AbortController();
+    const realStat = fsPromises.stat;
+    const statted: string[] = [];
+    let segmentStats = 0;
+    // The load stats the segment and its totals, reads the totals, then stats both again before caching.
+    const stats = spyOn(fsPromises, "stat").mockImplementation((async (...args: Parameters<typeof fsPromises.stat>) => {
+      statted.push(String(args[0]));
+      const result = await realStat(...args);
+      if (String(args[0]) === path && ++segmentStats === 2) deadline.abort();
+      return result;
+    }) as typeof fsPromises.stat);
+    try {
+      expect(await loadTotals(entry, deadline.signal)).toBeUndefined();
+    } finally {
+      stats.mockRestore();
+    }
+    expect(statted.slice(statted.lastIndexOf(path) + 1)).toEqual([]);
+    expect(knownSpan(entry)).toBeUndefined();
+    // Nothing was remembered against the files: an uncancelled load serves them.
+    expect((await loadTotals(entry))?.rows).toBe(2);
+  });
+
+  test("a deadline that fires while a known span is rechecked starts no stat after it and skips nothing", async () => {
+    const path = await builtSegment("625", archiveRows(2));
+    const entry = (await readArchiveListing()).segments.find(segment => segment.path === path)!;
+    await loadTotals(entry);
+    expect(knownSpan(entry)).toBeDefined();
+    const later = ARCHIVE_FIRST_ROW_AT + 48 * HOUR;
+    const deadline = new AbortController();
+    const realStat = fsPromises.stat;
+    const statted: string[] = [];
+    const stats = spyOn(fsPromises, "stat").mockImplementation((async (...args: Parameters<typeof fsPromises.stat>) => {
+      statted.push(String(args[0]));
+      const result = await realStat(...args);
+      if (String(args[0]) === path) deadline.abort();
+      return result;
+    }) as typeof fsPromises.stat);
+    let mayOverlap: boolean;
+    try {
+      mayOverlap = await segmentMayOverlapNow(entry, later, later + HOUR, deadline.signal);
+    } finally {
+      stats.mockRestore();
+    }
+    expect(statted).toEqual([path]);
+    // The cancelled check proved nothing, so the span does not rule the segment out.
+    expect(mayOverlap).toBe(true);
+    expect(await segmentMayOverlapNow(entry, later, later + HOUR)).toBe(false);
   });
 
   test("an in-window row appended after rows hours later is still returned", async () => {
