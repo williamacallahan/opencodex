@@ -340,4 +340,4 @@ An empty native Reserve shortlist records `reserve-cooldown` when a spent seat i
 physical send was counted, the transport marked a pre-connect failure (`connect_neutral`,
 `markUpstreamNotStarted`), or the relay answered a non-stream HTTP 401, 402, 403 or 429. A timeout, 5xx, any started stream, an accepted non-stream body such as a 200 JSON
 `response.failed`, or a caller abort never reaches native ordinary; later targets follow the existing rules.
-Coverage: `tests/server/server-combo-luna-reserve-order.test.ts`.
+Coverage: `tests/server/server-combo-luna-reserve-order.test.ts` and `tests/server/server-combo-luna-relay-cooldown.test.ts`.
