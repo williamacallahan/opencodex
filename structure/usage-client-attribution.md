@@ -95,7 +95,11 @@ recorded ledger revision is exactly the current one; reading it writes nothing. 
 passive candidate read decline a generation whose ledger is the same file but shorter than the
 recorded source, or as long but different, even in a process that observed no earlier length
 (`markDestructiveWithoutWriting`). They mark the generation in memory only, and the next writer-owned
-refresh records the mark and rebuilds. A regrowth that restores the last 64 KiB before the indexed
+refresh records the mark and rebuilds. A mark is issued once per destructive revision
+(`declinedRevisions`). The published generation keeps describing the longer file until the rebuild
+publishes, so a fresh ticket from every read meanwhile would fail that rebuild's publication fence each
+time. A different destructive revision during the rebuild still gets a new ticket and still retires
+the staging. A regrowth that restores the last 64 KiB before the indexed
 boundary would otherwise pass the append's boundary digest and keep the old rows and minimum. An
 archive read never ingests to answer. When the minimum is unverified, an active read that has
 finished calls `scheduleUsageFilterIndexRefresh`, which starts one shared refresh per home on a later

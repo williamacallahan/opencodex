@@ -1076,6 +1076,8 @@ function assertHomeUnchanged(dir: string): void {
  * too (`pendingInvalidations`); a passive read only marks it, with `home`, for the next writer to record.
  */
 const pendingInvalidations = new Map<string, { ticket: number; home?: string }>();
+/** Per index path, the destructive revision a no-write read last declined it for, pending or recorded since. */
+const declinedRevisions = new Map<string, string>();
 let invalidationTicket = 0;
 
 function sourceInvalidations(db: Database): number {
@@ -1819,6 +1821,12 @@ function markDestructiveWithoutWriting(path: string, meta: IndexMeta | null, rev
   const shrankBelowIndex = revision !== null && recorded !== null && usageLogIdentityKey(recorded) === usageLogIdentityKey(revision)
     && (revision.size < recorded.size || (revision.size === recorded.size && usageLogRevisionKey(recorded) !== usageLogRevisionKey(revision)));
   if (!shrankBelowIndex && !usageRevisionIsDestructive(revision)) return false;
+  // One change, one ticket: the published generation keeps describing the longer file until a rebuild
+  // publishes, so every read meanwhile sees the same shortened revision, and a fresh ticket from each
+  // would fail the rebuild's publication fence forever. Only a different destructive revision is new.
+  const revisionKey = usageLogRevisionKey(revision);
+  if (declinedRevisions.get(path) === revisionKey) return true;
+  declinedRevisions.set(path, revisionKey);
   pendingInvalidations.set(path, { ticket: ++invalidationTicket, home: getConfigDir() });
   return true;
 }
@@ -2094,6 +2102,7 @@ export function resetUsageFilterIndexForTests(): void {
   reclaimRun = null;
   reclaimAgain = false;
   pendingInvalidations.clear();
+  declinedRevisions.clear();
   ingestPassesByPath.clear();
   rebuildRequestedPaths.clear();
   sidecarOwnershipChecked.clear();

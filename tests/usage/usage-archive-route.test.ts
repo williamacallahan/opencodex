@@ -7,6 +7,7 @@ import { handleManagementAPI } from "../../src/server/management-api";
 import { archiveTotalsReads } from "../../src/usage/archive-query";
 import { noteArchiveChanged } from "../../src/usage/archive-segments";
 import { ARCHIVE_TOTALS_FORMAT_VERSION, MAX_HOURS_PER_SEGMENT, MAX_OVERLAPS_PER_SEGMENT, archiveTotalsPath } from "../../src/usage/archive-totals";
+import { setUsageFilterIndexTestHooksForTests } from "../../src/usage/filter-index";
 import { usageLogPath } from "../../src/usage/log";
 import { resetUsageRevisionObservationsForTests } from "../../src/usage/revision-observation";
 import type { OcxConfig } from "../../src/types";
@@ -103,6 +104,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setUsageFilterIndexTestHooksForTests(null);
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
   removeTreeWithRetry(home);
@@ -546,6 +548,50 @@ describe("GET /api/usage/archive", () => {
     expect(body.coverage.liveLedgerSince).toBe(iso(b[1]!.timestamp));
     expect(body).toMatchObject({ complete: false, summary: null, coverage: { ambiguousSegments: [basename(segmentB)] } });
   }, 30_000);
+
+  test("passive reads of a stable truncated ledger do not keep its rebuild from publishing, and a second truncation during it still does", async () => {
+    const rows = archiveRows(40, 60_000).map(row => ({ ...row, timestamp: row.timestamp + 10 * 24 * HOUR }));
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), jsonl(rows));
+    const query = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR);
+    expect((await untilLiveLedgerSince(query, iso(rows[0]!.timestamp))).coverage.liveLedgerSince).toBe(iso(rows[0]!.timestamp));
+    const published: string[] = [];
+    const staged: string[] = [];
+    setUsageFilterIndexTestHooksForTests({
+      // Every rebuild meets passive reads of the same shortened ledger before it publishes.
+      beforePublish: async ({ stagedGeneration }) => {
+        staged.push(stagedGeneration);
+        for (let read = 0; read < 3; read += 1) await runPassiveRead(() => archiveGet(query));
+      },
+      afterPublish: ({ generation }) => { published.push(generation); },
+    });
+    writeFileSync(usageLogPath(), jsonl(rows.slice(30)));
+    const settled = await untilLiveLedgerSince(query, iso(rows[30]!.timestamp));
+    expect(settled.coverage.liveLedgerSince).toBe(iso(rows[30]!.timestamp));
+    expect(published).toEqual(staged.slice(-1));
+
+    // A real truncation while the next rebuild is staged retires that staging; the retry publishes.
+    published.length = 0;
+    staged.length = 0;
+    let truncatedDuringBuild = false;
+    setUsageFilterIndexTestHooksForTests({
+      beforePublish: async ({ stagedGeneration }) => {
+        staged.push(stagedGeneration);
+        if (!truncatedDuringBuild) {
+          truncatedDuringBuild = true;
+          writeFileSync(usageLogPath(), jsonl(rows.slice(35)));
+        }
+        await runPassiveRead(() => archiveGet(query));
+      },
+      afterPublish: ({ generation }) => { published.push(generation); },
+    });
+    writeFileSync(usageLogPath(), jsonl(rows.slice(32)));
+    const twice = await untilLiveLedgerSince(query, iso(rows[35]!.timestamp));
+    expect(twice.coverage.liveLedgerSince).toBe(iso(rows[35]!.timestamp));
+    expect(staged.length).toBeGreaterThan(1);
+    expect(published).not.toContain(staged[0]);
+    expect(published).toHaveLength(1);
+  }, 40_000);
 
   test("while the live ledger's earliest row is unverified the archive withholds, and once the index catches up the same window answers exactly", async () => {
     // The 2026-11-24 window from the archive, while usage.jsonl holds 2026-11-25 onward and the
