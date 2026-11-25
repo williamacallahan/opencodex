@@ -4,6 +4,11 @@
 flush failure leaves the prior store in place; the subsequent parent-directory flush is best
 effort on POSIX and unavailable on Windows.
 
+Readers share one parsed store while the file's stat signature is unchanged and at least 50 ms
+old. Only a completed read or a completed write fills that cache: `mutateStore` reads past it and
+edits its own copy in place, so a write that fails leaves every reader on the bytes still on disk
+(`tests/oauth/oauth-store-cache.test.ts`).
+
 An `auth.json` that exists but cannot be loaded serves an empty account pool, which is otherwise
 indistinguishable from every account having signed out. `loadAuthStoreInternal` in
 `src/oauth/store.ts` therefore copies it to `auth.json.invalid-<timestamp>` and prints

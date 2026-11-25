@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { chmodSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as atomicWrites from "../../src/config/atomic-write";
 import {
   clearAuthStoreCacheForTests,
   getAccountSet,
@@ -92,5 +93,30 @@ describe("OAuth store stat-validated read cache", () => {
     } finally {
       readSpy.mockRestore();
     }
+  });
+
+  test("a mutation whose write fails leaves readers on the stored bytes, not the unwritten change", async () => {
+    await saveCredential("google-antigravity", {
+      access: "tok-1",
+      refresh: "ref-1",
+      expires: Date.now() + 3_600_000,
+      accountId: "acct-1",
+    });
+    const authPath = join(home, "auth.json");
+    const past = new Date(Date.now() - 5_000);
+    utimesSync(authPath, past, past);
+    const write = atomicWrites.atomicWriteFileStreamed;
+    const writeSpy = spyOn(atomicWrites, "atomicWriteFileStreamed").mockImplementation((...args) => {
+      if (args[0] === authPath) throw new Error("EACCES");
+      return write(...args);
+    });
+    try {
+      await expect(mutateStore(store => {
+        store["google-antigravity"]!.accounts[0]!.needsReauth = true;
+      })).rejects.toThrow("EACCES");
+    } finally {
+      writeSpy.mockRestore();
+    }
+    expect(getAccountSet("google-antigravity")!.accounts[0]!.needsReauth).toBeUndefined();
   });
 });

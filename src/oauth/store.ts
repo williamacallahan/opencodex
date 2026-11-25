@@ -479,7 +479,9 @@ function loadAuthStoreInternal(options?: { bypassCache?: boolean }): { store: Au
     return { store: {}, hadLegacy: false };
   }
   clearUnreadableAuthStoreRecord();
-  captureAuthStoreCache(path, result.store, result.hadLegacy);
+  // A bypassing caller (mutateStore) edits this object in place before it is written; caching it would serve
+  // an unwritten change to every reader when the write fails. `persist` caches the store once it is on disk.
+  if (!options?.bypassCache) captureAuthStoreCache(path, result.store, result.hadLegacy);
   // Outside the parse try: roster publication is advisory and must never route a loaded store into the invalid-config backup path.
   notifyAuthStoreLoaded(result.store);
   return result;
