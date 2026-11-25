@@ -213,9 +213,10 @@ its legacy count is the unclassified subset of the Codex app option for the sele
 Unselectable padded IDs remain in the configured membership set but are omitted from individual
 rows and counted separately, so they neither hide valid choices nor become unconfigured traffic.
 `src/server/management/usage-source-facets.ts` folds them from the candidate index's own columns
-(`usage_rows`: timestamp, client, surface, admission kind, key id) in bounded pages against one
-published generation (`nextIndexedRows` in `src/usage/filter-index.ts`), re-checking it between pages
-and reading no JSONL row, since ingest already validated those rows against the ledger. It keeps at
+(`usage_rows`: timestamp, client, surface, admission kind, key id) in pages of at most 2,000 physical
+rows by offset against one published generation (`nextIndexedRows` in `src/usage/filter-index.ts`),
+re-checking it between pages, applying the window in the accumulator, yielding after every page even
+one with no row in the window, and reading no JSONL row, since ingest already validated those rows. It keeps at
 most four completed answers for 15 seconds, keyed by home, filter, key inventory and time zone and
 tagged with the index generation, the last observed ledger revision and the captured window; a hit
 checks the published generation from index metadata alone, the revision (growth reuses, a shrink or

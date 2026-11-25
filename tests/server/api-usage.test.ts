@@ -17,8 +17,8 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { resetUsageReadCacheForTests, setManagementUsageMaxEntriesForTests, usageReadCacheStatsForTests } from "../../src/usage/log";
 import * as usageLogModule from "../../src/usage/log";
 import * as usageLedgerScannerModule from "../../src/usage/ledger-scanner";
-import { resetUsageColdRebuildForTests, settleUsageColdRebuildForTests, USAGE_COLD_READ_RETRY_AFTER_SECONDS } from "../../src/usage/cold-rebuild-slot";
-import { getUsageSummaryCacheEntry, resetUsageSummaryCacheForTests } from "../../src/server/management/usage-summary-cache";
+import { resetUsageColdRebuildForTests, settleUsageColdRebuildForTests, startUsageColdRebuild, USAGE_COLD_READ_RETRY_AFTER_SECONDS } from "../../src/usage/cold-rebuild-slot";
+import { evictOldestUsageSummaryForBudget, getUsageSummaryCacheEntry, resetUsageSummaryCacheForTests } from "../../src/server/management/usage-summary-cache";
 import * as usageAggregateCacheModule from "../../src/server/management/usage-aggregate-cache";
 
 let testDir = "";
@@ -392,6 +392,37 @@ describe("GET /api/usage", () => {
       expect(JSON.stringify(body.providers)).not.toContain("openai");
       expect(JSON.stringify(body.providers)).toContain("google");
     } finally {
+      await settleUsageColdRebuildForTests();
+      await server.stop(true);
+    }
+  });
+
+  test("a held summary is retired with its revision and never answers after a shrink and regrowth", async () => {
+    const path = join(testDir, "usage.jsonl");
+    const row = (requestId: string, provider: string) => `${JSON.stringify({ requestId, timestamp: Date.now() - 1_000, provider, model: "m", status: 200, durationMs: 1, usageStatus: "reported", usage: { inputTokens: 1, outputTokens: 1 } })}\n`;
+    writeFileSync(path, row("r1", "openai"));
+    const server = startServer(0);
+    let release = () => {};
+    try {
+      expect((await fetch(new URL("/api/usage?range=30d", server.url))).status).toBe(503);
+      await settleUsageColdRebuildForTests();
+      // A full budget evicts the cache and the accumulator; the held copy still answers the retry.
+      while (usageAggregateCacheModule.discardRetainedUsageAggregate() > 0) { /* evict */ }
+      while (evictOldestUsageSummaryForBudget() > 0) { /* evict */ }
+      expect((await fetch(new URL("/api/usage?range=30d", server.url))).status).toBe(200);
+      // Another build holds the slot from here on, so no build can replace the held copy.
+      startUsageColdRebuild("fixture-occupant", () => new Promise<void>(resolve => { release = resolve; }));
+      await Bun.sleep(5);
+      writeFileSync(path, "");
+      expect((await fetch(new URL("/api/usage?range=30d", server.url))).status).toBe(503);
+      // Regrown past its old length with two google rows: never the retired openai answer.
+      writeFileSync(path, row("g1", "google") + row("g2", "google"));
+      const regrown = await fetch(new URL("/api/usage?range=30d", server.url));
+      // Pending, or the empty file's own answer extended by growth; never the retired openai row.
+      expect(JSON.stringify(await regrown.json())).not.toContain("openai");
+    } finally {
+      await Bun.sleep(5);
+      release();
       await settleUsageColdRebuildForTests();
       await server.stop(true);
     }

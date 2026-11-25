@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../../src/config";
@@ -495,11 +495,13 @@ describe("attribution reaches usage.jsonl", () => {
       // A directory where the log should be: the read throws. Usage numbers are worth less than the
       // ability to revoke a key, but a zero would tell the operator an active key was never used.
       mkdirSync(usageLogPath(), { recursive: true });
+      // A read that cannot even open the log is unavailable, not pending, and still no zero.
       const payload = await keysGet(server, false);
       const rows = payload.keys as Array<Record<string, unknown>>;
       expect(rows).toHaveLength(2);
       expect(rows[0]).not.toHaveProperty("usage");
-      expect(payload).toMatchObject({ usageIncluded: false, usagePending: true });
+      expect(payload).toMatchObject({ usageIncluded: false, usageUnavailable: true });
+      expect(payload).not.toHaveProperty("usagePending");
       expect(payload.attributionSince).toBeUndefined();
     } finally {
       await server.stop(true);
@@ -528,6 +530,26 @@ describe("attribution reaches usage.jsonl", () => {
       expect((completed.keys as Array<{ usage?: { totalRequests: number } }>)[0]!.usage?.totalRequests).toBe(1);
     } finally {
       scanSpy.mockRestore();
+      await settleUsageColdRebuildForTests();
+      await server.stop(true);
+    }
+  });
+
+  test("counts read from an earlier revision are marked dated with the time they were read", async () => {
+    saveConfig(remoteConfig());
+    const row = (requestId: string) => `${JSON.stringify({
+      requestId, timestamp: Date.now(), provider: "p", model: "m",
+      status: 200, durationMs: 1, usageStatus: "exact", admissionKind: "configured", apiKeyId: "key-one",
+    })}\n`;
+    writeFileSync(usageLogPath(), row("first"));
+    const server = startServer(0);
+    try {
+      const exact = await keysGet(server);
+      expect(exact).not.toHaveProperty("usageDated");
+      appendFileSync(usageLogPath(), row("second"));
+      const dated = await keysGet(server, false);
+      expect(dated).toMatchObject({ usageDated: true, usageAsOf: exact.usageAsOf });
+    } finally {
       await settleUsageColdRebuildForTests();
       await server.stop(true);
     }

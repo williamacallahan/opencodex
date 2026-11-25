@@ -394,8 +394,9 @@ state. A rejected opaque reasoning blob counts as `ciphertext` rather than `payl
 
 `GET /api/keys` never waits for the usage log either: until a per-key rollup has been read it lists
 the keys without `usage`, with `usageIncluded: false` and `usagePending: true` (ask again after a few
-seconds); a served rollup carries `usageAsOf`, the time it was completed. A key is reported unused only
-from a completed rollup.
+seconds), or `usageUnavailable: true` when the last read failed. A served rollup carries `usageAsOf`,
+the time it was completed, and `usageDated: true` when the log has changed since. A key is reported
+unused only from a completed rollup.
 
 If a scanned row exceeds the existing parser size limit, `GET /api/usage` and `GET /api/keys`
 keep the readable-row aggregates and add `usageIncomplete: true` with

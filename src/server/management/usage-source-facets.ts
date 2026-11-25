@@ -73,8 +73,11 @@ async function foldFacetsFromIndex(captured: UsageSourceFilter, ids: readonly st
   if (!read) throw new SourceFacetsUnavailableError("usage filter index unavailable");
   const accumulator = createSourceFacetAccumulator(captured, ids, { since, until });
   try {
-    for (let rows = read.nextIndexedRows(); rows.length > 0; rows = read.nextIndexedRows()) {
-      for (const row of rows) accumulator.add(row);
+    // Every page yields, even one with no row in the window; only the pager's `done` ends the fold.
+    for (;;) {
+      const page = read.nextIndexedRows();
+      for (const row of page.rows) accumulator.add(row);
+      if (page.done) break;
       await new Promise<void>(resolve => setTimeout(resolve, 0));
     }
   } finally {

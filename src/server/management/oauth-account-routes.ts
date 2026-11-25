@@ -1315,7 +1315,8 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const { readApiKeyUsageRollup } = await import("./api-key-usage");
     const includeUsage = !req.headers.get("prefer")?.split(",").some(preference => preference.trim() === "return=minimal");
     // `null` while no completed rollup exists: the keys go out without usage, never with zeros.
-    const usage = includeUsage ? await readApiKeyUsageRollup(keys.map(k => k.id), config.managementUsageMaxReadBytes, "background") : undefined;
+    const usageRead = includeUsage ? await readApiKeyUsageRollup(keys.map(k => k.id), config.managementUsageMaxReadBytes, "background") : undefined;
+    const usage = usageRead?.status === "completed" ? usageRead.snapshot : undefined;
     const response = jsonResponse({
       // 8 random hex past the fixed `ocx_data_` literal: enough to tell two keys
       // apart in a list, with 128 bits of the tail still unrevealed. Masking only
@@ -1337,8 +1338,12 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
         ...(usage ? { usage: usage.rollup.get(k.id) ?? { requests7d: 0, totalRequests: 0 } } : {}),
       })),
       // Dataset-level and singular: it describes the usage log, not any one key.
-      ...(!includeUsage || !usage ? { usageIncluded: false } : { usageAsOf: new Date(usage.asOf).toISOString() }),
-      ...(includeUsage && !usage ? { usagePending: true } : {}),
+      // Pending is worth asking again; unavailable is not. Dated counts carry the time they were read.
+      ...(usageRead?.status === "completed"
+        ? { usageAsOf: new Date(usageRead.asOf).toISOString(), ...(usageRead.dated ? { usageDated: true } : {}) }
+        : { usageIncluded: false }),
+      ...(usageRead?.status === "pending" ? { usagePending: true } : {}),
+      ...(usageRead?.status === "unavailable" ? { usageUnavailable: true } : {}),
       ...(usage?.attributionSince ? { attributionSince: usage.attributionSince } : {}),
       ...(usage?.historyTruncated ? { historyTruncated: true } : {}),
       ...(usage?.usageIncomplete ? { usageIncomplete: true, usageIncompleteReason: usage.usageIncompleteReason } : {}),

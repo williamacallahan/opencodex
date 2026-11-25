@@ -271,6 +271,11 @@ export default function Usage({ apiBase, connected = false, apiKeyId, topology =
             </Notice>
           )}
           <UsageIncompleteNotice data={data} />
+          {typeof data?.snapshotAt === "string" && Number.isFinite(Date.parse(data.snapshotAt)) && (
+            <p className="usage-as-of m-0 text-fg-muted text-[13px]" role="status">
+              {t("lab.col.asOf")} {new Date(data.snapshotAt).toLocaleString(locale)}
+            </p>
+          )}
           {(client === "grok" || client === "aside" || client === "other") && <p className="text-fg-muted text-[13px]" role="status">{t("usageV2.clientUnverified")}</p>}
           {client === "codex" && typeof data?.legacyUnclassifiedRequests === "number" && <p className="text-fg-muted text-[13px]" role="status">{t("usageV2.legacy", { count: data.legacyUnclassifiedRequests })}</p>}
           {data?.historyTruncated && (

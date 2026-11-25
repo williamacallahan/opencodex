@@ -66,6 +66,11 @@ export function startUsageColdRebuild(key: string, build: () => Promise<unknown>
   return "started";
 }
 
+/** Whether `key`'s last build failed within one retry interval: a caller reports unavailable, not pending. */
+export function usageColdRebuildFailedRecently(key: string): boolean {
+  return rememberedFailure(key) !== undefined;
+}
+
 /**
  * Register the rebuild and throw the pending answer a request returns instead of waiting, or the
  * failure of the same key's build that just finished, which the route reports as a failed read.

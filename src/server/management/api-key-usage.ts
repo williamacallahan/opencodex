@@ -1,10 +1,11 @@
 import {
   currentUsageLogRevision,
+  usageLogRevisionKey,
   type PersistedUsageEntry,
   type UsageLogRevision,
 } from "../../usage/log";
 import { scanUsageLedgerCooperatively } from "../../usage/ledger-scanner";
-import { startUsageColdRebuild } from "../../usage/cold-rebuild-slot";
+import { startUsageColdRebuild, usageColdRebuildFailedRecently } from "../../usage/cold-rebuild-slot";
 import { observedUsageRevision, observeUsageRevision, type ObservedUsageRevision } from "../../usage/revision-observation";
 
 /**
@@ -140,8 +141,10 @@ export function createApiKeyUsageAccumulator(
  */
 let rollupCache: {
   idsKey: string;
-  /** The last ledger revision a read compared this rollup with; see `observeUsageRevision`. */
+  /** The ledger revision last observed with this rollup: only a destructive change is read from it. */
   observed: ObservedUsageRevision;
+  /** The revision the rollup was built from: it is exact only while the ledger is still this. */
+  builtRevisionKey: string;
   expiresAt: number;
   builtAt: number;
   snapshot: ApiKeyUsageSnapshot;
@@ -177,6 +180,7 @@ export function cacheApiKeyUsageFromRollup(
   rollupCache = {
     idsKey: JSON.stringify([configuredIds, maxReadBytes]),
     observed: observedUsageRevision(revision),
+    builtRevisionKey: usageLogRevisionKey(revision),
     expiresAt: now + ROLLUP_CACHE_TTL_MS,
     builtAt: now,
     snapshot,
@@ -185,24 +189,33 @@ export function cacheApiKeyUsageFromRollup(
 }
 
 /**
- * The per-key rollup, or `null` when no completed rollup can be served: a caller then omits usage
- * rather than reporting zero, because only a completed scan establishes that a key was unused.
- *
- * A cached rollup is dropped the moment the ledger is seen to shrink, be replaced, or change without
- * growing, since a row it counted may now belong to another key. `background` is for request
- * handlers: past its TTL a rollup is served as it stood (`asOf`) while its replacement builds in the
- * cold-rebuild slot; without one the build is registered there and the answer is `null` at once. A
- * request never waits for, or races, the ledger scan.
+ * What a key list can say about per-key usage. Only `completed` carries counts, because only a
+ * completed scan establishes that a key was unused; `dated` marks counts read from an earlier
+ * revision or past their freshness, shown with `asOf`. `pending` is being built and worth asking
+ * again; `unavailable` failed and is not.
+ */
+export type ApiKeyUsageRead =
+  | { status: "completed"; snapshot: ApiKeyUsageSnapshot; asOf: number; dated: boolean }
+  | { status: "pending" }
+  | { status: "unavailable" };
+
+/**
+ * The per-key rollup. A cached rollup is dropped the moment the ledger is seen to shrink, be
+ * replaced, or change without growing, since a row it counted may now belong to another key.
+ * `background` is for request handlers: a stale rollup is served dated while its replacement builds
+ * in the cold-rebuild slot; without one the build is registered there and the answer is `pending` at
+ * once (or `unavailable` when the last build failed). A request never waits for, or races, the scan.
  */
 export async function readApiKeyUsageRollup(
   configuredIds: string[],
   maxReadBytes?: number,
   cold: "await" | "background" = "await",
-): Promise<(ApiKeyUsageSnapshot & { asOf: number }) | null> {
+): Promise<ApiKeyUsageRead> {
   // JSON rather than a joined string: ids are only validated as non-empty
   // strings, so `["a\0b","c"]` and `["a","b\0c"]` join to the same value and one
   // config could be served the other's cached rollup.
   const idsKey = JSON.stringify([configuredIds, maxReadBytes]);
+  const slotKey = `api-key-rollup:${idsKey}`;
   const now = Date.now();
   const build = (): Promise<ApiKeyUsageSnapshot> => {
     const existing = rollupFlights.get(idsKey);
@@ -228,20 +241,30 @@ export async function readApiKeyUsageRollup(
     return flight;
   };
   try {
+    const current = currentUsageLogRevision();
     let cached = rollupCache?.idsKey === idsKey ? rollupCache : null;
-    if (cached && observeUsageRevision(cached.observed, currentUsageLogRevision()) === "rewritten") {
+    if (cached && observeUsageRevision(cached.observed, current) === "rewritten") {
       rollupCache = null;
       cached = null;
     }
-    if (cached && now < cached.expiresAt) return { ...cached.snapshot, asOf: cached.builtAt };
+    if (cached) {
+      const exact = now < cached.expiresAt && usageLogRevisionKey(current) === cached.builtRevisionKey;
+      // Within its freshness a rollup also covers rows appended since, as it always has.
+      if (now < cached.expiresAt) return { status: "completed", snapshot: cached.snapshot, asOf: cached.builtAt, dated: !exact };
+      if (cold === "background") {
+        startUsageColdRebuild(slotKey, build);
+        return { status: "completed", snapshot: cached.snapshot, asOf: cached.builtAt, dated: true };
+      }
+    }
     if (cold === "background") {
-      startUsageColdRebuild(`api-key-rollup:${idsKey}`, build);
-      return cached ? { ...cached.snapshot, asOf: cached.builtAt } : null;
+      if (usageColdRebuildFailedRecently(slotKey)) return { status: "unavailable" };
+      startUsageColdRebuild(slotKey, build);
+      return { status: "pending" };
     }
     const snapshot = await build();
-    return { ...snapshot, asOf: rollupCache?.builtAt ?? now };
+    return { status: "completed", snapshot, asOf: rollupCache?.builtAt ?? now, dated: false };
   } catch (error) {
     console.warn(`[api-keys] key usage could not be read: ${error instanceof Error ? error.message : String(error)}`);
-    return null;
+    return { status: "unavailable" };
   }
 }

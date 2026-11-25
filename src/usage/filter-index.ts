@@ -255,6 +255,20 @@ export interface UsageFilterIndexQuery {
   window?: UsageTimeWindow;
   /** Inclusive lower bound: the byte after the last row already folded in. */
   afterOffset?: number;
+  /**
+   * Refresh only by ingesting appended rows. Anything that would take a full ingest (a requested
+   * rebuild, another file, a shrink, a rewrite, an ingest already running) throws
+   * {@link UsageFilterIndexRebuildNeededError} instead, so a request never pays for it.
+   */
+  extendOnly?: true;
+}
+
+/** Answering would take a full index ingest, which only a background build may run. */
+export class UsageFilterIndexRebuildNeededError extends Error {
+  constructor() {
+    super("usage filter index needs a full rebuild");
+    this.name = "UsageFilterIndexRebuildNeededError";
+  }
 }
 
 export interface UsageFilterCandidateRead {
@@ -264,11 +278,12 @@ export interface UsageFilterCandidateRead {
   /** Returns the next bounded page of ascending row-start offsets. */
   nextPage(): number[];
   /**
-   * Returns the next bounded page of the window's indexed rows as their projected source fields,
-   * in ascending offset order, without reading `usage.jsonl`; empty at the end. Like `nextPage()`,
-   * each page re-checks schema and generation. Independent of the candidate pager's cursor.
+   * Returns the next page of at most {@link CANDIDATE_PAGE_SIZE} physical indexed rows, in ascending
+   * offset order, as their projected source fields, without reading `usage.jsonl`. The page bounds
+   * the rows examined, not the rows returned: the window is the caller's to apply, so a page can
+   * hold no row in it, and only `done` marks the end. Each page re-checks schema and generation.
    */
-  nextIndexedRows(): UsageSourceFields[];
+  nextIndexedRows(): { rows: UsageSourceFields[]; done: boolean };
   /**
    * Closes the database handle. Pages are not read from one long snapshot: each `nextPage()`
    * re-checks schema and generation inside its own short transaction.
@@ -1098,11 +1113,16 @@ async function refreshOnce(
   db: Database,
   dir: string,
   path: string,
+  extendOnly = false,
 ): Promise<UsageFilterIndexSnapshot | null> {
   assertHomeUnchanged(dir);
   const meta = readMeta(db);
   reclaimAbandonedStaging(db, path, meta.generation);
   const revision = currentUsageLogRevision();
+  const rebuildOrRetry = (db: Database, dir: string, path: string, meta: IndexMeta) => {
+    if (extendOnly) throw new UsageFilterIndexRebuildNeededError();
+    return rebuildOrRetryFull(db, dir, path, meta);
+  };
   if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION
     || !meta.generation
     || usageLogIdentityKey(meta.revision) !== usageLogIdentityKey(revision)) {
@@ -1132,7 +1152,7 @@ async function refreshOnce(
   }
 }
 
-async function rebuildOrRetry(
+async function rebuildOrRetryFull(
   db: Database,
   dir: string,
   path: string,
@@ -1150,11 +1170,12 @@ async function refreshWithRetry(
   db: Database,
   dir: string,
   path: string,
+  extendOnly = false,
 ): Promise<UsageFilterIndexSnapshot> {
   let lastError: unknown;
   for (let attempt = 0; attempt < MAX_REFRESH_ATTEMPTS; attempt += 1) {
     try {
-      const snapshot = await refreshOnce(db, dir, path);
+      const snapshot = await refreshOnce(db, dir, path, extendOnly);
       if (snapshot) return snapshot;
     } catch (error) {
       if (error instanceof UsageLedgerRebuildRequiredError) {
@@ -1179,8 +1200,14 @@ async function refreshWithRetry(
 async function refreshUsageFilterIndex(
   dir: string,
   path: string,
+  extendOnly = false,
 ): Promise<UsageFilterIndexSnapshot> {
-  if (ingestFlight?.path === path) return ingestFlight.promise;
+  // An ingest in flight may be a full rebuild; an extend-only caller never waits on one.
+  if (ingestFlight?.path === path) {
+    if (extendOnly) throw new UsageFilterIndexRebuildNeededError();
+    return ingestFlight.promise;
+  }
+  if (extendOnly && (rebuildRequestedPaths.has(path) || !existsSync(path))) throw new UsageFilterIndexRebuildNeededError();
   const promise = (async () => {
     const db = openIndexForWrite(dir, path);
     try {
@@ -1188,7 +1215,7 @@ async function refreshUsageFilterIndex(
         const rebuilt = await rebuild(db, dir, path, readMeta(db));
         return rebuilt ?? await refreshWithRetry(db, dir, path);
       }
-      return await refreshWithRetry(db, dir, path);
+      return await refreshWithRetry(db, dir, path, extendOnly);
     } finally {
       // A reader in another process can still pin the WAL; then this checkpoint is partial (SQLite
       // reports that as a result row, not an error) and a later writer's TRUNCATE empties it once
@@ -1375,22 +1402,20 @@ function rowAccessIndexWithoutClient(query: UsageFilterIndexQuery): string | nul
 export const CANDIDATE_PAGE_SIZE = 2_000;
 
 /**
- * Pages `usage_rows` for one published generation in offset order over `idx_usage_rows_window`,
- * bounded by the snapshot's indexed offset and the query window. Rows without a usable timestamp
- * are excluded by the window, exactly as an accumulator skips them.
+ * Pages `usage_rows` for one published generation by physical offset (the primary key's order),
+ * bounded by the snapshot's indexed offset. No window predicate sits in the statement: one placed
+ * before the LIMIT made a page scan every row outside the window in one synchronous step (954 ms
+ * on 725,946 rows to return none). The cursor advances past every row examined.
  */
 function indexedRowPager(
   db: Database,
   snapshot: UsageFilterIndexSnapshot,
   query: UsageFilterIndexQuery,
-): () => UsageSourceFields[] {
+): () => { rows: UsageSourceFields[]; done: boolean } {
   const statement = db.query(
     "SELECT byte_offset AS byteOffset, timestamp, api_key_id AS apiKeyId, client, surface, admission_kind AS admissionKind"
-    + " FROM usage_rows WHERE generation = ? AND byte_offset > ? AND byte_offset < ?"
-    + " AND timestamp IS NOT NULL AND timestamp >= ? AND timestamp <= ? ORDER BY byte_offset LIMIT ?",
+    + " FROM usage_rows WHERE generation = ? AND byte_offset > ? AND byte_offset < ? ORDER BY byte_offset LIMIT ?",
   );
-  const since = query.window?.since ?? Number.MIN_SAFE_INTEGER;
-  const until = query.window?.until ?? Number.MAX_SAFE_INTEGER;
   let cursor = (query.afterOffset ?? 0) - 1;
   return () => {
     db.exec("BEGIN");
@@ -1399,19 +1424,23 @@ function indexedRowPager(
       if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || meta.generation !== snapshot.generation) {
         throw new UsageLedgerRebuildRequiredError("content_changed");
       }
-      const rows = statement.all(snapshot.generation, cursor, snapshot.indexedOffset, since, until, CANDIDATE_PAGE_SIZE) as Array<{
-        byteOffset: number; timestamp: number; apiKeyId: string | null; client: string | null; surface: string | null; admissionKind: string | null;
+      const rows = statement.all(snapshot.generation, cursor, snapshot.indexedOffset, CANDIDATE_PAGE_SIZE) as Array<{
+        byteOffset: number; timestamp: number | null; apiKeyId: string | null; client: string | null; surface: string | null; admissionKind: string | null;
       }>;
       db.exec("COMMIT");
       const last = rows.at(-1);
       if (last) cursor = last.byteOffset;
-      return rows.map(row => ({
-        timestamp: row.timestamp,
-        ...(row.apiKeyId !== null ? { apiKeyId: row.apiKeyId } : {}),
-        ...(row.client !== null ? { client: row.client } : {}),
-        ...(row.surface !== null ? { surface: row.surface } : {}),
-        ...(row.admissionKind !== null ? { admissionKind: row.admissionKind } : {}),
-      }));
+      return {
+        done: rows.length < CANDIDATE_PAGE_SIZE,
+        rows: rows.map(row => ({
+          // A row without a usable timestamp reaches the accumulator as NaN, which no window admits.
+          timestamp: row.timestamp ?? Number.NaN,
+          ...(row.apiKeyId !== null ? { apiKeyId: row.apiKeyId } : {}),
+          ...(row.client !== null ? { client: row.client } : {}),
+          ...(row.surface !== null ? { surface: row.surface } : {}),
+          ...(row.admissionKind !== null ? { admissionKind: row.admissionKind } : {}),
+        })),
+      };
     } catch (error) {
       try { db.exec("ROLLBACK"); } catch { /* nothing to roll back */ }
       throw error;
@@ -1552,7 +1581,7 @@ async function readActive(
   path: string,
   query: UsageFilterIndexQuery,
 ): Promise<UsageFilterCandidateRead> {
-  const refreshed = await refreshUsageFilterIndex(dir, path);
+  const refreshed = await refreshUsageFilterIndex(dir, path, query.extendOnly === true);
   testHooks?.afterRefresh?.({ dbPath: path });
   const db = openIndexForRead(path);
   try {
@@ -1613,7 +1642,7 @@ export async function readUsageFilterCandidates(
     try {
       return await readActive(dir, path, query);
     } catch (error) {
-      if (error instanceof UsageFilterIndexSourceError) throw error;
+      if (error instanceof UsageFilterIndexSourceError || error instanceof UsageFilterIndexRebuildNeededError) throw error;
       // A changed home never heals on a re-check; every later open targets the new directory.
       if (error instanceof UsageFilterIndexHomeChangedError) {
         return null;
@@ -1723,6 +1752,34 @@ export async function readUsageFilterCandidatesPassive(
     try { db.exec("ROLLBACK"); } catch { /* transaction may not have started */ }
     db.close();
     return null;
+  }
+}
+
+/**
+ * Whether the index publishing `generation` can answer `revision` by ingesting appended rows only,
+ * judged from its metadata without opening the ledger: the same file, at least as long as indexed
+ * (an equal length must be the identical revision), no rebuild requested and no ingest running.
+ */
+export function usageFilterIndexExtendable(generation: string, revision: UsageLogRevision | null): boolean {
+  const path = indexPathForCurrentHome();
+  if (rebuildRequestedPaths.has(path) || ingestFlight?.path === path || !existsSync(path)) return false;
+  let db: Database;
+  try {
+    db = new Database(path, { readonly: true });
+  } catch {
+    return false;
+  }
+  try {
+    const meta = readMeta(db);
+    if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || meta.generation !== generation) return false;
+    if (usageLogIdentityKey(meta.revision) !== usageLogIdentityKey(revision)) return false;
+    const recorded = meta.revision?.size ?? 0;
+    const size = revision?.size ?? 0;
+    return size > recorded || (size === recorded && usageLogRevisionKey(meta.revision) === usageLogRevisionKey(revision));
+  } catch {
+    return false;
+  } finally {
+    db.close();
   }
 }
 

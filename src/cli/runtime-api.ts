@@ -185,6 +185,27 @@ function responseMessage(body: unknown, status: number, integrationRoute = false
 /** About a minute at the proxy's five-second Retry-After: longer than a cold read of a 5 GB ledger. */
 const USAGE_REBUILD_MAX_ROUNDS = 12;
 
+/**
+ * A usage read the proxy (or the Home over Remote Link) is still building in the background: a
+ * command waits for it at the proxy's own Retry-After, for a bounded number of rounds, rather than
+ * reporting a failure. Returns whether to ask again.
+ */
+async function waitForUsageRebuild(
+  status: number,
+  body: unknown,
+  retryAfterSeconds: number | undefined,
+  method: string,
+  attempt: number,
+  signal: AbortSignal | null | undefined,
+): Promise<boolean> {
+  const rebuilding = status === 503 && method.toUpperCase() === "GET"
+    && typeof body === "object" && body !== null && (body as { error?: unknown }).error === "usage_rebuilding";
+  if (!rebuilding || attempt + 1 >= USAGE_REBUILD_MAX_ROUNDS || signal?.aborted) return false;
+  const seconds = retryAfterSeconds !== undefined && Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds : 5;
+  await new Promise(resolve => setTimeout(resolve, seconds * 1_000));
+  return !signal?.aborted;
+}
+
 export async function runtimeRequest<T = unknown>(
   path: string,
   init: RequestInit = {},
@@ -205,9 +226,12 @@ export async function runtimeRequest<T = unknown>(
     if (!linkChildReadable(method, path)) {
       throw new RuntimeApiError(linkChildRefusal(link, `${method} ${pathname}`), 503, null, "link_child_management_unavailable");
     }
-    const { status, body } = await readLinkHomeJson(link, path, deps.linkHome, init.signal ? { signal: init.signal } : {});
-    if (status < 200 || status >= 300) throw new RuntimeApiError(responseMessage(body, status), status, body);
-    return body as T;
+    for (let attempt = 0; ; attempt += 1) {
+      const { status, body, retryAfterSeconds } = await readLinkHomeJson(link, path, deps.linkHome, init.signal ? { signal: init.signal } : {});
+      if (await waitForUsageRebuild(status, body, retryAfterSeconds, method, attempt, init.signal)) continue;
+      if (status < 200 || status >= 300) throw new RuntimeApiError(responseMessage(body, status), status, body);
+      return body as T;
+    }
   }
   const headers = runningProxyUpdateHeaders();
   for (const [key, value] of new Headers(init.headers).entries()) headers.set(key, value);
@@ -230,13 +254,8 @@ export async function runtimeRequest<T = unknown>(
       try { body = JSON.parse(text); }
       catch { body = text; }
     }
-    // A usage read the proxy is still building in the background: a command waits for it, at the
-    // proxy's own Retry-After, for a bounded number of rounds, rather than reporting a failure.
     const retryAfter = Number(response.headers.get("retry-after"));
-    const rebuilding = response.status === 503 && (init.method ?? "GET").toUpperCase() === "GET"
-      && typeof body === "object" && body !== null && (body as { error?: unknown }).error === "usage_rebuilding";
-    if (!rebuilding || attempt + 1 >= USAGE_REBUILD_MAX_ROUNDS || init.signal?.aborted) break;
-    await new Promise(resolve => setTimeout(resolve, (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 5) * 1_000));
+    if (!await waitForUsageRebuild(response.status, body, retryAfter, init.method ?? "GET", attempt, init.signal)) break;
   }
   if (!response.ok) {
     throw new RuntimeApiError(responseMessage(body, response.status, isIntegrationRoute(path, response)), response.status, body);

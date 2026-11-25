@@ -23,7 +23,8 @@ import type { OcxConfig } from "../../src/types/config";
 import { resetUsageReadCacheForTests, type PersistedUsageEntry } from "../../src/usage/log";
 import * as usageLedgerScannerModule from "../../src/usage/ledger-scanner";
 import { getUsageSourceFacets, resetUsageSourceFacetsForTests } from "../../src/server/management/usage-source-facets";
-import { settleUsageColdRebuildForTests, UsageColdReadPendingError } from "../../src/usage/cold-rebuild-slot";
+import { settleUsageColdRebuildForTests, startUsageColdRebuild, UsageColdReadPendingError } from "../../src/usage/cold-rebuild-slot";
+import { CANDIDATE_PAGE_SIZE, readUsageFilterCandidates, requestUsageFilterIndexRebuild } from "../../src/usage/filter-index";
 import { createSourceFacetAccumulator } from "../../src/usage/source-facets";
 import { rangeWindow } from "../../src/usage/summary";
 import { refreshUserCostOverlays } from "../../src/usage/user-cost-overlays";
@@ -165,6 +166,23 @@ describe("retained usage aggregate cache", () => {
     }
   });
 
+  test("the picker's index pages bound the rows examined, not the rows in the window", async () => {
+    const old = Date.now() - 40 * 24 * 60 * 60 * 1000;
+    writeFileSync(join(testDir, "usage.jsonl"), Array.from({ length: CANDIDATE_PAGE_SIZE + 500 }, (_, index) =>
+      `${JSON.stringify({ ...entry(`old-${index}`), timestamp: old })}\n`).join(""));
+    const now = Date.now();
+    const read = await readUsageFilterCandidates({ provider: null, model: null, apiKeyId: null, window: { since: now - 86_400_000, until: now } });
+    try {
+      // Every row is outside the window, yet the first page stops after one page of physical rows.
+      const first = read!.nextIndexedRows();
+      expect([first.rows.length, first.done]).toEqual([CANDIDATE_PAGE_SIZE, false]);
+      const second = read!.nextIndexedRows();
+      expect([second.rows.length, second.done]).toEqual([500, true]);
+    } finally {
+      read!.close();
+    }
+  });
+
   test("a same-length in-place rewrite is never served from the picker cache", async () => {
     const path = join(testDir, "usage.jsonl");
     const at = Date.now() - 60_000;
@@ -224,6 +242,73 @@ describe("retained usage aggregate cache", () => {
       await expect(getFilteredUsageAggregate(filter, undefined, "background")).rejects.toBeInstanceOf(UsageColdReadPendingError);
       await settleUsageColdRebuildForTests();
       expect(requests(await getFilteredUsageAggregate(filter, undefined, "background"))).toBe(0);
+    } finally {
+      scans.mockRestore();
+    }
+  });
+
+  test("a warm filter whose index needs a full rebuild answers pending before reading the ledger", async () => {
+    writeFileSync(join(testDir, "usage.jsonl"), line("a") + line("b"));
+    const filter = { provider: "openai" };
+    await expect(getFilteredUsageAggregate(filter, undefined, "background")).rejects.toBeInstanceOf(UsageColdReadPendingError);
+    await settleUsageColdRebuildForTests();
+    expect(requests(await getFilteredUsageAggregate(filter, undefined, "background"))).toBe(2);
+    appendFileSync(join(testDir, "usage.jsonl"), line("c"));
+    requestUsageFilterIndexRebuild();
+    const scans = spyOn(usageLedgerScannerModule, "scanUsageLedgerCooperatively");
+    try {
+      await expect(getFilteredUsageAggregate(filter, undefined, "background")).rejects.toBeInstanceOf(UsageColdReadPendingError);
+      expect(scans).not.toHaveBeenCalled(); // the rebuild belongs to the background build
+      await settleUsageColdRebuildForTests();
+      expect(requests(await getFilteredUsageAggregate(filter, undefined, "background"))).toBe(3);
+    } finally {
+      scans.mockRestore();
+    }
+  });
+
+  test("an append observed on a streaming answer leaves it dated until a new build publishes", async () => {
+    const path = join(testDir, "usage.jsonl");
+    writeFileSync(path, line("a"));
+    mkdirSync(join(testDir, "usage-filter-index.sqlite"));
+    const filter = { provider: "openai" };
+    await expect(getFilteredUsageAggregate(filter, undefined, "background")).rejects.toBeInstanceOf(UsageColdReadPendingError);
+    await settleUsageColdRebuildForTests();
+    // Another build holds the slot, so the refresh the append asks for cannot start.
+    let release!: () => void;
+    startUsageColdRebuild("fixture-occupant", () => new Promise<void>(resolve => { release = resolve; }));
+    try {
+      appendFileSync(path, line("b"));
+      for (let read = 0; read < 2; read += 1) {
+        const result = await getFilteredUsageAggregate(filter, undefined, "background");
+        expect([result.update, requests(result)]).toEqual(["dated", 1]);
+        expect(result.snapshotAt).toBeNumber();
+      }
+    } finally {
+      await Bun.sleep(5);
+      release();
+      await settleUsageColdRebuildForTests();
+    }
+  });
+
+  test("filtered builds are admitted only while a delivery slot is free", async () => {
+    writeFileSync(join(testDir, "usage.jsonl"), line("a"));
+    for (const model of ["m1", "m2", "m3", "m4"]) {
+      await expect(getFilteredUsageAggregate({ model }, undefined, "background")).rejects.toBeInstanceOf(UsageColdReadPendingError);
+      await settleUsageColdRebuildForTests();
+    }
+    // Four completed answers wait for their retries: a fifth filter is busy and starts no scan.
+    const scans = spyOn(usageLedgerScannerModule, "scanUsageLedgerCooperatively");
+    try {
+      const busy = await getFilteredUsageAggregate({ model: "m5" }, undefined, "background").catch(error => error);
+      expect(busy).toBeInstanceOf(UsageColdReadPendingError);
+      expect((busy as UsageColdReadPendingError).state).toBe("busy");
+      await settleUsageColdRebuildForTests();
+      expect(scans).not.toHaveBeenCalled();
+      // A delivered answer frees its slot for the next filter.
+      expect((await getFilteredUsageAggregate({ model: "m1" }, undefined, "background")).update).toBe("unchanged");
+      await expect(getFilteredUsageAggregate({ model: "m5" }, undefined, "background")).rejects.toBeInstanceOf(UsageColdReadPendingError);
+      await settleUsageColdRebuildForTests();
+      expect((await getFilteredUsageAggregate({ model: "m5" }, undefined, "background")).update).toBe("unchanged");
     } finally {
       scans.mockRestore();
     }

@@ -4,6 +4,7 @@
  * Two sequential GET /api/usage reads with acknowledged custom bounds.
  * `--range all` is refused: there is no previous equal window for open history.
  */
+import { HubClientError } from "../client/hub-client";
 import { readClientConnectionState, sameClientConnectionOwner } from "../client/state";
 import { fetchHubUsage } from "../client/hub-client";
 import { readServiceApiTokenState, serviceApiTokenFingerprint } from "../lib/service-secrets";
@@ -248,6 +249,11 @@ function pinUsageRuntime(deps: UsageCompareDeps, owner: UsageOwner): (suffix: st
     if (read.kind === "unavailable") {
       throw new RuntimeApiError(`Local usage read unavailable (${read.reason}). No comparison was produced.`, 503, null);
     }
+    if (read.response.status === 503) {
+      const body = await read.response.json().catch(() => null) as { error?: unknown } | null;
+      const retryAfter = Number(read.response.headers.get("retry-after"));
+      if (body?.error === "usage_rebuilding") throw new UsagePendingError(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 5);
+    }
     if (!read.response.ok) {
       throw new RuntimeApiError(`Usage request failed (HTTP ${read.response.status}). No comparison was produced.`, read.response.status, null);
     }
@@ -255,6 +261,40 @@ function pinUsageRuntime(deps: UsageCompareDeps, owner: UsageOwner): (suffix: st
     assertRuntime();
     return result;
   };
+}
+
+/** The proxy or hub is still building this window's report; ask again after `retryAfterSeconds`. */
+class UsagePendingError extends Error {
+  constructor(readonly retryAfterSeconds: number) {
+    super("usage report pending");
+    this.name = "UsagePendingError";
+  }
+}
+
+/** Bounds how long one comparison waits for its two reports to be built (a cold 5 GB ledger fits). */
+const USAGE_COMPARE_PENDING_DEADLINE_MS = 120_000;
+
+/**
+ * Reads one frozen window, asking again while the report is pending, at the server's Retry-After,
+ * until the comparison's total deadline. Every attempt is a whole read: a local one rechecks the
+ * runtime and owner and mints a fresh single-use grant, so no grant is ever replayed.
+ */
+async function readUsageWhilePending(read: () => Promise<ScopedUsage>, deadline: number): Promise<ScopedUsage> {
+  for (;;) {
+    try {
+      return await read();
+    } catch (error) {
+      const retryAfter = error instanceof UsagePendingError ? error.retryAfterSeconds
+        : error instanceof HubClientError && error.status === 503 ? error.retryAfterSeconds : undefined;
+      if (retryAfter === undefined || Date.now() + retryAfter * 1_000 > deadline) {
+        if (error instanceof UsagePendingError) {
+          throw new RuntimeApiError("The usage report is still being built from the usage log; no comparison was produced. Retry shortly.", 503, null);
+        }
+        throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, retryAfter * 1_000));
+    }
+  }
 }
 
 function assertUsageOwner(owner: UsageOwner): void {
@@ -302,7 +342,7 @@ async function readUsage(
     try {
       result = await localRead!(suffix);
     } catch (error) {
-      if (apiKeyId === undefined) throw error;
+      if (apiKeyId === undefined || error instanceof UsagePendingError) throw error;
       if (error instanceof RuntimeApiError) throw error;
       throw new Error("Key-scoped usage could not be read. Check runtime access and retry.");
     }
@@ -341,8 +381,10 @@ export async function handleUsageCompareCommand(argv: string[], deps: UsageCompa
   const filters = { range, surface, provider, model, apiKeyId };
   const owner = captureUsageOwner();
   const localRead = owner.connection.kind === "disconnected" ? pinUsageRuntime(deps, owner) : undefined;
-  const currentReport = await readUsage(query({ ...filters, since: windows.current.since, until: windows.current.until }), windows.current, apiKeyId, deps, owner, localRead);
-  const previousReport = await readUsage(query({ ...filters, since: windows.previous.since, until: windows.previous.until }), windows.previous, apiKeyId, deps, owner, localRead);
+  // Both windows stay frozen across retries, so a pending report is retried for the same bounds.
+  const deadline = Date.now() + USAGE_COMPARE_PENDING_DEADLINE_MS;
+  const currentReport = await readUsageWhilePending(() => readUsage(query({ ...filters, since: windows.current.since, until: windows.current.until }), windows.current, apiKeyId, deps, owner, localRead), deadline);
+  const previousReport = await readUsageWhilePending(() => readUsage(query({ ...filters, since: windows.previous.since, until: windows.previous.until }), windows.previous, apiKeyId, deps, owner, localRead), deadline);
   const current = totalsOf(currentReport);
   const previous = totalsOf(previousReport);
   const deltaTotals: Totals = {};

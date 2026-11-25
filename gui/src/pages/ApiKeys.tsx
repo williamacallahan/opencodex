@@ -38,8 +38,12 @@ interface KeysResponse extends UsageReadMetadata {
   usageIncluded?: boolean;
   /** The server is still reading the usage log for these keys; ask again shortly. */
   usagePending?: boolean;
+  /** The last read of the usage log failed; asking again will not help until it is repaired. */
+  usageUnavailable?: boolean;
   /** When the served per-key usage was completed. */
   usageAsOf?: string;
+  /** The counts come from an earlier revision of the log or are past their freshness. */
+  usageDated?: boolean;
   // Only an explicit minimal response may omit usage; missing statistics are not zeroes.
   keys?: Array<Omit<ApiKeyEntry, "usage"> & { usage?: ApiKeyEntry["usage"] }>;
   attributionSince?: string;
@@ -71,7 +75,9 @@ type CachedKeysShape = UsageReadMetadata & {
   keys: ApiKeyEntry[];
   usageIncluded?: boolean;
   usagePending?: true;
+  usageUnavailable?: true;
   usageAsOf?: string;
+  usageDated?: true;
   endpoints: ApiEndpointInfo;
   claudeCodeEnabled: boolean;
   /** Absent when the server predates API surface settings. */
@@ -192,7 +198,9 @@ export default function ApiKeys({ apiBase, active = true }: { apiBase: string; a
       keys: validatedKeys,
       ...(data.usageIncluded === false ? { usageIncluded: false } : {}),
       ...(data.usagePending === true ? { usagePending: true as const } : {}),
+      ...(data.usageUnavailable === true ? { usageUnavailable: true as const } : {}),
       ...(typeof data.usageAsOf === "string" ? { usageAsOf: data.usageAsOf } : {}),
+      ...(data.usageDated === true ? { usageDated: true as const } : {}),
       endpoints: {
         baseUrl: data.baseUrl ?? derived.baseUrl,
         responses: data.responsesEndpoint ?? data.endpoint ?? DEFAULT_ENDPOINTS.responses,
@@ -624,6 +632,8 @@ export default function ApiKeys({ apiBase, active = true }: { apiBase: string; a
         attributionSince={attributionSince}
         historyTruncated={historyTruncated}
         usageMetadata={readUsageMetadata(usageData)}
+        usageState={usageData?.usagePending ? "pending" : usageData?.usageUnavailable ? "unavailable" : undefined}
+        usageAsOf={usageData?.usageDated ? usageData.usageAsOf : undefined}
         authMatrix={authMatrix}
         keysLoading={false}
         keysLoadFailed={keysState.showError}

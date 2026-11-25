@@ -55,6 +55,8 @@ export interface StartedClientKeyRotation extends IssuedClientKey {
 }
 
 export class HubClientError extends Error {
+  /** Set when the hub answered pending with a Retry-After interval. */
+  retryAfterSeconds?: number;
   constructor(
     readonly code: string,
     message: string,
@@ -504,7 +506,11 @@ export async function fetchHubUsage(
     const message = response.status === 404 ? `${Peer} does not support client usage; upgrade the ${peer}`
       : response.status === 401 || response.status === 403 ? `${Peer} rejected this ${peer === "Home" ? "Child's link key" : "client's usage credential"}`
       : `${Peer} usage request failed (${response.status})`;
-    throw new HubClientError(`hub_usage_http_${response.status}`, message, response.status);
+    const error = new HubClientError(`hub_usage_http_${response.status}`, message, response.status);
+    // A 503 with Retry-After is the hub still building the report: the caller may ask again then.
+    const retryAfter = Number(response.headers.get("retry-after"));
+    if (response.status === 503 && Number.isFinite(retryAfter) && retryAfter > 0) error.retryAfterSeconds = retryAfter;
+    throw error;
   }
   if (!jsonCompatibleContentType(response)) {
     try { await response.body?.cancel(); } catch { /* best effort */ }

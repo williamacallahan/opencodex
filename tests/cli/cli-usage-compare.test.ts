@@ -174,6 +174,33 @@ describe("ocx usage compare", () => {
     expect(result.out).toContain("Cache write share");
   });
 
+  test("a pending window is read again in the same invocation, for the same bounds, with a fresh grant", async () => {
+    const expected = compareUsageWindows("today", NOW);
+    const urls: URL[] = [];
+    const nonces: string[] = [];
+    let n = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      urls.push(url);
+      nonces.push(new Request(input, init).headers.get(LOCAL_MANAGEMENT_NONCE_HEADER) ?? "");
+      n += 1;
+      if (n === 1) return Response.json({ error: "usage_rebuilding" }, { status: 503, headers: { "retry-after": "1" } });
+      return Response.json(report(url, n === 2 ? 20 : 10));
+    };
+    const lines: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+    try {
+      expect(await handleObserveCommand(["usage", "compare", "--range", "today", "--json"], localDeps(fetchImpl))).toBe(0);
+    } finally {
+      console.log = originalLog;
+    }
+    expect(urls).toHaveLength(3);
+    expect([urls[0]!.searchParams.get("until"), urls[1]!.searchParams.get("until")]).toEqual([String(expected.current.until), String(expected.current.until)]);
+    expect(new Set(nonces).size).toBe(3);
+    expect(JSON.parse(lines.join("\n")).current.summary.requests).toBe(20);
+  });
+
   test("JSON carries delta, percent change, and 1d as today", async () => {
     const expected = compareUsageWindows("today", NOW);
     const result = await run(["usage", "compare", "--range", "1d", "--json"]);

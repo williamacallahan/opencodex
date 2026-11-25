@@ -12,6 +12,8 @@ import {
 } from "../../usage/ledger-scanner";
 import {
   readUsageFilterCandidates,
+  usageFilterIndexExtendable,
+  UsageFilterIndexRebuildNeededError,
   readUsageFilterCandidatesPassive,
   requestUsageFilterIndexRebuild,
   resetUsageFilterIndexForTests,
@@ -35,7 +37,7 @@ import {
   type JevStatsAccumulator,
 } from "../../usage/jev-stats";
 
-import { requestUsageColdRebuild, startUsageColdRebuild } from "../../usage/cold-rebuild-slot";
+import { requestUsageColdRebuild, startUsageColdRebuild, UsageColdReadPendingError } from "../../usage/cold-rebuild-slot";
 import { observedUsageRevision, observeUsageRevision, type ObservedUsageRevision } from "../../usage/revision-observation";
 import {
   cacheApiKeyUsageFromRollup,
@@ -378,7 +380,10 @@ export async function getFilteredUsageAggregate(
   const flight = refreshFilteredAggregate(key, normalizedFilter, fixedWindow, cold, onBuilt);
   filteredFlights.set(key, flight);
   try {
-    return await flight;
+    const result = await flight;
+    // Delivered: the slot that held this answer for its retry is free again.
+    if (cold === "background") releaseDeliverySlot(key);
+    return result;
   } finally {
     if (filteredFlights.get(key) === flight) filteredFlights.delete(key);
   }
@@ -407,6 +412,46 @@ type RetainedFilteredAggregate = RetainedUsageAggregate & {
 
 /** Covers the Retry-After a pending answer sends, with room for a slow client. */
 const PUBLISHED_RESULT_HOLD_MS = 15_000;
+/**
+ * Delivery slots for background filtered builds: a build is admitted only with a reserved slot, its
+ * result is published into that slot (protected from trimming and memory eviction) and the slot is
+ * released when a request receives the result or `PUBLISHED_RESULT_HOLD_MS` after publication. Four
+ * slots of at most 32 MiB each bound what completed-but-undelivered answers can hold.
+ */
+const MAX_DELIVERY_SLOTS = 4;
+const MAX_DELIVERY_BYTES = 32 * 1024 * 1024;
+/** Filter key -> when its published result stops being held (`null` while the build runs). */
+const deliverySlots = new Map<string, number | null>();
+
+/** The completed answer did not fit its delivery slot; reported to the retry as unavailable. */
+export class UsageAnswerTooLargeError extends Error {}
+
+function pruneDeliverySlots(now: number): void {
+  for (const [key, until] of deliverySlots) {
+    if (until !== null && now >= until) {
+      deliverySlots.delete(key);
+      const state = retainedFilteredAggregates.get(key);
+      if (state) delete state.protectedUntil;
+    }
+  }
+}
+
+/** Reserve `key`'s delivery slot, unless every slot already holds another key's undelivered answer. */
+function reserveDeliverySlot(key: string): boolean {
+  pruneDeliverySlots(Date.now());
+  if (deliverySlots.has(key)) return true;
+  if (deliverySlots.size >= MAX_DELIVERY_SLOTS) return false;
+  deliverySlots.set(key, null);
+  return true;
+}
+
+function releaseDeliverySlot(key: string): void {
+  if (!deliverySlots.has(key) || deliverySlots.get(key) === null) return;
+  deliverySlots.delete(key);
+  const state = retainedFilteredAggregates.get(key);
+  if (state) delete state.protectedUntil;
+  trimRetainedFilteredAggregates();
+}
 
 function isProtected(state: RetainedFilteredAggregate): boolean {
   return state.protectedUntil !== undefined && Date.now() < state.protectedUntil;
@@ -576,11 +621,11 @@ async function withFilterIndexRetry<T>(run: () => Promise<T>): Promise<T> {
   throw lastError ?? new Error("filtered usage aggregate did not settle");
 }
 
-/** Trims the oldest unpinned, unprotected results, never `keep`: the result being published now. */
-function trimRetainedFilteredAggregates(keep?: string): void {
+/** Trims the oldest results that are neither pinned by a read nor held in a delivery slot. */
+function trimRetainedFilteredAggregates(): void {
   while (retainedFilteredAggregates.size > MAX_RETAINED_FILTERED_AGGREGATES) {
     const oldest = [...retainedFilteredAggregates]
-      .filter(([key, state]) => key !== keep && !pinnedAggregates.has(state) && !isProtected(state))
+      .filter(([, state]) => !pinnedAggregates.has(state) && !isProtected(state))
       .sort(([, left], [, right]) => left.retainedAt - right.retainedAt)[0];
     if (!oldest) return;
     retainedFilteredAggregates.delete(oldest[0]);
@@ -593,8 +638,14 @@ function publishFilteredAggregate(
   update: UsageFilterQueryStats["scope"],
   read: UsageFilterCandidateRead | null,
 ): UsageAggregateResult {
+  // A result built for a reserved delivery slot is protected before anything can trim or evict it.
+  if (deliverySlots.has(key) && state.accumulator.estimatedBytes <= MAX_DELIVERY_BYTES) {
+    const until = Date.now() + PUBLISHED_RESULT_HOLD_MS;
+    deliverySlots.set(key, until);
+    state.protectedUntil = until;
+  }
   retainedFilteredAggregates.set(key, state);
-  trimRetainedFilteredAggregates(key);
+  trimRetainedFilteredAggregates();
   enforceAppOwnedMemoryBudgetIfNeeded();
   return read
     ? { ...resultFrom(state, update), filterIndex: filterStats(read, update) }
@@ -640,7 +691,16 @@ function admitFilteredBuild(
   window: UsageTimeWindow | undefined,
   onBuilt?: UsageAggregateOptions["onBuilt"],
 ): never {
-  return requestUsageColdRebuild(`filtered:${key}`, () => buildFilteredInBackground(key, filter, window, onBuilt));
+  const reservedHere = !deliverySlots.has(key);
+  // Every slot holds an undelivered answer: busy, without starting a scan whose result has no room.
+  if (!reserveDeliverySlot(key)) throw new UsageColdReadPendingError("busy");
+  try {
+    return requestUsageColdRebuild(`filtered:${key}`, () => buildFilteredInBackground(key, filter, window, onBuilt));
+  } catch (error) {
+    // Only a build this call started (or joined) keeps the reservation.
+    if (reservedHere && !(error instanceof UsageColdReadPendingError && error.state !== "busy")) deliverySlots.delete(key);
+    throw error;
+  }
 }
 
 async function buildFilteredInBackground(
@@ -649,9 +709,18 @@ async function buildFilteredInBackground(
   window: UsageTimeWindow | undefined,
   onBuilt?: UsageAggregateOptions["onBuilt"],
 ): Promise<void> {
-  const result = await refreshFilteredAggregate(key, filter, window, "await");
-  const published = retainedFilteredAggregates.get(key);
-  if (published) published.protectedUntil = Date.now() + PUBLISHED_RESULT_HOLD_MS;
+  let result: UsageAggregateResult;
+  try {
+    result = await refreshFilteredAggregate(key, filter, window, "await");
+  } catch (error) {
+    deliverySlots.delete(key);
+    throw error;
+  }
+  if (deliverySlots.get(key) === null) {
+    // Published without fitting the slot: say so to the retry rather than scanning the same revision again.
+    deliverySlots.delete(key);
+    throw new UsageAnswerTooLargeError("the filtered usage answer exceeds its delivery bound");
+  }
   onBuilt?.(result);
 }
 
@@ -671,17 +740,23 @@ function backgroundFilteredAnswer(
   if (!state || state.overlayVersion !== userCostOverlayVersion() || state.timeZone !== currentTimeZone()) {
     return admitFilteredBuild(key, filter, window, onBuilt);
   }
-  const observation = observeUsageRevision(state.lastObserved, currentUsageLogRevision());
-  if (observation === "rewritten") {
+  const current = currentUsageLogRevision();
+  // The last observation only detects a destructive change; it never makes a result exact.
+  if (observeUsageRevision(state.lastObserved, current) === "rewritten") {
     retainedFilteredAggregates.delete(key);
+    releaseDeliverySlot(key);
     return admitFilteredBuild(key, filter, window, onBuilt);
   }
-  if (state.indexGeneration !== null) return null;
-  if (observation === "same") {
-    state.retainedAt = Date.now();
-    return resultFrom(state, "unchanged");
+  if (state.indexGeneration !== null) {
+    // An indexed result extends by appended rows only when the index can, from its metadata alone.
+    if (!usageFilterIndexExtendable(state.indexGeneration, current)) return admitFilteredBuild(key, filter, window, onBuilt);
+    return null;
   }
-  startUsageColdRebuild(`filtered:${key}`, () => buildFilteredInBackground(key, filter, window, onBuilt));
+  // Exact only when the file is still the revision the accumulator was built from.
+  if (usageLogRevisionKey(current) === state.revisionKey) return resultFrom(state, "unchanged");
+  if (reserveDeliverySlot(key) && startUsageColdRebuild(`filtered:${key}`, () => buildFilteredInBackground(key, filter, window, onBuilt)) === "busy") {
+    if (deliverySlots.get(key) === null) deliverySlots.delete(key);
+  }
   return { ...resultFrom(state, "dated"), snapshotAt: state.retainedAt };
 }
 
@@ -768,6 +843,8 @@ async function refreshFilteredAggregate(
       const read = await readCandidates({
         ...filterQuery(filter, window),
         afterOffset: state.processedThroughBytes,
+        // A request may extend the index by appended rows; any full ingest is the admitted build's.
+        ...(cold === "background" ? { extendOnly: true as const } : {}),
       });
       if (!read) {
         retainedFilteredAggregates.delete(key);
@@ -809,6 +886,9 @@ async function refreshFilteredAggregate(
       return appendFilteredAggregate(key, state, filter, read, overlayVersion, timeZone);
     });
   } catch (error) {
+    if (error instanceof UsageFilterIndexRebuildNeededError && cold === "background") {
+      return admitFilteredBuild(key, filter, window, onBuilt);
+    }
     if (error instanceof UsageFilterIndexPageError) {
       // A page failed after its reader was handed out: the index cannot serve this query,
       // so answer from the authoritative ledger scan instead of failing the request.
@@ -994,10 +1074,12 @@ export function usageAggregateRetainedStats(): UsageAggregateRetainedStats {
   let evictableBytes = 0;
   let pinnedBytes = 0;
   let oldestAt: number | null = null;
+  const heldForDelivery = new Set<RetainedAggregateState>([...retainedFilteredAggregates.values()].filter(isProtected));
   for (const state of states) {
     const stateBytes = state.accumulator.estimatedBytes;
     bytes += stateBytes;
-    if (pinnedAggregates.has(state)) pinnedBytes += stateBytes;
+    // A result held in a delivery slot cannot be evicted either, so the budget sees it as pinned.
+    if (pinnedAggregates.has(state) || heldForDelivery.has(state)) pinnedBytes += stateBytes;
     else {
       evictableBytes += stateBytes;
       oldestAt = oldestAt === null ? state.retainedAt : Math.min(oldestAt, state.retainedAt);
@@ -1038,6 +1120,7 @@ export function discardRetainedUsageAggregate(): number {
 }
 
 export function resetUsageAggregateCacheForTests(): void {
+  deliverySlots.clear();
   retainedAggregate = null;
   pinnedAggregates.clear();
   baseFlight = null;

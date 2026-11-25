@@ -89,6 +89,7 @@ import {
   getUsageSummaryCacheEntry,
   heldUsageSummary,
   holdUsageSummaryForRetry,
+  retireUsageSummaryRevision,
   setUsageSummaryCacheEntry,
 } from "./usage-summary-cache";
 import {
@@ -342,16 +343,19 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
       // ledger only grows past the revision last observed with it; a shrink, a replacement or a
       // same-length rewrite drops it before any ordinary or dated hit.
       const cached = filterRequested ? undefined : getUsageSummaryCacheEntry(cacheKey) ?? heldUsageSummary(cacheKey);
-      const cachedValid = cached !== undefined
+      const rewritten = cached !== undefined && observeUsageRevision(cached.observed, observed) === "rewritten";
+      // A rewritten or shrunk revision retires every summary of it, including the copy held for a
+      // retry; budget eviction alone never does.
+      if (cached && rewritten) retireUsageSummaryRevision(cached.revisionKey);
+      const cachedValid = cached !== undefined && !rewritten
         && cached.maxReadBytes === effectiveReadLimit
         && cached.overlayVersion === userCostOverlayVersion()
         && cached.timeZone === observedTimeZone
-        && now < cached.expiresAt
-        && observeUsageRevision(cached.observed, observed) !== "rewritten";
+        && now < cached.expiresAt;
       if (cached && cachedValid && now < cached.freshUntil) {
         return jsonResponse(refreshedUsageSummary(cached.summary, range, now));
       }
-      if (cached && !cachedValid) discardUsageSummaryCacheEntry(cacheKey);
+      if (cached && !cachedValid && !rewritten) discardUsageSummaryCacheEntry(cacheKey);
       if (filterRequested) {
         const filteredAggregate = await getFilteredUsageAggregate(filter, window, "background");
         if (sessionGuard) {

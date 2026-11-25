@@ -103,6 +103,20 @@ export function heldUsageSummary(key: string): Omit<UsageSummaryCacheEntry, "siz
   return undefined;
 }
 
+/**
+ * Retire every summary of one ledger revision, cached or held, after a read saw that revision
+ * rewritten or shrunk. Unlike budget eviction, nothing of it may answer again, however the file
+ * grows back.
+ */
+export function retireUsageSummaryRevision(revisionKey: string): void {
+  for (const [key, entry] of [...usageSummaryCache]) {
+    if (entry.revisionKey === revisionKey) deleteUsageSummaryCacheEntry(key);
+  }
+  for (const [key, held] of [...heldSummaries]) {
+    if (held.entry.revisionKey === revisionKey) heldSummaries.delete(key);
+  }
+}
+
 export function usageSummaryRetainedStoreSnapshot(): RetainedStoreSnapshot {
   return {
     count: usageSummaryCache.size,
