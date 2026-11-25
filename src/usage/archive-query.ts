@@ -45,11 +45,14 @@ export const TOTALS_CACHE_MAX_BUCKETS = 100_000;
 
 export const yieldToEventLoop = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0));
 
-/** A counted segment as the listing knows it: name, path, length, mtime, and whether a totals file exists. */
+/**
+ * A counted segment as the listing knows it: name, path, mtime, its actual length in `bytes` (which a
+ * totals file must match, whatever the name says), and its totals file's revision when one exists.
+ */
 export interface ArchiveSegmentEntry extends ArchiveSegmentName {
   path: string;
   mtimeMs: number;
-  totalsMtimeMs: number | undefined;
+  totalsRevision: string | undefined;
 }
 
 export interface ArchiveListing {
@@ -124,7 +127,7 @@ interface ListingCache {
   directoryMtimeMs: number;
   checkedAt: number;
   listedAt: number;
-  entries: Array<ArchiveSegmentName & { path: string; mtimeMs: number; totalsMtimeMs: number | undefined }>;
+  entries: ArchiveSegmentEntry[];
 }
 let listingCache: ListingCache | null = null;
 
@@ -138,8 +141,8 @@ async function listDirectory(directory: string, directoryMtimeMs: number, now: n
     try {
       const segmentStat = await stat(path);
       const totalsName = archiveTotalsName(segment.name);
-      const totalsMtimeMs = present.has(totalsName) ? (await stat(join(directory, totalsName)).catch(() => undefined))?.mtimeMs : undefined;
-      entries.push({ ...segment, path, mtimeMs: segmentStat.mtimeMs, totalsMtimeMs });
+      const totalsRevisionNow = present.has(totalsName) ? await totalsRevision(join(directory, totalsName)) : undefined;
+      entries.push({ ...segment, bytes: Number(segmentStat.size), path, mtimeMs: segmentStat.mtimeMs, totalsRevision: totalsRevisionNow });
     } catch (error) {
       // Pruned between the listing and its stat: it holds nothing to count any more.
       if (!isMissing(error)) throw error;
@@ -199,7 +202,7 @@ export function rowCoverage(totals: Pick<ArchiveTotalsFile, "firstRowAt" | "last
   };
 }
 
-const spanCache = new Map<string, { totalsMtimeMs: number; span: { firstRowAt: number | null; lastRowAt: number | null } | null }>();
+const spanCache = new Map<string, { revision: string; span: { firstRowAt: number | null; lastRowAt: number | null } | null }>();
 
 /**
  * The span a segment's rows can occupy, once its current totals file has been read: `null` when its
@@ -207,7 +210,7 @@ const spanCache = new Map<string, { totalsMtimeMs: number; span: { firstRowAt: n
  */
 export function knownSpan(entry: ArchiveSegmentEntry): { firstRowAt: number | null; lastRowAt: number | null } | null | undefined {
   const known = spanCache.get(totalsPathOf(entry));
-  return known !== undefined && known.totalsMtimeMs === entry.totalsMtimeMs ? known.span : undefined;
+  return known !== undefined && known.revision === entry.totalsRevision ? known.span : undefined;
 }
 
 const spanReaches = (span: { firstRowAt: number | null; lastRowAt: number | null }, since: number, until: number): boolean =>
@@ -238,7 +241,7 @@ export function uncountedMayOverlap(built: ArchiveSegmentBuilt, since: number, u
 }
 
 /** Least-recently-used parsed totals, keyed by totals path and bounded by their bucket count. */
-const totalsCache = new Map<string, { totalsMtimeMs: number; bytes: number; totals: ArchiveTotalsFile }>();
+const totalsCache = new Map<string, { revision: string; bytes: number; totals: ArchiveTotalsFile }>();
 let cachedBuckets = 0;
 
 /** Test seam: the number of totals files read from disk, to prove a window reads only its own segments. */
@@ -267,10 +270,10 @@ async function totalsRevision(path: string): Promise<string | undefined> {
 
 /** A segment's current totals, from the cache or one asynchronous read. */
 export async function loadTotals(entry: ArchiveSegmentEntry): Promise<ArchiveTotalsFile | undefined> {
-  if (entry.totalsMtimeMs === undefined) return undefined;
+  if (entry.totalsRevision === undefined) return undefined;
   const key = totalsPathOf(entry);
   const cached = totalsCache.get(key);
-  if (cached && cached.totalsMtimeMs === entry.totalsMtimeMs && cached.bytes === entry.bytes) {
+  if (cached && cached.revision === entry.totalsRevision && cached.bytes === entry.bytes) {
     totalsCache.delete(key);
     totalsCache.set(key, cached);
     return cached.totals;
@@ -298,8 +301,8 @@ export async function loadTotals(entry: ArchiveSegmentEntry): Promise<ArchiveTot
     return undefined;
   }
   unusableTotals.delete(key);
-  spanCache.set(key, { totalsMtimeMs: entry.totalsMtimeMs, span: rowCoverage({ ...totals, uncounted: uncountedCoverage(totals) }) });
-  totalsCache.set(key, { totalsMtimeMs: entry.totalsMtimeMs, bytes: entry.bytes, totals });
+  spanCache.set(key, { revision: entry.totalsRevision, span: rowCoverage({ ...totals, uncounted: uncountedCoverage(totals) }) });
+  totalsCache.set(key, { revision: entry.totalsRevision, bytes: entry.bytes, totals });
   cachedBuckets += totals.buckets.length;
   evictTotals();
   return totals;
@@ -360,7 +363,7 @@ export async function buildMissingArchiveTotals(limit: number, configDir = getCo
   const missing: ArchiveSegmentEntry[] = [];
   for (const entry of [...listing.segments].reverse()) {
     // A totals file that exists is checked against its segment once; spans are then known for coverage.
-    if (entry.totalsMtimeMs !== undefined && (knownSpan(entry) || await loadTotals(entry))) continue;
+    if (entry.totalsRevision !== undefined && (knownSpan(entry) || await loadTotals(entry))) continue;
     if (!archiveTotalsBuildFailure(entry.path)) missing.push(entry);
     await yieldToEventLoop();
   }

@@ -58,9 +58,9 @@ describe("usage archive totals bounds", () => {
     const listing = {
       segments: Array.from({ length: 30 }, (_, index) => ({
         name: `seg-${index}`, label: new Date(hour + index * 3_600_000).toISOString().replaceAll(":", "-"), ino: String(index), bytes: 1,
-        path: join(archiveDirectory(), `seg-${index}.jsonl`), mtimeMs: hour + (index + 1) * 3_600_000, totalsMtimeMs: 1,
+        path: join(archiveDirectory(), `seg-${index}.jsonl`), mtimeMs: hour + (index + 1) * 3_600_000, totalsRevision: "1",
       })),
-      skipped: [],
+      ambiguous: [],
       liveLedgerSince: null,
     };
     const held: Array<WeakRef<object>> = [];

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { handleManagementAPI } from "../../src/server/management-api";
@@ -351,6 +351,29 @@ describe("GET /api/usage/archive", () => {
     expect(body.coverage.ambiguousSegments?.sort()).toEqual([basename(first), basename(second)].sort());
     // Both stay where they are, unread by anything but this answer.
     expect(readdirSync(archiveDirectory()).sort()).toEqual([basename(first), basename(second), basename(archiveTotalsPath(first)), basename(archiveTotalsPath(second))].sort());
+  });
+
+  test("totals replaced under the same mtime are read again, and totals of a segment that changed length are not served", async () => {
+    const rows = archiveRows(5);
+    const path = await builtSegment("519", rows);
+    const totalsPath = archiveTotalsPath(path);
+    // A whole-second mtime, so the rewrite below can carry exactly the same one.
+    const mtime = new Date(Math.floor(Date.now() / 1000) * 1000 - 60_000);
+    utimesSync(totalsPath, mtime, mtime);
+    noteArchiveChanged();
+    const all = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 6 * HOUR);
+    expect((await archiveGet(all)).body.summary.requests).toBe(5);
+    const totals = JSON.parse(readFileSync(totalsPath, "utf8")) as { buckets: Array<{ requests: number }> };
+    for (const bucket of totals.buckets) bucket.requests = 0;
+    writeFileSync(totalsPath, JSON.stringify(totals));
+    utimesSync(totalsPath, mtime, mtime);
+    noteArchiveChanged();
+    expect((await archiveGet(all)).body.summary.requests).toBe(0);
+    // The segment's name still says its old length, but the file grew: its totals no longer describe it.
+    appendFileSync(path, jsonl(archiveRows(1, undefined, 50)));
+    noteArchiveChanged();
+    const grown = await archiveGet(all);
+    expect(grown.body).toMatchObject({ complete: false, summary: null });
   });
 
   test("coverage reports the per-segment caps, so a caller knows a breakdown may fold keys", async () => {

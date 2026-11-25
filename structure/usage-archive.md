@@ -24,18 +24,11 @@ totals build and the startup pass over an archive holding a valid-looking segmen
 temp-style name, a nested directory, an operator file and a link, and checks every byte, the link and
 its target, and the ledger are unchanged.
 
-## Known gaps until slice 2
-
-The read side is not yet exact in these cases; the totals route's `complete: false` covers only a
-segment with no usable totals.
+## Known gaps
 
 - Uninstall still removes `usage.jsonl` and `usage-archive` (catalog-owned removal lands with slice 3/4).
-
-- The span cache is keyed on totals path and mtime, so a totals file replaced with the same mtime keeps
-  serving the old span.
 - The first read after a restart reads every segment's totals file once, with no budget on that cold
   pass.
-- A segment's byte length is taken from its name, not its actual size, when matching its totals.
 
 ## Attribution
 
@@ -142,7 +135,9 @@ exact span once its totals have been read, and otherwise always answers yes: a n
 and a file's mtime are not a trustworthy span (a row is stamped when its request starts and appended
 when it completes, no hub setting bounds a request's total duration, and an mtime can be changed), so
 a segment is never dropped by them. Its totals file is read once to learn its span, which is then
-cached by totals mtime, or, without usable totals, it is reported pending or failed.
+cached by the totals file's revision (device, inode, size, mtime, ctime), or, without usable totals,
+it is reported pending or failed. A totals file is matched against the segment's actual length, not
+the length in its name, so a segment that grew or shrank is never described by its old totals.
 
 `answerArchiveTotals` in `src/usage/archive-answer.ts` loads, folds and drops one segment's totals at
 a time, keeping only its span and hour index, so a request never holds more than one segment's
