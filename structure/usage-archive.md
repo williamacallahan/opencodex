@@ -189,9 +189,13 @@ smallest `hourOffsets` offset among hours at or after the hour before `since`'s,
 uncounted rows, which have no hour offset, may lie in the window) to its end: a row is
 stamped when its request starts and appended when it ends, and no setting bounds a request's
 duration, so a row in the window can follow rows stamped hours later and no offset can prove the
-window's rows are over. A read also stops at `limit + 1` matching rows or the deadline, and a segment
-replaced or shortened while it is read ends as `segment-changed`; each of those answers
-`incomplete: true`. A segment without current totals is never
+window's rows are over. A read also stops at `limit + 1` matching rows or the deadline. Each scan is
+bound to the segment revision the listing recorded (`archiveFileRevision`: device, inode, size and
+nanosecond mtime and ctime), checked before the scan, against the size the scan opened, and after it;
+a segment removed, replaced, grown or shortened since it was listed ends as `segment-changed`. A row
+over the 1 MiB ceiling is skipped and counted in the segment's `skippedRows`, since it could have
+matched. The five-second deadline starts when the read takes its turn, so listing, loading totals and
+the ambiguity check spend it too. Any of these answers `incomplete: true`. A segment without current totals is never
 scanned from its start: it is reported pending (or failed) and its build is queued, and the answer
 sets `incomplete: true`. Rows go through the same `requestLogEntryFromPersistedUsage` and
 `requestLogDto` projection as `/api/request-history`. `tests/usage/usage-archive-rows.test.ts` covers

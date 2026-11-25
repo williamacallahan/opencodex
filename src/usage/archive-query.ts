@@ -52,6 +52,8 @@ export const yieldToEventLoop = (): Promise<void> => new Promise(resolve => setT
 export interface ArchiveSegmentEntry extends ArchiveSegmentName {
   path: string;
   mtimeMs: number;
+  /** The segment file's revision when listed (`archiveFileRevision`); a read checks it again. */
+  segmentRevision: string;
   totalsRevision: string | undefined;
 }
 
@@ -139,10 +141,14 @@ async function listDirectory(directory: string, directoryMtimeMs: number, now: n
   for (const segment of names.flatMap(name => parseArchiveSegmentName(name) ?? [])) {
     const path = join(directory, segment.name);
     try {
-      const segmentStat = await stat(path);
+      const segmentStat = await stat(path, { bigint: true });
       const totalsName = archiveTotalsName(segment.name);
       const totalsRevisionNow = present.has(totalsName) ? await totalsRevision(join(directory, totalsName)) : undefined;
-      entries.push({ ...segment, bytes: Number(segmentStat.size), path, mtimeMs: segmentStat.mtimeMs, totalsRevision: totalsRevisionNow });
+      entries.push({
+        ...segment, bytes: Number(segmentStat.size), path, mtimeMs: Number(segmentStat.mtimeMs),
+        segmentRevision: `${segmentStat.dev}:${segmentStat.ino}:${segmentStat.size}:${segmentStat.mtimeNs}:${segmentStat.ctimeNs}`,
+        totalsRevision: totalsRevisionNow,
+      });
     } catch (error) {
       // Pruned between the listing and its stat: it holds nothing to count any more.
       if (!isMissing(error)) throw error;
@@ -258,15 +264,16 @@ function evictTotals(): void {
 /** Totals files last observed unreadable or incompatible, by the file's observed revision and the segment length they were checked against. */
 const unusableTotals = new Map<string, { revision: string; bytes: number }>();
 
-/** The totals file's observed revision (device, inode, size, mtime, ctime), or undefined when it cannot be statted. */
-async function totalsRevision(path: string): Promise<string | undefined> {
+/** A file's observed revision (device, inode, size, mtime and ctime in nanoseconds), or undefined when it cannot be statted. */
+export async function archiveFileRevision(path: string): Promise<string | undefined> {
   try {
-    const { dev, ino, size, mtimeMs, ctimeMs } = await stat(path);
-    return `${dev}:${ino}:${size}:${mtimeMs}:${ctimeMs}`;
+    const { dev, ino, size, mtimeNs, ctimeNs } = await stat(path, { bigint: true });
+    return `${dev}:${ino}:${size}:${mtimeNs}:${ctimeNs}`;
   } catch {
     return undefined;
   }
 }
+const totalsRevision = archiveFileRevision;
 
 /** A segment's current totals, from the cache or one asynchronous read. */
 export async function loadTotals(entry: ArchiveSegmentEntry): Promise<ArchiveTotalsFile | undefined> {
@@ -323,9 +330,11 @@ export function segmentState(entry: ArchiveSegmentEntry, totals: ArchiveTotalsFi
  * The counted segments that may overlap `[since, until)`, with their spans and hour indexes: only
  * those totals files are read, one per event-loop turn, and no buckets are kept.
  */
-export async function loadWindowSegments(listing: ArchiveListing, since: number, until: number): Promise<ArchiveSegmentState[]> {
+export async function loadWindowSegments(listing: ArchiveListing, since: number, until: number, signal?: AbortSignal): Promise<ArchiveSegmentState[]> {
   const states: ArchiveSegmentState[] = [];
   for (const entry of listing.segments) {
+    // A caller past its deadline stops here; its reader reports the deadline.
+    if (signal?.aborted) break;
     if (!entryMayOverlap(entry, since, until)) continue;
     states.push(segmentState(entry, await loadTotals(entry)));
     await yieldToEventLoop();
@@ -337,9 +346,10 @@ export async function loadWindowSegments(listing: ArchiveListing, since: number,
  * The ambiguous segments that may hold rows in `[since, until)`: their totals, when present, are read
  * only for their span. A window they reach cannot be answered exactly.
  */
-export async function ambiguousWindowSegments(listing: ArchiveListing, since: number, until: number): Promise<ArchiveSegmentEntry[]> {
+export async function ambiguousWindowSegments(listing: ArchiveListing, since: number, until: number, signal?: AbortSignal): Promise<ArchiveSegmentEntry[]> {
   const reached: ArchiveSegmentEntry[] = [];
   for (const entry of listing.ambiguous) {
+    if (signal?.aborted) break;
     if (!entryMayOverlap(entry, since, until)) continue;
     if (segmentOverlaps(segmentState(entry, await loadTotals(entry)), since, until)) reached.push(entry);
     await yieldToEventLoop();

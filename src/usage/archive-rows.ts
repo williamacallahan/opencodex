@@ -12,7 +12,7 @@
  * is reported pending rather than scanned from its start. Segments are read oldest first under the
  * totals' counting rule, so a row is returned once.
  */
-import { segmentOverlaps, uncountedMayOverlap, type ArchiveSegmentBuilt, type ArchiveSegmentState } from "./archive-query";
+import { archiveFileRevision, segmentOverlaps, uncountedMayOverlap, type ArchiveSegmentBuilt, type ArchiveSegmentState } from "./archive-query";
 import type { ArchiveFilter } from "./archive-answer";
 import { ATTRIBUTION_DIMENSIONS, ROW_DIMENSIONS, rowAttributionKeys, rowDimensionValues } from "./archive-row-attribution";
 import { scanUsageLedgerCooperatively, UsageLedgerRebuildRequiredError } from "./ledger-scanner";
@@ -43,6 +43,8 @@ export interface ArchiveSegmentRead {
   segment: string;
   fromByte: number;
   endedBy: ArchiveReadEnd;
+  /** Rows over the 1 MiB ceiling the read skipped; any of them could have matched. */
+  skippedRows?: number;
 }
 
 export interface ArchivedRowsResult {
@@ -55,6 +57,8 @@ export interface ArchivedRowsResult {
   segments: ArchiveSegmentRead[];
   /** Segments in the window whose totals, and so their offsets, are not built yet. */
   pending: ArchiveSegmentState[];
+  /** Oversized rows skipped across all segments read; a positive count means rows may be missing. */
+  skippedRows: number;
 }
 
 /**
@@ -143,6 +147,7 @@ export async function readArchivedRows(
   const full = new AbortController();
   let outOfTime = false;
   let changed = false;
+  let skippedRows = 0;
   for (const state of states) {
     if (!segmentOverlaps(state, query.since, query.until)) continue;
     if (!state.built) {
@@ -159,9 +164,17 @@ export async function readArchivedRows(
     if (fromByte === undefined) continue;
     const read: ArchiveSegmentRead = { segment: state.name, fromByte, endedBy: "segment-end" };
     segments.push(read);
+    // The offsets and the counting rule describe the file as it was listed; any other file, or the
+    // same one grown, shortened or removed since, is not what they describe.
+    if (await archiveFileRevision(state.path) !== state.segmentRevision) {
+      read.endedBy = "segment-changed";
+      changed = true;
+      continue;
+    }
     let stopped = false;
+    let scan: Awaited<ReturnType<typeof scanUsageLedgerCooperatively>> | undefined;
     try {
-      await scanUsageLedgerCooperatively({
+      scan = await scanUsageLedgerCooperatively({
         path: state.path,
         startAtBytes: fromByte,
         signal: AbortSignal.any([deadline, full.signal]),
@@ -186,8 +199,20 @@ export async function readArchivedRows(
     }
     // The limit is decided in onEntry; only a thrown scan can mean the deadline.
     read.endedBy = full.signal.aborted ? "limit" : stopped && deadline.aborted ? "deadline" : "segment-end";
+    if (read.endedBy === "segment-end"
+      && (scan?.revision?.size !== state.bytes || await archiveFileRevision(state.path) !== state.segmentRevision)) {
+      read.endedBy = "segment-changed";
+      changed = true;
+      continue;
+    }
+    if (scan && scan.oversizedRows > 0) {
+      read.skippedRows = scan.oversizedRows;
+      skippedRows += scan.oversizedRows;
+    }
     outOfTime ||= read.endedBy === "deadline";
   }
-  if (full.signal.aborted) return { rows: rows.slice(0, query.limit), endedBy: "limit", segments, pending };
-  return { rows, endedBy: outOfTime ? "deadline" : changed ? "segment-changed" : "window-end", segments, pending };
+  // Preparation that ran past the deadline left segments unlisted, unloaded or unread.
+  outOfTime ||= deadline.aborted && !full.signal.aborted;
+  if (full.signal.aborted) return { rows: rows.slice(0, query.limit), endedBy: "limit", segments, pending, skippedRows };
+  return { rows, endedBy: outOfTime ? "deadline" : changed ? "segment-changed" : "window-end", segments, pending, skippedRows };
 }

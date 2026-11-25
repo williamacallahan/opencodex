@@ -177,11 +177,13 @@ async function archiveRowsResponse(ctx: ManagementContext): Promise<Response> {
   // An abandoned request stops its read, or its wait for a turn, at once instead of at the deadline.
   const abandoned = ctx.req.signal;
   const queued = await inArchiveRowsReadQueue(ARCHIVE_ROWS_DEADLINE_MS, async () => {
-    const listing = await readArchiveListing();
-    const states = await loadWindowSegments(listing, query.since, query.until);
-    queueMissingTotals(states);
-    const ambiguous = await ambiguousWindowSegments(listing, query.since, query.until);
+    // The read's own deadline starts with its turn and covers listing, totals and the ambiguity check,
+    // not only the scan; waiting for the turn has its own budget above.
     const deadline = AbortSignal.any([AbortSignal.timeout(ARCHIVE_ROWS_DEADLINE_MS), abandoned]);
+    const listing = await readArchiveListing();
+    const states = await loadWindowSegments(listing, query.since, query.until, deadline);
+    queueMissingTotals(states);
+    const ambiguous = await ambiguousWindowSegments(listing, query.since, query.until, deadline);
     return { listing, ambiguous, result: await readArchivedRows(states, query, deadline) };
   }, abandoned);
   if (queued.kind === "busy") {
@@ -201,7 +203,7 @@ async function archiveRowsResponse(ctx: ManagementContext): Promise<Response> {
     endedBy: result.endedBy,
     truncated: result.endedBy !== "window-end",
     // Segments in the window without totals (pending or failed), and ambiguous ones, were not read, so rows may be missing.
-    incomplete: result.endedBy !== "window-end" || result.pending.length > 0 || ambiguous.length > 0,
+    incomplete: result.endedBy !== "window-end" || result.pending.length > 0 || ambiguous.length > 0 || result.skippedRows > 0,
     coverage: {
       segments: result.segments,
       pending: pending.length > 0,

@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { closeRequestHistoryIndex } from "../../src/routing/history/indexer";
@@ -219,6 +220,49 @@ describe("GET /api/usage/archive/rows", () => {
     const { body } = await rowsGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR));
     expect(body).toMatchObject({ entries: [], incomplete: true, coverage: { duplicateSegments: 2 } });
     expect(body.coverage.ambiguousSegments).toHaveLength(2);
+  });
+
+  test("a listed segment that vanished, or that grew while it was read, makes the answer incomplete", async () => {
+    const path = await builtSegment("616", archiveRows(3_000, 1_000));
+    const since = ARCHIVE_FIRST_ROW_AT;
+    const until = ARCHIVE_FIRST_ROW_AT + HOUR;
+    const states = await loadWindowSegments(await readArchiveListing(), since, until);
+    // Appended after its first chunk was read, so the read ends before rows it should have seen.
+    setTimeout(() => appendFileSync(path, jsonl([{ ...archiveRow(4_000), timestamp: since + 1 }])), 0);
+    const grew = await readArchivedRows(states, { since, until, filter: {}, limit: 5_000 }, new AbortController().signal, { chunkBytes: 4096 });
+    expect(grew.segments).toEqual([expect.objectContaining({ endedBy: "segment-changed" })]);
+    expect(grew.endedBy).toBe("segment-changed");
+    // Removed after it was listed: nothing read is not the same as nothing archived.
+    rmSync(path);
+    const vanished = await readArchivedRows(states, { since, until, filter: {}, limit: 5_000 }, new AbortController().signal);
+    expect(vanished.segments).toEqual([expect.objectContaining({ endedBy: "segment-changed" })]);
+    expect(vanished.endedBy).toBe("segment-changed");
+  });
+
+  test("an oversized row in a segment makes the answer incomplete", async () => {
+    const at = ARCHIVE_FIRST_ROW_AT;
+    await builtSegment("617", [{ ...archiveRow(0), timestamp: at }, { ...archiveRow(1), timestamp: at + 1, padding: "x".repeat(1024 * 1024 + 16) }]);
+    const { body } = await rowsGet(window(at, at + HOUR));
+    expect(body.entries).toHaveLength(1);
+    expect(body.incomplete).toBe(true);
+  });
+
+  test("the deadline starts when the read takes its turn, so slow preparation answers incomplete", async () => {
+    await builtSegment("618", archiveRows(10));
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const shortDeadline = spyOn(AbortSignal, "timeout").mockImplementation(() => realTimeout(50));
+    const realReaddir = fsPromises.readdir;
+    const slowListing = spyOn(fsPromises, "readdir").mockImplementation((async (...args: Parameters<typeof fsPromises.readdir>) => {
+      await Bun.sleep(200);
+      return realReaddir(...args);
+    }) as typeof fsPromises.readdir);
+    try {
+      const { body } = await rowsGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR));
+      expect(body).toMatchObject({ endedBy: "deadline", incomplete: true });
+    } finally {
+      slowListing.mockRestore();
+      shortDeadline.mockRestore();
+    }
   });
 
   test("an in-window row appended after rows hours later is still returned", async () => {
