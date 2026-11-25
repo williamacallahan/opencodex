@@ -10,7 +10,7 @@
  * Reading never builds: a segment without current totals is queued, and one whose build failed is left.
  */
 import { closeSync, fstatSync, openSync } from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { getConfigDir } from "../config";
 import {
@@ -469,15 +469,15 @@ export async function missingWindowSegments(listing: ArchiveListing, since: numb
   const reached: ArchiveMissingSegment[] = [];
   for (const missing of listing.missing) {
     if (signal?.aborted) break;
+    // Only a sidecar that validates as its own segment's totals (its name, a supported version, the
+    // length its name records) with known coverage may rule a window out; any other reaches them all.
     let span: { firstRowAt: number | null; lastRowAt: number | null } | null = null;
+    const named = parseArchiveSegmentName(missing.segment);
     try {
-      const file = JSON.parse(await readFile(missing.totalsPath, "utf8")) as Partial<ArchiveTotalsFile>;
-      const instant = (at: unknown): at is number | null => at === null || (typeof at === "number" && Number.isFinite(at));
-      if (instant(file.firstRowAt) && instant(file.lastRowAt) && typeof file.unparsableRows === "number" && file.unparsableRows === 0) {
-        span = { firstRowAt: file.firstRowAt, lastRowAt: file.lastRowAt };
-      }
+      const totals = named ? await readArchiveTotals(join(dirname(missing.totalsPath), missing.segment), named.bytes) : undefined;
+      if (totals) span = rowCoverage({ ...totals, uncounted: uncountedCoverage(totals) });
     } catch {
-      // Unreadable: it cannot say where its rows were, so it reaches every window.
+      // Unreadable: it cannot say where its rows were.
     }
     if (!span || spanReaches(span, since, until)) reached.push(missing);
     await yieldToEventLoop();

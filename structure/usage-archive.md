@@ -162,8 +162,10 @@ the cached listing so the next read relists. A totals file must name its own seg
 match its actual length, and a version-5 file must record the segment it was built from (`source`:
 device, inode, size, nanosecond mtime); for a version-4 file, which records none, the first segment
 identity seen with it in this process stands in, and any other is a replacement it cannot verify. A
-totals file left without its segment is a missing source: `missingWindowSegments` reads only the
-span it records, and a window it may reach lists it in `coverage.missingSegments` and is incomplete.
+totals file left without its segment is a missing source: `missingWindowSegments` lets it rule a
+window out only when it validates as that segment's totals (its own name, a supported version, the
+length the name records) with known coverage; otherwise, and for a window it may reach, it is listed
+in `coverage.missingSegments` and the answer is incomplete.
 
 `answerArchiveTotals` in `src/usage/archive-answer.ts` loads, folds and drops one segment's totals at
 a time, keeping only its span and hour index, so a request never holds more than one segment's

@@ -486,6 +486,23 @@ describe("GET /api/usage/archive", () => {
     expect(body.coverage.ambiguousSegments).toContain(basename(segmentB));
   });
 
+  test.each([
+    ["names another segment", (totals: Record<string, unknown>) => ({ ...totals, segment: "2026-01-01T00-00-00.000Z_1-1.jsonl" })],
+    ["is an unsupported version", (totals: Record<string, unknown>) => ({ ...totals, version: 3 })],
+  ])("a totals file left without its segment that %s cannot rule a window out", async (_label, alter) => {
+    const rows = archiveRows(3);
+    const path = await builtSegment("530", rows);
+    const totalsPath = archiveTotalsPath(path);
+    writeFileSync(totalsPath, JSON.stringify(alter(JSON.parse(readFileSync(totalsPath, "utf8")) as Record<string, unknown>)));
+    rmSync(path);
+    noteArchiveChanged();
+    // The span it records lies days before this window, but nothing vouches for that span.
+    const later = ARCHIVE_FIRST_ROW_AT + 5 * 24 * HOUR;
+    const { body } = await archiveGet(window(later, later + HOUR));
+    expect(body).toMatchObject({ complete: false, summary: null });
+    expect(body.coverage.missingSegments).toEqual([basename(path)]);
+  });
+
   test("coverage reports the per-segment caps, so a caller knows a breakdown may fold keys", async () => {
     const rows = Array.from({ length: 1_010 }, (_, index) => ({ ...archiveRow(0, 0), requestId: `cap-${index}`, clientHost: `host-${index}` }));
     await builtSegment("515", rows);
