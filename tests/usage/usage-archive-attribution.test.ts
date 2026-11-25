@@ -197,7 +197,7 @@ describe("archive attribution matches the live summary", () => {
     const archive = await get<ArchiveBody & { complete: boolean }>(`/api/usage/archive?since=${hour}&until=${hour + HOUR}&provider=openai`);
     expect(archive.complete).toBe(true);
     expect(pricing(archive.summary as unknown as Pricing)).toEqual(pricing(live.summary as unknown as Pricing));
-    expect(archive.summary!.estimatedCostUsd).toBe(0);
+    expect((archive.summary as unknown as Pricing).estimatedCostUsd).toBe(0);
   });
 
   test("a row retried on a second account of the same provider counts once for that provider", async () => {
