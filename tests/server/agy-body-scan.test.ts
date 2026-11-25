@@ -284,7 +284,8 @@ describe("routing project never differs from the reference", () => {
     const pick = <T,>(items: readonly T[]): T => items[Math.floor(random() * items.length)]!;
     const alphabet = ["{", "}", "[", "]", '"', ":", ",", "\\", "1", "a", " ", "\n", "\t"];
     const requests = ['{}', '{"a":1}', '{"labels":{"trajectory_id":"3f0b6c1e-8d2a-4b7e-9c51-2a6d8e4f1b07"},"sessionId":"5"}', '{"a":[1,{"b":"c"}],"project":"nested"}', '"s"', 'null', '12', '[1,2]', '{"a":"x\\"y"}'];
-    const projects = ['"project":"real"', '"project":"real","project":"dup"', '"\\u0070roject":"esc"', '"project":""', '"project":7'];
+    const projects = ['"project":"real"', '"project":"real","project":"dup"', '"\\u0070roject":"esc"', '"project":""', '"project":7',
+      '"requestId":"agent_monitoring/3f0b6c1e-8d2a-4b7e-9c51-2a6d8e4f1b07","project":"real"', '"project":"real","requestId":"m/u"', '"requestId":{"project":"inner"},"project":"real"'];
     const build = (): string => {
       const request = `"request":${pick(requests)}`;
       const head = pick(projects);
@@ -315,7 +316,7 @@ describe("routing project never differs from the reference", () => {
       try { JSON.parse(body); } catch { malformed += 1; }
       const bytes = enc(body);
       let scanned: ReturnType<typeof scanAgyBody>;
-      try { scanned = scanAgyBody(bytes, i % 2 ? acl : generate); } catch (error) { throw new Error(`threw on ${JSON.stringify(body)}: ${String(error)}`); }
+      try { scanned = scanAgyBody(bytes, i % 2 ? acl : generate, {}); } catch (error) { throw new Error(`threw on ${JSON.stringify(body)}: ${String(error)}`); }
       const want = referenceProject(bytes, "project");
       if (scanned.project !== undefined) {
         if (scanned.project !== want) throw new Error(`differs on ${JSON.stringify(body)}: got ${scanned.project}, reference ${String(want)}`);

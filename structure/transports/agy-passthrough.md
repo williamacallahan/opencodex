@@ -118,11 +118,26 @@ line describing the body's shape and nothing in it: the top-level, `request` and
 order (identifier-shaped names only, else `<other>`, 40 at most), the JSON type of `request.sessionId`,
 top-level `requestType` and `request.labels.trajectory_id` (strings add their byte length and one class of
 `uuid`, `signed-digits`, `digits`, `hex`, `empty`, `other`), `requestType` itself when it matches
-`^[A-Za-z_-]{1,24}$`, the character-class pattern of the top-level `requestId` (`request_id_pattern`: hex-digit runs `h<n>`, all-decimal runs `d<n>`, other letter runs `a<n>`, `/ - _ . :` kept, anything else `?`, `toolong` over 200 characters, `absent` when not a string; no character of the value survives and the pattern is part of the shape signature), and the body size rounded up to a power of two. Values, the project, request ids, prompt
+`^[A-Za-z_-]{1,24}$`, the character-class pattern of the top-level `requestId` (`request_id_pattern`: hex-digit runs `h<n>`, all-decimal runs `d<n>`, other letter runs `a<n>`, `/ - _ . :` kept, anything else `?`, `toolong` over 200 characters, `absent` when not a string; no character of the value survives and the pattern is not part of the shape signature, since the UUID varies per request), and the body size rounded up to a power of two. Values, the project, request ids, prompt
 text and headers are never read into it. It is bounded for the process lifetime (one line per distinct shape,
-20 lines, 64 remembered shapes, nothing computed afterwards), runs one extra walk of the top level and of
+20 lines, 64 remembered shapes, nothing computed afterwards), runs one extra walk (for a call still unlabelled after the monitoring lookup) of the top level and of
 `request`'s direct members only when no session was found, never throws, and leaves the forwarded bytes
 untouched. `tests/server/agy-unlabelled-shape.test.ts` covers it.
+
+## Monitoring calls and session identities
+
+agy's `agent_monitoring` generate calls carry no labels and no `sessionId`; their top-level `requestId` is
+`<mode>/<UUID>`. `src/server/agy-monitoring-session.ts` keeps, per caller key (the one-way hash the account
+chooser uses), the canonical `trajectory_id`, `cascade_id` and `root_cascade_id` UUIDs of each request the scan
+labelled, each mapped to that trajectory (4,096 entries, least recently used, six hours after last use,
+compared lowercase). An unlabelled generate call whose `requestId` matches `^[A-Za-z_]{1,32}/<UUID>$` and whose
+UUID is in the caller's map takes that trajectory as its session through `withBodyHarnessSession`; another
+caller never matches. The `requestId` is read by the same single walk (`scanAgyBody` wants the key only for a
+generate call, and its early stop waits for it only while no session is found, so a labelled call stops where it
+did) and is never stored or logged. The only log is `event=agy.monitoring_session_match`, cumulative counts
+(`matched_trajectory`, `matched_cascade`, `matched_root_cascade`, `unmatched`, `no_request_id_uuid`,
+`map_size`), at most every ten minutes and only when they changed. The shape diagnostic below runs only for a call
+that stayed unlabelled after this lookup. `tests/server/agy-monitoring-session.test.ts` covers it.
 
 ## Physical send
 

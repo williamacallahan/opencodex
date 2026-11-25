@@ -60,11 +60,10 @@ describe("unlabelled generate shape", () => {
     expect(pattern(undefined)).toBe("absent");
   });
 
-  test("a different request id pattern is a different shape", () => {
+  test("the request id pattern is not part of the shape, since its UUID varies per request", () => {
     log({ requestId: "ab-12", request: { a: 1 } });
-    log({ requestId: "ab-12", request: { a: 1 } });
-    log({ requestId: "ab/12", request: { a: 1 } });
-    expect(lines).toHaveLength(2);
+    log({ requestId: "cd/9f", request: { a: 1 } });
+    expect(lines).toHaveLength(1);
   });
 
   test("one line per shape, at most 20 lines, and nothing is computed after the cap", () => {

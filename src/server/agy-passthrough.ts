@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { brotliDecompress, gunzip, inflate, zstdDecompress } from "node:zlib";
 import { admissionFields, resolveDataPlaneAdmissionSecret, withRequestAttribution, type DataPlaneAdmission } from "./auth-cors";
+import { rememberAgySession, resolveMonitoringSession, type AgyScanIds } from "./agy-monitoring-session";
 import { logUnlabelledGenerateShape, type JsonScanners } from "./agy-unlabelled-shape";
 import { withBodyHarnessSession } from "./request-attribution";
 import { readBoundedRequestBytes } from "./index/bounded-request";
@@ -64,6 +65,7 @@ const CLOUD_CODE_METHOD = /^\/v1internal:[A-Za-z]+$/;
 const PROJECT_REQUIRED = /^\/v1internal:(?:streamGenerateContent|generateContent|countTokens)$/;
 /** The generation calls whose body should name an agy session. */
 const GENERATE_METHOD = /^\/v1internal:(?:streamGenerateContent|generateContent)$/;
+const MAX_REQUEST_ID_BYTES = 200;
 const AGY_USER_AGENT = /^antigravity\/cli\//;
 const REGISTRY_ORIGIN = new URL(PROVIDER_REGISTRY.find(entry => entry.id === ANTIGRAVITY_OAUTH_STORE_KEY)!.baseUrl).origin;
 
@@ -280,8 +282,8 @@ const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 const DECIMAL_SESSION = /^-?([0-9]{1,32})$/;
 const matching = (pattern: RegExp, raw: string | undefined): string | undefined => raw !== undefined && pattern.test(raw) ? raw : undefined;
 
-const TOP_KEYS = wantKeys("project", "request");
-const TOP_ACL_KEYS = wantKeys("project", "request", "trajectoryId");
+const TOP_KEYS = wantKeys("project", "request", "requestId");
+const TOP_ACL_KEYS = wantKeys("project", "request", "requestId", "trajectoryId");
 const REQUEST_KEYS = wantKeys("labels", "sessionId");
 const LABEL_KEYS = wantKeys("trajectory_id", "cascade_id", "root_cascade_id");
 
@@ -291,10 +293,11 @@ const LABEL_KEYS = wantKeys("trajectory_id", "cascade_id", "root_cascade_id");
  * is the trajectory id in `request.labels`, else the decimal `request.sessionId` (the trajectory UUID is preferred;
  * the decimal id is used only when no trajectory id is present), else a `writeTrajectoryAcls`
  * call's top-level `trajectoryId`; the cascade id is the agent only when the root cascade is another UUID.
- * The first occurrence of each key wins. Request ids are never read, and nothing is copied out of the body
- * but the few short values returned.
+ * The first occurrence of each key wins. `ids`, when given, receives the canonical label ids (for the session map)
+ * and, only for a generate call with no session, the short top-level `requestId`; the same walk reads it, and the
+ * walk stops early only once that call is labelled or has seen `requestId`. Nothing else is copied out of the body.
  */
-export function scanAgyBody(plain: Uint8Array, method: string): { project?: string; session?: string; agent?: string } {
+export function scanAgyBody(plain: Uint8Array, method: string, ids?: AgyScanIds): { project?: string; session?: string; agent?: string } {
   const acl = method === "/v1internal:writeTrajectoryAcls";
   let project: string | undefined;
   let projectSeen = false;
@@ -308,7 +311,12 @@ export function scanAgyBody(plain: Uint8Array, method: string): { project?: stri
   const labelSeen = [false, false, false];
   let sessionIdSeen = false;
   let sessionId: string | undefined;
-  const satisfied = () => projectSeen && requestDone && (!acl || aclSeen);
+  const wantRequestId = ids !== undefined && GENERATE_METHOD.test(method);
+  let requestIdSeen = false;
+  let requestId: string | undefined;
+  const sessionResolved = () => (labelsRead && matching(CANONICAL_UUID, labelValues[0]) !== undefined)
+    || (sessionId !== undefined && DECIMAL_SESSION.test(sessionId));
+  const satisfied = () => projectSeen && requestDone && (!acl || aclSeen) && (!wantRequestId || requestIdSeen || sessionResolved());
 
   const visitLabel = (index: number, valueStart: number): number => {
     const captured = captureString(plain, valueStart);
@@ -373,7 +381,12 @@ export function scanAgyBody(plain: Uint8Array, method: string): { project?: stri
         end = skipVal(plain, valueStart);
         requestDone = true;
       }
-    } else if (index === 2 && !aclSeen) {
+    } else if (index === 2 && !requestIdSeen) {
+      requestIdSeen = true;
+      const token = wantRequestId && plain[valueStart] === 0x22 ? scanStr(plain, valueStart) : null;
+      if (token && !token.escaped && token.end - valueStart <= MAX_REQUEST_ID_BYTES) requestId = utf8Decoder.decode(plain.subarray(valueStart + 1, token.end));
+      end = skipVal(plain, valueStart);
+    } else if (index === 3 && !aclSeen) {
       aclSeen = true;
       const captured = captureString(plain, valueStart);
       aclTrajectory = captured.value;
@@ -390,6 +403,10 @@ export function scanAgyBody(plain: Uint8Array, method: string): { project?: stri
   const session = trajectory ?? decimal ?? (acl ? matching(CANONICAL_UUID, aclTrajectory) : undefined);
   const cascade = labelsRead ? matching(CANONICAL_UUID, labelValues[1]) : undefined;
   const root = labelsRead ? matching(CANONICAL_UUID, labelValues[2]) : undefined;
+  if (ids) {
+    if (trajectory) Object.assign(ids, { trajectory, ...(cascade ? { cascade } : {}), ...(root ? { root } : {}) });
+    else if (!session && requestId !== undefined) ids.requestId = requestId;
+  }
   return {
     ...(project !== undefined ? { project } : {}),
     ...(session ? { session } : {}),
@@ -418,12 +435,21 @@ export async function decodeBoundedPayload(bytes: Uint8Array, contentEncoding: s
  * Read-only view of the body, decoded once and walked once (`scanAgyBody`). The forwarded bytes stay the
  * originals; null for a content coding this lane does not read.
  */
-async function agyBodyView(bytes: Uint8Array, contentEncoding: string | null, method: string): Promise<{ project?: string; session?: string; agent?: string } | null> {
+async function agyBodyView(bytes: Uint8Array, contentEncoding: string | null, method: string, caller: string): Promise<{ project?: string; session?: string; agent?: string } | null> {
   const plain = await decodeBoundedPayload(bytes, contentEncoding);
   if (plain === null) return null;
   if (plain.byteLength === 0) return {};
-  const scanned = scanAgyBody(plain, method);
-  if (scanned.session === undefined && GENERATE_METHOD.test(method)) logUnlabelledGenerateShape(plain, AGY_JSON_SCANNERS);
+  const ids: AgyScanIds = {};
+  const scanned = scanAgyBody(plain, method, ids);
+  if (!GENERATE_METHOD.test(method)) return scanned;
+  if (scanned.session !== undefined) {
+    rememberAgySession(caller, ids);
+    return scanned;
+  }
+  const session = resolveMonitoringSession(caller, ids.requestId);
+  if (session !== undefined) return { ...scanned, session };
+  // The shape diagnostic walks the body again, so it runs only for a call that stayed unlabelled.
+  logUnlabelledGenerateShape(plain, AGY_JSON_SCANNERS);
   return scanned;
 }
 
@@ -549,13 +575,14 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
   disableResponsesRequestTimeout(req, ctx.server);
   const bytes = await readBoundedRequestBytes(req, MAX_AGY_REQUEST_BYTES);
   if (bytes === null) return refuse(413, "request body exceeds the pass-through limit");
-  const body = await agyBodyView(bytes, req.headers.get("content-encoding"), parts.method);
+  const caller = callerKey(admission, authorization);
+  const body = await agyBodyView(bytes, req.headers.get("content-encoding"), parts.method, caller);
   if (body === null) return refuse(415, "unsupported request content-encoding");
   const project = body.project;
   if (project === undefined && PROJECT_REQUIRED.test(parts.method)) return refuse(400, "a generation call must name its Cloud Code project");
 
   const choice = chooseAgyAccount({
-    project, callerKey: callerKey(admission, authorization), mayRotate: parts.method === "/v1internal:loadCodeAssist",
+    project, callerKey: caller, mayRotate: parts.method === "/v1internal:loadCodeAssist",
   });
   if (choice.kind !== "account") return choiceRefusal(choice);
   // Captured with the account choice: a roster change or another sign-in in the slot fences the quota write.

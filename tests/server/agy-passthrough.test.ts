@@ -10,6 +10,7 @@ import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resetAgyMonitoringStateForTests } from "../../src/server/agy-monitoring-session";
 import { resetUnlabelledShapeLogForTests } from "../../src/server/agy-unlabelled-shape";
 import { gzipSync } from "node:zlib";
 import { saveConfig } from "../../src/config";
@@ -164,7 +165,7 @@ describe("agy pass-through public HTTP lane", () => {
       // A pass-through stays one: Google receives agy's exact bytes and headers.
       expect(sent.bytes).toEqual(typeof body === "string" ? new TextEncoder().encode(body) : body);
       expect([...sent.headers.keys()].sort()).toEqual(
-        ["accept-encoding", "authorization", "connection", "content-length", "content-type", "host", "user-agent", "x-future-client", ...Object.keys(headers)].sort());
+        ["accept-encoding", "authorization", "connection", "content-length", "content-type", "host", "user-agent", "x-future-client", ...Object.keys(headers)].filter((name, index, all) => all.indexOf(name) === index).sort());
       // The row is finalized when the relayed stream ends, which can trail the response by a moment.
       for (let waited = 0; waited < 2_000 && getRequestLogEntries().length === 0; waited += 10) await Bun.sleep(10);
       const [row] = getRequestLogEntries();
@@ -242,6 +243,45 @@ describe("agy pass-through public HTTP lane", () => {
       } finally {
         info.mockRestore();
       }
+    });
+
+    describe("a monitoring call takes the session its request id names", () => {
+      const monitoring = (uuid: string) => JSON.stringify({
+        project: "synthetic-project-two", requestId: `agent_monitoring/${uuid}`, model: "gemini-3.8-flash-low", requestType: "agent_monitoring",
+        request: { contents: [{ role: "user", parts: [{ text: "zz-marker-prompt" }] }], generationConfig: {} },
+      });
+      const labelled = (caller: string) => recorded("streamGenerateContent?alt=sse",
+        generation({ labels: { trajectory_id: trajectory, cascade_id: cascade, root_cascade_id: root } }), { authorization: `Bearer ${caller}` });
+
+      for (const [kind, id] of [["trajectory", trajectory], ["cascade", cascade], ["root cascade", root]] as const) {
+        test(`the ${kind} id labels it with the trajectory, for the same caller only`, async () => {
+          await launch();
+          resetAgyMonitoringStateForTests();
+          await labelled("caller-a");
+          const same = await recorded("streamGenerateContent?alt=sse", monitoring(id.toUpperCase()), { authorization: "Bearer caller-a" });
+          expect(same).toMatchObject({ harnessSessionId: trajectory, workload: `antigravity:${trajectory}`, workloadSource: "harness" });
+          const other = await recorded("streamGenerateContent?alt=sse", monitoring(id), { authorization: "Bearer caller-b" });
+          expect(other).not.toHaveProperty("harnessSessionId");
+        });
+      }
+
+      test("an unknown id is not labelled, and no log line carries the request id, the caller or a prompt", async () => {
+        await launch();
+        resetAgyMonitoringStateForTests();
+        resetUnlabelledShapeLogForTests();
+        const info = spyOn(console, "info").mockImplementation(() => {});
+        try {
+          await labelled("caller-a");
+          const unknown = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+          const row = await recorded("streamGenerateContent?alt=sse", monitoring(unknown), { authorization: "Bearer caller-a" });
+          expect(row).not.toHaveProperty("harnessSessionId");
+          const logged = info.mock.calls.map(call => String(call[0])).join("\n");
+          expect(logged).toContain("event=agy.monitoring_session_match");
+          for (const secret of [unknown, "caller-a", "zz-marker-prompt", trajectory, "synthetic-project-two"]) expect(logged).not.toContain(secret);
+        } finally {
+          info.mockRestore();
+        }
+      });
     });
 
     test("a malformed, label-less or non-JSON body keeps the hub's label", async () => {

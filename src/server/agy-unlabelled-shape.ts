@@ -186,7 +186,7 @@ export function logUnlabelledGenerateShape(bytes: Uint8Array, scan: JsonScanners
   try {
     const fields = unlabelledShapeFields(bytes, scan);
     if (!fields) return;
-    const signature = fields.filter(([name]) => name !== "body_bytes_bucket").map(([, value]) => value).join("|");
+    const signature = fields.filter(([name]) => name !== "body_bytes_bucket" && name !== "request_id_pattern").map(([, value]) => value).join("|");
     if (seenShapes.has(signature)) return;
     seenShapes.add(signature);
     linesLogged += 1;
