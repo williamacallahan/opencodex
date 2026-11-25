@@ -40,7 +40,7 @@ describe("loopback listener policy view", () => {
 
   test("the loopback view admits without a credential and names it loopback", () => {
     const policy = requestPolicyView(wildcardConfig, "127.0.0.1");
-    expect(resolveResponsesApiAuth(request(), policy)).toEqual({ kind: "loopback", source: "loopback", attribution: { workload: "unknown-client:via-opencodex" } });
+    expect(resolveResponsesApiAuth(request(), policy)).toEqual({ kind: "loopback", source: "loopback", attribution: { client: "unknown", workload: "unknown-client:via-opencodex", workloadSource: "hub" } });
   });
 
   test("the view carries no bind address other than the one it was given", () => {
@@ -57,7 +57,7 @@ describe("loopback listener policy view", () => {
     expect(resolveResponsesApiAuth(
       request("/v1/responses", { "x-opencodex-api-key": "ocx_data_realsecret" }),
       wildcardConfig,
-    )).toEqual({ kind: "configured", keyId: "k1", source: "dedicated", contextPrincipalId: expect.stringMatching(/^[a-f0-9]{64}$/), attribution: { workload: "unknown-client:via-opencodex" } });
+    )).toEqual({ kind: "configured", keyId: "k1", source: "dedicated", contextPrincipalId: expect.stringMatching(/^[a-f0-9]{64}$/), attribution: { client: "unknown", workload: "unknown-client:via-opencodex", workloadSource: "hub" } });
   });
 
   test("both Anthropic routes finish CORS with the listener-effective policy", () => {
