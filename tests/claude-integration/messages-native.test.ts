@@ -1091,14 +1091,20 @@ describe("strict Messages public HTTP transport", () => {
       expect(text).toContain('"detail":"[REDACTED]"');
     });
 
-    test("is withheld, with the clean prefix kept, on a gzip stream", async () => {
+    test("is withheld on a gzip stream with no flush point before it", async () => {
+      // The one-byte enqueues may coalesce into one upstream read, and then a single wire chunk
+      // encodes both frames: nothing is verifiable, so nothing leaves and the client may see a
+      // reset before any byte. The clean prefix is kept only behind a flush point, which the
+      // next case proves.
       const split = Bun.gzipSync(encode(clean + reflected + clean));
       await launch(() => new Response(new ReadableStream<Uint8Array>({ start(controller) {
         for (const byte of split) controller.enqueue(Uint8Array.of(byte));
         controller.close();
       } }), { headers: { "content-type": "text/event-stream", "content-encoding": "gzip" } }), withKey);
-      const received = await readAll(await post(encode(streamBody)));
-      const visible = gunzipSync(received, { finishFlush: constants.Z_SYNC_FLUSH }).toString();
+      const response = await post(encode(streamBody)).catch(() => undefined);
+      const received = response ? await readAll(response) : new Uint8Array();
+      const visible = received.length ? gunzipSync(received, { finishFlush: constants.Z_SYNC_FLUSH }).toString() : "";
+      expect(calls).toHaveLength(1);
       expect(Buffer.from(received).toString("latin1")).not.toContain(key);
       expect(visible).not.toContain(key);
       expect(visible).not.toContain("error");
