@@ -13,6 +13,7 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { resetUsageReadCacheForTests, setManagementUsageMaxEntriesForTests, usageReadCacheStatsForTests } from "../../src/usage/log";
 import * as usageLogModule from "../../src/usage/log";
 import * as usageLedgerScannerModule from "../../src/usage/ledger-scanner";
+import { settleUsageColdRebuildForTests, USAGE_COLD_READ_RETRY_AFTER_SECONDS, USAGE_COLD_READ_WAIT_MS } from "../../src/usage/cold-rebuild-slot";
 import { getUsageSummaryCacheEntry, resetUsageSummaryCacheForTests } from "../../src/server/management/usage-summary-cache";
 import * as usageAggregateCacheModule from "../../src/server/management/usage-aggregate-cache";
 
@@ -357,6 +358,37 @@ describe("GET /api/usage", () => {
       releaseScan();
       aggregateSpy.mockRestore();
       scanSpy.mockRestore();
+      await server.stop(true);
+    }
+  });
+
+  test("a cold rebuild that outlasts the wait answers 503 with Retry-After, never zero, and the next read serves it", async () => {
+    writeFixture(Date.now());
+    const originalScan = usageLedgerScannerModule.scanUsageLedgerCooperatively;
+    let releaseScan!: () => void;
+    const scanGate = new Promise<void>(resolve => { releaseScan = resolve; });
+    const scanSpy = spyOn(usageLedgerScannerModule, "scanUsageLedgerCooperatively").mockImplementation(async options => {
+      await scanGate;
+      return originalScan(options);
+    });
+    const server = startServer(0);
+    try {
+      const started = Date.now();
+      const pending = await fetch(new URL("/api/usage?range=30d", server.url));
+      expect(Date.now() - started).toBeLessThan(USAGE_COLD_READ_WAIT_MS + 1_000);
+      expect(pending.status).toBe(503);
+      expect(pending.headers.get("retry-after")).toBe(String(USAGE_COLD_READ_RETRY_AFTER_SECONDS));
+      expect(await pending.json()).toEqual({ error: "usage_rebuilding" });
+      releaseScan();
+      await settleUsageColdRebuildForTests();
+      const completed = await fetch(new URL("/api/usage?range=30d", server.url));
+      expect(completed.status).toBe(200);
+      expect((await completed.json()).summary.requests).toBe(3);
+      expect(scanSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseScan();
+      scanSpy.mockRestore();
+      await settleUsageColdRebuildForTests();
       await server.stop(true);
     }
   });

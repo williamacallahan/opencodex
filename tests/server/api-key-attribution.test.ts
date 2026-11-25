@@ -7,6 +7,7 @@ import { startServer } from "../../src/server";
 import { AUTH_MATRIX } from "../../src/server/auth-cors";
 import { clearApiKeyUsageCacheForTests, readApiKeyUsageRollup, rollupApiKeyUsage } from "../../src/server/management/api-key-usage";
 import { resetUsageAggregateCacheForTests } from "../../src/server/management/usage-aggregate-cache";
+import { settleUsageColdRebuildForTests, USAGE_COLD_READ_WAIT_MS } from "../../src/usage/cold-rebuild-slot";
 import * as usageLedgerScannerModule from "../../src/usage/ledger-scanner";
 import { appendUsageEntry, normalizeUsageEntryForTest, usageLogPath, type PersistedUsageEntry } from "../../src/usage/log";
 import type { OcxConfig } from "../../src/types";
@@ -475,20 +476,54 @@ describe("attribution reaches usage.jsonl", () => {
     }
   });
 
-  test("an unreadable usage snapshot degrades to zeroes, not a failed route", async () => {
+  test("an unreadable usage snapshot omits usage instead of reporting zero, and key management still answers", async () => {
     saveConfig(remoteConfig());
     const server = startServer(0);
     try {
-      // A directory where the log should be: the read throws, and key management
-      // must still answer. Usage numbers are worth less than the ability to
-      // revoke a key.
+      // A directory where the log should be: the read throws. Usage numbers are worth less than the
+      // ability to revoke a key, but a zero would tell the operator an active key was never used.
       mkdirSync(usageLogPath(), { recursive: true });
       const payload = await keysGet(server);
       const rows = payload.keys as Array<Record<string, unknown>>;
       expect(rows).toHaveLength(2);
-      expect((rows[0]!.usage as Record<string, number>).totalRequests).toBe(0);
+      expect(rows[0]).not.toHaveProperty("usage");
+      expect(payload).toMatchObject({ usageIncluded: false, usagePending: true });
       expect(payload.attributionSince).toBeUndefined();
     } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("a rollup still scanning the ledger does not hold /api/keys, and the completed one is served next", async () => {
+    saveConfig(remoteConfig());
+    appendUsageEntry({
+      requestId: "pending-rollup", timestamp: Date.now(), provider: "p", model: "m",
+      status: 200, durationMs: 1, usageStatus: "exact", admissionKind: "configured", apiKeyId: "key-one",
+    } as PersistedUsageEntry);
+    const originalScan = usageLedgerScannerModule.scanUsageLedgerCooperatively;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const scanSpy = spyOn(usageLedgerScannerModule, "scanUsageLedgerCooperatively").mockImplementation(async options => {
+      await gate;
+      return originalScan(options);
+    });
+    const server = startServer(0);
+    try {
+      const started = Date.now();
+      const pending = await keysGet(server);
+      expect(Date.now() - started).toBeLessThan(USAGE_COLD_READ_WAIT_MS + 1_000);
+      expect(pending).toMatchObject({ usageIncluded: false, usagePending: true });
+      expect((pending.keys as Array<Record<string, unknown>>)[0]).not.toHaveProperty("usage");
+      release();
+      await settleUsageColdRebuildForTests();
+      const completed = await keysGet(server);
+      expect(completed).not.toHaveProperty("usagePending");
+      expect(typeof completed.usageAsOf).toBe("string");
+      expect((completed.keys as Array<{ usage?: { totalRequests: number } }>)[0]!.usage?.totalRequests).toBe(1);
+    } finally {
+      release();
+      scanSpy.mockRestore();
+      await settleUsageColdRebuildForTests();
       await server.stop(true);
     }
   });

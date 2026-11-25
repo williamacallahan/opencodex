@@ -4,6 +4,7 @@ import {
   type PersistedUsageEntry,
 } from "../../usage/log";
 import { scanUsageLedgerCooperatively } from "../../usage/ledger-scanner";
+import { awaitUsageColdRebuild, startUsageColdRebuild, UsageColdReadPendingError } from "../../usage/cold-rebuild-slot";
 
 /**
  * Per-key usage as the API tab renders it.
@@ -136,7 +137,7 @@ export function createApiKeyUsageAccumulator(
  * create/rename/delete. The compact rollup is a handful of counters per key, so
  * caching it costs nothing; a new row changes the revision and invalidates it.
  */
-let rollupCache: { revisionKey: string; expiresAt: number; lastSeenSize?: number; snapshot: ApiKeyUsageSnapshot } | null = null;
+let rollupCache: { revisionKey: string; expiresAt: number; builtAt: number; lastSeenSize?: number; snapshot: ApiKeyUsageSnapshot } | null = null;
 const rollupFlights = new Map<string, Promise<ApiKeyUsageSnapshot>>();
 
 /**
@@ -181,6 +182,7 @@ export function cacheApiKeyUsageFromSnapshot(
   rollupCache = {
     revisionKey: `${identityKey}|${idsKey}`,
     expiresAt: now + ROLLUP_CACHE_TTL_MS,
+    builtAt: now,
     lastSeenSize,
     snapshot: rolled,
   };
@@ -200,31 +202,37 @@ export function cacheApiKeyUsageFromRollup(
   rollupCache = {
     revisionKey: `${identityKey}|${idsKey}`,
     expiresAt: now + ROLLUP_CACHE_TTL_MS,
+    builtAt: now,
     lastSeenSize,
     snapshot,
   };
   return snapshot;
 }
 
-export async function readApiKeyUsageRollup(configuredIds: string[], maxReadBytes?: number): Promise<ApiKeyUsageSnapshot> {
+/**
+ * The per-key rollup, or `null` when no completed rollup can be served: a caller then omits usage
+ * rather than reporting zero, because only a completed scan establishes that a key was unused.
+ *
+ * `background` is for request handlers. A rollup older than its TTL is served as it stood (`asOf`)
+ * while its replacement builds in the cold-rebuild slot; with none for this ledger file and key set,
+ * the rebuild starts there and the answer is `null`. A request never waits for the ledger scan.
+ */
+export async function readApiKeyUsageRollup(
+  configuredIds: string[],
+  maxReadBytes?: number,
+  cold: "await" | "background" = "await",
+): Promise<(ApiKeyUsageSnapshot & { asOf: number }) | null> {
   // JSON rather than a joined string: ids are only validated as non-empty
   // strings, so `["a\0b","c"]` and `["a","b\0c"]` join to the same value and one
   // config could be served the other's cached rollup.
   const idsKey = JSON.stringify([configuredIds, maxReadBytes]);
   const now = Date.now();
-  try {
-    const observed = currentUsageLogRevision();
-    const observedKey = `${usageLogIdentityKey(observed)}|${idsKey}`;
-    const observedSize = observed?.size ?? 0;
-    if (rollupCache?.revisionKey === observedKey && now < rollupCache.expiresAt && observedSize >= (rollupCache.lastSeenSize ?? 0)) {
-      return rollupCache.snapshot;
-    }
-
+  const build = (): Promise<ApiKeyUsageSnapshot> => {
     const existing = rollupFlights.get(idsKey);
-    if (existing) return await existing;
-
+    if (existing) return existing;
     const flight = (async (): Promise<ApiKeyUsageSnapshot> => {
-      const accumulator = createApiKeyUsageAccumulator(configuredIds, now);
+      const builtAt = Date.now();
+      const accumulator = createApiKeyUsageAccumulator(configuredIds, builtAt);
       const scan = await scanUsageLedgerCooperatively({ onEntry: entry => accumulator.add(entry) });
       return cacheApiKeyUsageFromRollup(
         {
@@ -235,18 +243,37 @@ export async function readApiKeyUsageRollup(configuredIds: string[], maxReadByte
         usageLogIdentityKey(scan.revision),
         scan.revision?.size ?? 0,
         maxReadBytes,
-        now,
+        builtAt,
       );
-    })();
-    rollupFlights.set(idsKey, flight);
-    try {
-      return await flight;
-    } finally {
+    })().finally(() => {
       if (rollupFlights.get(idsKey) === flight) rollupFlights.delete(idsKey);
+    });
+    rollupFlights.set(idsKey, flight);
+    return flight;
+  };
+  try {
+    const observed = currentUsageLogRevision();
+    const cached = rollupCache;
+    const matches = cached?.revisionKey === `${usageLogIdentityKey(observed)}|${idsKey}`
+      && (observed?.size ?? 0) >= (cached.lastSeenSize ?? 0);
+    if (matches && now < cached!.expiresAt) return { ...cached!.snapshot, asOf: cached!.builtAt };
+    if (cold === "background") {
+      if (matches) {
+        startUsageColdRebuild(`api-key-rollup:${idsKey}`, build);
+        return { ...cached!.snapshot, asOf: cached!.builtAt };
+      }
+      try {
+        const snapshot = await awaitUsageColdRebuild(`api-key-rollup:${idsKey}`, build);
+        return { ...snapshot, asOf: rollupCache?.builtAt ?? now };
+      } catch (error) {
+        if (error instanceof UsageColdReadPendingError) return null;
+        throw error;
+      }
     }
-  } catch {
-    const rollup = new Map<string, ApiKeyUsage>();
-    for (const id of configuredIds) rollup.set(id, { requests7d: 0, totalRequests: 0 });
-    return { rollup };
+    const snapshot = await build();
+    return { ...snapshot, asOf: rollupCache?.builtAt ?? now };
+  } catch (error) {
+    console.warn(`[api-keys] key usage could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
   }
 }

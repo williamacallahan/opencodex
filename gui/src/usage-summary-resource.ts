@@ -25,6 +25,17 @@ export class UsageReadFailedError extends Error {
   }
 }
 
+/**
+ * The proxy is rebuilding usage from the whole ledger in the background (503 `usage_rebuilding`).
+ * Not a failure and not an empty report: keep the last valid snapshot and ask again after the delay.
+ */
+export class UsageRebuildingError extends Error {
+  constructor(readonly retryAfterSeconds: number) {
+    super("Usage is still being read from the usage log; it will refresh shortly.");
+    this.name = "UsageRebuildingError";
+  }
+}
+
 /** Admit usage data only after recognizing both current HTTP errors and legacy HTTP-200 failures. */
 export async function readUsageResponseJson<T>(response: Response, fallbackMessage?: string): Promise<T> {
   let value: unknown;
@@ -34,6 +45,10 @@ export async function readUsageResponseJson<T>(response: Response, fallbackMessa
     throw new Error(fallbackMessage ?? `${response.status} ${response.statusText}`.trim());
   }
   if (isUsageReadFailure(value)) throw new UsageReadFailedError();
+  if (response.status === 503 && !!value && typeof value === "object" && "error" in value && value.error === "usage_rebuilding") {
+    const retryAfter = Number(response.headers.get("retry-after"));
+    throw new UsageRebuildingError(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 5);
+  }
   if (!response.ok) throw new Error(fallbackMessage ?? `${response.status} ${response.statusText}`.trim());
   return value as T;
 }

@@ -5,7 +5,7 @@ import type { Root } from "react-dom/client";
 import { LanguageProvider } from "../src/i18n/provider";
 import { clearClientResourceStoresForTests } from "../src/client-resource";
 import { readSessionListCache } from "../src/session-list-cache";
-import { isUsageReadFailure, readUsageMetadata, readUsageResponseJson, UsageReadFailedError } from "../src/usage-summary-resource";
+import { isUsageReadFailure, readUsageMetadata, readUsageResponseJson, UsageReadFailedError, UsageRebuildingError } from "../src/usage-summary-resource";
 import { DashboardOverviewHead } from "../src/pages/dashboard-overview-head";
 import ProviderWorkspaceShell from "../src/components/provider-workspace/ProviderWorkspaceShell";
 import AddProviderModal from "../src/components/AddProviderModal";
@@ -96,6 +96,12 @@ test("usage response admission classifies both current HTTP 500 and legacy HTTP 
   }
   await expect(readUsageResponseJson(Response.json({ summary: { requests: 0 } })))
     .resolves.toEqual({ summary: { requests: 0 } });
+});
+
+test("a proxy still rebuilding usage is reported as rebuilding with its Retry-After, never admitted as data", async () => {
+  const rebuilding = readUsageResponseJson(Response.json({ error: "usage_rebuilding" }, { status: 503, headers: { "retry-after": "5" } }));
+  await expect(rebuilding).rejects.toBeInstanceOf(UsageRebuildingError);
+  await expect(rebuilding).rejects.toMatchObject({ retryAfterSeconds: 5 });
 });
 
 test("Dashboard warns even when no readable requests remain", async () => {

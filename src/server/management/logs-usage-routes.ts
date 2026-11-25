@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { UsageColdReadPendingError } from "../../usage/cold-rebuild-slot";
 import { readFileSync } from "node:fs";
 import type { CatalogModel } from "../../codex/catalog";
 import { catalogModelSlug, invalidateCodexModelsCache, nativeModelRows, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
@@ -350,7 +351,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
       }
       if (cached && !filterRequested) discardUsageSummaryCacheEntry(cacheKey);
       if (filterRequested) {
-        const filteredAggregate = await getFilteredUsageAggregate(filter, window);
+        const filteredAggregate = await getFilteredUsageAggregate(filter, window, "background");
         if (sessionGuard) {
           const denied = sessionGuard(ctx, "dashboard");
           if (denied) return expiredUsageSession();
@@ -370,6 +371,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
           entriesDropped: 0,
           snapshotWindowStart: accumulator.snapshotWindow.start,
           snapshotWindowEnd: accumulator.snapshotWindow.end,
+          ...(filteredAggregate.snapshotAt !== undefined ? { snapshotAt: new Date(filteredAggregate.snapshotAt).toISOString() } : {}),
         };
         return unconfigured ? Response.json(body, { headers: { "cache-control": "no-store" } }) : jsonResponse(body);
       }
@@ -379,6 +381,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
         now,
         configuredApiKeyIds,
         managementUsageMaxReadBytes: effectiveReadLimit,
+        cold: "background",
       });
       const baseAccumulator = aggregate.accumulator;
       const revisionReadAt = Date.now();
@@ -436,8 +439,15 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
         }
       }
       return jsonResponse(requestedSummary);
-    } catch {
+    } catch (failure) {
       if (sessionGuard && sessionGuard(ctx, "dashboard")) return expiredUsageSession();
+      if (failure instanceof UsageColdReadPendingError) {
+        // Not an empty report and not a failure: the whole-ledger rebuild runs in the background.
+        return Response.json({ error: "usage_rebuilding" }, {
+          status: 503,
+          headers: { "cache-control": "no-store", "retry-after": String(failure.retryAfterSeconds) },
+        });
+      }
       // A missing ledger is handled as an empty installation by the reader. Reaching this catch
       // therefore means the report is unavailable, not that usage was measured as zero. Keep the
       // transport status aligned with the JEV projection above so every dashboard consumer can

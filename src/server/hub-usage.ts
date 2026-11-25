@@ -1,4 +1,5 @@
 import type { OcxConfig } from "../types";
+import { UsageColdReadPendingError } from "../usage/cold-rebuild-slot";
 import { MAX_HUB_USAGE_BYTES, parseHubUsage } from "../remote/hub-usage";
 import { parseRange, parseUsageSurface, USAGE_RANGES, USAGE_SURFACES } from "../usage/summary";
 import { parseUsageTimeWindow } from "../usage/time-range";
@@ -48,7 +49,7 @@ export async function handleHubUsage(req: Request, config: OcxConfig, policy: Re
       apiKeyId: keyId, provider: query.get("provider"), model: query.get("model"),
       // The linked client reads newer client labels as `unknown`, so its `unknown` filter selects them too.
       ...(client !== null ? { sourceFilter: { client: client as UsageSourceClient, device: { kind: "key", id: keyId }, linkedClientRoster: true } } : {}),
-    }, window);
+    }, window, "background");
     const capacity = query.get("include") === "capacity"
       ? await (await import("../quota-pool/client")).readClientCapacity(config, admission) : undefined;
     const current = resolveDataPlaneAdmissionSecret(token, config, source, options);
@@ -69,7 +70,12 @@ export async function handleHubUsage(req: Request, config: OcxConfig, policy: Re
       return error("hub_usage_too_large", "Usage exceeds the response bound; narrow the requested range", 507);
     }
     return reply(report);
-  } catch {
+  } catch (failure) {
+    if (failure instanceof UsageColdReadPendingError) {
+      const pending = error("hub_usage_pending", "Hub usage is being rebuilt; retry shortly", 503);
+      pending.headers.set("retry-after", String(failure.retryAfterSeconds));
+      return pending;
+    }
     return error("hub_usage_read_failed", "Hub usage could not be read", 503);
   }
 }

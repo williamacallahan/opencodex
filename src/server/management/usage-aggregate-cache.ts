@@ -35,6 +35,7 @@ import {
   type JevStatsAccumulator,
 } from "../../usage/jev-stats";
 
+import { awaitUsageColdRebuild, startUsageColdRebuild } from "../../usage/cold-rebuild-slot";
 import {
   cacheApiKeyUsageFromRollup,
   createApiKeyUsageAccumulator,
@@ -75,7 +76,10 @@ export interface UsageAggregateResult {
   processedThroughBytes: number;
   overlayVersion: number;
   timeZone: string;
-  update: "unchanged" | "append" | "rebuild";
+  /** `dated`: a completed answer for an earlier revision, served while its replacement builds. */
+  update: "unchanged" | "append" | "rebuild" | "dated";
+  /** When the served answer was completed; set on `dated` answers. */
+  snapshotAt?: number;
   /**
    * Present on filtered results: how many ledger rows the derived candidate index read to
    * answer this filter, against the whole ledger. A full scan reports the same number twice.
@@ -87,6 +91,12 @@ export interface UsageAggregateOptions {
   now?: number;
   configuredApiKeyIds?: string[];
   managementUsageMaxReadBytes?: number;
+  /**
+   * `background` is for request handlers: a whole-ledger rebuild starts in the cold-rebuild slot and
+   * the call throws `UsageColdReadPendingError` instead of waiting for it. Appends still run inline,
+   * since they read only the suffix since the last answer.
+   */
+  cold?: "await" | "background";
 }
 
 export interface JevStatsAggregateResult {
@@ -281,20 +291,25 @@ async function appendAggregate(
   } finally {
     pinnedAggregates.delete(state);
   }
-  if (rebuildAfterUnpin) return rebuildAggregate(options);
+  if (rebuildAfterUnpin) return rebuildOrPending(options);
   throw new Error("usage aggregate append did not settle");
+}
+
+function rebuildOrPending(options: UsageAggregateOptions): Promise<UsageAggregateResult> {
+  if (options.cold !== "background") return rebuildAggregate(options);
+  return awaitUsageColdRebuild("base", () => rebuildAggregate({ ...options, cold: "await" }));
 }
 
 async function refreshAggregate(options: UsageAggregateOptions): Promise<UsageAggregateResult> {
   const state = retainedAggregate;
-  if (!state) return rebuildAggregate(options);
+  if (!state) return rebuildOrPending(options);
 
   const observed = currentUsageLogRevision();
   const overlayVersion = userCostOverlayVersion();
   const timeZone = currentTimeZone();
   if (requiresRebuild(state, observed, overlayVersion, timeZone)) {
     retainedAggregate = null;
-    return rebuildAggregate(options);
+    return rebuildOrPending(options);
   }
   if (usageLogRevisionKey(observed) === state.revisionKey) return resultFrom(state, "unchanged");
   return appendAggregate(state, options);
@@ -323,7 +338,11 @@ function normalizeExactFilterValue(value: string | null | undefined): string | n
   return normalized || null;
 }
 
-export async function getFilteredUsageAggregate(filter: UsageSummaryFilterInput, window?: UsageTimeWindow): Promise<UsageAggregateResult> {
+export async function getFilteredUsageAggregate(
+  filter: UsageSummaryFilterInput,
+  window?: UsageTimeWindow,
+  cold: UsageAggregateOptions["cold"] = "await",
+): Promise<UsageAggregateResult> {
   const fixedWindow = window ? Object.freeze({ ...window }) : undefined;
   const normalizedFilter = {
     provider: normalizeFilterValue(filter.provider),
@@ -349,7 +368,7 @@ export async function getFilteredUsageAggregate(filter: UsageSummaryFilterInput,
     throw new Error("too many concurrent filtered usage aggregates");
   }
 
-  const flight = refreshFilteredAggregate(key, normalizedFilter, fixedWindow);
+  const flight = refreshFilteredAggregate(key, normalizedFilter, fixedWindow, cold);
   filteredFlights.set(key, flight);
   try {
     return await flight;
@@ -395,7 +414,7 @@ function filterQuery(
 
 function filterStats(
   read: UsageFilterCandidateRead,
-  update: UsageAggregateResult["update"],
+  update: UsageFilterQueryStats["scope"],
 ): UsageFilterQueryStats {
   return {
     totalRows: read.snapshot.indexedRows,
@@ -548,7 +567,7 @@ function trimRetainedFilteredAggregates(): void {
 function publishFilteredAggregate(
   key: string,
   state: RetainedFilteredAggregate,
-  update: UsageAggregateResult["update"],
+  update: UsageFilterQueryStats["scope"],
   read: UsageFilterCandidateRead | null,
 ): UsageAggregateResult {
   retainedFilteredAggregates.set(key, state);
@@ -562,14 +581,13 @@ function publishFilteredAggregate(
 async function rebuildFilteredAggregate(
   key: string,
   filter: NormalizedUsageFilter,
-  window?: UsageTimeWindow,
-  overlayVersion: number = userCostOverlayVersion(),
-  timeZone: string = currentTimeZone(),
+  window: UsageTimeWindow | undefined,
+  overlayVersion: number,
+  timeZone: string,
+  cold: UsageAggregateOptions["cold"],
 ): Promise<UsageAggregateResult> {
   const read = await readCandidates(filterQuery(filter, window));
-  if (!read) {
-    return rebuildFilteredAggregateStreaming(key, filter, window, overlayVersion, timeZone);
-  }
+  if (!read) return streamingOrPending(key, filter, window, cold);
   const accumulator = createUsageSummaryAccumulator({
     filter,
     mode: "row-unique",
@@ -585,6 +603,33 @@ async function rebuildFilteredAggregate(
     "rebuild",
     read,
   );
+}
+
+/**
+ * The whole-ledger fallback for a filter the index cannot serve. In the background mode a completed
+ * streaming answer for the same ledger file, prices and time zone is served as `dated` while its
+ * replacement builds in the cold-rebuild slot; without one the request is told to retry.
+ */
+function streamingOrPending(
+  key: string,
+  filter: NormalizedUsageFilter,
+  window: UsageTimeWindow | undefined,
+  cold: UsageAggregateOptions["cold"],
+): Promise<UsageAggregateResult> {
+  const overlayVersion = userCostOverlayVersion();
+  const timeZone = currentTimeZone();
+  const build = () => rebuildFilteredAggregateStreaming(key, filter, window, overlayVersion, timeZone);
+  if (cold !== "background") return build();
+  const state = retainedFilteredAggregates.get(key);
+  if (state
+    && state.indexGeneration === null
+    && state.overlayVersion === overlayVersion
+    && state.timeZone === timeZone
+    && state.identityKey === usageLogIdentityKey(currentUsageLogRevision())) {
+    startUsageColdRebuild(`filtered:${key}`, build);
+    return Promise.resolve({ ...resultFrom(state, "dated"), snapshotAt: state.retainedAt });
+  }
+  return awaitUsageColdRebuild(`filtered:${key}`, build);
 }
 
 async function rebuildFilteredAggregateStreaming(
@@ -648,7 +693,8 @@ async function appendFilteredAggregate(
 async function refreshFilteredAggregate(
   key: string,
   filter: NormalizedUsageFilter,
-  window?: UsageTimeWindow,
+  window: UsageTimeWindow | undefined,
+  cold: UsageAggregateOptions["cold"],
 ): Promise<UsageAggregateResult> {
   try {
     return await withFilterIndexRetry(async () => {
@@ -659,7 +705,7 @@ async function refreshFilteredAggregate(
         || state.overlayVersion !== overlayVersion
         || state.timeZone !== timeZone
         || state.indexGeneration === null) {
-        return rebuildFilteredAggregate(key, filter, window, overlayVersion, timeZone);
+        return rebuildFilteredAggregate(key, filter, window, overlayVersion, timeZone, cold);
       }
       const read = await readCandidates({
         ...filterQuery(filter, window),
@@ -667,7 +713,7 @@ async function refreshFilteredAggregate(
       });
       if (!read) {
         retainedFilteredAggregates.delete(key);
-        return rebuildFilteredAggregate(key, filter, window, overlayVersion, timeZone);
+        return rebuildFilteredAggregate(key, filter, window, overlayVersion, timeZone, cold);
       }
       if (state.indexGeneration !== read.snapshot.generation
         || state.identityKey !== read.snapshot.identityKey
@@ -675,7 +721,7 @@ async function refreshFilteredAggregate(
         // This branch never pages, so it owns closing the reader before the rebuild discards it.
         read.close();
         retainedFilteredAggregates.delete(key);
-        return rebuildFilteredAggregate(key, filter, window, overlayVersion, timeZone);
+        return rebuildFilteredAggregate(key, filter, window, overlayVersion, timeZone, cold);
       }
       if (state.processedThroughBytes === read.snapshot.indexedOffset) {
         // Even an unchanged retained projection validates the ledger against the snapshot, so a
@@ -709,9 +755,7 @@ async function refreshFilteredAggregate(
       // A page failed after its reader was handed out: the index cannot serve this query,
       // so answer from the authoritative ledger scan instead of failing the request.
       retainedFilteredAggregates.delete(key);
-      return withFilterIndexRetry(() =>
-        rebuildFilteredAggregateStreaming(key, filter, window, userCostOverlayVersion(), currentTimeZone()),
-      );
+      return withFilterIndexRetry(() => streamingOrPending(key, filter, window, cold));
     }
     throw error;
   }
