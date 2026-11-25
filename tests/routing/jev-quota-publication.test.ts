@@ -183,7 +183,7 @@ test("snapshot reads cannot mutate retained evidence and config-root changes dis
   expect(readLoadedDecisionQuotaPool("codex")![0]!.windows![0]!.percent).toBe(90);
   const previous = process.env.OPENCODEX_HOME;
   process.env.OPENCODEX_HOME = home.path("other");
-  try { expect(readLoadedDecisionQuotaPool("codex")).toBeUndefined(); } finally { process.env.OPENCODEX_HOME = previous; }
+  try { expect(readLoadedDecisionQuotaPool("codex")).toBeUndefined(); } finally { if (previous === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = previous; }
 });
 
 test("raw Anthropic producer preserves exact percent and invalid reset/overage stays unknown", async () => {

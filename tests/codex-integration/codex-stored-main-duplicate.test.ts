@@ -407,7 +407,7 @@ describe("stored Pool duplicate of native main", () => {
       process.env.CODEX_HOME = join(home, "other-home");
       expect(codexAccountUnusableReason(config, poolId)).toBeUndefined();
       expect(dto().selectionExcludedReason).toBeUndefined();
-    } finally { process.env.CODEX_HOME = original; }
+    } finally { if (original === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = original; }
   });
 });
 

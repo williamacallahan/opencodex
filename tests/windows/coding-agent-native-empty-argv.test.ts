@@ -79,7 +79,8 @@ describe.skipIf(process.platform !== "win32")("Windows coding-agent empty argv (
       await createQoderAdapter(qoderCn).runTurn!(parsed, { headers: new Headers(), translatorBudget: createTestTranslatorBudget() }, event => events.push(event));
       return events;
     } finally {
-      process.env.PATH = previous;
+      if (previous === undefined) delete process.env.PATH;
+      else process.env.PATH = previous;
     }
   }
 

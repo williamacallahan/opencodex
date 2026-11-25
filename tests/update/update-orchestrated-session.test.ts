@@ -415,7 +415,8 @@ test("dispose leaves the channel in place when an ancestor could be replaced or 
       chmodSync(shared, 0o777);
       process.env.TMPDIR = shared;
       const exposed = createOrchestratedResultChannel();
-      process.env.TMPDIR = previous;
+      if (previous === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previous;
       expect(exposed.directory.startsWith(shared)).toBe(true);
       exposed.dispose();
       expect(existsSync(exposed.resultPath)).toBe(true);

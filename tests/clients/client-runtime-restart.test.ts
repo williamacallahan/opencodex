@@ -561,7 +561,8 @@ describe("connection-ended evidence from the real state reader", () => {
       expect(state).toEqual({ kind: "invalid", reason: "config.json is missing" });
       expect(clientConnectionEnded(link, state)).toBe(false);
     } finally {
-      process.env.OPENCODEX_HOME = previous;
+      if (previous === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previous;
       removeTreeWithRetry(empty);
     }
   });

@@ -224,7 +224,8 @@ describe("launchd status from a shell with other homes", () => {
     } finally {
       if (previous.codex === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = previous.codex;
-      process.env.OPENCODEX_HOME = previous.opencodex;
+      if (previous.opencodex === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previous.opencodex;
     }
   }
 
@@ -310,7 +311,8 @@ describe("Windows wrapper escaping", () => {
     } finally {
       if (previous.profile === undefined) delete process.env.USERPROFILE;
       else process.env.USERPROFILE = previous.profile;
-      process.env.OPENCODEX_HOME = previous.opencodex;
+      if (previous.opencodex === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previous.opencodex;
     }
   });
 });
