@@ -149,9 +149,10 @@ function removeUnpublishedSegments(directory: string, sourceFd: number, sourceIn
 }
 
 /**
- * After a publish, delete every other segment named with the replaced ledger's inode whose bytes are a
- * prefix of the segment just written: it is the leftover of an earlier trim of that same file that never
- * published, and every row it holds is now in the new segment. A young leftover goes too: once this trim
+ * After a publish, delete every other segment named with the replaced ledger's inode that shares its
+ * bytes with the segment just written, the shorter being the longer's prefix: it is the leftover of an
+ * earlier trim of that same file that never published, and every row it holds is now in the new segment
+ * or, past that segment's end, in the ledger just published. A young leftover goes too: once this trim
  * replaced the file, no trim of the old file can publish any more. Temp files are left alone here:
  * a young one may still be another writer's, and the next trim's age rule removes a crashed one.
  */
@@ -164,8 +165,11 @@ function removeSupersededSegments(archivePath: string, sourceIno: string): void 
       const path = join(directory, leftover.name);
       if (path === archivePath) continue;
       eachEntry(path, "a superseded archive segment", () => {
-        const size = statSync(path).size;
-        if (size <= archiveSize && isPrefixOf(path, size, archiveFd)) removeLeftover(directory, leftover, "a superseded archive segment");
+        // Shorter: every row it holds is in the new segment. Longer, with the new segment its prefix (a
+        // trim killed before its rename, then a smaller cut after the limit was raised): the rows past the
+        // new segment's end are in the ledger just published. Either way the shorter is the longer's prefix.
+        const size = Math.min(statSync(path).size, archiveSize);
+        if (isPrefixOf(path, size, archiveFd)) removeLeftover(directory, leftover, "a superseded archive segment");
       });
     }
   } finally {
