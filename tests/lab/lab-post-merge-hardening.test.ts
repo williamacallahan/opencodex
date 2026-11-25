@@ -25,6 +25,7 @@ import { suiteManifestDigest } from "../../src/lab/digest";
 import { enforceEventStructureLimits } from "../../src/lab/events/limits";
 import type { ObservationEvent, ProtocolSubjectV1 } from "../../src/lab/events/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { repoPath } from "../helpers/repo-root";
 
 const HOMES: string[] = [];
 const previousHome = process.env.OPENCODEX_HOME;
@@ -385,4 +386,24 @@ test("purge tombstone without targets still requires a directory-scoped action",
     expect(err).toBeInstanceOf(LabValidationError);
     expect((err as LabValidationError).code).toBe("empty_purge_targets");
   }
+});
+
+test("artifact I/O mode detection leaves no probe in the process cwd or the artifact directory", () => {
+  // The mode is detected once per process, so a fresh process runs the probe with a cwd that is
+  // not the artifact directory. Bun 1.4.4 ignores openSync's `dir` option, which once created
+  // and renamed the probe in cwd and left `.dirfd-probe-<pid>.ok` behind.
+  const root = fs.mkdtempSync(join(tmpdir(), "ocx-lab-dirfd-probe-"));
+  HOMES.push(root);
+  const cwd = join(root, "cwd");
+  const artifacts = join(root, "artifacts");
+  mkdirSync(cwd);
+  const script = `
+    const { openTrustedArtifactDir, closeTrustedArtifactDir } = await import(${JSON.stringify(repoPath("src/lab/artifacts/secure-fs.ts"))});
+    closeTrustedArtifactDir(openTrustedArtifactDir(${JSON.stringify(artifacts)}));
+  `;
+  const child = Bun.spawnSync([process.execPath, "-e", script], { cwd, stdout: "pipe", stderr: "pipe" });
+  expect(child.stderr.toString()).toBe("");
+  expect(child.exitCode).toBe(0);
+  expect(fs.readdirSync(cwd)).toEqual([]);
+  expect(fs.readdirSync(artifacts)).toEqual([]);
 });

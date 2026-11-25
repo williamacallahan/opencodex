@@ -15,6 +15,7 @@ import {
   mkdirSync,
   openSync,
   readSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   writeSync,
@@ -129,21 +130,35 @@ function detectArtifactIoMode(dir: TrustedArtifactDir): ArtifactIoMode {
     artifactIoMode = "win32_pinned";
     return artifactIoMode;
   }
+  // A runtime that ignores `dir` resolves the relative name against the process cwd (Bun 1.4.4
+  // does), so the probe never creates through the `dir` calls: it creates by absolute path inside
+  // the artifact directory, then only opens, renames and unlinks that existing name relative to
+  // the descriptor. An ignored `dir` meets an absent cwd entry and fails without writing there.
   const probe = `.dirfd-probe-${process.pid}`;
   const finalName = `${probe}.ok`;
+  const probePath = join(dir.path, probe);
+  const finalPath = join(dir.path, finalName);
+  artifactIoMode = "win32_pinned";
   try {
-    const openWithDir = openSync as unknown as OpenSyncWithDir;
-    const fd = openWithDir(probe, O_CREAT | O_EXCL | O_RDWR, 0o600, { dir: dir.fd });
-    closeSync(fd);
+    // With cwd at the artifact directory an ignored `dir` resolves to the same file: undecidable.
+    if (realpathSync(process.cwd()) === realpathSync(dir.path)) return artifactIoMode;
+    const created = openSync(probePath, O_CREAT | O_EXCL | O_RDWR, 0o600);
+    const createdIdentity = fstatSync(created, { bigint: true });
+    closeSync(created);
+    const opened = (openSync as unknown as OpenSyncWithDir)(probe, O_RDONLY, 0, { dir: dir.fd });
+    const sameFile = sameFileIdentity(fstatSync(opened, { bigint: true }), createdIdentity);
+    closeSync(opened);
+    if (!sameFile) return artifactIoMode;
     (renameSync as unknown as RenameSyncWithDir)(probe, finalName, { dir: dir.fd });
-    if (!existsSync(join(dir.path, finalName))) {
-      artifactIoMode = "win32_pinned";
-      return artifactIoMode;
-    }
+    if (!existsSync(finalPath)) return artifactIoMode;
     (unlinkSync as unknown as UnlinkSyncWithDir)(finalName, { dir: dir.fd });
-    artifactIoMode = "dirfd";
+    if (!existsSync(finalPath)) artifactIoMode = "dirfd";
   } catch {
-    artifactIoMode = "win32_pinned";
+    // An ignored or unsupported `dir` lands here; pinned mode is the verified-path fallback.
+  } finally {
+    for (const leftover of [probePath, finalPath]) {
+      try { unlinkSync(leftover); } catch { /* absent: nothing was left behind */ }
+    }
   }
   return artifactIoMode;
 }
