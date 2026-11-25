@@ -57,15 +57,17 @@ function launch(entry: PreviewEntry): void {
         entry.running = false;
         // A rewrite observed while this scan ran makes its answer unknowable; the next lookup rebuilds.
         if (epoch !== entry.epoch) return;
-        if (observeUsageRevision(entry.observed, revision) === "rewritten") {
-          entry.observed = observedUsageRevision(revision);
-        }
+        // The answer covers the prefix the scan read. Its revision may only advance the observation:
+        // a scan that opened at 166 bytes must not pull back an observation of 498, or a later
+        // rewrite to 332 bytes would look like growth.
+        observeUsageRevision(entry.observed, revision);
         entry.completed = { at: Date.now(), aggregate };
         delete entry.failedAt;
       },
       () => {
         entry.running = false;
-        entry.failedAt = Date.now();
+        // An obsolete build's failure says nothing about the revision now observed.
+        if (epoch === entry.epoch) entry.failedAt = Date.now();
       },
     );
   }, 0);

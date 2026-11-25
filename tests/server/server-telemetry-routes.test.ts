@@ -412,4 +412,32 @@ describe("telemetry preview builds", () => {
     await settleTelemetryPreviewBuildForTests();
     expect(requests(telemetryPreviewAggregate(day, dir))).toBe(await oracle(dir));
   });
+
+  test("a scan that opened before observed growth never pulls the observation back", async () => {
+    const dir = home(rows(1));
+    const ledger = join(dir, "usage.jsonl");
+    scans.mockRestore();
+    const originalScan = usageLedgerScanner.scanUsageLedgerCooperatively;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    // The scan reads the one-row file at once and completes only after the growth below is observed.
+    scans = spyOn(usageLedgerScanner, "scanUsageLedgerCooperatively").mockImplementation(async options => {
+      const result = await originalScan(options);
+      await gate;
+      return result;
+    });
+    telemetryPreviewAggregate(day, dir);
+    await Bun.sleep(20);
+    nodeFs.appendFileSync(ledger, rows(2));
+    expect(telemetryPreviewAggregate(day, dir).status).toBe("pending"); // observes three rows
+    release();
+    await settleTelemetryPreviewBuildForTests();
+    // Rewritten to two rows of another day: more than the scan read, less than observed.
+    const otherDay = rows(2).replaceAll(String(at), String(at - 3 * 86_400_000));
+    nodeFs.truncateSync(ledger, 0);
+    nodeFs.appendFileSync(ledger, otherDay);
+    expect(telemetryPreviewAggregate(day, dir).status).toBe("pending");
+    await settleTelemetryPreviewBuildForTests();
+    expect(requests(telemetryPreviewAggregate(day, dir))).toBe(await oracle(dir));
+  });
 });
