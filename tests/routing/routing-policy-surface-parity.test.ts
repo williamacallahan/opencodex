@@ -443,3 +443,70 @@ describe("routing policy request evidence parity (via dev handlers)", () => {
     expect(claudeHasImage).toBe(false);
   });
 });
+
+describe("a policy fallback candidate receives the caller's intent", () => {
+  // The first candidate exposes no effort control and answers 429; the second accepts both
+  // effort and tier. What reaches the second provider's wire is the contract.
+  function fallbackConfig(): OcxConfig {
+    return {
+      port: 0, defaultProvider: "a", cursorEffortRows: true,
+      providers: {
+        a: { adapter: "openai-chat", baseUrl: "https://a.fixture.test/v1", authMode: "key", apiKey: "a",
+          models: ["m0"], noReasoningModels: ["m0"], retryOn429: { enabled: false } },
+        b: { adapter: "openai-chat", baseUrl: "https://b.fixture.test/v1", authMode: "key", apiKey: "b",
+          models: ["m1"], supportsServiceTier: true, chatServiceTier: true },
+      },
+      routingProfiles: { daily: { candidates: [{ provider: "a", model: "m0" }, { provider: "b", model: "m1" }] } },
+    } as OcxConfig;
+  }
+
+  async function secondCandidateBody(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    takeSpendHome();
+    const sent: Record<string, Record<string, unknown>> = {};
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      const outbound = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      sent[url.hostname] = outbound;
+      if (url.hostname === "a.fixture.test") {
+        return Response.json({ error: { type: "rate_limit_error", message: "slow down" } }, { status: 429 });
+      }
+      if (outbound.stream !== true) {
+        return Response.json({ id: "c", object: "chat.completion", model: "m1",
+          choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] });
+      }
+      return new Response('data: {"id":"c","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        { headers: { "content-type": "text/event-stream" } });
+    }) as typeof fetch;
+    try {
+      const handler = path === "/v1/messages" ? handleClaudeMessages : handleResponses;
+      const response = await handler(new Request(`http://localhost${path}`, {
+        method: "POST", headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
+        body: JSON.stringify(body),
+      }), fallbackConfig(), { model: "", provider: "" });
+      await response.text();
+      expect(response.status).toBe(200);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(sent["a.fixture.test"]).toBeDefined();
+    return sent["b.fixture.test"] ?? {};
+  }
+
+  test("a Messages effort survives a first candidate with an empty effort ladder", async () => {
+    const sent = await secondCandidateBody("/v1/messages", {
+      model: MODEL, max_tokens: 64, stream: false, output_config: { effort: "high" },
+      messages: [{ role: "user", content: "hello" }],
+    });
+    expect(sent.reasoning_effort).toBe("high");
+  });
+
+  test.each([
+    ["an explicit tier", { model: MODEL, service_tier: "priority" }, "service_tier", "priority"],
+    ["a --fast suffix", { model: `${MODEL}--fast` }, "service_tier", "priority"],
+    ["an effort suffix", { model: `${MODEL}--high` }, "reasoning_effort", "high"],
+  ] as const)("a native Responses retry keeps %s", async (_label, selector, field, expected) => {
+    const sent = await secondCandidateBody("/v1/responses", { ...selector, stream: false, input: "hello" });
+    expect(sent[field]).toBe(expected);
+  });
+});

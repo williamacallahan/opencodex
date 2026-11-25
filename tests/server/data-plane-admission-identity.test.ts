@@ -162,7 +162,9 @@ describe("the two wrappers still differ", () => {
     const bearer = request({ authorization: "Bearer ocx_data_firstsecret" });
 
     // /v1/models and /v1/messages take bearer...
-    expect(resolveApiAuth(bearer, config)).toEqual({ kind: "configured", keyId: "first-key", source: "bearer", contextPrincipalId: expect.stringMatching(/^[a-f0-9]{64}$/), attribution: { client: "unknown", workload: "unknown-client:via-opencodex", workloadSource: "hub" } });
+    // Credential fields only: headerless attribution defaults are pinned once, in
+    // tests/usage/request-attribution.test.ts.
+    expect(resolveApiAuth(bearer, config)).toMatchObject({ kind: "configured", keyId: "first-key", source: "bearer", contextPrincipalId: expect.stringMatching(/^[a-f0-9]{64}$/) });
     expect(hasValidApiAuth(bearer, config)).toBe(true);
 
     // ...and Responses now does too. Rejecting it meant a Codex client configured with
@@ -170,7 +172,7 @@ describe("the two wrappers still differ", () => {
     // credential is substituted rather than forwarded -- see materializeCodexUpstreamAuth.
     // The source is recorded so that substitution can be made conditional on it.
     expect(resolveResponsesApiAuth(request({ authorization: "Bearer ocx_data_firstsecret" }), config))
-      .toEqual({ kind: "configured", keyId: "first-key", source: "bearer", contextPrincipalId: expect.stringMatching(/^[a-f0-9]{64}$/), attribution: { client: "unknown", workload: "unknown-client:via-opencodex", workloadSource: "hub" } });
+      .toMatchObject({ kind: "configured", keyId: "first-key", source: "bearer", contextPrincipalId: expect.stringMatching(/^[a-f0-9]{64}$/) });
     expect(requireResponsesApiAuth(request({ authorization: "Bearer ocx_data_firstsecret" }), config)).toBeNull();
   });
 

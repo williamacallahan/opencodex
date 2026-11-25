@@ -40,7 +40,8 @@ describe("loopback listener policy view", () => {
 
   test("the loopback view admits without a credential and names it loopback", () => {
     const policy = requestPolicyView(wildcardConfig, "127.0.0.1");
-    expect(resolveResponsesApiAuth(request(), policy)).toEqual({ kind: "loopback", source: "loopback", attribution: { client: "unknown", workload: "unknown-client:via-opencodex", workloadSource: "hub" } });
+    // Headerless attribution defaults are pinned once, in tests/usage/request-attribution.test.ts.
+    expect(resolveResponsesApiAuth(request(), policy)).toMatchObject({ kind: "loopback", source: "loopback" });
   });
 
   test("the view carries no bind address other than the one it was given", () => {

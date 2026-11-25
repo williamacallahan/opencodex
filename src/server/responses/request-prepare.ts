@@ -320,7 +320,6 @@ export async function prepareResponsesRequest(
   // concrete provider/model, so neither site below may rewrite or re-resolve it. It keeps the phase
   // through `options.memoryModelPhase` instead, which is what applies the phase effort.
   const memoryModelApplies = memoryModelTarget !== undefined && !concreteSelection;
-  options.onRequestBodyParsed?.(body);
   // An effort row naming a table-less combo (`combo/x--high`) must reach the combo dispatcher
   // as its base id, so the selector is normalized here, before comboIdFromRawBody reads model.
   const comboRows = !concreteSelection && body && typeof body === "object" && !Array.isArray(body)
@@ -351,6 +350,10 @@ export async function prepareResponsesRequest(
       effort: comboEffortRow.effort,
     };
   }
+  // Observers (the policy-fallback retry snapshot) see the caller's intent: a `--fast` or effort
+  // suffix is already the service_tier/reasoning field a retry keeps when it renames `model`, and
+  // no target-specific normalization below has run yet.
+  options.onRequestBodyParsed?.(body);
   const isCompactionTrigger = body !== null && typeof body === "object" && !Array.isArray(body)
     && Array.isArray((body as { input?: unknown }).input)
     && ((body as { input: unknown[] }).input).some((item: unknown) =>
