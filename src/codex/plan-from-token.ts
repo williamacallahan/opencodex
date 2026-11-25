@@ -6,7 +6,6 @@ import {
 import type { CodexAccount, OcxConfig } from "../types";
 import { isSelectableCodexPoolAccount, isValidCodexAccountId } from "./account-id";
 import {
-  getCodexAccountCredential,
   isCodexAccountGenerationLive,
   peekCodexAccountGenerationLive,
   readCodexAccountRecord,
@@ -25,11 +24,6 @@ function configuredPoolAccount(config: OcxConfig, accountId: string): CodexAccou
     .find(account => account.id === accountId && isSelectableCodexPoolAccount(account)) ?? null;
 }
 
-function jwtPlanFromPoolCredential(accountId: string): string | undefined {
-  const cred = getCodexAccountCredential(accountId);
-  return cred ? extractChatgptPlanType(undefined, cred.accessToken) : undefined;
-}
-
 /**
  * WHAM-wins gate (release-audit fix). A JWT-derived plan may be persisted only when no
  * WHAM-sourced plan exists for the CURRENT credential generation. A token refresh bumps the
@@ -46,10 +40,13 @@ function jwtMayWritePlan(account: CodexAccount, generation: number): boolean {
 function collectJwtPoolPlanUpdates(runtimeConfig: OcxConfig): FreshPoolPlanUpdate[] {
   const updates: FreshPoolPlanUpdate[] = [];
   for (const account of (runtimeConfig.codexAccounts ?? []).filter(isSelectableCodexPoolAccount)) {
-    const jwtPlan = jwtPlanFromPoolCredential(account.id);
+    // Plan and generation come from one record, so a refresh between two reads cannot stamp an
+    // older token's plan with the newer credential's generation.
+    const record = readCodexAccountRecord(account.id);
+    if (!record?.credential || record.deletedAt != null) continue;
+    const jwtPlan = extractChatgptPlanType(undefined, record.credential.accessToken);
     if (!jwtPlan || codexPlanValue(account.plan) === jwtPlan) continue;
-    const generation = readCodexAccountRecord(account.id)?.generation;
-    if (generation === undefined) continue;
+    const generation = record.generation;
     if (!jwtMayWritePlan(account, generation)) continue;
     updates.push({ accountId: account.id, plan: jwtPlan, credentialGeneration: generation });
   }

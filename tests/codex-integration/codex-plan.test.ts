@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import * as accountStore from "../../src/codex/account-store";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { getMainAccountPlan, setMainAccountPlan } from "../../src/codex/main-account";
 import { extractChatgptPlanType } from "../../src/codex/plan";
@@ -87,6 +88,31 @@ describe("reconcileCodexPlansFromTokens", () => {
     reconcileCodexPlansFromTokens(config);
 
     expect(config.codexAccounts?.[0]?.plan).toBe("pro");
+    expect(loadConfig().codexAccounts?.[0]?.plan).toBe("pro");
+  });
+
+  test("a refresh between reads cannot stamp an old token's plan with the new generation", () => {
+    const credential = (plan: string) => ({ accessToken: chatgptPlanJwt(plan, "acct-pool-race"),
+      refreshToken: `refresh-${plan}`, expiresAt: Date.now() + 5 * 60_000, chatgptAccountId: "acct-pool-race" });
+    saveCodexAccountCredential("pool-race", credential("plus"));
+    const whamGeneration = accountStore.readCodexAccountRecord("pool-race")!.generation;
+    const config: OcxConfig = { port: 10100, providers: {}, defaultProvider: "openai", codexAccounts: [{
+      id: "pool-race", email: "race@example.test", plan: "pro", isMain: false,
+      planSource: "wham", planCredentialGeneration: whamGeneration,
+    }] };
+    saveConfig(config);
+    // A refresh, whose token WHAM's plan already describes, lands after the first record read.
+    const real = accountStore.readCodexAccountRecord;
+    let reads = 0;
+    const read = spyOn(accountStore, "readCodexAccountRecord").mockImplementation(id => {
+      if (++reads === 2) saveCodexAccountCredential("pool-race", credential("pro"));
+      return real(id);
+    });
+    try {
+      reconcileCodexPlansFromTokens(config);
+    } finally {
+      read.mockRestore();
+    }
     expect(loadConfig().codexAccounts?.[0]?.plan).toBe("pro");
   });
 
