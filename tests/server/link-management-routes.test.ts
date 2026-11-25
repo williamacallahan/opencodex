@@ -187,8 +187,8 @@ describe("link management routes", () => {
       started(); await gate; throw new Error("fixture scan failed");
     });
     try {
-      if (kind === "report") {
-        // The candidate index ingests a non-empty ledger, which is the scan this case fails.
+      {
+        // Both read through the candidate index, which ingests a non-empty ledger: the scan this case fails.
         writeFileSync(join(temp, "usage.jsonl"), `${JSON.stringify({
           requestId: "fixture",
           timestamp: Date.now(),
@@ -277,6 +277,10 @@ describe("link management routes", () => {
       return original(options);
     });
     try {
+      // Facets fold from the candidate index, whose ingest of this row is the in-flight read.
+      writeFileSync(join(temp, "usage.jsonl"), `${JSON.stringify({
+        requestId: "fixture", timestamp: Date.now(), provider: "openai", model: "gpt-5.5", status: 200, durationMs: 1, usageStatus: "reported",
+      })}\n`);
       const url = new URL("http://127.0.0.1/api/usage/source-facets?client=all&device=all");
       const pending = handleManagementAPI(new Request(url, { headers: { host: "127.0.0.1", "content-type": "application/json" } }), url, h.config, h.deps, "gui-session",
         { isPaired: () => paired, isCurrent: () => paired, revokeCurrent: () => true },

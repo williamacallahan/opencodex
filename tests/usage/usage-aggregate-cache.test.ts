@@ -22,7 +22,9 @@ import {
 import type { OcxConfig } from "../../src/types/config";
 import { resetUsageReadCacheForTests, type PersistedUsageEntry } from "../../src/usage/log";
 import * as usageLedgerScannerModule from "../../src/usage/ledger-scanner";
-import { getUsageSourceFacets, SourceFacetsBusyError } from "../../src/server/management/usage-source-facets";
+import { getUsageSourceFacets, resetUsageSourceFacetsForTests } from "../../src/server/management/usage-source-facets";
+import { createSourceFacetAccumulator } from "../../src/usage/source-facets";
+import { rangeWindow } from "../../src/usage/summary";
 import { refreshUserCostOverlays } from "../../src/usage/user-cost-overlays";
 import { buildRouteDecisionTrace } from "../../src/routing/trace";
 import { createAnthropicAdapter } from "../../src/adapters/anthropic";
@@ -64,6 +66,7 @@ beforeEach(() => {
   testDir = mkdtempSync(join(tmpdir(), "ocx-usage-aggregate-"));
   process.env.OPENCODEX_HOME = testDir;
   resetUsageAggregateCacheForTests();
+  resetUsageSourceFacetsForTests();
   resetUsageReadCacheForTests();
   resetAppOwnedMemoryForTests();
   refreshUserCostOverlays({ providers: {} } as unknown as OcxConfig);
@@ -112,28 +115,56 @@ describe("retained usage aggregate cache", () => {
     expect((await getFilteredUsageAggregate(filter)).usageInvalidRows).toBe(true);
   });
 
-  test("facet scans share identical work and reject excess distinct concurrent scans", async () => {
-    const original = usageLedgerScannerModule.scanUsageLedgerCooperatively;
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    let scans = 0;
-    const spy = spyOn(usageLedgerScannerModule, "scanUsageLedgerCooperatively").mockImplementation(async options => {
-      scans += 1;
-      await gate;
-      return original(options);
-    });
-    const source = (client: "all" | "codex" | "claude_code" | "grok" | "aside") => ({ client, device: { kind: "all" as const } });
+  test("picker facets fold from the index, equal the raw rows, and a reopened picker reads no ledger bytes", async () => {
+    const path = join(testDir, "usage.jsonl");
+    const at = Date.now() - 60_000;
+    const row = (requestId: string, over: Record<string, unknown>) => `${JSON.stringify({ ...entry(requestId), timestamp: at, ...over })}\n`;
+    writeFileSync(path, [
+      row("codex-a", { client: "codex", apiKeyId: "key-a", admissionKind: "configured" }),
+      row("claude-b", { client: "claude_code", apiKeyId: "key-b", admissionKind: "configured" }),
+      row("no-key", { client: "codex" }),
+      row("old", { client: "codex", timestamp: at - 40 * 24 * 60 * 60 * 1000 }),
+    ].join(""));
+    const source = { client: "all" as const, device: { kind: "all" as const } };
+    // The raw-row oracle: every row through the authoritative whole-ledger scanner.
+    const expected = async (ids: string[]) => {
+      const accumulator = createSourceFacetAccumulator(source, ids, { since: rangeWindow("30d", Date.now()).since!, until: Date.now() });
+      await usageLedgerScannerModule.scanUsageLedgerCooperatively({ onEntry: row => accumulator.add(row) });
+      const { apps, devices } = accumulator.snapshot();
+      return { apps, devices };
+    };
+    const want = await expected(["key-a", "key-b"]);
+    const first = await getUsageSourceFacets(source, ["key-a", "key-b"]);
+    expect({ apps: first.apps, devices: first.devices }).toEqual(want);
+    const fullScans = spyOn(usageLedgerScannerModule, "scanUsageLedgerCooperatively");
     try {
-      const flights = [getUsageSourceFacets(source("all"), []), getUsageSourceFacets(source("all"), []),
-        getUsageSourceFacets(source("codex"), []), getUsageSourceFacets(source("claude_code"), []),
-        getUsageSourceFacets(source("grok"), [])];
-      await expect(getUsageSourceFacets(source("aside"), [])).rejects.toBeInstanceOf(SourceFacetsBusyError);
-      expect(scans).toBe(4);
-      release();
-      await Promise.all(flights);
+      expect(first.devices.find(device => device.device.kind === "all")?.requests).toBe(3);
+      const rowReads = spyOn(usageLedgerScannerModule, "readUsageLedgerRowsAtOffsets");
+      try {
+        // A late append inside the 15 s reuse window keeps the completed counts and reads nothing.
+        appendFileSync(path, row("late", { client: "codex" }));
+        expect(await getUsageSourceFacets(source, ["key-a", "key-b"])).toEqual(first);
+        expect(rowReads).not.toHaveBeenCalled();
+        // A changed key inventory never reuses, and sees the late row too.
+        const changed = await getUsageSourceFacets(source, ["key-a"]);
+        expect(rowReads).toHaveBeenCalled();
+        // The index ingests only the appended suffix; nothing rescans the ledger from its first byte.
+        const ingests = fullScans.mock.calls.map(([options]) => options.startAtBytes ?? 0);
+        expect(ingests.every(start => start > 0)).toBe(true);
+        fullScans.mockRestore();
+        expect({ apps: changed.apps, devices: changed.devices }).toEqual(await expected(["key-a"]));
+      } finally {
+        rowReads.mockRestore();
+      }
+      // A replaced ledger is a different key, never served from the old file's counts.
+      writeFileSync(`${path}.next`, row("replacement", { client: "claude_code" }));
+      rmSync(path);
+      writeFileSync(path, readFileSync(`${path}.next`));
+      const replaced = await getUsageSourceFacets(source, ["key-a", "key-b"]);
+      expect(replaced.devices.find(device => device.device.kind === "all")?.requests).toBe(1);
+      expect({ apps: replaced.apps, devices: replaced.devices }).toEqual(await expected(["key-a", "key-b"]));
     } finally {
-      release();
-      spy.mockRestore();
+      fullScans.mockRestore();
     }
   });
 

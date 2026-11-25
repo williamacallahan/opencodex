@@ -212,7 +212,15 @@ snapshot is included in filtered-cache identity. `src/usage/source-facets.ts` fo
 its legacy count is the unclassified subset of the Codex app option for the selected device.
 Unselectable padded IDs remain in the configured membership set but are omitted from individual
 rows and counted separately, so they neither hide valid choices nor become unconfigured traffic.
-`src/server/management/usage-source-facets.ts` bounds concurrent scans. The session-only facets
+`src/server/management/usage-source-facets.ts` folds them from the candidate index
+(`src/usage/filter-index.ts`): the window's row offsets in bounded pages against one published
+index generation, each page read at its offsets and validated against that snapshot, never a
+per-picker whole-ledger scan. It keeps at most four completed answers for 15 seconds, keyed by home,
+ledger file identity, filter, key inventory, time zone and the local 30-day window start, so a
+reopened picker reads no ledger bytes, appends wait for expiry, and a replaced ledger, changed
+inventory or local midnight never reuse one. The fold runs in the cold-rebuild slot
+(`src/usage/cold-rebuild-slot.ts`); one that outlasts its 500 ms wait, an unusable index, or an index
+that disagrees with the ledger (which also requests an index rebuild) answers 503. The session-only facets
 route rechecks session and inventory after scanning, fails closed on changes and sets no-store.
 Expiration after an authorized scan starts returns 401 so the dashboard clears session-scoped
 results; an initial credential lacking the required dashboard scope still receives 403.

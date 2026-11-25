@@ -224,9 +224,11 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
       const currentLinks = JSON.stringify(readStoreFor(ctx).links.map(({ apiKeyId, alias }) => [apiKeyId, alias]).sort());
       if (JSON.stringify(ids) !== JSON.stringify(currentIds) || links !== currentLinks) throw new Error("inventory changed");
       return Response.json(facets, { headers: { "cache-control": "no-store" } });
-    } catch {
+    } catch (failure) {
       if (auth(ctx, "dashboard")) return expiredUsageSession();
-      return Response.json({ error: "usage_facets_unavailable" }, { status: 503, headers: { "cache-control": "no-store", "retry-after": "1" } });
+      // Pending: the fold is finishing in the background and fills the 15-second cache.
+      const retryAfter = failure instanceof UsageColdReadPendingError ? failure.retryAfterSeconds : 1;
+      return Response.json({ error: "usage_facets_unavailable" }, { status: 503, headers: { "cache-control": "no-store", "retry-after": String(retryAfter) } });
     }
   }
 
