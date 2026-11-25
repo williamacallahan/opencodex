@@ -74,6 +74,7 @@ import {
   type UsageLedgerScanResult,
 } from "./ledger-scanner";
 import { LINKED_CLIENT_FOLDED_CLIENTS, USAGE_CODEX_CLIENT_LABELS, type UsageSourceFields, type UsageSourceFilter } from "./source-filter";
+import { noteUsageRevision, usageRevisionEpoch } from "./revision-observation";
 import { usageAttributions } from "./summary";
 import type { UsageTimeWindow } from "./time-range";
 
@@ -1071,12 +1072,28 @@ function assertHomeUnchanged(dir: string): void {
   if (getConfigDir() !== dir) throw new UsageFilterIndexHomeChangedError();
 }
 
+/**
+ * Per index path, the published generation this process trusts and the destructive epoch of the
+ * ledger it was trusted under (`src/usage/revision-observation.ts`). The index judges an append
+ * from its own recorded size and boundary digest, so a shrink another cache observed, followed by
+ * regrowth past the indexed size, would otherwise extend a generation whose early rows changed.
+ * A generation this process neither built nor checked is trusted only while no destructive change
+ * has been observed; after one, only a full ingest that publishes under an unchanged epoch is.
+ */
+const trustedGenerations = new Map<string, { generation: string; epoch: number }>();
+
+function generationTrusted(path: string, generation: string, epoch: number): boolean {
+  const trusted = trustedGenerations.get(path);
+  return trusted?.generation === generation ? trusted.epoch === epoch : epoch === 0;
+}
+
 async function rebuild(
   db: Database,
   dir: string,
   path: string,
   prior: IndexMeta,
 ): Promise<UsageFilterIndexSnapshot | null> {
+  const epoch = noteUsageRevision(currentUsageLogRevision());
   const staging = randomUUID();
   beginStaging(db, path, staging);
   let published = false;
@@ -1107,6 +1124,9 @@ async function rebuild(
       return null;
     }
     published = true;
+    // Fenced on the epoch the ingest started under: a destructive change observed during it leaves
+    // the new generation untrusted, so the next refresh ingests again.
+    if (noteUsageRevision(currentUsageLogRevision()) === epoch) trustedGenerations.set(path, { generation: staging, epoch });
     scheduleRetiredGenerationReclaim(dir, path);
     await testHooks?.afterPublish?.({ dbPath: path, generation: staging });
     hardenSidecars(path);
@@ -1181,7 +1201,8 @@ async function refreshOnce(
   };
   if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION
     || !meta.generation
-    || usageLogIdentityKey(meta.revision) !== usageLogIdentityKey(revision)) {
+    || usageLogIdentityKey(meta.revision) !== usageLogIdentityKey(revision)
+    || !generationTrusted(path, meta.generation, noteUsageRevision(revision))) {
     return rebuildOrRetry(db, dir, path, meta);
   }
   if (revision === null) return snapshotFrom(meta, 0, ingestPassesFor(path));
@@ -1766,7 +1787,8 @@ export async function readUsageFilterCandidatesPassive(
     try {
       const meta = readMeta(db);
       const revision = currentUsageLogRevision();
-      if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || !meta.generation) {
+      if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || !meta.generation
+        || !generationTrusted(path, meta.generation, noteUsageRevision(revision))) {
         throw new UsageLedgerRebuildRequiredError("content_changed");
       }
       if (usageLogIdentityKey(meta.revision) !== usageLogIdentityKey(revision)
@@ -1829,6 +1851,7 @@ export function usageFilterIndexExtendable(generation: string, revision: UsageLo
     const meta = readMeta(db);
     if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || meta.generation !== generation) return false;
     if (usageLogIdentityKey(meta.revision) !== usageLogIdentityKey(revision)) return false;
+    if (!generationTrusted(path, generation, usageRevisionEpoch(revision))) return false;
     const recorded = meta.revision?.size ?? 0;
     const size = revision?.size ?? 0;
     return size > recorded || (size === recorded && usageLogRevisionKey(meta.revision) === usageLogRevisionKey(revision));
@@ -1910,6 +1933,7 @@ export function resetUsageFilterIndexForTests(): void {
   ingestFlight = null;
   reclaimRun = null;
   reclaimAgain = false;
+  trustedGenerations.clear();
   ingestPassesByPath.clear();
   rebuildRequestedPaths.clear();
   sidecarOwnershipChecked.clear();

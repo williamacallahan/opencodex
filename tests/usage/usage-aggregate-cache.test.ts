@@ -377,6 +377,43 @@ describe("retained usage aggregate cache", () => {
     }
   });
 
+  test("a destructive change another cache observed retires the index generation for prewarmed filters and the picker", async () => {
+    const path = join(testDir, "usage.jsonl");
+    // Rows far past 64 KiB, so the early rewrite leaves the index's boundary digest window intact.
+    const row = (requestId: string, provider: string, apiKeyId: string) => `${JSON.stringify({ ...entry(requestId), timestamp: Date.now() - 60_000,
+      provider, apiKeyId, admissionKind: "configured", pad: "x".repeat(400) })}\n`;
+    const filler = Array.from({ length: 400 }, (_, index) => row(`f-${index}`, "anthropic", "key-f")).join("");
+    writeFileSync(path, row("r-0", "openai", "key-a") + filler);
+    const settled = async <T>(read: () => T | Promise<T>): Promise<T> => {
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return await read();
+        } catch (error) {
+          if (!(error instanceof UsageColdReadPendingError) || attempt > 3) throw error;
+          await settleUsageColdRebuildForTests();
+        }
+      }
+    };
+    const ids = ["key-a", "key-b", "key-f"];
+    const source = { client: "all" as const, device: { kind: "all" as const } };
+    const base = () => settled(() => getUsageAggregate({ cold: "background" }));
+    const keyB = () => settled(() => getFilteredUsageAggregate({ apiKeyId: "key-b" }, undefined, "background"));
+    const picker = async () => Object.fromEntries((await settled(() => getUsageSourceFacets(source, ids))).devices
+      .filter(device => device.device.kind === "key").map(device => [(device.device as { id: string }).id, device.requests]));
+    await base();
+    expect(requests(await keyB())).toBe(0);
+    expect(await picker()).toMatchObject({ "key-a": 1, "key-b": 0 });
+    // The base cache observes growth by four rows, then a shorter file whose first row moved to google and key-b.
+    appendFileSync(path, ["a1", "a2", "a3", "a4"].map(id => row(id, "anthropic", "key-f")).join(""));
+    await base();
+    writeFileSync(path, row("r-0", "google", "key-b") + filler + row("a1", "anthropic", "key-f"));
+    const byProvider = Object.fromEntries((await base()).accumulator.summarize("all", NOW).providers.map(entry => [entry.provider, entry.requests]));
+    expect(byProvider).toMatchObject({ google: 1 });
+    expect(byProvider).not.toHaveProperty("openai");
+    expect(requests(await keyB())).toBe(1);
+    expect(await picker()).toMatchObject({ "key-a": 0, "key-b": 1 });
+  });
+
   test("a reservation re-made after expiry while the slot is busy is released, so a new filter still starts", async () => {
     writeFileSync(join(testDir, "usage.jsonl"), line("a"));
     const realNow = Date.now;

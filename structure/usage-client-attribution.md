@@ -146,6 +146,15 @@ the per-page recheck described with the paging contract above. A published
 generation that claims rows it no longer holds is rebuilt rather than served as a complete zero, in
 both the active and the passive read.
 
+The index judges an append from its own recorded size and boundary digest, so it cannot see a
+shrink another cache observed if the file then grows past the indexed size again. Each process
+therefore trusts a published generation only under the ledger's destructive epoch
+(`src/usage/revision-observation.ts`) it was trusted at: its own full ingest records the epoch it
+started under when that epoch is unchanged at publish, and a generation it neither built nor checked
+is trusted only while no destructive change has been observed. An untrusted generation is never
+extended or served: the active refresh ingests in full, an extend-only refresh and
+`usageFilterIndexExtendable` refuse, and the passive read returns no answer.
+
 A staging generation registers itself and its writer pid before its first row. A failed attempt
 ends its own lease in a finally; a process that dies without running it leaves a lease whose pid is
 no longer alive. Retired, failed and abandoned generations are all removed by one background
