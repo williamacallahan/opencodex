@@ -289,19 +289,35 @@ function pinUsageRuntime(deps: UsageCompareDeps, owner: UsageOwner): (suffix: st
     if (read.kind === "unavailable") {
       throw new RuntimeApiError(`Local usage read unavailable (${read.reason}). No comparison was produced.`, 503, null);
     }
-    const cancelBody = () => { void read.response.body?.cancel().catch(() => {}); };
     if (read.response.status === 503) {
-      const body = await withinDeadline(read.response.json().catch(() => null), budget, cancelBody) as { error?: unknown } | null;
+      const body = await jsonWithinDeadline(read.response, budget)
+        .catch(error => { if (error instanceof RuntimeApiError) throw error; return null; }) as { error?: unknown } | null;
       const retryAfter = Number(read.response.headers.get("retry-after"));
       if (body?.error === "usage_rebuilding") throw new UsagePendingError(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 5);
     }
     if (!read.response.ok) {
       throw new RuntimeApiError(`Usage request failed (HTTP ${read.response.status}). No comparison was produced.`, read.response.status, null);
     }
-    const result = await withinDeadline(read.response.json(), budget, cancelBody) as ScopedUsage;
+    const result = await jsonWithinDeadline(read.response, budget) as ScopedUsage;
     assertRuntime();
     return result;
   };
+}
+
+/**
+ * Reads a JSON body through a reader this call holds, cancelling that reader when the deadline
+ * aborts: `body.cancel()` cannot release a stream `json()` has locked, and an injected stream need
+ * not follow the request's signal.
+ */
+async function jsonWithinDeadline(response: Response, budget: CompareBudget): Promise<unknown> {
+  if (!response.body) return response.json();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  const text = await withinDeadline((async () => {
+    for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) chunks.push(chunk.value);
+    return Buffer.concat(chunks).toString("utf8");
+  })(), budget, () => { void reader.cancel().catch(() => {}); });
+  return JSON.parse(text);
 }
 
 /** The proxy or hub is still building this window's report; ask again after `retryAfterSeconds`. */

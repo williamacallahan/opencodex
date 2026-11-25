@@ -22,7 +22,7 @@ const NOW = Date.UTC(2026, 9, 15, 15, 30, 0);
 const LOCAL = { pid: 4242, port: 10100, hostname: "127.0.0.1", attestationSecret: "A".repeat(43) };
 const AUTH: ManagementAuthState = { available: true, token: "compare-fixture-admin", source: "environment", sessions: new Map(), pairingGrants: new Map() };
 
-function localDeps(fetchImpl: typeof fetch): UsageCompareDeps {
+function localDeps(fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>): UsageCompareDeps {
   return {
     // baseUrl must never bypass protected runtime discovery, even with a fetch seam.
     baseUrl: "http://untrusted.test", now: () => NOW,
@@ -362,12 +362,16 @@ test.each([
     if (scenario === "secret-after-response") runtime = { ...LOCAL, attestationSecret: "B".repeat(43) };
     if (scenario === "hostname-after-response") runtime = { ...LOCAL, hostname: "localhost" };
     if (scenario === "secret-during-body") {
-      const json = response.json.bind(response);
-      response.json = async () => {
-        const result = await json();
-        runtime = { ...LOCAL, attestationSecret: "B".repeat(43) };
-        return result;
-      };
+      // The runtime is replaced while the body is still being read, however the reader consumes it.
+      const source = response.body!.getReader();
+      return new Response(new ReadableStream({
+        async pull(controller) {
+          const chunk = await source.read();
+          if (!chunk.done) return controller.enqueue(chunk.value);
+          runtime = { ...LOCAL, attestationSecret: "B".repeat(43) };
+          controller.close();
+        },
+      }), { status: response.status, headers: response.headers });
     }
     return response;
   };
@@ -623,10 +627,14 @@ test("a read that completes after the deadline is not accepted", async () => {
   }
 });
 
-test("the deadline ends a read whose body never finishes", async () => {
+test("the deadline ends and cancels a read whose body never finishes", async () => {
+  let cancelled = false;
   const deps: UsageCompareDeps = {
-    ...localDeps(async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("{")); } }),
-      { headers: { "content-type": "application/json" } })),
+    // The stream ignores the request's signal, so only the reader's own cancel can release it.
+    ...localDeps(async () => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode("{")); },
+      cancel() { cancelled = true; },
+    }), { headers: { "content-type": "application/json" } })),
     deadlineMs: 200,
   };
   const started = Date.now();
@@ -634,4 +642,5 @@ test("the deadline ends a read whose body never finishes", async () => {
   expect(result.code).toBe(1);
   expect(result.errors).toContain("time limit");
   expect(Date.now() - started).toBeLessThan(1_500);
+  expect(cancelled).toBe(true);
 });
