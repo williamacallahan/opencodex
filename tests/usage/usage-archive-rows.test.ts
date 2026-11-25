@@ -8,6 +8,7 @@ import { handleManagementAPI } from "../../src/server/management-api";
 import { loadWindowSegments, readArchiveListing } from "../../src/usage/archive-query";
 import { noteArchiveChanged } from "../../src/usage/archive-segments";
 import { inArchiveRowsReadQueue, readArchivedRows } from "../../src/usage/archive-rows";
+import * as ledgerScannerModule from "../../src/usage/ledger-scanner";
 import { resetUsageReadCacheForTests, usageLogPath } from "../../src/usage/log";
 import type { OcxConfig } from "../../src/types";
 import { ManagementRequest } from "../helpers/management-auth";
@@ -147,14 +148,23 @@ describe("GET /api/usage/archive/rows", () => {
   });
 
   test("a deadline that passes in the middle of a scan returns the rows read so far and says it stopped", async () => {
-    // 3,000 rows a second apart; the scanner yields after its first thousand, when the deadline fires.
+    // 3,000 rows a second apart; the deadline passes once the scan has read its first row, and the
+    // scanner notices it at its next yield. A timer would race the read's own checks before the scan.
     await builtSegment("605", archiveRows(3_000, 1_000));
     const since = ARCHIVE_FIRST_ROW_AT;
     const until = ARCHIVE_FIRST_ROW_AT + HOUR;
     const states = await loadWindowSegments(await readArchiveListing(), since, until);
     const deadline = new AbortController();
-    setTimeout(() => deadline.abort(), 0);
-    const result = await readArchivedRows(states, { since, until, filter: {}, limit: 5_000 }, deadline.signal, { chunkBytes: 4096 });
+    const realScan = ledgerScannerModule.scanUsageLedgerCooperatively;
+    const scan = spyOn(ledgerScannerModule, "scanUsageLedgerCooperatively").mockImplementation(options => realScan({
+      ...options,
+      onEntry: (entry, rowStartBytes) => {
+        options.onEntry(entry, rowStartBytes);
+        deadline.abort();
+      },
+    }));
+    const result = await readArchivedRows(states, { since, until, filter: {}, limit: 5_000 }, deadline.signal, { chunkBytes: 4096 })
+      .finally(() => scan.mockRestore());
     expect(result.endedBy).toBe("deadline");
     expect(result.segments).toEqual([expect.objectContaining({ endedBy: "deadline" })]);
     expect(result.rows.length).toBeGreaterThan(0);
