@@ -175,6 +175,7 @@ export async function readArchivedRows(
       continue;
     }
     let stopped = false;
+    let untimed = 0;
     let scan: Awaited<ReturnType<typeof scanUsageLedgerCooperatively>> | undefined;
     try {
       scan = await scanUsageLedgerCooperatively({
@@ -184,6 +185,11 @@ export async function readArchivedRows(
         ...(options.chunkBytes !== undefined ? { chunkBytes: options.chunkBytes } : {}),
         onEntry: entry => {
           if (full.signal.aborted) return;
+          // A record with no finite timestamp cannot be placed in or out of any window: skipped, not filtered.
+          if (!Number.isFinite(entry.timestamp)) {
+            untimed += 1;
+            return;
+          }
           if (!matches(entry, query)) return;
           rows.push(entry);
           if (rows.length > query.limit) full.abort();
@@ -208,7 +214,7 @@ export async function readArchivedRows(
       changed = true;
       continue;
     }
-    const skipped = scan ? scan.oversizedRows + scan.invalidRows - (scan.tornSuffix ? 1 : 0) : 0;
+    const skipped = untimed + (scan ? scan.oversizedRows + scan.invalidRows - (scan.tornSuffix ? 1 : 0) : 0);
     if (skipped > 0) {
       read.skippedRows = skipped;
       skippedRows += skipped;

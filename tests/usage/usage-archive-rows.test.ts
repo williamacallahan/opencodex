@@ -275,6 +275,22 @@ describe("GET /api/usage/archive/rows", () => {
     expect(withTorn.body.entries).toHaveLength(1);
   });
 
+  test("a record with no usable timestamp is reported as skipped, and an out-of-window one is not", async () => {
+    const at = ARCHIVE_FIRST_ROW_AT;
+    const untimedPath = await builtSegment("624", [{ ...archiveRow(0), timestamp: at }, { ...archiveRow(1), timestamp: null }]);
+    const untimed = await rowsGet(window(at, at + HOUR));
+    expect(untimed.body.entries).toHaveLength(1);
+    expect(untimed.body.incomplete).toBe(true);
+    // That record could belong to any window, so it is removed before asking about another.
+    rmSync(untimedPath);
+    rmSync(untimedPath.replace(/\.jsonl$/, ".hourly.json"));
+    noteArchiveChanged();
+    await builtSegment("625", [{ ...archiveRow(2), timestamp: at + 3 * 24 * HOUR }, { ...archiveRow(3), timestamp: at + 3 * 24 * HOUR + 1 }]);
+    const elsewhere = await rowsGet(window(at + 3 * 24 * HOUR, at + 3 * 24 * HOUR + 1));
+    expect(elsewhere.body).toMatchObject({ incomplete: false });
+    expect(elsewhere.body.entries).toHaveLength(1);
+  });
+
   test("the deadline starts when the read takes its turn, so slow preparation answers incomplete", async () => {
     await builtSegment("618", archiveRows(10));
     const realTimeout = AbortSignal.timeout.bind(AbortSignal);
