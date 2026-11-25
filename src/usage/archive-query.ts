@@ -148,12 +148,14 @@ function invalidateListing(): void {
   listingCache = null;
 }
 
-async function listDirectory(directory: string, directoryMtimeMs: number, now: number): Promise<ListingCache> {
+async function listDirectory(directory: string, directoryMtimeMs: number, now: number, signal?: AbortSignal): Promise<ListingCache> {
   const generation = archiveChangeGeneration();
   const names = await readdir(directory);
   const present = new Set(names);
   const entries: ListingCache["entries"] = [];
   for (const segment of names.flatMap(name => parseArchiveSegmentName(name) ?? [])) {
+    // A caller past its deadline starts no further I/O; the partial listing is discarded, never cached.
+    signal?.throwIfAborted();
     const path = join(directory, segment.name);
     try {
       const segmentStat = await stat(path, { bigint: true });
@@ -189,8 +191,12 @@ async function listDirectory(directory: string, directoryMtimeMs: number, now: n
 
 const totalsPathOf = (entry: { path: string; name: string }): string => join(dirname(entry.path), archiveTotalsName(entry.name));
 
-/** The archive's counted segments, from a listing at most a few seconds old. */
-export async function readArchiveListing(configDir = getConfigDir()): Promise<ArchiveListing> {
+/**
+ * The archive's counted segments, from a listing at most a few seconds old. With `signal`, no new I/O
+ * starts once it aborts: the call throws its reason and caches nothing.
+ */
+export async function readArchiveListing(configDir = getConfigDir(), signal?: AbortSignal): Promise<ArchiveListing> {
+  signal?.throwIfAborted();
   const directory = usageArchiveDirectory(configDir);
   const live = liveLedgerHead();
   const now = Date.now();
@@ -199,13 +205,16 @@ export async function readArchiveListing(configDir = getConfigDir()): Promise<Ar
     let directoryMtimeMs: number;
     try {
       directoryMtimeMs = (await stat(directory)).mtimeMs;
+      signal?.throwIfAborted();
     } catch (error) {
+      if (signal?.aborted) throw error;
       if (!isMissing(error)) throw error;
       listingCache = null;
       return { segments: [], ambiguous: [], missing: [], liveLedgerSince: live?.since ?? null };
     }
     if (cache && cache.directoryMtimeMs === directoryMtimeMs && now - cache.listedAt < LISTING_MAX_AGE_MS) cache.checkedAt = now;
-    else cache = await listDirectory(directory, directoryMtimeMs, now);
+    else cache = await listDirectory(directory, directoryMtimeMs, now, signal);
+    signal?.throwIfAborted();
     listingCache = cache;
   }
   const { counted, ambiguous } = countedArchiveSegments(cache.entries, live?.head ?? null);
@@ -332,12 +341,14 @@ function totalsDescribe(entry: ArchiveSegmentEntry, totals: ArchiveTotalsFile): 
   return seen === undefined || seen === identity;
 }
 
-export async function loadTotals(entry: ArchiveSegmentEntry): Promise<ArchiveTotalsFile | undefined> {
-  if (entry.totalsRevision === undefined) return undefined;
+export async function loadTotals(entry: ArchiveSegmentEntry, signal?: AbortSignal): Promise<ArchiveTotalsFile | undefined> {
+  if (entry.totalsRevision === undefined || signal?.aborted) return undefined;
   // Checked against the files as they are now, not as the listing saw them: a changed one is judged
   // by its current revision and length, and the listing is dropped so the next read relists.
   const segmentNow = await archiveFileRevision(entry.path);
+  if (signal?.aborted) return undefined;
   const totalsNow = await archiveFileRevision(totalsPathOf(entry));
+  if (signal?.aborted) return undefined;
   if (segmentNow === undefined || totalsNow === undefined) {
     invalidateListing();
     return undefined;
@@ -411,7 +422,7 @@ export async function loadWindowSegments(listing: ArchiveListing, since: number,
     // A caller past its deadline stops here; its reader reports the deadline.
     if (signal?.aborted) break;
     if (!await segmentMayOverlapNow(entry, since, until)) continue;
-    states.push(segmentState(entry, await loadTotals(entry)));
+    states.push(segmentState(entry, await loadTotals(entry, signal)));
     await yieldToEventLoop();
   }
   return states;
@@ -426,7 +437,7 @@ export async function ambiguousWindowSegments(listing: ArchiveListing, since: nu
   for (const entry of listing.ambiguous) {
     if (signal?.aborted) break;
     if (!await segmentMayOverlapNow(entry, since, until)) continue;
-    if (segmentOverlaps(segmentState(entry, await loadTotals(entry)), since, until)) reached.push(entry);
+    if (segmentOverlaps(segmentState(entry, await loadTotals(entry, signal)), since, until)) reached.push(entry);
     await yieldToEventLoop();
   }
   return reached;

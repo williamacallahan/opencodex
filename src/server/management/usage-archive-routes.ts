@@ -185,7 +185,14 @@ async function archiveRowsResponse(ctx: ManagementContext): Promise<Response> {
     // The read's own deadline starts with its turn and covers listing, totals and the ambiguity check,
     // not only the scan; waiting for the turn has its own budget above.
     const deadline = AbortSignal.any([AbortSignal.timeout(ARCHIVE_ROWS_DEADLINE_MS), abandoned]);
-    const listing = await readArchiveListing();
+    let listing: Awaited<ReturnType<typeof readArchiveListing>>;
+    try {
+      listing = await readArchiveListing(undefined, deadline);
+    } catch (error) {
+      if (!deadline.aborted) throw error;
+      // The listing ran out of time: nothing was read, which the reader reports as the deadline.
+      listing = { segments: [], ambiguous: [], missing: [], liveLedgerSince: null };
+    }
     const states = await loadWindowSegments(listing, query.since, query.until, deadline);
     queueMissingTotals(states);
     const ambiguous = await ambiguousWindowSegments(listing, query.since, query.until, deadline);

@@ -279,6 +279,33 @@ describe("GET /api/usage/archive/rows", () => {
     expect(body.entries.map(entry => entry.requestId).length === 1 || body.incomplete).toBe(true);
   });
 
+  test("a listing that outlasts the deadline stops statting and releases the read at the deadline", async () => {
+    for (let index = 0; index < 20; index++) writeSegment(archiveDirectory(), String(700 + index), jsonl(archiveRows(2)));
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const shortDeadline = spyOn(AbortSignal, "timeout").mockImplementation(() => realTimeout(60));
+    const realStat = fsPromises.stat;
+    const started = performance.now();
+    const statsAt: number[] = [];
+    const slowStat = spyOn(fsPromises, "stat").mockImplementation((async (...args: Parameters<typeof fsPromises.stat>) => {
+      statsAt.push(performance.now() - started);
+      await Bun.sleep(20);
+      return realStat(...args);
+    }) as typeof fsPromises.stat);
+    try {
+      const { body } = await rowsGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR));
+      const returnedAt = performance.now() - started;
+      expect(body).toMatchObject({ endedBy: "deadline", incomplete: true });
+      // Twenty stats at 20 ms each would take 400 ms; the read ends near its 60 ms deadline instead.
+      expect(returnedAt).toBeLessThan(250);
+      expect(statsAt.filter(at => at > 60 + 25)).toEqual([]);
+    } finally {
+      slowStat.mockRestore();
+      shortDeadline.mockRestore();
+    }
+    // The interrupted listing was not kept: the next read lists every segment.
+    expect((await rowsGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR))).body.coverage.pendingSegments).toHaveLength(20);
+  });
+
   test("an in-window row appended after rows hours later is still returned", async () => {
     // A long request is stamped when it starts and appended when it ends, after rows of later hours.
     const day = Date.UTC(2026, 10, 5);
