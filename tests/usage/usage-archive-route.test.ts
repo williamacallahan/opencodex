@@ -7,7 +7,10 @@ import { handleManagementAPI } from "../../src/server/management-api";
 import { archiveTotalsReads } from "../../src/usage/archive-query";
 import { noteArchiveChanged } from "../../src/usage/archive-segments";
 import { ARCHIVE_TOTALS_FORMAT_VERSION, MAX_HOURS_PER_SEGMENT, MAX_OVERLAPS_PER_SEGMENT, archiveTotalsPath } from "../../src/usage/archive-totals";
-import { setUsageFilterIndexTestHooksForTests } from "../../src/usage/filter-index";
+import { Database } from "bun:sqlite";
+import {
+  readUsageFilterCandidates, readUsageFilterCandidatesPassive, setUsageFilterIndexTestHooksForTests, usageFilterIndexPath,
+} from "../../src/usage/filter-index";
 import { usageLogPath } from "../../src/usage/log";
 import { resetUsageRevisionObservationsForTests } from "../../src/usage/revision-observation";
 import type { OcxConfig } from "../../src/types";
@@ -543,6 +546,52 @@ describe("GET /api/usage/archive", () => {
     truncateSync(usageLogPath(), 406);
     await runPassiveRead(() => archiveGet(query));
     writeFileSync(usageLogPath(), headB + tail + line({ ...archiveRow(0), requestId: "appended", timestamp: at(13, 0) }, 700));
+    const body = await untilLiveLedgerSince(query, iso(b[1]!.timestamp));
+    expect(body.coverage.liveLedgerSince).toBe(iso(b[1]!.timestamp));
+    expect(body).toMatchObject({ complete: false, summary: null, coverage: { ambiguousSegments: [basename(segmentB)] } });
+  }, 30_000);
+
+  test.each(["candidate", "minimum"] as const)("a truncation a passive %s read sees while the index is locked still makes the index rebuild after it regrows", async (reader) => {
+    const day = Date.UTC(2026, 10, 12);
+    const at = (hour: number, minute: number) => day + hour * HOUR + minute * 60_000;
+    const b = archiveRows(3, 60_000).map((row, index) => ({ ...row, requestId: `b-${index}`, timestamp: at(1, index) }));
+    const segmentB = await builtSegment("538", b, iso(b[0]!.timestamp).replaceAll(":", "-"));
+    const line = (row: object, length: number): string => {
+      const bare = JSON.stringify({ ...row, padding: "" });
+      return `${JSON.stringify({ ...row, padding: "x".repeat(length - bare.length) })}\n`;
+    };
+    const headA = line({ ...archiveRow(0), requestId: "a-0", timestamp: at(8, 0) }, 800);
+    const headB = line(b[1]!, 800);
+    const tail = archiveRows(400, 60_000, 50).map((row, index) => line({ ...row, timestamp: at(12, 0) + index * 1_000 }, 700)).join("");
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), headA + tail);
+    const query = window(at(1, 0), at(2, 0));
+    expect((await untilLiveLedgerSince(query, iso(at(8, 0)))).coverage.liveLedgerSince).toBe(iso(at(8, 0)));
+    truncateSync(usageLogPath(), 421);
+    // Another connection holds the index exclusively, so the passive read cannot read its metadata.
+    const holder = new Database(usageFilterIndexPath(home));
+    holder.exec("PRAGMA locking_mode = EXCLUSIVE");
+    holder.exec("BEGIN EXCLUSIVE");
+    holder.exec("CREATE TABLE IF NOT EXISTS lock_probe (held INTEGER)");
+    holder.exec("COMMIT");
+    try {
+      if (reader === "candidate") {
+        expect(await runPassiveRead(() => readUsageFilterCandidatesPassive({ provider: null, model: null, apiKeyId: null }))).toBeNull();
+      } else {
+        await runPassiveRead(() => archiveGet(query));
+      }
+    } finally {
+      holder.close();
+    }
+    writeFileSync(usageLogPath(), headB + tail + line({ ...archiveRow(0), requestId: "appended", timestamp: at(13, 0) }, 700));
+    const read = await readUsageFilterCandidates({ provider: null, model: null, apiKeyId: null, window: { since: at(1, 0), until: at(2, 0) } });
+    let candidates = 0;
+    try {
+      for (let page = read!.nextPage(); page.length > 0; page = read!.nextPage()) candidates += page.length;
+    } finally {
+      read?.close();
+    }
+    expect(candidates).toBe(1);
     const body = await untilLiveLedgerSince(query, iso(b[1]!.timestamp));
     expect(body.coverage.liveLedgerSince).toBe(iso(b[1]!.timestamp));
     expect(body).toMatchObject({ complete: false, summary: null, coverage: { ambiguousSegments: [basename(segmentB)] } });

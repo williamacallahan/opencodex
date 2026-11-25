@@ -1076,8 +1076,11 @@ function assertHomeUnchanged(dir: string): void {
  * too (`pendingInvalidations`); a passive read only marks it, with `home`, for the next writer to record.
  */
 const pendingInvalidations = new Map<string, { ticket: number; home?: string }>();
-/** Per index path, the generation a no-write read declined and the last live revision observed since. */
-const declinedRevisions = new Map<string, { generation: string; observed: UsageLogRevision }>();
+/**
+ * Per index path, the last live revision a no-write read observed since a destructive change, and the
+ * generation it declined (null until a read binds it from the metadata).
+ */
+const declinedRevisions = new Map<string, { generation: string | null; observed: UsageLogRevision }>();
 let invalidationTicket = 0;
 
 function sourceInvalidations(db: Database): number {
@@ -1809,39 +1812,56 @@ export async function readUsageFilterCandidates(
 }
 
 /**
- * Mark the generation declined for a destructive change seen by a read that writes nothing; the next
- * writer-owned refresh records it for every process (`refreshOnce`) and rebuilds instead of extending.
- * Destructive means against this process's observations or, since a process may have none, against
- * the source revision the index persisted: the same file shorter than it, or as long but different.
- * A regrowth that restores the last 64 KiB before the indexed boundary would otherwise pass the
- * append's boundary digest.
+ * Decline the generation for a destructive change seen by a read that writes nothing: one ticket per
+ * change, in memory only, which the next writer-owned refresh records for every process
+ * (`refreshOnce`) before rebuilding instead of extending. A regrowth that restores the last 64 KiB
+ * before the indexed boundary would otherwise pass the append's boundary digest.
  *
- * One change, one ticket. The published generation keeps describing the longer file until a rebuild
- * publishes, so later reads compare against the last live revision observed since the generation was
- * declined (`declinedRevisions`), kept after the ticket is recorded: growth of the same file advances
- * it and issues nothing, and only a shrink below it or a same-length rewrite is a new change. A fresh
- * ticket from every read would fail the rebuild's publication fence forever.
+ * A read observes twice. Before any SQLite access ({@link observeLiveRevision}) it compares the live
+ * file with what this process already knows, so a change survives a locked or unreadable index. After
+ * reading the metadata ({@link observeAgainstIndex}) it compares with the source revision the index
+ * persisted, which seeds a process that has no earlier observation. `declinedRevisions` keeps the last
+ * live revision observed since the change and the generation it declined, also after the writer
+ * records the ticket. Growth of the same file advances it and issues nothing, so the rebuild of a
+ * captured prefix can publish; only a shrink below it or a same-length rewrite is a new change. A
+ * fresh ticket from every read would fail the rebuild's publication fence forever.
  */
-function markDestructiveWithoutWriting(path: string, meta: IndexMeta, revision: UsageLogRevision | null): boolean {
-  if (!revision) return false;
+function issueDeclineTicket(path: string): void {
+  pendingInvalidations.set(path, { ticket: ++invalidationTicket, home: getConfigDir() });
+}
+
+function observeLiveRevision(path: string, revision: UsageLogRevision | null): void {
+  if (!revision) return;
   const declined = declinedRevisions.get(path);
-  if (declined?.generation === meta.generation && usageLogIdentityKey(declined.observed) === usageLogIdentityKey(revision)) {
-    const observed = declined.observed;
-    if (revision.size > observed.size || usageLogRevisionKey(revision) === usageLogRevisionKey(observed)) {
-      if (revision.size > observed.size) declined.observed = revision;
-      return true;
-    }
-    declined.observed = revision;
-    pendingInvalidations.set(path, { ticket: ++invalidationTicket, home: getConfigDir() });
-    return true;
+  if (declined && usageLogIdentityKey(declined.observed) === usageLogIdentityKey(revision)) {
+    if (revision.size > declined.observed.size) declined.observed = revision;
+    if (usageLogRevisionKey(revision) === usageLogRevisionKey(declined.observed)) return;
+    // Shorter than, or as long as but different from, the last observation: a new change, bound to
+    // whichever generation the metadata shows next.
+    declinedRevisions.set(path, { generation: null, observed: revision });
+    issueDeclineTicket(path);
+    return;
+  }
+  if (!usageRevisionIsDestructive(revision)) return;
+  declinedRevisions.set(path, { generation: null, observed: revision });
+  issueDeclineTicket(path);
+}
+
+function observeAgainstIndex(path: string, meta: IndexMeta, revision: UsageLogRevision | null): void {
+  if (!revision) return;
+  const declined = declinedRevisions.get(path);
+  if (declined && usageLogIdentityKey(declined.observed) === usageLogIdentityKey(revision)) {
+    // The change observed before the metadata was read declines this generation; no second ticket.
+    if (declined.generation === null) declined.generation = meta.generation;
+    if (declined.generation === meta.generation) return;
+    // A newer generation was published since: judge against the revision it recorded.
+    declinedRevisions.delete(path);
   }
   const recorded = meta.revision;
-  const shrankBelowIndex = recorded !== null && usageLogIdentityKey(recorded) === usageLogIdentityKey(revision)
-    && (revision.size < recorded.size || (revision.size === recorded.size && usageLogRevisionKey(recorded) !== usageLogRevisionKey(revision)));
-  if (!shrankBelowIndex && !usageRevisionIsDestructive(revision)) return false;
+  if (recorded === null || usageLogIdentityKey(recorded) !== usageLogIdentityKey(revision)) return;
+  if (revision.size > recorded.size || usageLogRevisionKey(recorded) === usageLogRevisionKey(revision)) return;
   declinedRevisions.set(path, { generation: meta.generation, observed: revision });
-  pendingInvalidations.set(path, { ticket: ++invalidationTicket, home: getConfigDir() });
-  return true;
+  issueDeclineTicket(path);
 }
 
 /**
@@ -1855,6 +1875,8 @@ export async function readUsageFilterCandidatesPassive(
 ): Promise<UsageFilterCandidateRead | null> {
   const path = indexPathForCurrentHome();
   if (!existsSync(path)) return null;
+  // Before any SQLite access, so a lock or an unreadable file cannot make a seen change be forgotten.
+  observeLiveRevision(path, currentUsageLogRevision());
   let db: Database;
   try {
     db = new Database(path, { readonly: true });
@@ -1876,7 +1898,7 @@ export async function readUsageFilterCandidatesPassive(
       const revision = currentUsageLogRevision();
       // Writes nothing: a destructive change seen here declines the generation in this process only,
       // and the next writer-owned refresh records it for every process.
-      markDestructiveWithoutWriting(path, meta, revision);
+      observeAgainstIndex(path, meta, revision);
       if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || !meta.generation
         || !generationValidated(db, path, meta)) {
         throw new UsageLedgerRebuildRequiredError("content_changed");
@@ -1990,6 +2012,7 @@ function readUsageLedgerMinimum(): UsageLedgerMinimum {
   if (!revision) return { state: "unavailable" };
   const path = indexPathForCurrentHome();
   if (!existsSync(path)) return { state: "behind" };
+  observeLiveRevision(path, revision);
   let db: Database;
   try {
     db = new Database(path, { readonly: true });
@@ -2000,7 +2023,7 @@ function readUsageLedgerMinimum(): UsageLedgerMinimum {
     // One read transaction: the minimum, the revision it covers and the counts that validate it.
     db.exec("BEGIN");
     const meta = readMeta(db);
-    if (markDestructiveWithoutWriting(path, meta, revision)) return { state: "behind" };
+    observeAgainstIndex(path, meta, revision);
     const usable = meta.schemaVersion === USAGE_FILTER_INDEX_SCHEMA_VERSION && meta.generation !== ""
       && generationValidated(db, path, meta) && !rebuildRequestedPaths.has(path);
     if (!usable || usageLogRevisionKey(meta.revision) !== usageLogRevisionKey(revision)) return { state: "behind" };
