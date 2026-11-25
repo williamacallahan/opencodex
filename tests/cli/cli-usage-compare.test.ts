@@ -571,3 +571,67 @@ test.each(["stable-local", "stable-hub", "connect", "disconnect", "account", "cr
     }
   }, SPAWN_BUDGET_MS,
 );
+
+async function compareExitCode(deps: UsageCompareDeps): Promise<{ code: number; errors: string }> {
+  const errors: unknown[] = [];
+  const originalLog = console.log, originalError = console.error;
+  console.log = () => {};
+  console.error = (...args) => { errors.push(args); };
+  try {
+    return { code: await handleObserveCommand(["usage", "compare", "--json"], deps), errors: JSON.stringify(errors) };
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+}
+
+test("runtime discovery is bounded by the comparison's deadline", async () => {
+  const deadlines: Array<number | undefined> = [];
+  const started = Date.now();
+  const deps: UsageCompareDeps = {
+    ...localDeps(async input => Response.json(report(new URL(new Request(input).url), 1))),
+    findLiveProxy: async io => {
+      deadlines.push(io?.deadlineAt);
+      return { ...LOCAL, source: "runtime" };
+    },
+  };
+  expect((await compareExitCode(deps)).code).toBe(0);
+  expect(deadlines).toHaveLength(2);
+  for (const deadlineAt of deadlines) {
+    expect(deadlineAt).toBeGreaterThanOrEqual(started + 120_000);
+    expect(deadlineAt).toBeLessThanOrEqual(Date.now() + 120_000);
+  }
+});
+
+test("a read that completes after the deadline is not accepted", async () => {
+  const realNow = Date.now;
+  let elapsed = 0;
+  let reads = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => realNow() + elapsed);
+  try {
+    const deps = localDeps(async input => {
+      reads += 1;
+      // The previous window's report arrives after the comparison's 120 seconds.
+      if (reads === 2) elapsed = 121_000;
+      return Response.json(report(new URL(new Request(input).url), 1));
+    });
+    const result = await compareExitCode(deps);
+    expect(result.code).toBe(1);
+    expect(result.errors).toContain("time limit");
+  } finally {
+    clock.mockRestore();
+  }
+});
+
+test("the deadline ends a read whose body never finishes", async () => {
+  const deps: UsageCompareDeps = {
+    ...localDeps(async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("{")); } }),
+      { headers: { "content-type": "application/json" } })),
+    deadlineMs: 200,
+  };
+  const started = Date.now();
+  const result = await compareExitCode(deps);
+  expect(result.code).toBe(1);
+  expect(result.errors).toContain("time limit");
+  expect(Date.now() - started).toBeLessThan(1_500);
+});

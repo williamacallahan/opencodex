@@ -37,6 +37,8 @@ export type CompareRange = "today" | "7d" | "30d";
 export type UsageCompareDeps = RuntimeApiDeps & Pick<LocalManagementReadDeps, "directFetch"> & {
   now?: () => number;
   readRuntime?: typeof readRuntimePort;
+  /** The comparison's whole time limit; `USAGE_COMPARE_PENDING_DEADLINE_MS` unless a test shortens it. */
+  deadlineMs?: number;
 };
 
 const METRICS = ["requests", "totalTokens", "inputTokens", "outputTokens", "cachedInputTokens", "cacheReadInputTokens", "cacheCreationInputTokens", "estimatedCostUsd"] as const;
@@ -217,12 +219,33 @@ interface CompareBudget {
   signal: AbortSignal;
 }
 
+function deadlineExceeded(): RuntimeApiError {
+  return new RuntimeApiError("The usage reports were not ready within the comparison's time limit; no comparison was produced. Retry shortly.", 503, null);
+}
+
 function remainingMs(budget: CompareBudget): number {
   const left = budget.deadline - Date.now();
-  if (left <= 0 || budget.signal.aborted) {
-    throw new RuntimeApiError("The usage reports were not ready within the comparison's time limit; no comparison was produced. Retry shortly.", 503, null);
-  }
+  if (left <= 0 || budget.signal.aborted) throw deadlineExceeded();
   return left;
+}
+
+/**
+ * Settles with `work`, or fails at once when the comparison's deadline aborts, calling `cancel` so
+ * the read in flight (its request or its body) is released rather than left to finish.
+ */
+function withinDeadline<T>(work: Promise<T>, budget: CompareBudget, cancel: () => void = () => {}): Promise<T> {
+  if (budget.signal.aborted) {
+    cancel();
+    return Promise.reject(deadlineExceeded());
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cancel();
+      reject(deadlineExceeded());
+    };
+    budget.signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => budget.signal.removeEventListener("abort", onAbort));
+  });
 }
 
 function pinUsageRuntime(deps: UsageCompareDeps, owner: UsageOwner): (suffix: string, budget: CompareBudget) => Promise<ScopedUsage> {
@@ -247,7 +270,7 @@ function pinUsageRuntime(deps: UsageCompareDeps, owner: UsageOwner): (suffix: st
   }
   return async (suffix, budget) => {
     assertRuntime();
-    const live = await (deps.findLiveProxy ?? findLiveProxy)();
+    const live = await withinDeadline((deps.findLiveProxy ?? findLiveProxy)({ deadlineAt: budget.deadline }), budget);
     assertRuntime();
     assertUsageOwner(owner);
     if (!live) throw new RuntimeApiError(PROXY_NOT_RUNNING_MESSAGE, 503, null, "proxy_not_running");
@@ -258,23 +281,24 @@ function pinUsageRuntime(deps: UsageCompareDeps, owner: UsageOwner): (suffix: st
       throw new Error("Usage runtime changed during comparison; no comparison was produced. Retry for the current runtime.");
     }
     liveIdentity = identity;
-    const read = await fetchBoundLocalManagementRead(live, `/api/usage?${suffix.replace(/^\?/, "")}`, {
+    const read = await withinDeadline(fetchBoundLocalManagementRead(live, `/api/usage?${suffix.replace(/^\?/, "")}`, {
       fetchImpl: deps.fetchImpl, directFetch: deps.directFetch, readRuntime: assertRuntime,
-      timeoutMs: Math.min(60_000, remainingMs(budget)), requireResponseProof: true,
-    });
+      timeoutMs: Math.min(60_000, remainingMs(budget)), requireResponseProof: true, signal: budget.signal,
+    }), budget);
     assertRuntime();
     if (read.kind === "unavailable") {
       throw new RuntimeApiError(`Local usage read unavailable (${read.reason}). No comparison was produced.`, 503, null);
     }
+    const cancelBody = () => { void read.response.body?.cancel().catch(() => {}); };
     if (read.response.status === 503) {
-      const body = await read.response.json().catch(() => null) as { error?: unknown } | null;
+      const body = await withinDeadline(read.response.json().catch(() => null), budget, cancelBody) as { error?: unknown } | null;
       const retryAfter = Number(read.response.headers.get("retry-after"));
       if (body?.error === "usage_rebuilding") throw new UsagePendingError(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 5);
     }
     if (!read.response.ok) {
       throw new RuntimeApiError(`Usage request failed (HTTP ${read.response.status}). No comparison was produced.`, read.response.status, null);
     }
-    const result = await read.response.json() as ScopedUsage;
+    const result = await withinDeadline(read.response.json(), budget, cancelBody) as ScopedUsage;
     assertRuntime();
     return result;
   };
@@ -300,7 +324,10 @@ async function readUsageWhilePending(read: () => Promise<ScopedUsage>, budget: C
   for (;;) {
     remainingMs(budget);
     try {
-      return await read();
+      const report = await read();
+      // A read that finished after the deadline is not accepted.
+      remainingMs(budget);
+      return report;
     } catch (error) {
       const retryAfter = error instanceof UsagePendingError ? error.retryAfterSeconds
         : error instanceof HubClientError && error.status === 503 ? error.retryAfterSeconds : undefined;
@@ -368,9 +395,9 @@ async function readUsage(
     const link = connection.value.transport === "link" && connection.value.link;
     const peerFetch = deps.fetchImpl
       ?? (link ? (await import("../client/link-home")).linkBoundFetch(connection.value, token.token) : undefined);
-    result = await fetchHubUsage(connection.value.serverUrl, token.token, new URLSearchParams(suffix.replace(/^\?/, "")), {
-      fetchImpl: peerFetch, timeoutMs: Math.min(60_000, remainingMs(budget)), ...(link ? { peer: "Home" as const } : {}),
-    });
+    result = await withinDeadline(fetchHubUsage(connection.value.serverUrl, token.token, new URLSearchParams(suffix.replace(/^\?/, "")), {
+      fetchImpl: peerFetch, timeoutMs: Math.min(60_000, remainingMs(budget)), signal: budget.signal, ...(link ? { peer: "Home" as const } : {}),
+    }), budget);
   } else {
     try {
       result = await localRead!(suffix, budget);
@@ -416,9 +443,10 @@ export async function handleUsageCompareCommand(argv: string[], deps: UsageCompa
   const localRead = owner.connection.kind === "disconnected" ? pinUsageRuntime(deps, owner) : undefined;
   // Both windows stay frozen across retries, so a pending report is retried for the same bounds.
   // One deadline for the whole comparison: both windows, every attempt, and every wait between them.
+  const deadlineMs = deps.deadlineMs ?? USAGE_COMPARE_PENDING_DEADLINE_MS;
   const controller = new AbortController();
-  const budget: CompareBudget = { deadline: Date.now() + USAGE_COMPARE_PENDING_DEADLINE_MS, signal: controller.signal };
-  const expiry = setTimeout(() => controller.abort(), USAGE_COMPARE_PENDING_DEADLINE_MS);
+  const budget: CompareBudget = { deadline: Date.now() + deadlineMs, signal: controller.signal };
+  const expiry = setTimeout(() => controller.abort(), deadlineMs);
   let currentReport: ScopedUsage;
   let previousReport: ScopedUsage;
   try {
