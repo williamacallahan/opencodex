@@ -610,9 +610,10 @@ misleading.
 
 #### Archived usage
 
-With `usageLedgerMaxBytes` set, a trim moves the oldest rows of `usage.jsonl` into the
-`usage-archive` directory for 31 days (see the server configuration reference). `/api/usage`
-reads only the live ledger; `GET /api/usage/archive` answers for the archived part.
+Earlier releases with `usageLedgerMaxBytes` set moved the oldest rows of `usage.jsonl` into the
+`usage-archive` directory; that trim is currently suspended, so no new archive files appear (see the
+server configuration reference). `/api/usage` reads only the live ledger; `GET /api/usage/archive`
+answers for the archived part.
 
 `since` and `until` are required, as a full ISO datetime with timezone or epoch milliseconds;
 `until` must be after `since`, at most 32 days later. The window widens outward to whole UTC
@@ -653,15 +654,17 @@ The answer comes only from precomputed hourly totals, never from the rows themse
   `usage.jsonl`. Rows from that time on are not in this answer; add `/api/usage` for them. While
   some archive file has no totals yet, its first row comes from its file name and its last row from
   its modification time, and `coverage.approximate` is `true`.
-- `coverage.pending` is `true` when an archive file in the window has no totals yet, and
-  `pendingSegments` names them. The request starts their build in the background and answers with
-  what is available, so a pending answer is incomplete; ask again shortly. The proxy also builds
-  missing totals in the background, starting about a minute after it starts, four archive files
-  every five minutes, newest first.
-- `coverage.failed` lists archive files in the window whose totals build failed since the proxy
-  started, each as `{ segment, reason }` with `reason` `segment-changed`, `io-error` (with `code`),
-  or `build-error`. They are not retried until the proxy restarts, so their rows are missing from
-  this answer.
+- `coverage.pending` is `true` when an archive file in the window has no totals yet and no build
+  has been asked for since the proxy started, and `pendingSegments` names them. A pending answer is
+  incomplete. The request asks for their build, and so does a background pass starting about a
+  minute after the proxy starts (four archive files every five minutes, newest first); while
+  trimming is suspended every such build is refused, so the next answer lists those files under
+  `coverage.failed`.
+- `coverage.failed` lists archive files in the window whose totals build failed or was refused since
+  the proxy started, each as `{ segment, reason }` with `reason` `publishing-suspended` (no totals
+  file is written into `usage-archive` while trimming is suspended), `segment-changed`, `io-error`
+  (with `code`), or `build-error`. They are not retried until the proxy restarts, so their rows are
+  missing from this answer.
 - `coverage.duplicateSegments` counts leftover archive files skipped because their rows are
   already counted from another file or are still in `usage.jsonl`, so no row is counted twice.
 

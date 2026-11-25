@@ -1,5 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { noteArchiveChanged } from "../../src/usage/archive-segments";
+import { archiveTotalsPath, buildArchiveTotals, type ArchiveTotalsFile } from "../../src/usage/archive-totals";
 
 /** 2026-11-01T08:30:00Z: rows advance from here so they span several UTC hours. */
 export const ARCHIVE_FIRST_ROW_AT = Date.UTC(2026, 10, 1, 8, 30, 0, 0);
@@ -60,6 +62,17 @@ export function archiveRows(count: number, stepMs?: number, from = 0): ArchiveFi
 
 export function jsonl(rows: readonly unknown[]): string {
   return rows.map(row => `${JSON.stringify(row)}\n`).join("");
+}
+
+/**
+ * Build a segment's totals in memory and write them beside it, standing in for the totals file an
+ * earlier build published: the hub writes none while the archive trim is suspended.
+ */
+export async function writeArchiveTotals(segmentPath: string): Promise<ArchiveTotalsFile | null> {
+  const totals = await buildArchiveTotals(segmentPath);
+  if (totals) writeFileSync(archiveTotalsPath(segmentPath), JSON.stringify(totals), { mode: 0o600 });
+  noteArchiveChanged();
+  return totals;
 }
 
 /** Write a segment the way a trim names it and return its path. */

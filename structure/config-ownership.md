@@ -104,6 +104,21 @@ before the tombstone can still create its file afterwards; see the last item bel
   removes whatever is at a listed name when it gets there, and a resumed run does the same; it keeps
   no per-file identity.
 
+## Usage history survives uninstall
+
+The operator's order keeps identified request records at least 30 days, so uninstall never removes
+the usage ledger or its archive. `removeOwnedEntry` in `src/lib/config-ownership-removal.ts` returns
+without touching an entry named `usage.jsonl` at the root, or `usage-archive` or anything below it
+(`PRESERVED_USAGE_HISTORY`), before its link or directory branches run, so neither the directory, a
+recorded child, a link inside it, nor the link's target is touched. This covers every manifest an
+older build wrote: `usage.jsonl` is still in every new manifest's initial names, and earlier trims
+registered `usage-archive` itself; the trim no longer registers it. The run then deletes the ownership
+metadata as usual and ends `partial`, listing both paths among the residual paths with a reason that
+says the usage history was kept, and a second uninstall finds no metadata and refuses the home
+untouched. `tests/config/config-ownership-uninstall.test.ts` runs uninstall twice over a legacy manifest
+listing the archive and two of its children, with a segment, a totals name, a temp-style name, an
+operator file and a link, and checks every byte survives while other owned state is removed.
+
 ## Removal stays inside the root
 
 `removeOwnedConfigState` resolves the config root to its realpath once, at the start, and every later
@@ -116,7 +131,7 @@ the lock can leave the ownership lock file in place); one found later ends the r
 paths are reported in the spelling the caller passed. A root reached through an
 aliased ancestor, such as macOS `/var` for `/private/var`, therefore still works, and a root that is
 itself a link is refused as before. `src/lib/config-ownership-removal.ts` resolves every manifest
-entry from that root. Immediately before
+entry from that root, skipping the usage history above before any check. Immediately before
 each unlink, directory listing and rmdir it lstats every directory from the root down to the entry's
 parent. Each must be a real directory, not a symlink, junction or other reparse point, and the
 root must still resolve to itself while the parent's realpath stays inside it (names are not compared

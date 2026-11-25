@@ -1,17 +1,17 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { archiveTotalsReads } from "../../src/usage/archive-query";
 import { noteArchiveChanged } from "../../src/usage/archive-segments";
-import { ARCHIVE_TOTALS_FORMAT_VERSION, archiveTotalsPath, scheduleArchiveTotalsBuild } from "../../src/usage/archive-totals";
+import { ARCHIVE_TOTALS_FORMAT_VERSION, archiveTotalsPath } from "../../src/usage/archive-totals";
 import { usageLogPath } from "../../src/usage/log";
 import type { OcxConfig } from "../../src/types";
 import { ManagementRequest } from "../helpers/management-auth";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import {
-  ARCHIVE_FIRST_ROW_AT, archiveRow, archiveRows, bruteForce, jsonl, writeSegment, type ArchiveFixtureRow,
+  ARCHIVE_FIRST_ROW_AT, archiveRow, archiveRows, bruteForce, jsonl, writeArchiveTotals, writeSegment, type ArchiveFixtureRow,
 } from "../helpers/usage-archive-rows";
 
 const config: OcxConfig = { port: 0, hostname: "127.0.0.1", defaultProvider: "test", providers: {} };
@@ -66,7 +66,7 @@ function olderThanNow(path: string, ageMs: number): void {
 
 async function builtSegment(ino: string, rows: readonly unknown[], label?: string): Promise<string> {
   const path = writeSegment(archiveDirectory(), ino, jsonl(rows), label);
-  await scheduleArchiveTotalsBuild(path);
+  await writeArchiveTotals(path);
   return path;
 }
 
@@ -128,7 +128,7 @@ describe("GET /api/usage/archive", () => {
     expect(body.error?.code).toBe(code);
   });
 
-  test("a segment without current totals is reported pending, built in the background, and counted once built", async () => {
+  test("a segment without current totals is reported pending, then failed with its refused build, and counted once totals exist", async () => {
     const rows = archiveRows(20);
     const path = writeSegment(archiveDirectory(), "503", jsonl(rows));
     const query = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 6 * HOUR);
@@ -138,19 +138,25 @@ describe("GET /api/usage/archive", () => {
     expect(first.body.coverage).toMatchObject({ earliestRowAt: iso(ARCHIVE_FIRST_ROW_AT), approximate: true });
     expect(Date.parse(first.body.coverage.latestRowAt!)).toBeGreaterThanOrEqual(rows.at(-1)!.timestamp);
     expect(first.body.summary.requests).toBe(0);
-    await scheduleArchiveTotalsBuild(path);
+    // The read queued a build, which is refused while the archive trim is suspended and writes nothing.
+    const refused = await archiveGet(query);
+    expect(refused.body.coverage).toMatchObject({
+      pending: false, pendingSegments: [], failed: [{ segment: path.split("/").at(-1), reason: "publishing-suspended" }],
+    });
+    expect(readdirSync(archiveDirectory())).toEqual([path.split("/").at(-1)]);
+    await writeArchiveTotals(path);
     const second = await archiveGet(query);
     expect(second.body.coverage.pending).toBe(false);
     expect(second.body.coverage).toMatchObject({ latestRowAt: iso(rows.at(-1)!.timestamp) });
     expect(second.body.coverage).not.toHaveProperty("approximate");
     expect(second.body.summary).toMatchObject(plainSummary(rows));
 
-    // A totals file from an older format is pending again and rebuilt by the read.
+    // A totals file from an older format is never served; its rebuild stays refused.
     writeFileSync(archiveTotalsPath(path), JSON.stringify({ version: ARCHIVE_TOTALS_FORMAT_VERSION - 1, bytes: statSync(path).size }));
     noteArchiveChanged();
-    expect((await archiveGet(query)).body.coverage.pending).toBe(true);
-    await scheduleArchiveTotalsBuild(path);
-    expect((await archiveGet(query)).body.summary).toMatchObject(plainSummary(rows));
+    const stale = await archiveGet(query);
+    expect(stale.body.summary.requests).toBe(0);
+    expect(stale.body.coverage.failed).toEqual([{ segment: path.split("/").at(-1)!, reason: "publishing-suspended" }]);
   });
 
   test("each breakdown keeps the 200 keys with the most requests and counts the rest", async () => {
@@ -216,23 +222,6 @@ describe("GET /api/usage/archive", () => {
     expect(body.summary.requests).toBe(5);
   });
 
-  test("a segment whose build failed is reported failed with its reason, apart from pending, and not rebuilt", async () => {
-    if (process.platform === "win32" || process.getuid?.() === 0) return;
-    const path = writeSegment(archiveDirectory(), "511", jsonl(archiveRows(5)));
-    chmodSync(path, 0o000);
-    const warn = spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      await scheduleArchiveTotalsBuild(path).catch(() => undefined);
-      const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 6 * HOUR));
-      expect(body.coverage).toMatchObject({
-        pending: false, pendingSegments: [], failed: [{ segment: path.split("/").at(-1), reason: "io-error", code: "EACCES" }],
-      });
-    } finally {
-      warn.mockRestore();
-      chmodSync(path, 0o600);
-    }
-  });
-
   test("a row stamped beyond what a Date holds is unparsable and never turns the answer into a 500", async () => {
     const rows = archiveRows(5);
     await builtSegment("512", [...rows, { ...archiveRow(6), timestamp: 1e17 }]);
@@ -260,7 +249,7 @@ describe("GET /api/usage/archive", () => {
     const query = window(at - 2 * HOUR, Date.UTC(2026, 10, 3, 14));
     // Not built yet: the name less the append slack still reaches back into the window.
     expect((await archiveGet(query)).body.coverage).toMatchObject({ segments: 1, pending: true });
-    await scheduleArchiveTotalsBuild(path);
+    await writeArchiveTotals(path);
     expect((await archiveGet(query)).body.summary.requests).toBe(1);
   });
 

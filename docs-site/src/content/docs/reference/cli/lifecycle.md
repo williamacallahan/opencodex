@@ -309,6 +309,10 @@ A recorded entry whose parent directory inside the config directory is a link (a
 is left in place and listed as a remaining path, and the run ends as a partial uninstall. Replace that
 link with the real directory or remove it, then run `ocx uninstall` again to finish.
 
+Uninstall keeps the request history: `usage.jsonl` and the `usage-archive` directory stay in the
+config directory, are listed as remaining paths, and the run ends as a partial uninstall. Delete them
+yourself once you no longer need the history.
+
 Both commands accept no arguments. Unsupported flags (including `--dry-run` and `--yes`)
 exit with usage status 2 before preflight or teardown; no changes are made.
 For help, run `ocx help uninstall` or `ocx help remove`.

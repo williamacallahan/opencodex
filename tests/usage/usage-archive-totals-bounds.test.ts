@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
-import { archiveRow, archiveRows, jsonl, writeSegment } from "../helpers/usage-archive-rows";
+import { archiveRow, archiveRows, jsonl, writeArchiveTotals, writeSegment } from "../helpers/usage-archive-rows";
 import {
-  ARCHIVE_TOTALS_FORMAT_VERSION, archiveTotalsBuildFailure, blankBucketSums, buildArchiveTotals, BUILD_GAP_MS, buildArchiveTotalsInBackground,
-  MAX_BUCKETS_PER_SEGMENT, MAX_HOURS_PER_SEGMENT, readArchiveTotals, scheduleArchiveTotalsBuild, type ArchiveTotalsFile,
+  ARCHIVE_TOTALS_FORMAT_VERSION, archiveTotalsBuildFailure, blankBucketSums, buildArchiveTotals,
+  MAX_BUCKETS_PER_SEGMENT, MAX_HOURS_PER_SEGMENT, readArchiveTotals, type ArchiveTotalsFile,
 } from "../../src/usage/archive-totals";
 import { answerArchiveTotals } from "../../src/usage/archive-answer";
 import { scheduleArchiveTotalsStartupBuild, stopArchiveTotalsStartupBuild } from "../../src/server/usage-ledger-retention";
@@ -79,16 +79,13 @@ describe("usage archive totals bounds", () => {
     expect(peak).toBe(1);
   });
 
-  test("the startup pass builds a few segments at a time, newest first, and re-arms until none remain", async () => {
+  test("the startup pass takes a few segments at a time, newest first, and re-arms until none remain", async () => {
     const paths = Array.from({ length: 5 }, (_, index) =>
       writeSegment(archiveDirectory(), String(720 + index), jsonl(archiveRows(2)), `2026-11-0${index + 1}T00-00-00.000Z`));
+    // Each build is refused while publishing is suspended, which marks the segment as handled for the pass.
     scheduleArchiveTotalsStartupBuild(10, { segments: 2, intervalMs: 400 });
     try {
-      const built = async (): Promise<string[]> => {
-        const done: string[] = [];
-        for (const path of paths) if (await readArchiveTotals(path, statSync(path).size)) done.push(path);
-        return done;
-      };
+      const built = async (): Promise<string[]> => paths.filter(path => archiveTotalsBuildFailure(path) !== undefined);
       const deadline = Date.now() + 5_000;
       while ((await built()).length < 2 && Date.now() < deadline) await Bun.sleep(10);
       expect((await built()).sort()).toEqual(paths.slice(3).sort());
@@ -119,7 +116,7 @@ describe("usage archive totals bounds", () => {
       { ...archiveRow(13), padding: "x".repeat(1024 * 1024 + 10) },
     ]);
     const path = writeSegment(archiveDirectory(), "702", content);
-    const totals = await buildArchiveTotals(path);
+    const totals = await writeArchiveTotals(path);
     expect(totals).toMatchObject({ rows: 3, unparsableRows: 4, lastRowAt: good.at(-1)!.timestamp });
     // No NaN reached the file, so the reader accepts it instead of rebuilding it forever.
     expect(await readArchiveTotals(path, statSync(path).size)).toEqual(totals!);
@@ -145,32 +142,5 @@ describe("usage archive totals bounds", () => {
     const folded = totals!.buckets.find(bucket => bucket.provider === OVERFLOW_KEY && bucket.clientHost === OVERFLOW_KEY);
     expect(folded?.requests).toBe(extra);
     expect(totals!.buckets.reduce((sum, bucket) => sum + bucket.requests, 0)).toBe(rows.length);
-  });
-
-  test("queued builds run one at a time with an idle gap between them", async () => {
-    const first = writeSegment(archiveDirectory(), "705", jsonl(archiveRows(5)));
-    const second = writeSegment(archiveDirectory(), "706", jsonl(archiveRows(5)));
-    const finished: number[] = [];
-    await Promise.all([first, second].map(path => scheduleArchiveTotalsBuild(path).then(() => finished.push(performance.now()))));
-    expect(finished[1]! - finished[0]!).toBeGreaterThanOrEqual(BUILD_GAP_MS - 5);
-  });
-
-  test("a build that fails is remembered with its reason and not queued again", async () => {
-    // Root reads any file whatever its mode, and Windows does not map POSIX modes.
-    if (process.platform === "win32" || process.getuid?.() === 0) return;
-    const path = writeSegment(archiveDirectory(), "707", jsonl(archiveRows(5)));
-    chmodSync(path, 0o000);
-    const warn = spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      await scheduleArchiveTotalsBuild(path).catch(() => undefined);
-      expect(archiveTotalsBuildFailure(path)).toEqual({ reason: "io-error", code: "EACCES" });
-      chmodSync(path, 0o600);
-      buildArchiveTotalsInBackground(path);
-      await Bun.sleep(BUILD_GAP_MS * 2);
-      expect(await readArchiveTotals(path, statSync(path).size)).toBeUndefined();
-    } finally {
-      warn.mockRestore();
-      chmodSync(path, 0o600);
-    }
   });
 });

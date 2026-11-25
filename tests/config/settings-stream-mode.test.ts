@@ -1145,7 +1145,7 @@ describe("manual compaction settings", () => {
 });
 
 describe("usageLedgerMaxBytes settings", () => {
-  test("saves, enforces against an oversized ledger, reloads, and clears via null", async () => {
+  test("saves, reports the limit suspended over an oversized ledger without trimming it, reloads, and clears via null", async () => {
     const { MIN_USAGE_LEDGER_MAX_BYTES } = await import("../../src/usage/retention-contract");
     const { setUsageLedgerRetention } = await import("../../src/server/usage-ledger-retention");
     const { usageLogPath } = await import("../../src/usage/log");
@@ -1167,17 +1167,15 @@ describe("usageLedgerMaxBytes settings", () => {
       expect(put?.status).toBe(200);
       const saved = await put!.json() as {
         usageLedgerMaxBytes?: number | null;
-        usageLedgerRetention?: { maxBytes?: number; currentBytes: number };
+        usageLedgerRetention?: { maxBytes?: number; currentBytes: number; enforcement?: "suspended" };
       };
       expect(saved.usageLedgerMaxBytes).toBe(MIN_USAGE_LEDGER_MAX_BYTES);
-      expect(saved.usageLedgerRetention?.maxBytes).toBe(MIN_USAGE_LEDGER_MAX_BYTES);
+      expect(saved.usageLedgerRetention).toEqual({
+        maxBytes: MIN_USAGE_LEDGER_MAX_BYTES, currentBytes: oversizedRow.length * 100, enforcement: "suspended",
+      });
       expect(loadConfig().usageLedgerMaxBytes).toBe(MIN_USAGE_LEDGER_MAX_BYTES);
-
-      const deadline = Date.now() + 5_000;
-      while (readFileSync(usageLogPath()).byteLength > MIN_USAGE_LEDGER_MAX_BYTES && Date.now() < deadline) {
-        await Bun.sleep(50);
-      }
-      expect(readFileSync(usageLogPath()).byteLength).toBeLessThanOrEqual(MIN_USAGE_LEDGER_MAX_BYTES);
+      // The trim is suspended until the archive can publish trimmed rows safely: the ledger stays whole.
+      expect(readFileSync(usageLogPath(), "utf8")).toBe(oversizedRow.repeat(100));
 
       const cleared = await putSettings(config, { usageLedgerMaxBytes: null });
       expect(cleared?.status).toBe(200);

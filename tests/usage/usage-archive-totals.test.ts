@@ -1,37 +1,23 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import {
-  archiveRows, bruteForce, hourOf, jsonl, writeSegment, type ArchiveFixtureRow,
+  archiveRows, bruteForce, hourOf, jsonl, writeArchiveTotals, writeSegment,
 } from "../helpers/usage-archive-rows";
 import {
-  ARCHIVE_TOTALS_FORMAT_VERSION, archiveTotalsPath, buildArchiveTotals, readArchiveTotals, scheduleArchiveTotalsBuild,
+  ARCHIVE_TOTALS_FORMAT_VERSION, archiveTotalsBuildFailure, archiveTotalsPath, buildArchiveTotals, readArchiveTotals,
   type ArchiveTotalsFile,
 } from "../../src/usage/archive-totals";
-import { enforceUsageLedgerSizeLimit } from "../../src/usage/ledger-retention";
-import { MIN_USAGE_LEDGER_MAX_BYTES, USAGE_ARCHIVE_RETENTION_DAYS } from "../../src/usage/retention-contract";
-import { usageLogPath } from "../../src/usage/log";
 import {
-  scheduleArchiveTotalsStartupBuild, setUsageLedgerRetention, stopArchiveTotalsStartupBuild,
+  scheduleArchiveTotalsStartupBuild, stopArchiveTotalsStartupBuild,
 } from "../../src/server/usage-ledger-retention";
 
 let home: string;
 let previousHome: string | undefined;
 
 const archiveDirectory = (): string => join(home, "usage-archive");
-const segmentsIn = (directory: string): string[] => readdirSync(directory).filter(name => name.endsWith(".jsonl")).sort();
-
-/** Rows padded to a fixed size, so 200 of them cross the 1 MiB minimum limit. */
-function paddedRows(count: number): Array<ArchiveFixtureRow & { padding: string }> {
-  return archiveRows(count).map(row => ({ ...row, padding: "x".repeat(8 * 1024) }));
-}
-
-function writeLedger(content: string): void {
-  mkdirSync(dirname(usageLogPath()), { recursive: true });
-  writeFileSync(usageLogPath(), content, { mode: 0o600 });
-}
 
 async function waitFor<T>(read: () => T | undefined | Promise<T | undefined>, timeoutMs = 10_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
@@ -68,23 +54,17 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  setUsageLedgerRetention(undefined);
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
   removeTreeWithRetry(home);
 });
 
 describe("usage archive hourly totals", () => {
-  test("a trim builds its segment's totals, and they equal a plain sum of the rows it archived", async () => {
-    const rows = paddedRows(200);
-    writeLedger(jsonl(rows));
-    setUsageLedgerRetention(MIN_USAGE_LEDGER_MAX_BYTES);
-    const segment = await waitFor(() => segmentsIn(archiveDirectory())[0]);
-    const segmentPath = join(archiveDirectory(), segment);
-    const totals = await waitFor(() => readArchiveTotals(segmentPath, statSync(segmentPath).size));
-    const archived = readFileSync(segmentPath, "utf8").trimEnd().split("\n").map(line => JSON.parse(line) as ArchiveFixtureRow);
-    expect(archived.length).toBeGreaterThan(0);
-    expect(archived.length).toBeLessThan(rows.length);
+  test("a segment's totals equal a plain sum of its rows in every dimension", async () => {
+    const archived = archiveRows(200);
+    const segmentPath = writeSegment(archiveDirectory(), "4240", jsonl(archived));
+    const segment = segmentPath.split("/").at(-1);
+    const totals = (await buildArchiveTotals(segmentPath))!;
 
     expect(totals).toMatchObject({
       version: ARCHIVE_TOTALS_FORMAT_VERSION, segment, bytes: statSync(segmentPath).size, rows: archived.length, unparsableRows: 0,
@@ -102,12 +82,10 @@ describe("usage archive hourly totals", () => {
     }
   });
 
-  test("a segment written before totals existed gets them from a lazy build", async () => {
+  test("a build sums a segment by provider and records where each hour's first row starts", async () => {
     const rows = archiveRows(40);
     const path = writeSegment(archiveDirectory(), "4242", jsonl(rows));
-    expect(existsSync(archiveTotalsPath(path))).toBe(false);
-    await scheduleArchiveTotalsBuild(path);
-    const totals = await readArchiveTotals(path, statSync(path).size);
+    const totals = await buildArchiveTotals(path);
     expect(totals?.rows).toBe(40);
     expect(totalsBy(totals!, bucket => bucket.provider)).toEqual(bruteForce(rows, row => row.provider));
     // Each hour's offset is where its first row starts in the file.
@@ -121,14 +99,15 @@ describe("usage archive hourly totals", () => {
     expect(totals?.hourOffsets).toEqual(expectedOffsets);
   });
 
-  test("segments without totals get them from one background pass after startup, not before it is due", async () => {
+  test("the startup pass over segments without totals is refused and writes nothing into the archive", async () => {
     const path = writeSegment(archiveDirectory(), "4246", jsonl(archiveRows(5)));
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
     scheduleArchiveTotalsStartupBuild(50);
     try {
-      expect(existsSync(archiveTotalsPath(path))).toBe(false);
-      const totals = await waitFor(() => readArchiveTotals(path, statSync(path).size));
-      expect(totals.rows).toBe(5);
+      expect(await waitFor(() => archiveTotalsBuildFailure(path))).toEqual({ reason: "publishing-suspended" });
+      expect(readdirSync(archiveDirectory())).toEqual([path.split("/").at(-1)]);
     } finally {
+      warn.mockRestore();
       stopArchiveTotalsStartupBuild();
     }
   });
@@ -144,14 +123,12 @@ describe("usage archive hourly totals", () => {
 
   test("totals of another format version, or of a different segment length, are not served", async () => {
     const path = writeSegment(archiveDirectory(), "4244", jsonl(archiveRows(3)));
-    const built = await buildArchiveTotals(path);
+    const built = await writeArchiveTotals(path);
     const size = statSync(path).size;
     expect(await readArchiveTotals(path, size)).toEqual(built!);
     expect(await readArchiveTotals(path, size + 1)).toBeUndefined();
     writeFileSync(archiveTotalsPath(path), JSON.stringify({ ...built, version: ARCHIVE_TOTALS_FORMAT_VERSION - 1 }));
     expect(await readArchiveTotals(path, size)).toBeUndefined();
-    await scheduleArchiveTotalsBuild(path);
-    expect((await readArchiveTotals(path, size))?.version).toBe(ARCHIVE_TOTALS_FORMAT_VERSION);
   });
 
   test("the build yields to the event loop between chunks instead of reading the segment in one turn", async () => {
@@ -162,52 +139,5 @@ describe("usage archive hourly totals", () => {
     const totals = await build;
     expect(timerRan).toBe(true);
     expect(totals?.rows).toBe(3_000);
-  });
-
-  test(`a trim's ${USAGE_ARCHIVE_RETENTION_DAYS}-day prune removes a totals file with its segment, and an orphan whose segment is gone`, () => {
-    const expired = writeSegment(archiveDirectory(), "1111", jsonl(archiveRows(2)), "2026-09-01T00-00-00.000Z");
-    const kept = writeSegment(archiveDirectory(), "2222", jsonl(archiveRows(2)), "2026-10-30T00-00-00.000Z");
-    for (const path of [expired, kept]) writeFileSync(archiveTotalsPath(path), "{}");
-    const orphan = join(archiveDirectory(), "2026-10-01T00-00-00.000Z_3333-10.hourly.json");
-    writeFileSync(orphan, "{}");
-    const old = (Date.now() - (USAGE_ARCHIVE_RETENTION_DAYS + 1) * 86_400_000) / 1000;
-    utimesSync(expired, old, old);
-    writeLedger(jsonl(paddedRows(200)));
-    expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
-    const names = readdirSync(archiveDirectory());
-    expect(names).not.toContain(expired.split("/").at(-1));
-    expect(names).not.toContain(archiveTotalsPath(expired).split("/").at(-1));
-    expect(names).not.toContain(orphan.split("/").at(-1));
-    expect(names).toContain(kept.split("/").at(-1));
-    expect(names).toContain(archiveTotalsPath(kept).split("/").at(-1));
-  });
-
-  test("a trim stays published when its totals build throws, and the build runs from a timer after the trim returned", async () => {
-    const warn = spyOn(console, "warn").mockImplementation(() => {});
-    let hookStack = "";
-    let ledgerBytesAtHook = Number.NaN;
-    try {
-      writeLedger(jsonl(paddedRows(200)));
-      setUsageLedgerRetention(MIN_USAGE_LEDGER_MAX_BYTES, {
-        onSegmentPublished: () => {
-          hookStack = new Error("probe").stack ?? "";
-          ledgerBytesAtHook = statSync(usageLogPath()).size;
-          throw new Error("totals unavailable");
-        },
-      });
-      const segment = await waitFor(() => segmentsIn(archiveDirectory())[0]);
-      await waitFor(() => warn.mock.calls.length > 0 ? true : undefined);
-      expect(statSync(usageLogPath()).size).toBeLessThanOrEqual(MIN_USAGE_LEDGER_MAX_BYTES);
-      expect(existsSync(join(archiveDirectory(), segment))).toBe(true);
-      expect(warn.mock.calls).toHaveLength(1);
-      expect(String(warn.mock.calls[0]![0])).toContain("totals unavailable");
-      // The trim's own failure path never saw the throw, and the hook ran outside the trim's stack.
-      expect(String(warn.mock.calls[0]![0])).not.toContain("could not enforce");
-      expect(hookStack).not.toContain("enforceNow");
-      expect(hookStack).not.toContain("enforceUsageLedgerSizeLimit");
-      expect(ledgerBytesAtHook).toBeLessThanOrEqual(MIN_USAGE_LEDGER_MAX_BYTES);
-    } finally {
-      warn.mockRestore();
-    }
   });
 });
