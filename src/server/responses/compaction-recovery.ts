@@ -93,6 +93,14 @@ async function bufferedJson(response: Response, signal: AbortSignal): Promise<{ 
  * Opt-in recovery for routed compaction only. Native compact/ciphertext, stored continuations,
  * policy/combo routes and hosted tools retain their original failure. This owns no credentials.
  */
+function withCallerSelection(
+  body: Record<string, unknown>, caller: Options["compactionCallerSelection"],
+): Record<string, unknown> {
+  if (!caller) return body;
+  const { reasoning: _overridden, ...rest } = body;
+  return { ...rest, model: caller.model, ...(caller.reasoning === undefined ? {} : { reasoning: caller.reasoning }) };
+}
+
 export async function runWithCompactionRecovery(
   req: Request, config: OcxConfig, logCtx: RequestLogContext, options: Options, dispatch: Dispatch,
 ): Promise<Response> {
@@ -122,11 +130,14 @@ export async function runWithCompactionRecovery(
       sourceReportedSends += count;
       options.onCompactionRecoverySendsReported?.(count);
     },
-    onRequestBodyAsSent(body) {
-      options.onRequestBodyAsSent?.(body);
+    onRequestBodyAsSent(observed) {
+      options.onRequestBodyAsSent?.(observed);
       // One snapshot per request: a later caller can neither replace it nor charge bytes twice.
       if (snapshotObserved) return;
       snapshotObserved = true;
+      // A v1 compact turn was built after its routing override: project the caller's selection,
+      // keeping the prepared history and synthetic trigger, before the snapshot is sized.
+      const body = record(observed) ? withCallerSelection(observed, options.compactionCallerSelection) : observed;
       if (!record(body) || !Array.isArray(body.input) || typeof body.model !== "string"
         || !body.input.some(item => record(item) && item.type === "compaction_trigger") || !portableBody(body)) return;
       const users = extractCompactUserMessages(body.input);
@@ -138,14 +149,6 @@ export async function runWithCompactionRecovery(
           const copy = copyPlainData(body);
           if (!copy.ok) return;
           snapshot = copy.value;
-          // A v1 compact turn was built after its routing override: restore the caller's selection,
-          // keeping the prepared history and synthetic trigger.
-          const caller = options.compactionCallerSelection;
-          if (caller) {
-            snapshot.model = caller.model;
-            if (caller.reasoning === undefined) delete snapshot.reasoning;
-            else snapshot.reasoning = caller.reasoning;
-          }
           snapshotBytes = bytes;
           reservation.commitRetained();
         } finally { reservation.release(); }

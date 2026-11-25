@@ -608,6 +608,11 @@ export async function bufferCompactResponse(
 
 
 
+/** The model id a native compact send serializes for `provider`; authorization reads the same id. */
+function compactWireModelId(provider: Pick<OcxProviderConfig, "modelSuffixBracketStrip">, modelId: string): string {
+  return provider.modelSuffixBracketStrip ? stripBracketedModelSuffix(modelId) : modelId;
+}
+
 /**
  * Route one `/v1/responses/compact` request: validate the body (rejecting malformed
  * proxy-owned retained envelopes before routing or credential resolution), select the
@@ -638,12 +643,17 @@ export async function handleResponsesCompact(
   // Compaction forwards client history upstream too; keep local artifact paths out of it.
   redactHostedImageDisplayPaths(body);
   const claudeBridgePoolSession = resolveClaudeBridgePoolSession({ ingress: req.headers, replay: req.headers, admission });
-  // The emergency rescue replays the caller's selection, not the override's model or effort.
+  // The emergency rescue replays the caller's selection, not the override's model or effort. The
+  // override replaces `reasoning` rather than mutating it, so the caller's value is kept by reference
+  // and passed on only when this request's own override applied.
   const callerSelection = typeof (body as { model?: unknown }).model === "string"
-    ? { model: (body as { model: string }).model, reasoning: structuredClone((body as { reasoning?: unknown }).reasoning) }
+    ? { model: (body as { model: string }).model, reasoning: (body as { reasoning?: unknown }).reasoning }
     : undefined;
+  let ownOverride = false;
   if (!options.compactionRoutingOverride) {
-    options = { ...options, compactionRoutingOverride: applyCompactionRoutingOverride(body, req.headers, config, { endpoint: "compact", claudeBridgePoolSession }) };
+    const override = applyCompactionRoutingOverride(body, req.headers, config, { endpoint: "compact", claudeBridgePoolSession });
+    ownOverride = override !== null;
+    options = { ...options, compactionRoutingOverride: override };
   }
   const raw = body as { model?: unknown; input?: unknown };
   if (typeof raw.model !== "string" || raw.model.length === 0) {
@@ -686,6 +696,8 @@ export async function handleResponsesCompact(
   }
 
   let route;
+  // The scope captured at admission, so a key edited mid-request cannot widen it.
+  const admissionScope = resolveAdmissionModelScope(config, admission);
   try {
     // Compact requests route through the same policy evaluation as normal
     // turns, so body-derived evidence (tools/image) must reach the first
@@ -700,7 +712,7 @@ export async function handleResponsesCompact(
     // Routed xAI OAuth compaction must preview its Fast wire model here;
     // native compact keeps checking the destination it dispatches directly.
     const callerTier = (raw as Record<string, unknown>).service_tier;
-    assertRouteAllowedByScope(resolveAdmissionModelScope(config, admission), clientModelLabel, {
+    assertRouteAllowedByScope(admissionScope, clientModelLabel, {
       providerName: route.providerName,
       modelId: previewXaiOauthWireModel({ options: {
         serviceTier: compactFastRow ? "priority" : typeof callerTier === "string" ? callerTier : undefined,
@@ -756,6 +768,19 @@ export async function handleResponsesCompact(
     logCtx.wireModel = virtual.wireModelId;
   } else {
     logCtx.resolvedModel = route.modelId;
+  }
+  // A key scoped to the routed id must also allow the id a native send serializes once bracket
+  // stripping changes it; a queued key selection re-runs this for its refreshed provider.
+  const authorizeCompactWireModel = (provider: Pick<OcxProviderConfig, "modelSuffixBracketStrip">): void => {
+    const wireModelId = compactWireModelId(provider, route.modelId);
+    if (wireModelId !== route.modelId) {
+      assertRouteAllowedByScope(admissionScope, clientModelLabel, { providerName: route.providerName, modelId: wireModelId });
+    }
+  };
+  try { authorizeCompactWireModel(route.provider); }
+  catch (err) {
+    if (err instanceof AdmissionModelDeniedError) return admissionModelDeniedResponse(projectAdmissionModelDeniedLog(err, logCtx));
+    throw err;
   }
   if (compactFastRow) {
     // Resolved AFTER the virtual-model rewrite above, and against `route.modelId`, which is
@@ -1222,8 +1247,7 @@ export async function handleResponsesCompact(
         }
         // The adapter's wire-model projection, then its per-model sampling filter for this physical
         // send, matched against the final model and the catalog ids from before any rewrite.
-        const wireModel = sendProvider.modelSuffixBracketStrip ? stripBracketedModelSuffix(route.modelId) : route.modelId;
-        const projected = poolReserveWireBody({ ...replayBody as typeof compactBody, model: wireModel }, sendProvider);
+        const projected = poolReserveWireBody({ ...replayBody as typeof compactBody, model: compactWireModelId(sendProvider, route.modelId) }, sendProvider);
         return stripRejectedSamplingParams(projected, sendProvider, [selectedModelId, route.modelId]) as typeof compactBody;
       };
       const doFetch = (upstreamRecovery?: UpstreamSendRecovery) => fetchWithHeaderTimeout(
@@ -1267,6 +1291,7 @@ export async function handleResponsesCompact(
                   ? buildResponsesTransport({ ...current, apiKey: resolveProviderApiKey(current.apiKey) }, { headers: req.headers, attribution: admission?.attribution })
                   : undefined;
                 sendHeaders = wireHeaders = headers = currentGateway ? new Headers(currentGateway.headers) : rebuilt;
+                authorizeCompactWireModel(current);
                 sendProvider = compactProvider = current;
                 compactUrl = currentGateway ? `${currentGateway.url.replace(/\/+$/, "")}/compact`
                   : `${(current.baseUrl ?? "").replace(/\/+$/, "")}/responses/compact`;
@@ -1336,7 +1361,8 @@ export async function handleResponsesCompact(
         ? formatErrorResponse(400, "invalid_request_error", redactSecretString(cause.message))
         : cause instanceof InvalidRetainedCompactionEnvelopeError
         ? formatErrorResponse(400, "invalid_request_error", cause.message)
-        : cause instanceof ProviderApiKeyPausedError ? formatErrorResponse(403, "permission_error", cause.message) : undefined)
+        : cause instanceof ProviderApiKeyPausedError ? formatErrorResponse(403, "permission_error", cause.message)
+        : cause instanceof AdmissionModelDeniedError ? admissionModelDeniedResponse(projectAdmissionModelDeniedLog(cause, logCtx)) : undefined)
         ?? requestPacingOverloadResponse(cause) ?? spendLedgerStorageErrorResponse(error, logCtx) ?? (cause instanceof SendBudgetExhaustedError
         ? unboundPoolSpendRefusalResponse(logCtx) ?? formatErrorResponse(429, "request_send_budget_exhausted", cause.message)
         : mapCodexAuthContextErrorToResponse(cause, {
@@ -1844,7 +1870,7 @@ export async function handleResponsesCompact(
     // fallback spend four more.
     // internalReq keeps only FORWARD_HEADERS, so the caller principal is resolved from req.
     const replayPrincipal = { clientPrincipalId: resolveContextPrincipal(req, config, admission) };
-    const response = await handleResponses(internalReq, config, logCtx, { clientModelLabel: options.clientModelLabel, abortSignal: req.signal, turnAdmissionLease, sendBudget, compactionRecoveryKind: "compaction-v1", compactionRoutingOverride: options.compactionRoutingOverride, ...(callerSelection ? { compactionCallerSelection: callerSelection } : {}), advisorAdmissionPolicy: options.advisorAdmissionPolicy, replayPrincipal, ...(admission ? { admission } : {}) });
+    const response = await handleResponses(internalReq, config, logCtx, { clientModelLabel: options.clientModelLabel, abortSignal: req.signal, turnAdmissionLease, sendBudget, compactionRecoveryKind: "compaction-v1", compactionRoutingOverride: options.compactionRoutingOverride, ...(ownOverride && callerSelection ? { compactionCallerSelection: callerSelection } : {}), advisorAdmissionPolicy: options.advisorAdmissionPolicy, replayPrincipal, ...(admission ? { admission } : {}) });
     if (req.signal.aborted) {
       void response.body?.cancel(req.signal.reason).catch(() => undefined);
       return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");

@@ -19,10 +19,10 @@ const deny = { noTemperatureModels: ["k3.1-pro"], noTopPModels: ["k3.1-pro"] };
 const bracketed = "k3.1-pro[256k]";
 const sampling = { temperature: 0.3, top_p: 0.9 };
 
-function responsesWire(provider: OcxProviderConfig, model: string): Record<string, unknown> {
+function responsesWire(provider: OcxProviderConfig, model: string, controls: Record<string, unknown> = sampling): Record<string, unknown> {
   const budget = createTranslatorBudget();
   const request = createResponsesPassthroughAdapter(provider).buildRequest(
-    parseRequest({ model, input: "hi", stream: true, ...sampling }),
+    parseRequest({ model, input: "hi", stream: true, ...controls }),
     { headers: new Headers({ authorization: "Bearer caller-fixture" }), translatorBudget: budget },
   );
   request.releaseBodyObservation?.();
@@ -46,6 +46,24 @@ describe("sampling deny lists match the serialized wire model", () => {
     expect(listed).not.toHaveProperty("temperature");
     expect(listed).not.toHaveProperty("top_p");
     expect(responsesWire(gateway, "other-model")).toMatchObject(sampling);
+  });
+
+  test("a Reserve-only penalty entry applies to the Reserve move and not to the ordinary Luna send", () => {
+    // The pool Reserve rewrite turns gpt-6-luna into gpt-reserve on the canonical backend; only the
+    // rewritten id is listed, so only the moved send may lose the penalty.
+    const canonical = { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex",
+      authMode: "forward", noPenaltyModels: ["gpt-reserve"] } as OcxProviderConfig;
+    const seat = { accessToken: "seat-fixture", chatgptAccountId: "acct-fixture", kind: "pool" as const };
+    const penalties = { presence_penalty: 0.4, frequency_penalty: 0.2 };
+    const ordinary = responsesWire({ ...canonical, _codexAccountOverride: seat } as OcxProviderConfig, "gpt-6-luna", penalties);
+    const reserve = responsesWire({ ...canonical, _codexAccountOverride: { ...seat, poolReserve: true } } as OcxProviderConfig, "gpt-6-luna", penalties);
+    expect(ordinary).toMatchObject({ model: "gpt-6-luna", ...penalties });
+    expect(reserve.model).toBe("gpt-reserve");
+    expect(reserve).not.toHaveProperty("presence_penalty");
+    expect(reserve).not.toHaveProperty("frequency_penalty");
+    const { model: _ordinaryModel, presence_penalty: _p, frequency_penalty: _f, ...ordinaryRest } = ordinary;
+    const { model: _reserveModel, ...reserveRest } = reserve;
+    expect(reserveRest).toEqual(ordinaryRest);
   });
 
   // Chat also carries stop and both penalties, each with its own list naming the bare id.
@@ -116,6 +134,47 @@ describe("native compact endpoint", () => {
     expect(sent).toHaveLength(1);
     expect(new URL(sent[0]!.url).pathname).toBe("/v1/responses/compact");
     expect(sent[0]!.body.model).toBe(wireModel);
+    expect(sent[0]!.body).not.toHaveProperty("temperature");
+    expect(sent[0]!.body).not.toHaveProperty("top_p");
+  });
+
+  test.each([
+    ["only the suffixed id", ["gw/k3.1-pro[256k]"], 403, 0],
+    ["both ids", ["gw/k3.1-pro[256k]", "gw/k3.1-pro"], 200, 1],
+  ] as const)("a scoped key that allows %s is checked against the projected wire model", async (_label, allowedModels, status, sends) => {
+    let upstream = 0;
+    globalThis.fetch = (async () => {
+      upstream++;
+      return Response.json({ object: "response.compaction", output: [{ type: "compaction", encrypted_content: "fixture" }] });
+    }) as typeof fetch;
+    const provider: OcxProviderConfig = { adapter: "openai-responses", baseUrl: "https://gateway.example/v1",
+      authMode: "key", apiKey: "fixture", supportsNativeCompactEndpoint: true, modelSuffixBracketStrip: true };
+    const config = { ...getDefaultConfig(), defaultProvider: "gw", providers: { gw: provider },
+      apiKeys: [{ id: "scoped", name: "scoped", key: "ocx_data_" + "b".repeat(40), createdAt: "2026-11-25T00:00:00Z", allowedModels: [...allowedModels] }] };
+    const response = await handleResponsesCompact(compactionRequest(baseCompactionBody({ model: "gw/k3.1-pro[256k]" })), config,
+      { model: "", provider: "" }, undefined, { kind: "configured", keyId: "scoped", source: "bearer" });
+    expect(response.status).toBe(status);
+    await response.text();
+    expect(upstream).toBe(sends);
+  });
+
+  test("a compact deny entry naming only the pre-rewrite virtual id still applies", async () => {
+    const sent: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      sent.push({ url: String(url), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+      return Response.json({ object: "response.compaction", output: [{ type: "compaction", encrypted_content: "fixture" }] });
+    }) as typeof fetch;
+    const provider: OcxProviderConfig = { adapter: "openai-responses", baseUrl: "https://api.openai.com/v1",
+      authMode: "key", apiKey: "fixture", supportsNativeCompactEndpoint: true,
+      noTemperatureModels: ["gpt-5.6-sol-pro"], noTopPModels: ["gpt-5.6-sol-pro"] };
+    const config = { ...getDefaultConfig(), defaultProvider: "openai-apikey", providers: { "openai-apikey": provider } };
+    const response = await handleResponsesCompact(compactionRequest(baseCompactionBody({ ...sampling, model: "openai-apikey/gpt-5.6-sol-pro" })),
+      config, { model: "", provider: "" });
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(sent).toHaveLength(1);
+    expect(new URL(sent[0]!.url).pathname).toBe("/v1/responses/compact");
+    expect(sent[0]!.body.model).toBe("gpt-5.6-sol");
     expect(sent[0]!.body).not.toHaveProperty("temperature");
     expect(sent[0]!.body).not.toHaveProperty("top_p");
   });

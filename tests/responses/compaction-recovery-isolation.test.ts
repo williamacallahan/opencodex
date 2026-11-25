@@ -112,6 +112,37 @@ test("a routed v1 compact rescue replays the caller's effort, not the override's
   expect(effortOf(calls[1]!.parsed)).toBe("low");
 });
 
+test.each([
+  ["fits", 1024 * 1024, true],
+  ["exceeds the snapshot ceiling", 33 * 1024 * 1024, false],
+] as const)("a restored v1 caller selection that %s is charged at its own size", async (_label, reasoningBytes, retained) => {
+  const translatorBudget = createTranslatorBudget();
+  try {
+    const overridden = body("source/swe-2", { reasoning: { effort: "high" } });
+    const callerReasoning = "x".repeat(reasoningBytes);
+    let chargedDuringSend = -1;
+    let sent = false;
+    const response = await runWithCompactionRecovery(
+      request(overridden), settings(), { model: "", provider: "" },
+      { translatorBudget, sendBudget: createRequestExecutionBudget(), compactionRecoveryKind: "compaction-v1",
+        compactionCallerSelection: { model: "source/normal", reasoning: callerReasoning } },
+      async (_sent, _config, _log, options) => {
+        options.onRequestBodyAsSent?.(structuredClone(overridden));
+        chargedDuringSend = translatorBudget.snapshot().currentBytes;
+        sent = true;
+        return Response.json({ id: "resp_fixture", status: "completed", output: [] });
+      },
+    );
+    await response.text();
+    expect(sent).toBe(true);
+    if (retained) expect(chargedDuringSend).toBeGreaterThan(reasoningBytes);
+    else expect(chargedDuringSend).toBe(0);
+    expect(translatorBudget.snapshot().currentBytes).toBe(0);
+  } finally {
+    translatorBudget.dispose();
+  }
+});
+
 test("a repeated body observation keeps one snapshot charge, released before the budget is disposed", async () => {
   const translatorBudget = createTranslatorBudget();
   try {
