@@ -237,7 +237,8 @@ describe("agy pass-through public HTTP lane", () => {
         await recorded("streamGenerateContent?alt=sse", generation({ sessionId: "5" }));
         const shapes = info.mock.calls.map(call => String(call[0])).filter(line => line.includes("agy.unlabelled_generate_shape"));
         expect(shapes).toHaveLength(1);
-        expect(shapes[0]).toContain("request_keys=\"contents,extra\"");
+        // A field name outside the schema's own is never copied into the line.
+        expect(shapes[0]).toContain("request_keys=\"contents,other\"");
         expect(shapes[0]).not.toContain("zz-marker-77");
         expect(shapes[0]).not.toContain("synthetic-project-two");
       } finally {

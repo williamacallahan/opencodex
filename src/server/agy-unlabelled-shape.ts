@@ -1,10 +1,12 @@
 /**
  * A content-free diagnostic for agy generate requests the body scan could not label with a session.
  *
- * It logs the shape of the body, never its content: key names that look like identifiers (anything else is
- * `<other>`), the JSON type of three named values with a length and a closed class for strings, the
- * `requestType` mode name when it is enum-like, the character-class pattern of the top-level `requestId` (no character of it survives), and the body size rounded up to a power of two. Values, the
- * project, request ids, prompt text and headers are never read into the line. It is bounded for life: one
+ * It logs the shape of the body, never its content: key names from a closed list of the schema's own
+ * field names (anything else is `other`), the JSON type of three named values with a length and a closed
+ * class for strings, the `requestType` mode when it is one of the known modes (else `other`), a closed
+ * format label for the top-level `requestId`, and the body size rounded up to a power of two. No text the
+ * caller chose reaches the line: values, the project, request ids, prompt text, headers, and unknown key
+ * names and modes are never copied into it. It is bounded for life: one
  * line per distinct shape, 8 lines, 64 remembered shapes and 64 body walks per process, and the body is not touched
  * once any cap is reached.
  */
@@ -20,8 +22,14 @@ const MAX_WALKS = 64;
 const MAX_SHAPES = 64;
 const MAX_NAMES = 40;
 const MAX_STRING_CLASS_BYTES = 64;
-const KEY_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,39}$/;
-const MODE_NAME = /^[A-Za-z_-]{1,24}$/;
+/** Field names of the Cloud Code generate envelope, its Gemini `request`, and agy's `request.labels`. */
+const TOP_FIELDS = new Set(["project", "model", "request", "requestId", "requestType", "userAgent", "trajectoryId"]);
+const REQUEST_FIELDS = new Set([
+  "contents", "systemInstruction", "cachedContent", "tools", "toolConfig", "safetySettings", "generationConfig", "labels", "sessionId",
+]);
+const LABEL_FIELDS = new Set(["trajectory_id", "cascade_id", "root_cascade_id", "request_id"]);
+const MODES = new Set(["agent", "agent_monitoring"]);
+const OTHER = "other";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const decoder = new TextDecoder();
 const seenShapes = new Set<string>();
@@ -34,8 +42,11 @@ interface Member {
   readonly valueEnd: number;
 }
 
-/** The members of the JSON object at `start`, in order (at most 40), or null when it is not a well-formed object prefix. */
-function members(bytes: Uint8Array, start: number, scan: JsonScanners): Member[] | null {
+/**
+ * The members of the JSON object at `start`, in order (at most 40), or null when it is not a well-formed object
+ * prefix. A name not in `known` (or written with an escape) is `other`.
+ */
+function members(bytes: Uint8Array, start: number, scan: JsonScanners, known: ReadonlySet<string>): Member[] | null {
   if (bytes[start] !== 0x7B) return null;
   const found: Member[] = [];
   let pos = start + 1;
@@ -46,7 +57,7 @@ function members(bytes: Uint8Array, start: number, scan: JsonScanners): Member[]
     if (!key) return null;
     const rawLength = key.end - (pos + 1);
     const text = !key.escaped && rawLength <= MAX_NAMES ? decoder.decode(bytes.subarray(pos + 1, key.end)) : "";
-    const name = KEY_NAME.test(text) ? text : "<other>";
+    const name = known.has(text) ? text : OTHER;
     pos = scan.skipWs(bytes, key.end + 1);
     if (bytes[pos] !== 0x3A) return null;
     const valueStart = scan.skipWs(bytes, pos + 1);
@@ -92,58 +103,32 @@ function describeValue(bytes: Uint8Array, member: Member | undefined, scan: Json
   return "number";
 }
 
-const MAX_PATTERN_SOURCE_BYTES = 200;
+const MAX_REQUEST_ID_BYTES = 200;
+const PREFIXED_UUID = /^[A-Za-z_]{1,32}([/-])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * The character-class pattern of a string, so that no character of it survives: a run of hex digits and `a`-`f`
- * is `h<count>` (`d<count>` when all are decimal digits), any other ASCII letter run is `a<count>`, each of
- * `/ - _ . :` stays itself, and any other character is `?`.
+ * The format of a string from a closed set: `uuid`, `word/uuid` (agy's monitoring ids), `word-uuid` (the hub's
+ * own `agent-<UUID>`), `digits`, `hex`, `empty`, or `other`. No character of the value is in the label.
  */
-export function characterClassPattern(text: string): string {
-  let out = "";
-  for (let i = 0; i < text.length;) {
-    const ch = text.charCodeAt(i);
-    const digit = ch >= 0x30 && ch <= 0x39;
-    const hexLetter = (ch >= 0x61 && ch <= 0x66) || (ch >= 0x41 && ch <= 0x46);
-    const letter = hexLetter || (ch >= 0x61 && ch <= 0x7A) || (ch >= 0x41 && ch <= 0x5A);
-    if (digit || hexLetter) {
-      let end = i;
-      let allDigits = true;
-      for (; end < text.length; end += 1) {
-        const c = text.charCodeAt(end);
-        const isDigit = c >= 0x30 && c <= 0x39;
-        if (!isDigit && !((c >= 0x61 && c <= 0x66) || (c >= 0x41 && c <= 0x46))) break;
-        if (!isDigit) allDigits = false;
-      }
-      out += `${allDigits ? "d" : "h"}${end - i}`;
-      i = end;
-    } else if (letter) {
-      let end = i;
-      for (; end < text.length; end += 1) {
-        const c = text.charCodeAt(end);
-        const hex = (c >= 0x30 && c <= 0x39) || (c >= 0x61 && c <= 0x66) || (c >= 0x41 && c <= 0x46);
-        if (hex || !((c >= 0x61 && c <= 0x7A) || (c >= 0x41 && c <= 0x5A))) break;
-      }
-      out += `a${end - i}`;
-      i = end;
-    } else {
-      out += "/-_.:".includes(text[i]!) ? text[i]! : "?";
-      i += 1;
-    }
-  }
-  return out;
+export function requestIdFormat(text: string): string {
+  if (text.length === 0) return "empty";
+  if (UUID.test(text)) return "uuid";
+  const prefixed = PREFIXED_UUID.exec(text);
+  if (prefixed) return prefixed[1] === "/" ? "word/uuid" : "word-uuid";
+  if (/^[0-9]+$/.test(text)) return "digits";
+  if (/^[0-9a-fA-F]+$/.test(text)) return "hex";
+  return OTHER;
 }
 
 function requestIdPattern(bytes: Uint8Array, member: Member | undefined, scan: JsonScanners): string {
   if (!member || bytes[member.valueStart] !== 0x22) return "absent";
   const token = scan.scanStr(bytes, member.valueStart);
   if (!token) return "absent";
-  if (token.end - (member.valueStart + 1) > MAX_PATTERN_SOURCE_BYTES) return "toolong";
+  if (token.end - (member.valueStart + 1) > MAX_REQUEST_ID_BYTES) return "toolong";
   // Decoded as JSON so an escape is classed by the character it stands for, never by its spelling.
   try {
     const value: unknown = JSON.parse(decoder.decode(bytes.subarray(member.valueStart, token.end + 1)));
-    if (typeof value !== "string") return "absent";
-    return value.length > MAX_PATTERN_SOURCE_BYTES ? "toolong" : characterClassPattern(value);
+    return typeof value === "string" ? requestIdFormat(value) : "absent";
   } catch {
     return "absent";
   }
@@ -154,21 +139,21 @@ const logfmt = (text: string): string => /^[A-Za-z0-9_.:\-/@]+$/.test(text) ? te
 
 /** The log line for a body, or undefined when the body is not a well-formed enough JSON object. Exported for tests. */
 export function unlabelledShapeFields(bytes: Uint8Array, scan: JsonScanners): [string, string][] | undefined {
-  const top = members(bytes, scan.skipWs(bytes, 0), scan);
+  const top = members(bytes, scan.skipWs(bytes, 0), scan, TOP_FIELDS);
   if (!top) return undefined;
   const requestMember = first(top, "request");
-  const request = requestMember && bytes[requestMember.valueStart] === 0x7B ? members(bytes, requestMember.valueStart, scan) : null;
+  const request = requestMember && bytes[requestMember.valueStart] === 0x7B ? members(bytes, requestMember.valueStart, scan, REQUEST_FIELDS) : null;
   if (requestMember && bytes[requestMember.valueStart] === 0x7B && !request) return undefined;
   const labelsMember = request ? first(request, "labels") : undefined;
-  const labels = labelsMember && bytes[labelsMember.valueStart] === 0x7B ? members(bytes, labelsMember.valueStart, scan) : null;
+  const labels = labelsMember && bytes[labelsMember.valueStart] === 0x7B ? members(bytes, labelsMember.valueStart, scan, LABEL_FIELDS) : null;
   const requestType = first(top, "requestType");
   let mode = "absent";
   if (requestType && bytes[requestType.valueStart] === 0x22) {
     const token = scan.scanStr(bytes, requestType.valueStart);
-    if (token && !token.escaped && token.end - requestType.valueStart <= 25) {
-      const text = decoder.decode(bytes.subarray(requestType.valueStart + 1, token.end));
-      if (MODE_NAME.test(text)) mode = text;
-    }
+    const text = token && !token.escaped && token.end - requestType.valueStart <= 25
+      ? decoder.decode(bytes.subarray(requestType.valueStart + 1, token.end))
+      : "";
+    mode = MODES.has(text) ? text : OTHER;
   }
   const list = (names: readonly Member[] | null): string => names ? names.map(member => member.name).join(",") : "absent";
   return [
