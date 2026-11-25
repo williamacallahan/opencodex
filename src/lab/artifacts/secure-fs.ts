@@ -139,12 +139,16 @@ function detectArtifactIoMode(dir: TrustedArtifactDir): ArtifactIoMode {
   const probePath = join(dir.path, probe);
   const finalPath = join(dir.path, finalName);
   artifactIoMode = "win32_pinned";
+  // Cleanup removes only the file this call created, recognized by identity under either name; a
+  // stale or foreign entry already holding a probe name is never touched.
+  let createdIdentity: BigIntStats | undefined;
   try {
     // With cwd at the artifact directory an ignored `dir` resolves to the same file: undecidable.
     if (realpathSync(process.cwd()) === realpathSync(dir.path)) return artifactIoMode;
+    // The relative rename would replace an existing final name, so a collision keeps pinned mode.
+    if (pathEntryExists(finalPath)) return artifactIoMode;
     const created = openSync(probePath, O_CREAT | O_EXCL | O_RDWR, 0o600);
-    const createdIdentity = fstatSync(created, { bigint: true });
-    closeSync(created);
+    try { createdIdentity = fstatSync(created, { bigint: true }); } finally { closeSync(created); }
     const opened = (openSync as unknown as OpenSyncWithDir)(probe, O_RDONLY, 0, { dir: dir.fd });
     const sameFile = sameFileIdentity(fstatSync(opened, { bigint: true }), createdIdentity);
     closeSync(opened);
@@ -156,11 +160,25 @@ function detectArtifactIoMode(dir: TrustedArtifactDir): ArtifactIoMode {
   } catch {
     // An ignored or unsupported `dir` lands here; pinned mode is the verified-path fallback.
   } finally {
-    for (const leftover of [probePath, finalPath]) {
-      try { unlinkSync(leftover); } catch { /* absent: nothing was left behind */ }
+    if (createdIdentity) {
+      for (const leftover of [probePath, finalPath]) {
+        try {
+          const entry = lstatSync(leftover, { bigint: true });
+          if (entry.isFile() && sameFileIdentity(entry, createdIdentity)) unlinkSync(leftover);
+        } catch { /* absent: nothing was left behind */ }
+      }
     }
   }
   return artifactIoMode;
+}
+
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function childPath(dir: TrustedArtifactDir, name: string): string {

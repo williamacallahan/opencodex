@@ -649,6 +649,7 @@ describe("strict Messages public HTTP transport", () => {
   let savedClaudeHome: string | undefined;
   let savedCodexHome: string | undefined;
   let calls: Captured[];
+  let launchedConfig: OcxConfig | undefined;
   let denied: number;
   let priorLogIds: Set<string>;
   const allowed = new Set<string>();
@@ -720,6 +721,7 @@ describe("strict Messages public HTTP transport", () => {
     } as OcxConfig;
     change(config);
     saveConfig(config);
+    launchedConfig = config;
     proxy = (await import("../../src/server")).startServer(0);
     allowed.add(proxy.url.origin);
     allowed.add(`http://127.0.0.1:${proxy.port}`);
@@ -1101,7 +1103,11 @@ describe("strict Messages public HTTP transport", () => {
         for (const byte of split) controller.enqueue(Uint8Array.of(byte));
         controller.close();
       } }), { headers: { "content-type": "text/event-stream", "content-encoding": "gzip" } }), withKey);
-      const response = await post(encode(streamBody)).catch(() => undefined);
+      const response = await post(encode(streamBody)).catch((error: unknown) => {
+        // A reset is the only accepted failure: it is what a fully withheld coded stream produces.
+        expect((error as { code?: unknown }).code).toBe("ECONNRESET");
+        return undefined;
+      });
       const received = response ? await readAll(response) : new Uint8Array();
       const visible = received.length ? gunzipSync(received, { finishFlush: constants.Z_SYNC_FLUSH }).toString() : "";
       expect(calls).toHaveLength(1);
@@ -1109,6 +1115,25 @@ describe("strict Messages public HTTP transport", () => {
       expect(visible).not.toContain(key);
       expect(visible).not.toContain("error");
       expect(received.length).toBeLessThan(split.length);
+
+      // The same fixture read at the proxy's own response stream, before HTTP framing can turn the
+      // withhold into a reset: the stream must fail rather than finish, holding back the frame.
+      const direct = await handleClaudeMessages(new Request(new URL("/v1/messages" + query, `http://127.0.0.1:${proxy!.port}`), {
+        method: "POST", body: encode(streamBody), headers: { "content-type": "application/json" } }), launchedConfig!, { model: "", provider: "" });
+      expect(direct.headers.get("content-encoding")).toBe("gzip");
+      expect(calls).toHaveLength(2);
+      const parts: Uint8Array[] = [];
+      let failed = false;
+      const reader = direct.body!.getReader();
+      try { for (;;) { const chunk = await reader.read(); if (chunk.done) break; parts.push(chunk.value); } }
+      catch { failed = true; }
+      const streamed = new Uint8Array(Buffer.concat(parts));
+      expect(failed).toBe(true);
+      expect(streamed.length).toBeLessThan(split.length);
+      expect(Buffer.from(streamed).toString("latin1")).not.toContain(key);
+      const decoded = streamed.length ? gunzipSync(streamed, { finishFlush: constants.Z_SYNC_FLUSH }).toString() : "";
+      expect(decoded).not.toContain(key);
+      expect(decoded).not.toContain("error");
     });
 
     test("a gzip stream delivers its clean decoded event before the credential-bearing one arrives", async () => {

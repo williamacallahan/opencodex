@@ -39,7 +39,7 @@ afterEach(async () => {
   }
 });
 
-async function turn(canonical: boolean, reset: boolean, stream?: { mode: "auto" | "eager-relay"; genuine?: true }) {
+async function turn(canonical: boolean, reset: boolean, stream?: { mode: "auto" | "eager-relay"; genuine?: true; incompleteQuota?: true }) {
   const config = { port: 0, defaultProvider: "fixture", websockets: true, streamMode: stream?.mode, providers: {
     fixture: { adapter: "openai-responses", upstreamWebsocket: false, retryOn429: { enabled: false },
       ...(canonical
@@ -60,7 +60,9 @@ async function turn(canonical: boolean, reset: boolean, stream?: { mode: "auto" 
       const genuine = { type: "response.failed", response: { status: "failed", error: {
         type: "rate_limit_error", code: "rate_limit_exceeded", message: "Fixture rate limit",
       } } };
-      const events = stream.genuine ? [bare, genuine] : [bare];
+      const incomplete = { type: "response.incomplete", response: { status: "incomplete",
+        incomplete_details: { reason: "usage_limit_reached" } } };
+      const events = stream.incompleteQuota ? [incomplete] : stream.genuine ? [bare, genuine] : [bare];
       return new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
         { headers: { "content-type": "text/event-stream" } });
     }
@@ -78,7 +80,8 @@ async function turn(canonical: boolean, reset: boolean, stream?: { mode: "auto" 
     await until(() => !ws.data.cancel && !ws.data.nativeControl);
   };
   handler.message(ws, JSON.stringify({ type: "response.create", model: "fixture/gpt-test", input: "fixture", store: false }));
-  await until(() => frames.some(frame => frame.type === (stream ? "response.failed" : "error")) && !ws.data.cancel);
+  const terminal = stream?.incompleteQuota ? "response.incomplete" : stream ? "response.failed" : "error";
+  await until(() => frames.some(frame => frame.type === terminal) && !ws.data.cancel);
   expect(sends).toBe(1);
   expect(getRequestLogEntries()).toHaveLength(1);
   const row = getRequestLogEntries()[0]!;
@@ -123,6 +126,12 @@ for (const mode of ["auto", "eager-relay"] as const) {
 
 test("a genuine WebSocket terminal supersedes a bare wrapper 503", async () => {
   const { row } = await turn(false, false, { mode: "eager-relay", genuine: true });
+  expect(row.status).toBe(429);
+  expect(row.terminalSource).toBe("upstream");
+});
+
+test("an incomplete WebSocket terminal with a quota reason records the request as 429", async () => {
+  const { row } = await turn(false, false, { mode: "eager-relay", incompleteQuota: true });
   expect(row.status).toBe(429);
   expect(row.terminalSource).toBe("upstream");
 });

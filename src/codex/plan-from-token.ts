@@ -8,6 +8,7 @@ import { isSelectableCodexPoolAccount, isValidCodexAccountId } from "./account-i
 import {
   getCodexAccountCredential,
   isCodexAccountGenerationLive,
+  peekCodexAccountGenerationLive,
   readCodexAccountRecord,
 } from "./account-store";
 import { extractChatgptPlanType, codexPlanValue } from "./plan";
@@ -65,7 +66,7 @@ function persistJwtPlanUpdates(runtimeConfig: OcxConfig, updates: FreshPoolPlanU
       const accepted: FreshPoolPlanUpdate[] = [];
       let changed = false;
       for (const update of updates) {
-        if (!isCodexAccountGenerationLive(update.accountId, update.credentialGeneration)) continue;
+        if (!peekCodexAccountGenerationLive(update.accountId, update.credentialGeneration)) continue;
         const liveAccount = configuredPoolAccount(runtimeConfig, update.accountId);
         const persistedAccount = configuredPoolAccount(persistedConfig, update.accountId);
         if (!liveAccount || !persistedAccount) continue;

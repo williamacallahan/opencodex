@@ -320,6 +320,7 @@ export async function prepareResponsesRequest(
   // concrete provider/model, so neither site below may rewrite or re-resolve it. It keeps the phase
   // through `options.memoryModelPhase` instead, which is what applies the phase effort.
   const memoryModelApplies = memoryModelTarget !== undefined && !concreteSelection;
+  options.onRequestBodyAsSent?.(body);
   // An effort row naming a table-less combo (`combo/x--high`) must reach the combo dispatcher
   // as its base id, so the selector is normalized here, before comboIdFromRawBody reads model.
   const comboRows = !concreteSelection && body && typeof body === "object" && !Array.isArray(body)

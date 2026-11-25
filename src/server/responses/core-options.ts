@@ -179,8 +179,14 @@ export interface HandleResponsesOptions {
   replayPrincipal?: Readonly<{ clientPrincipalId: string | undefined }>;
   /** Called at most once after the complete client body is read and accepted for dispatch. */
   onRequestBodyRead?: () => void;
-  /** Internal handoff for retry wrappers that must reuse the already-accounted request body. */
+  /**
+   * Internal handoff for retry wrappers that must reuse the already-accounted request body. Fires
+   * after a `--fast` or effort suffix became service_tier/reasoning, so a policy retry that renames
+   * `model` keeps the caller's intent.
+   */
   onRequestBodyParsed?: (body: unknown) => void;
+  /** Same handoff before any selector normalization: compaction recovery replays the body as sent. */
+  onRequestBodyAsSent?: (body: unknown) => void;
   forceEmptyResponseId?: boolean;
   /** Internal, connection-owned control channel; never reconstructed from headers. */
   nativeControl?: NativeResponseControl;

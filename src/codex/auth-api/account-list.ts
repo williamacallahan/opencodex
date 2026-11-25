@@ -2,7 +2,7 @@ import { getMainAccountExternalUsageWarning, type MainAccountExternalUsageWarnin
 import { codexCreditsDtoField, hasCodexCreditsObservation, pruneCodexCredits } from "../credits";
 import type { CodexCredits } from "../quota-types";
 import { codexAccountLogLabel } from "../account-label";
-import { codexAccountRecordFromSnapshot, loadCodexAccountRecordSnapshot, poolQuotaHistoryIdentity, poolQuotaHistoryIdentityOf, getCodexAccountCredential, getValidCodexToken, isCodexAccountGenerationLive, readCodexAccountRecord } from "../account-store";
+import { codexAccountRecordFromSnapshot, loadCodexAccountRecordSnapshot, poolQuotaHistoryIdentity, poolQuotaHistoryIdentityOf, getCodexAccountCredential, getValidCodexToken, isCodexAccountGenerationLive, peekCodexAccountGenerationLive, readCodexAccountRecord } from "../account-store";
 import { getAccountQuota, getAccountWeeklyQuotaConflicts, isCodexQuotaExhausted, setAccountQuotaFromParsed, withoutRetiredCodexQuota } from "../quota";
 import type { StoredAccountQuota } from "../quota";
 import { ConfigMutationLockError, mutatePersistedConfig } from "../../config";
@@ -256,7 +256,7 @@ export function reconcileFreshPoolAccountPlans(runtimeConfig: OcxConfig, updates
       const accepted: FreshPoolPlanUpdate[] = [];
       let changed = false;
       for (const update of updates) {
-        if (!isCodexAccountGenerationLive(update.accountId, update.credentialGeneration)) continue;
+        if (!peekCodexAccountGenerationLive(update.accountId, update.credentialGeneration)) continue;
         const liveAccount = configuredPoolAccount(runtimeConfig, update.accountId);
         const persistedAccount = configuredPoolAccount(persistedConfig, update.accountId);
         if (!liveAccount || !persistedAccount) continue;

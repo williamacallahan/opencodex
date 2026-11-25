@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createNativeRoutingVerifier, matchesNativeCompatibilityRouting, NATIVE_ROUTING_OVERRIDE_ENV } from "../../src/codex/desktop-compatibility/routing-preflight";
+import { createNativeRoutingVerifier, matchesNativeCompatibilityRouting } from "../../src/codex/desktop-compatibility/routing-preflight";
 import { bindNativeCompatibilityOwner, nativeCompatibilityOwner, type NativeCompatibilityOwner } from "../../src/codex/desktop-compatibility/routing-binding";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 const owner: NativeCompatibilityOwner = { hostname: "127.0.0.1", port: 12001, loopbackPort: 12002, config: { port: 10100, providers: {} } };
@@ -10,13 +10,25 @@ const text = 'model_provider = "openai"\nopenai_base_url = "http://127.0.0.1:120
 const roots: string[] = [];
 // The verifier refuses under a process-level transport override by design; a developer shell
 // that exports one (CODEX_API_BASE_URL) must not decide these cases.
+const TRANSPORT_OVERRIDE_ENV = ["CODEX_API_BASE_URL", "CODEX_APP_SERVER_WS_URL", "CODEX_ELECTRON_USER_DATA_PATH", "ELECTRON_RUN_AS_NODE"];
 const ambientOverrides = new Map<string, string | undefined>();
 beforeEach(() => {
-  for (const key of NATIVE_ROUTING_OVERRIDE_ENV) { ambientOverrides.set(key, process.env[key]); delete process.env[key]; }
+  for (const key of TRANSPORT_OVERRIDE_ENV) { ambientOverrides.set(key, process.env[key]); delete process.env[key]; }
 });
 afterEach(() => {
-  for (const root of roots.splice(0)) removeTreeWithRetry(root);
-  for (const [key, value] of ambientOverrides) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+  try {
+    for (const root of roots.splice(0)) removeTreeWithRetry(root);
+  } finally {
+    for (const [key, value] of ambientOverrides) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+  }
+});
+
+test("a process-level transport override refuses routing the TOML alone would accept", () => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-desktop-override-")); roots.push(root);
+  writeFileSync(join(root, "config.toml"), text);
+  expect(createNativeRoutingVerifier(root, () => owner)()).toBe(true);
+  process.env.CODEX_API_BASE_URL = "http://127.0.0.1:9/v1";
+  expect(createNativeRoutingVerifier(root, () => owner)()).toBe(false);
 });
 
 test("address family matches the bound listener instead of any loopback alias", () => {

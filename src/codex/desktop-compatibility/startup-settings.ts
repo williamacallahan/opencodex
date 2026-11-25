@@ -11,8 +11,9 @@ const failure = (code: string) => new Error(`desktop_compatibility_settings_${co
 /** A next-process preference: never changes live runtime, trust, app or login state. */
 export function createDesktopStartupSettings(io: SettingsIo = {}) {
   const read = io.read ?? readConfigFileSnapshot, mutate = io.mutate ?? mutatePersistedConfig;
-  function inspect() {
-    const snapshot = read();
+  // A passive read publishes no recovery backup; the mutation callback also runs unlocked.
+  function inspect(passive = false) {
+    const snapshot = read({ passive });
     if (snapshot.diagnostics.source !== "file" || snapshot.raw === undefined) throw failure("unavailable");
     let raw: Record<string, unknown>;
     try { raw = JSON.parse(snapshot.raw.replace(/^\uFEFF/, "")); } catch { throw failure("unavailable"); }
@@ -28,7 +29,7 @@ export function createDesktopStartupSettings(io: SettingsIo = {}) {
     try { outcome = mutate(config => {
       // Runs under the existing config lock, including each rebase retry. Unrelated fields
       // may change, but a changed preference must be shown again before this write.
-      const current = status();
+      const current = inspect(true).status;
       if (current.revision !== expectedRevision) throw failure("changed");
       if (current.startOnProxyStart === startOnProxyStart) return { changed: false, value: startOnProxyStart };
       config.desktopCompatibility = { startOnProxyStart };

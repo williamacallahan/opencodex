@@ -5,7 +5,7 @@ import { adoptPersistedCodexAccountSelection, claudeCodeBaselineArmed } from "..
 import { deleteConfigTopLevelKey, fileBackedConfigPath, recordFileBackedConfig } from "../../config/rebase-provenance";
 import { MAIN_CODEX_ACCOUNT_ID, hasLegacyMainCodexPoolAccount, isSelectableCodexPoolAccount, isValidCodexAccountId } from "../account-id";
 import { isCodexAccountPaused } from "../account-pause";
-import { readCodexAccountRecord } from "../account-store";
+import { peekCodexAccountRecord } from "../account-store";
 import { codexAccountPinDrainReason, resetCodexRoutingForClearedSelection, resetCodexRoutingForManualSelection } from "../routing";
 import { jsonResponse } from "./http";
 
@@ -24,7 +24,8 @@ function validateSelection(config: OcxConfig, accountId: string | null): void {
   if (!(config.codexAccounts ?? []).some(account => isSelectableCodexPoolAccount(account) && account.id === accountId)) {
     throw new SelectionRejected("Account not found", 400);
   }
-  if (readCodexAccountRecord(accountId)?.codexValidationPending) {
+  // Observe-only: this check also runs in the config mutation's unlocked precheck.
+  if (peekCodexAccountRecord(accountId)?.codexValidationPending) {
     throw new SelectionRejected("Account validation is pending. Refresh quota after recovery to validate it.", 409);
   }
 }

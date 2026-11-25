@@ -148,6 +148,7 @@ export function peekCodexAccountRecordStore(): Record<string, CodexAccountCreden
   const normalized: Record<string, CodexAccountCredentialRecord> = {};
   try {
     const raw = JSON.parse(readFileSync(path, "utf-8")) as RawCodexAccountStore;
+    if (!isObject(raw)) return {};
     for (const [id, value] of Object.entries(raw)) {
       const record = normalizeRecord(value);
       if (record) normalized[id] = record;
@@ -156,6 +157,21 @@ export function peekCodexAccountRecordStore(): Record<string, CodexAccountCreden
     return {};
   }
   return normalized;
+}
+
+/**
+ * Observe-only {@link readCodexAccountRecord} for a check that can run speculatively, such as a
+ * config mutation callback, whose unlocked no-op precheck must not harden files, back up an
+ * invalid store, or publish a roster.
+ */
+export function peekCodexAccountRecord(id: string): CodexAccountCredentialRecord | null {
+  return peekCodexAccountRecordStore()[id] ?? null;
+}
+
+/** Observe-only {@link isCodexAccountGenerationLive}, for the same speculative callers. */
+export function peekCodexAccountGenerationLive(id: string, generation: number): boolean {
+  const record = peekCodexAccountRecord(id);
+  return !!record?.credential && record.deletedAt == null && record.generation === generation;
 }
 
 /** Read the Codex account record store from disk with hardened permissions, and hand it to the opt-in decision-quota slot (a no-op unless JEV quota signals are active). */

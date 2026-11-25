@@ -49,7 +49,7 @@ export function matchesNativeCompatibilityRouting(text: string, owner: NativeCom
   } catch { return false; }
 }
 /** Process-level overrides that could put the app on another transport despite its TOML. */
-export const NATIVE_ROUTING_OVERRIDE_ENV = ["CODEX_API_BASE_URL", "CODEX_APP_SERVER_WS_URL", "CODEX_ELECTRON_USER_DATA_PATH", "ELECTRON_RUN_AS_NODE"] as const;
+const NATIVE_ROUTING_OVERRIDE_ENV = ["CODEX_API_BASE_URL", "CODEX_APP_SERVER_WS_URL", "CODEX_ELECTRON_USER_DATA_PATH", "ELECTRON_RUN_AS_NODE"] as const;
 export function createNativeRoutingVerifier(codexHome: string, readOwner = nativeCompatibilityOwner) {
   const path = join(codexHome, "config.toml");
   let baseline: string | undefined, invalidated = false;

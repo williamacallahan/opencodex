@@ -6,7 +6,7 @@ import type { CodexAuthContext } from "../codex/auth-context";
 import type { AccountPauseReason } from "../types/account-auto-pause";
 import { credentialGeneration, getAccountSet, setAccountPaused } from "./store";
 import { mutatePersistedConfig } from "../config";
-import { isCodexAccountGenerationLive, readCodexAccountRecord } from "../codex/account-store";
+import { peekCodexAccountGenerationLive, readCodexAccountRecord } from "../codex/account-store";
 import { captureMainQuotaDispatch, isMainQuotaDispatchLive } from "../codex/main-account-cache";
 import { isCodexAccountPaused, setCodexAccountPaused } from "../codex/account-pause";
 import { apiKeyPoolEntryId } from "../providers/api-keys";
@@ -88,7 +88,8 @@ export function captureAccountAutoPauseAttempt(name: string, provider: OcxProvid
     const revision = config.codexAccountPauseState?.[accountId]?.revision;
     const mainDispatch = codex.kind === "main-pool" ? captureMainQuotaDispatch(codex.accessToken, codex.chatgptAccountId, codex.writerGeneration) : undefined;
     const credentialCurrent = () => codex.kind === "pool"
-      ? isCodexAccountGenerationLive(accountId, codex.generation)
+      // Observe-only: the pause mutation's callback, including its unlocked precheck, runs this.
+      ? peekCodexAccountGenerationLive(accountId, codex.generation)
       : !!mainDispatch && isMainQuotaDispatchLive(mainDispatch);
     key = `${name}\0codex\0${accountId}`;
     incarnation = `${codex.kind === "pool" ? readCodexAccountRecord(accountId)?.quotaHistoryIdentity ?? codex.generation : mainDispatch?.credentialGeneration}\0${revision ?? ""}`;

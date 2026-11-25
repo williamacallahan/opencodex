@@ -121,8 +121,8 @@ export async function runWithCompactionRecovery(
       sourceReportedSends += count;
       options.onCompactionRecoverySendsReported?.(count);
     },
-    onRequestBodyParsed(body) {
-      options.onRequestBodyParsed?.(body);
+    onRequestBodyAsSent(body) {
+      options.onRequestBodyAsSent?.(body);
       if (!record(body) || !Array.isArray(body.input) || typeof body.model !== "string"
         || !body.input.some(item => record(item) && item.type === "compaction_trigger") || !portableBody(body)) return;
       const users = extractCompactUserMessages(body.input);
@@ -273,7 +273,7 @@ export async function runWithCompactionRecovery(
         ...options, preParsedBody: undefined, preParsedBodyBytes: undefined, preParsedBodyCharged: false,
         clientModelLabel: firstOptions.clientModelLabel, compactionRecoveryAttempted: true, compactionRecoveryPermit: recoveryPermit,
         compactionRoutingOverride: { sourceModel: originalModel },
-        onRequestBodyRead: undefined, onRequestBodyParsed: undefined,
+        onRequestBodyRead: undefined, onRequestBodyParsed: undefined, onRequestBodyAsSent: undefined,
         onCompactionRecoveryRoute: undefined, onCompactionRecoveryAdapterEvent: undefined,
         onCompactionRecoverySendsReported: count => {
           fallbackReportedSends += count;
