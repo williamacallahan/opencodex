@@ -81,7 +81,12 @@ describe("the legacy usage archive is never written or deleted while its trim is
     writeFileSync(join(archiveDirectory(), "nested", "child.jsonl"), head);
     const outside = join(home, "outside-target.txt");
     writeFileSync(outside, "target");
-    symlinkSync(outside, join(archiveDirectory(), "link.jsonl"));
+    // Windows without symlink privilege cannot create the link; the byte checks below still run.
+    try {
+      symlinkSync(outside, join(archiveDirectory(), "link.jsonl"));
+    } catch (error) {
+      if (!["EPERM", "EACCES", "ENOSYS"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    }
     const before = snapshot(archiveDirectory());
 
     const result = enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES);

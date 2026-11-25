@@ -577,9 +577,6 @@ archive file without a current totals file is listed under `coverage.pendingSegm
 read after the proxy starts and under `coverage.failed` (`publishing-suspended`) from then on, instead
 of being built; while any such file may overlap the window the answer has `complete: false` and no
 totals.
-`ocx uninstall` keeps `usage.jsonl` and the `usage-archive` directory, lists them among the files
-that remain, and removes the rest of the proxy's owned files; delete them yourself once you no
-longer need the history.
 
 Configure it in `config.json`, with `ocx config set usageLedgerMaxBytes <bytes>`, or through
 `GET`/`PUT /api/settings` (`null` clears the limit).

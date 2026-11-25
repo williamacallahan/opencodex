@@ -280,108 +280,11 @@ export interface OwnedRemovalOptions {
 }
 
 /**
- * The usage ledger and its archive outlive uninstall: the operator's order keeps identified request
- * records at least 30 days, and older manifests list `usage-archive` (and possibly its children) as
- * disposable. Only the exact names are preserved; {@link usageHistoryRefusal} refuses the whole run
- * first whenever that name rule might not be enough.
- */
-export const PRESERVED_USAGE_HISTORY = ["usage.jsonl", "usage-archive"] as const;
-
-/** `usage.jsonl` at the top level, or `usage-archive` and anything recorded below it, by exact name. */
-export function isPreservedUsageHistory(parts: readonly string[]): boolean {
-  const [first] = parts;
-  return first === "usage-archive" || (parts.length === 1 && first === "usage.jsonl");
-}
-
-/** How deep and how many entries the archive walk inspects before it gives up and refuses. */
-const USAGE_ARCHIVE_WALK_MAX_DEPTH = 8;
-const USAGE_ARCHIVE_WALK_MAX_ENTRIES = 100_000;
-
-const REMOVE_YOURSELF = "Move the usage history out of the config directory (or resolve the link) and run 'ocx uninstall' again; nothing was removed.";
-
-/**
- * Why uninstall must not run here, or null. Name-based preservation is safe only for a plain
- * `usage.jsonl` file and a plain `usage-archive` directory holding real files and directories: a
- * link could lead history into state the run removes, and an alias spelling on a case-insensitive
- * volume could reach the history under a name the rule does not know. So before anything is removed
- * the run is refused when either entry is a link or not the expected kind, when any entry inside the
- * archive is a link or not a regular file or directory (walked with lstat, at most
- * {@link USAGE_ARCHIVE_WALK_MAX_DEPTH} levels and {@link USAGE_ARCHIVE_WALK_MAX_ENTRIES} entries,
- * refusing past either), when a protected path cannot be inspected for a reason other than absence,
- * or when a manifest entry's first component matches a protected name only case-insensitively.
- */
-export function usageHistoryRefusal(rootPath: string, manifestPaths: readonly string[]): string | null {
-  for (const rel of manifestPaths) {
-    const first = rel.split("/")[0] ?? "";
-    const alias = PRESERVED_USAGE_HISTORY.find(name => first !== name && first.toLowerCase() === name);
-    if (alias !== undefined) {
-      return `the uninstall manifest records ${join(rootPath, first)}, another spelling of ${alias}, which may be the same entry on this volume. ${REMOVE_YOURSELF}`;
-    }
-  }
-  const inspect = (path: string): Stats | null | string => {
-    try {
-      return lstatSync(path);
-    } catch (error) {
-      if (errorCode(error) === "ENOENT") return null;
-      return `${path} could not be inspected (${String(errorCode(error) ?? "unknown error")}).`;
-    }
-  };
-  const ledgerPath = join(rootPath, "usage.jsonl");
-  const ledger = inspect(ledgerPath);
-  if (typeof ledger === "string") return `${ledger} ${REMOVE_YOURSELF}`;
-  if (ledger && (isLinkEntry(ledgerPath, ledger) || !ledger.isFile())) {
-    return `${ledgerPath} is a link or not a regular file, so uninstall cannot tell what keeping it would keep. ${REMOVE_YOURSELF}`;
-  }
-  const archivePath = join(rootPath, "usage-archive");
-  const archive = inspect(archivePath);
-  if (typeof archive === "string") return `${archive} ${REMOVE_YOURSELF}`;
-  if (!archive) return null;
-  if (isLinkEntry(archivePath, archive) || !archive.isDirectory()) {
-    return `${archivePath} is a link or not a directory, so uninstall cannot tell what keeping it would keep. ${REMOVE_YOURSELF}`;
-  }
-  let seen = 0;
-  const pending: Array<{ path: string; depth: number }> = [{ path: archivePath, depth: 0 }];
-  while (pending.length > 0) {
-    const { path, depth } = pending.pop()!;
-    let names: string[];
-    try {
-      names = readdirSync(path);
-    } catch (error) {
-      return `${path} could not be listed (${String(errorCode(error) ?? "unknown error")}). ${REMOVE_YOURSELF}`;
-    }
-    for (const name of names) {
-      seen += 1;
-      if (seen > USAGE_ARCHIVE_WALK_MAX_ENTRIES) {
-        return `${archivePath} holds more than ${USAGE_ARCHIVE_WALK_MAX_ENTRIES} entries, too many to check for links. ${REMOVE_YOURSELF}`;
-      }
-      const child = join(path, name);
-      const entry = inspect(child);
-      if (typeof entry === "string") return `${entry} ${REMOVE_YOURSELF}`;
-      if (!entry) continue;
-      if (isLinkEntry(child, entry)) {
-        return `${child} is a link inside the usage archive; removing other owned state could delete what it points to. ${REMOVE_YOURSELF}`;
-      }
-      if (entry.isDirectory()) {
-        if (depth + 1 >= USAGE_ARCHIVE_WALK_MAX_DEPTH) {
-          return `${child} is nested more than ${USAGE_ARCHIVE_WALK_MAX_DEPTH} levels inside the usage archive, too deep to check for links. ${REMOVE_YOURSELF}`;
-        }
-        pending.push({ path: child, depth: depth + 1 });
-      } else if (!entry.isFile()) {
-        return `${child} inside the usage archive is not a regular file or directory. ${REMOVE_YOURSELF}`;
-      }
-    }
-  }
-  return null;
-}
-
-/**
  * Remove the recorded entry `parts` below the canonical `rootPath`. A final-component link is
  * unlinked itself, never its target; a directory is emptied and removed with the chain rechecked for
- * every child and before the rmdir. The usage history is never removed (the caller skips it, and
- * recursion from a recorded directory cannot reach a top-level name).
+ * every child and before the rmdir.
  */
 export function removeOwnedEntry(rootPath: string, parts: readonly string[], options: OwnedRemovalOptions = {}): void {
-  if (isPreservedUsageHistory(parts)) return;
   assertRealDirectoryChain(rootPath, parts.slice(0, -1), options);
   const path = join(rootPath, ...parts);
   const entry = lstatSync(path);

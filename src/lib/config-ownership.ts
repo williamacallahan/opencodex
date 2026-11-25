@@ -11,16 +11,14 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Database } from "bun:sqlite";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { GenerationContext } from "./state-store-sweeper";
 import { renameAtomicFile } from "./windows-atomic-replace";
 import {
   canonicalRootUnchanged,
   elevatedRemovalRefusal,
   ownedEntryPresent,
-  isPreservedUsageHistory,
   removeOwnedEntry,
-  usageHistoryRefusal,
   rootIdentity,
   uninstallRunsElevated,
   type RootIdentity,
@@ -814,24 +812,6 @@ export function uninstallPrivilegeRefusal(configDir: string): string | null {
   return privilegeCheck(configDir)?.refusal ?? null;
 }
 
-/**
- * Read-only check `ocx uninstall` runs before its first teardown step, beside the privilege check:
- * why the usage history makes this home unsafe to uninstall (`usageHistoryRefusal`), or null. The
- * remover repeats it under the lock, before the tombstone.
- */
-export function uninstallUsageHistoryRefusal(configDir: string): string | null {
-  if (!existsSync(configDir)) return null;
-  let root: string;
-  try {
-    root = canonicalRoot(configDir);
-  } catch {
-    return null;
-  }
-  // Without ownership metadata the remover leaves the whole home untouched, so nothing to check.
-  const ownership = loadOwnershipForUninstall(root);
-  return ownership ? usageHistoryRefusal(root, ownership.manifest.paths) : null;
-}
-
 export function removeOwnedConfigState(configDir: string): ConfigRemovalResult {
   ownershipCache.delete(ownershipCacheKey(configDir));
   lockedManifestIdentity.delete(ownershipCacheKey(configDir));
@@ -932,9 +912,6 @@ function removeCanonicalOwnedConfigState(configDir: string, identity: RootIdenti
       // tree may all have changed since the unlocked check.
       const lockedRefusal = privilege ? elevatedRemovalRefusal(configDir) : null;
       if (lockedRefusal) return { status: "refused", reason: lockedRefusal, residualPaths: [configDir] };
-      // Before the tombstone and every removal: a refusal leaves the manifest and every file as they are.
-      const historyRefusal = usageHistoryRefusal(configDir, ownership.manifest.paths);
-      if (historyRefusal) return { status: "refused", reason: historyRefusal, residualPaths: [configDir] };
       if (!canonicalRootUnchanged(configDir, identity)) return rootChanged;
       if (ownership.manifest.uninstallStartedAt === undefined) {
         writeManifest(configDir, { ...ownership.manifest, uninstallStartedAt: Date.now() });
@@ -946,8 +923,6 @@ function removeCanonicalOwnedConfigState(configDir: string, identity: RootIdenti
       for (const rel of ownership.manifest.paths) {
         const parts = rel.split("/");
         const path = join(configDir, ...parts);
-        // Before any lookup, so a recorded child of the archive never reaches the presence checks.
-        if (isPreservedUsageHistory(parts)) continue;
         try {
           // lstat-based: a listed symlink whose target is gone is still ours to unlink, and a link on
           // the way to an entry is reported rather than read as absence.
@@ -993,12 +968,9 @@ function removeCanonicalOwnedConfigState(configDir: string, identity: RootIdenti
   // The lock holder retired its own lock file on release; one that remains (Windows) is reported.
   const residualPaths = readdirSync(configDir).map(name => join(configDir, name));
   if (residualPaths.length > 0) {
-    const keptHistory = residualPaths.some(path => isPreservedUsageHistory([basename(path)]));
     return {
       status: "partial",
-      reason: keptHistory
-        ? "the usage ledger and usage archive were kept so request history survives uninstall; remove them yourself when it is no longer needed"
-        : "unowned files remain in the config directory",
+      reason: "unowned files remain in the config directory",
       residualPaths,
     };
   }

@@ -42,11 +42,11 @@ describe("full uninstall command", () => {
     expect(cli).not.toContain("rmSync(getConfigDir()");
   });
 
-  test("an elevated-run or usage-history refusal exits before the first teardown step", async () => {
+  test("an elevated-run refusal exits before the first teardown step", async () => {
     const cli = await readText("src/cli/index.ts");
     const body = cli.slice(cli.indexOf("async function handleUninstall()"));
-    const refusal = body.indexOf("const preflightRefusal = uninstallPrivilegeRefusal(getConfigDir()) ?? uninstallUsageHistoryRefusal(getConfigDir());");
-    const exit = body.indexOf("if (preflightRefusal) { console.error(`❌ ${preflightRefusal}`); process.exit(1); }");
+    const refusal = body.indexOf("const privilegeRefusal = uninstallPrivilegeRefusal(getConfigDir());");
+    const exit = body.indexOf("if (privilegeRefusal) { console.error(`❌ ${privilegeRefusal}`); process.exit(1); }");
     expect(refusal).toBeGreaterThan(0);
     expect(exit).toBeGreaterThan(refusal);
     // Nothing before the check: every step that stops, removes or rewrites anything comes after the exit.

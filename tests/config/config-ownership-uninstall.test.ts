@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,7 +7,6 @@ import {
   CONFIG_UNINSTALL_MANIFEST,
   recordOwnedConfigPath,
   removeOwnedConfigState,
-  uninstallUsageHistoryRefusal,
 } from "../../src/lib/config-ownership";
 import { setUninstallElevationProbeForTests } from "../../src/lib/config-ownership-removal";
 import { writePristineCatalogBackup } from "../../src/codex/catalog/parsing";
@@ -91,147 +90,6 @@ describe("owned config uninstall", () => {
       expect(existsSync(join(dir, "config.json"))).toBe(false);
       expect(existsSync(join(dir, "nested", "owned.txt"))).toBe(false);
     } finally {
-      removeTreeWithRetry(parent);
-    }
-  });
-
-  test("keeps the usage ledger and every recorded archive path, twice, and still removes other owned state", () => {
-    const parent = mkdtempSync(join(tmpdir(), "ocx-config-usage-history-"));
-    const dir = join(parent, "config");
-    const archive = join(dir, "usage-archive");
-    const segment = join(archive, "2026-11-01T08-30-00.000Z_123-456.jsonl");
-    try {
-      // A manifest an older build wrote: the archive directory itself and one of its children are listed.
-      for (const path of [join(dir, "config.json"), archive, segment, join(archive, "nested", "child.txt")]) {
-        expect(recordOwnedConfigPath(dir, path)).toBe(true);
-      }
-      expect(manifestPaths(dir)).toContain("usage.jsonl");
-      writeFileSync(join(dir, "config.json"), "owned");
-      writeFileSync(join(dir, "usage.jsonl"), "{\"requestId\":\"recent\"}\n");
-      mkdirSync(join(archive, "nested"), { recursive: true });
-      const files: Record<string, string> = {
-        [segment]: "{\"requestId\":\"old\"}\n",
-        [`${segment.slice(0, -".jsonl".length)}.hourly.json`]: "{}",
-        [`${segment}.ocx.1.2.tmp`]: "temp",
-        [join(archive, "operator-notes.txt")]: "notes",
-        [join(archive, "nested", "child.txt")]: "child",
-      };
-      for (const [path, bytes] of Object.entries(files)) writeFileSync(path, bytes);
-
-      const first = removeOwnedConfigState(dir);
-      expect(first.status).toBe("partial");
-      expect(first.reason).toContain("usage ledger and usage archive were kept");
-      expect(first.residualPaths).toEqual(expect.arrayContaining([join(dir, "usage.jsonl"), archive]));
-      expect(existsSync(join(dir, "config.json"))).toBe(false);
-      const second = removeOwnedConfigState(dir);
-      expect(second.status).not.toBe("removed");
-
-      expect(readFileSync(join(dir, "usage.jsonl"), "utf8")).toBe("{\"requestId\":\"recent\"}\n");
-      for (const [path, bytes] of Object.entries(files)) expect(readFileSync(path, "utf8")).toBe(bytes);
-    } finally {
-      removeTreeWithRetry(parent);
-    }
-  });
-
-  /** Every path below `root` with its bytes, link target or kind, so a refused run's untouched tree can be compared. */
-  function treeSnapshot(root: string): Map<string, string> {
-    const seen = new Map<string, string>();
-    const walk = (path: string, rel: string): void => {
-      for (const entry of readdirSync(path, { withFileTypes: true })) {
-        const child = join(path, entry.name);
-        const name = rel ? `${rel}/${entry.name}` : entry.name;
-        if (entry.isSymbolicLink()) seen.set(name, `link:${readlinkSync(child)}`);
-        else if (entry.isDirectory()) { seen.set(name, "dir"); walk(child, name); }
-        else seen.set(name, readFileSync(child, "base64"));
-      }
-    };
-    walk(root, "");
-    return seen;
-  }
-
-  /** A home with one unrelated owned file, a plain ledger and a plain archive, plus `extra` recorded entries. */
-  function historyHome(prefix: string, extra: string[] = []): { parent: string; dir: string } {
-    const parent = mkdtempSync(join(tmpdir(), prefix));
-    const dir = join(parent, "config");
-    for (const rel of ["config.json", "usage-archive", ...extra]) expect(recordOwnedConfigPath(dir, join(dir, ...rel.split("/")))).toBe(true);
-    writeFileSync(join(dir, "config.json"), "owned");
-    writeFileSync(join(dir, "usage.jsonl"), "recent\n");
-    mkdirSync(join(dir, "usage-archive"));
-    writeFileSync(join(dir, "usage-archive", "2026-11-01T08-30-00.000Z_1-2.jsonl"), "old\n");
-    return { parent, dir };
-  }
-
-  function expectRefusedIntact(dir: string, mention: string): void {
-    const before = treeSnapshot(dir);
-    const result = removeOwnedConfigState(dir);
-    expect(result.status).toBe("refused");
-    expect(result.reason).toContain(mention);
-    expect(result.reason).toContain("nothing was removed");
-    expect(existsSync(join(dir, CONFIG_UNINSTALL_MANIFEST))).toBe(true);
-    expect(treeSnapshot(dir)).toEqual(before);
-    expect(uninstallUsageHistoryRefusal(dir)).toBe(result.reason!);
-  }
-
-  test("refuses, before removing anything, a manifest entry that spells a usage-history name another way", () => {
-    for (const alias of ["Usage-Archive", "USAGE-ARCHIVE/2026-11-01T08-30-00.000Z_1-2.jsonl", "Usage.JSONL"]) {
-      const { parent, dir } = historyHome("ocx-config-usage-alias-", [alias]);
-      try {
-        expectRefusedIntact(dir, join(dir, alias.split("/")[0]!));
-      } finally {
-        removeTreeWithRetry(parent);
-      }
-    }
-  });
-
-  (process.platform === "win32" ? test.skip : test)("refuses, before removing anything, a linked ledger, a linked archive, or a link inside the archive (links require POSIX)", () => {
-    const cases: Array<{ name: string; arrange: (dir: string) => string }> = [
-      { name: "linked ledger", arrange: dir => {
-        rmSync(join(dir, "usage.jsonl"));
-        mkdirSync(join(dir, "data"));
-        writeFileSync(join(dir, "data", "ledger.jsonl"), "recent\n");
-        symlinkSync(join(dir, "data", "ledger.jsonl"), join(dir, "usage.jsonl"));
-        return join(dir, "usage.jsonl");
-      } },
-      { name: "linked archive", arrange: dir => {
-        rmSync(join(dir, "usage-archive"), { recursive: true });
-        mkdirSync(join(dir, "data", "archive-store"), { recursive: true });
-        writeFileSync(join(dir, "data", "archive-store", "seg.jsonl"), "old\n");
-        symlinkSync(join(dir, "data", "archive-store"), join(dir, "usage-archive"), "dir");
-        return join(dir, "usage-archive");
-      } },
-      // The reviewer's case: an archive member links to a file inside owned state the run would remove.
-      { name: "archive member linked into owned artifacts", arrange: dir => {
-        mkdirSync(join(dir, "artifacts"));
-        writeFileSync(join(dir, "artifacts", "seg.jsonl"), "old\n");
-        symlinkSync(join(dir, "artifacts", "seg.jsonl"), join(dir, "usage-archive", "2026-11-02T00-00-00.000Z_3-4.jsonl"));
-        return join(dir, "usage-archive", "2026-11-02T00-00-00.000Z_3-4.jsonl");
-      } },
-    ];
-    for (const { arrange } of cases) {
-      const { parent, dir } = historyHome("ocx-config-usage-link-", ["artifacts", "data"]);
-      try {
-        const link = arrange(dir);
-        expectRefusedIntact(dir, link);
-      } finally {
-        removeTreeWithRetry(parent);
-      }
-    }
-  });
-
-  (process.platform === "win32" || process.getuid?.() === 0 ? test.skip : test)("refuses, before removing anything, an archive it cannot list (POSIX modes required)", () => {
-    const { parent, dir } = historyHome("ocx-config-usage-unreadable-");
-    const archive = join(dir, "usage-archive");
-    try {
-      chmodSync(archive, 0o000);
-      const result = removeOwnedConfigState(dir);
-      chmodSync(archive, 0o700);
-      expect(result).toMatchObject({ status: "refused" });
-      expect(result.reason).toContain(archive);
-      expect(existsSync(join(dir, CONFIG_UNINSTALL_MANIFEST))).toBe(true);
-      expect(readFileSync(join(dir, "config.json"), "utf8")).toBe("owned");
-      expect(readFileSync(join(archive, "2026-11-01T08-30-00.000Z_1-2.jsonl"), "utf8")).toBe("old\n");
-    } finally {
-      chmodSync(archive, 0o700);
       removeTreeWithRetry(parent);
     }
   });

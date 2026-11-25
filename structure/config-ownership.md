@@ -104,48 +104,6 @@ before the tombstone can still create its file afterwards; see the last item bel
   removes whatever is at a listed name when it gets there, and a resumed run does the same; it keeps
   no per-file identity.
 
-## Usage history survives uninstall
-
-The operator's order keeps identified request records at least 30 days, so uninstall never removes
-the usage ledger or its archive. Preservation is by exact name only (`isPreservedUsageHistory` in
-`src/lib/config-ownership-removal.ts`): the removal loop skips `usage.jsonl` and `usage-archive`, with
-every entry recorded below it, before `ownedEntryPresent`, and `removeOwnedEntry` returns at the same
-names, so recursion from a recorded directory never reaches them. This covers every manifest an older
-build wrote: `usage.jsonl` is still in every new manifest's initial names, and earlier trims registered
-`usage-archive` itself; the trim no longer registers it. The run then deletes the ownership metadata
-as usual and ends `partial`, listing both paths among the residual paths with a reason that says the
-usage history was kept, and a second uninstall finds no metadata and refuses the home untouched.
-
-A name rule is only safe for a plain `usage.jsonl` file and a plain `usage-archive` directory of real
-files and directories, so the run fails closed otherwise. `usageHistoryRefusal` refuses the whole
-uninstall, before the tombstone and before any removal, leaving the manifest and every file as they
-are, when:
-
-- `usage.jsonl` or `usage-archive` is a link, or not a regular file or directory respectively;
-- any entry inside `usage-archive` is a link or not a regular file or directory. The walk uses lstat
-  and gives up, refusing, past 8 levels or 100,000 entries;
-- a protected path cannot be inspected or listed for any reason other than absence;
-- a manifest entry's first component equals a protected name case-insensitively but not exactly: on a
-  case-insensitive volume that spelling may be the same entry.
-
-The refusal names the path and tells the operator to move the history out of the config directory, or
-resolve the link, and run `ocx uninstall` again. `ocx uninstall` runs the same check
-(`uninstallUsageHistoryRefusal`) beside the privilege check before its first teardown step and exits 1
-on a refusal; a home without ownership metadata is skipped there, since the remover leaves it untouched
-anyway.
-
-A home left holding only the kept history is a root with files and no ownership metadata, so a later
-install does not claim it: registrations record nothing there, as for any unowned home, and a later
-`ocx uninstall` refuses it untouched until the operator moves or deletes the history. That is the
-intended trade (history is never adopted as disposable state again), not a code path this change
-handles.
-
-`tests/config/config-ownership-uninstall.test.ts` runs uninstall twice over a legacy manifest listing
-the archive and two of its children and checks every kept byte survives while other owned state is
-removed. It checks that each alias spelling, a linked ledger, a linked archive and an archive member
-linked into owned `artifacts/` (links on POSIX), and an archive it cannot list are refused with the
-manifest present and the tree unchanged.
-
 ## Removal stays inside the root
 
 `removeOwnedConfigState` resolves the config root to its realpath once, at the start, and every later
@@ -158,7 +116,7 @@ the lock can leave the ownership lock file in place); one found later ends the r
 paths are reported in the spelling the caller passed. A root reached through an
 aliased ancestor, such as macOS `/var` for `/private/var`, therefore still works, and a root that is
 itself a link is refused as before. `src/lib/config-ownership-removal.ts` resolves every manifest
-entry from that root, skipping the usage history above by exact name before any check. Immediately before
+entry from that root. Immediately before
 each unlink, directory listing and rmdir it lstats every directory from the root down to the entry's
 parent. Each must be a real directory, not a symlink, junction or other reparse point, and the
 root must still resolve to itself while the parent's realpath stays inside it (names are not compared

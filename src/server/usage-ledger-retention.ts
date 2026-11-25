@@ -55,8 +55,9 @@ function scheduleEnforcement(): void {
 
 /** Install or update the policy. `undefined` removes the hook entirely. */
 export function setUsageLedgerRetention(maxBytes: number | undefined): void {
+  // The once-per-process warning re-arms only when the limit actually changes.
+  if (maxBytes !== configuredMaxBytes) suspensionWarned = false;
   configuredMaxBytes = maxBytes;
-  suspensionWarned = false;
   if (scheduledEnforcement !== null) {
     clearTimeout(scheduledEnforcement);
     scheduledEnforcement = null;

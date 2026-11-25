@@ -93,6 +93,24 @@ describe("usage ledger retention while the trim is suspended", () => {
     }
   });
 
+  test("putting the same limit again keeps the warning spent, and a different limit re-arms it", async () => {
+    writeRows(200, 16 * 1024);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      setUsageLedgerRetention(MIN_USAGE_LEDGER_MAX_BYTES);
+      await waitForWarning(warn);
+      expect(warn.mock.calls).toHaveLength(1);
+      setUsageLedgerRetention(MIN_USAGE_LEDGER_MAX_BYTES);
+      await Bun.sleep(1_200);
+      expect(warn.mock.calls).toHaveLength(1);
+      setUsageLedgerRetention(MIN_USAGE_LEDGER_MAX_BYTES + 1);
+      await Bun.sleep(1_200);
+      expect(warn.mock.calls).toHaveLength(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   test("no limit, a limit below the floor, and a ledger under the limit leave the file alone", () => {
     writeRows(20, 64);
     const before = readFileSync(usageLogPath(), "utf-8");

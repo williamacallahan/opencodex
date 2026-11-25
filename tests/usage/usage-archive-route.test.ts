@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { archiveTotalsReads } from "../../src/usage/archive-query";
 import { noteArchiveChanged } from "../../src/usage/archive-segments";
@@ -134,7 +134,7 @@ describe("GET /api/usage/archive", () => {
     const path = writeSegment(archiveDirectory(), "503", jsonl(rows));
     const query = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 6 * HOUR);
     const first = await archiveGet(query);
-    expect(first.body.coverage).toMatchObject({ segments: 1, pending: true, pendingSegments: [path.split("/").at(-1)] });
+    expect(first.body.coverage).toMatchObject({ segments: 1, pending: true, pendingSegments: [basename(path)] });
     // Coverage comes from the segment's name and mtime until its totals exist, and says so.
     expect(first.body.coverage).toMatchObject({ earliestRowAt: iso(ARCHIVE_FIRST_ROW_AT), approximate: true });
     expect(Date.parse(first.body.coverage.latestRowAt!)).toBeGreaterThanOrEqual(rows.at(-1)!.timestamp);
@@ -143,10 +143,10 @@ describe("GET /api/usage/archive", () => {
     // The read queued a build, which is refused while the archive trim is suspended and writes nothing.
     const refused = await archiveGet(query);
     expect(refused.body.coverage).toMatchObject({
-      pending: false, pendingSegments: [], failed: [{ segment: path.split("/").at(-1), reason: "publishing-suspended" }],
+      pending: false, pendingSegments: [], failed: [{ segment: basename(path), reason: "publishing-suspended" }],
     });
     expect(refused.body).toMatchObject({ complete: false, summary: null });
-    expect(readdirSync(archiveDirectory())).toEqual([path.split("/").at(-1)]);
+    expect(readdirSync(archiveDirectory())).toEqual([basename(path)]);
     await writeArchiveTotals(path);
     const second = await archiveGet(query);
     expect(second.body.coverage.pending).toBe(false);
@@ -160,7 +160,18 @@ describe("GET /api/usage/archive", () => {
     noteArchiveChanged();
     const stale = await archiveGet(query);
     expect(stale.body).toMatchObject({ complete: false, summary: null });
-    expect(stale.body.coverage.failed).toEqual([{ segment: path.split("/").at(-1)!, reason: "publishing-suspended" }]);
+    expect(stale.body.coverage.failed).toEqual([{ segment: basename(path), reason: "publishing-suspended" }]);
+
+    // The unusable file is read once per revision, not on every request; a replacement is read again.
+    const readsAfterFirst = archiveTotalsReads.count;
+    await archiveGet(query);
+    await archiveGet(query);
+    expect(archiveTotalsReads.count).toBe(readsAfterFirst);
+    await writeArchiveTotals(path);
+    noteArchiveChanged();
+    const repaired = await archiveGet(query);
+    expect(repaired.body.complete).toBe(true);
+    expect(repaired.body.summary).toMatchObject(plainSummary(rows));
   });
 
   test("each breakdown keeps the 200 keys with the most requests and counts the rest", async () => {

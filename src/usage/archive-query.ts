@@ -151,6 +151,7 @@ async function listDirectory(directory: string, directoryMtimeMs: number, now: n
     }
   }
   for (const key of [...spanCache.keys()]) if (key.startsWith(directory) && !totalsPaths.has(key)) spanCache.delete(key);
+  for (const key of [...unusableTotals.keys()]) if (key.startsWith(directory) && !totalsPaths.has(key)) unusableTotals.delete(key);
   return { directory, generation, directoryMtimeMs, checkedAt: now, listedAt: now, entries };
 }
 
@@ -223,6 +224,19 @@ function evictTotals(): void {
   }
 }
 
+/** Totals files last observed unreadable or incompatible, by the file's observed revision and the segment length they were checked against. */
+const unusableTotals = new Map<string, { revision: string; bytes: number }>();
+
+/** The totals file's observed revision (device, inode, size, mtime, ctime), or undefined when it cannot be statted. */
+async function totalsRevision(path: string): Promise<string | undefined> {
+  try {
+    const { dev, ino, size, mtimeMs, ctimeMs } = await stat(path);
+    return `${dev}:${ino}:${size}:${mtimeMs}:${ctimeMs}`;
+  } catch {
+    return undefined;
+  }
+}
+
 /** A segment's current totals, from the cache or one asynchronous read. */
 export async function loadTotals(entry: ArchiveSegmentEntry): Promise<ArchiveTotalsFile | undefined> {
   if (entry.totalsMtimeMs === undefined) return undefined;
@@ -237,9 +251,18 @@ export async function loadTotals(entry: ArchiveSegmentEntry): Promise<ArchiveTot
     totalsCache.delete(key);
     cachedBuckets -= cached.totals.buckets.length;
   }
+  // A corrupt or incompatible totals file is read once per revision, not on every request.
+  const revision = await totalsRevision(key);
+  const unusable = unusableTotals.get(key);
+  if (revision !== undefined && unusable?.revision === revision && unusable.bytes === entry.bytes) return undefined;
   archiveTotalsReads.count += 1;
   const totals = await readArchiveTotals(entry.path, entry.bytes);
-  if (!totals) return undefined;
+  if (!totals) {
+    if (revision !== undefined) unusableTotals.set(key, { revision, bytes: entry.bytes });
+    else unusableTotals.delete(key);
+    return undefined;
+  }
+  unusableTotals.delete(key);
   spanCache.set(key, { totalsMtimeMs: entry.totalsMtimeMs, firstRowAt: totals.firstRowAt, lastRowAt: totals.lastRowAt });
   totalsCache.set(key, { totalsMtimeMs: entry.totalsMtimeMs, bytes: entry.bytes, totals });
   cachedBuckets += totals.buckets.length;

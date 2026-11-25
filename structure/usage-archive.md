@@ -16,8 +16,8 @@ are its own: a crashed copy and a published segment can be byte-identical, and a
 added files. So while the trim is suspended no code path writes, renames or deletes anything in it:
 `enforceUsageLedgerSizeLimit` in `src/usage/ledger-retention.ts` defers (`archive-suspended`) before
 it opens the archive directory, the runtime owner in `src/server/usage-ledger-retention.ts` only warns,
-every totals build is refused before it reads the segment (below), and uninstall keeps the
-directory with everything in it. Existing segments and totals files are only read. The trim returns
+and every totals build is refused before it reads the segment (below). Uninstall is not covered
+by this suspension (Known gaps). Existing segments and totals files are only read. The trim returns
 with the archive catalog, which publishes the archived prefix and the new live ledger in one
 durable decision. `tests/usage/usage-archive-leftovers.test.ts` drives a trim over the limit, a
 totals build and the startup pass over an archive holding a valid-looking segment and totals name, a
@@ -28,6 +28,8 @@ its target, and the ledger are unchanged.
 
 The read side is not yet exact in these cases; the totals route's `complete: false` covers only a
 segment with no usable totals.
+
+- Uninstall still removes `usage.jsonl` and `usage-archive` (catalog-owned removal lands with slice 3/4).
 
 - The span cache is keyed on totals path and mtime, so a totals file replaced with the same mtime keeps
   serving the old span.
