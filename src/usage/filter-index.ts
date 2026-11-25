@@ -631,11 +631,7 @@ function registerKeptSidecars(dir: string, path: string): void {
   if (present === 2) sidecarOwnershipChecked.add(path);
 }
 
-/**
- * `busyTimeoutMs` is installed before the first read. A foreground caller waits briefly for another
- * writer; background work passes 0 and retries off the event loop, because SQLite's busy wait is a
- * synchronous sleep.
- */
+/** `busyTimeoutMs` precedes the first read; background work passes 0, since SQLite's busy wait is a synchronous sleep. */
 function openIndexForWrite(dir: string, path: string, busyTimeoutMs = SQLITE_BUSY_TIMEOUT_MS): Database {
   const existed = existsSync(path);
   preparePrivateSqliteDatabase(path);
@@ -911,11 +907,9 @@ function endLease(db: Database, generation: string): void {
 }
 
 /**
- * Generations whose rows may be removed: registered, not published, and not owned by a live
- * writer. Every staging generation writes its lease before its first row, so the lease table is
- * the complete set of in-flight generations; a retired published generation keeps its registry row
- * (the durable retirement record) with no lease. A live writer's staging is never a candidate,
- * which keeps this from repeating the multi-writer row loss it cleans up after.
+ * Generations whose rows may be removed: registered, not published, not owned by a live writer. A
+ * staging generation leases before its first row; a retired one keeps its registry row (the retirement
+ * record) with no lease. A live writer's staging is never a candidate, which prevents multi-writer row loss.
  */
 function retiredGenerationCandidates(db: Database, published: string): { candidates: string[]; orphanLease: boolean } {
   const generations = db.query(
@@ -967,11 +961,7 @@ function scheduleRetiredGenerationReclaim(dir: string, path: string): void {
 const RECLAIM_BUSY_FIRST_DELAY_MS = 50;
 const RECLAIM_BUSY_MAX_DELAY_MS = 2_000;
 
-/**
- * Another writer holding the index lock is transient: wait with capped backoff and try again, so
- * the backlog drains after the lock is released without waiting for the next index read. The
- * connection is closed and no transaction is open during the wait.
- */
+/** Another writer's lock is transient: retry with capped backoff, connection closed and no transaction open while waiting. */
 async function reclaimUntilDone(dir: string, path: string, current: () => boolean): Promise<void> {
   for (let delay = RECLAIM_BUSY_FIRST_DELAY_MS; current(); delay = Math.min(delay * 2, RECLAIM_BUSY_MAX_DELAY_MS)) {
     try {
@@ -1188,8 +1178,7 @@ async function rebuild(
     return snapshotFrom(next, result.rows, bumpIngestPasses(path));
   } finally {
     if (!published) {
-      // A failed or crashed attempt must not leave its staging behind: ending its lease makes it a
-      // reclamation candidate, removed in the same bounded batches as a retired generation.
+      // Ending a failed attempt's lease makes its staging a candidate for the same bounded reclamation.
       endLease(db, staging);
       scheduleRetiredGenerationReclaim(dir, path);
     }
@@ -1541,6 +1530,7 @@ export const CANDIDATE_PAGE_SIZE = 2_000;
  */
 function indexedRowPager(
   db: Database,
+  path: string,
   snapshot: UsageFilterIndexSnapshot,
   query: UsageFilterIndexQuery,
 ): () => { rows: UsageSourceFields[]; done: boolean } {
@@ -1552,10 +1542,7 @@ function indexedRowPager(
   return () => {
     db.exec("BEGIN");
     try {
-      const meta = readMeta(db);
-      if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || meta.generation !== snapshot.generation) {
-        throw new UsageLedgerRebuildRequiredError("content_changed");
-      }
+      assertPageReadable(db, path, snapshot.generation);
       const rows = statement.all(snapshot.generation, cursor, snapshot.indexedOffset, CANDIDATE_PAGE_SIZE) as Array<{
         byteOffset: number; timestamp: number | null; apiKeyId: string | null; client: string | null; surface: string | null; admissionKind: string | null;
       }>;
@@ -1608,8 +1595,16 @@ function candidatePageStatements(
  * page; an offset that appears in two branches is emitted once because every head at that value is
  * consumed together.
  */
+/** Inside a page's read transaction: its generation is still published and still valid, or no row is read. */
+function assertPageReadable(db: Database, path: string, generation: string): void {
+  const meta = readMeta(db);
+  if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || meta.generation !== generation
+    || !generationValidated(db, path, meta)) throw new UsageLedgerRebuildRequiredError("content_changed");
+}
+
 function candidatePager(
   db: Database,
+  path: string,
   snapshot: UsageFilterIndexSnapshot,
   query: UsageFilterIndexQuery,
 ): Pick<UsageFilterCandidateRead, "candidateRows" | "nextPage"> {
@@ -1636,11 +1631,7 @@ function candidatePager(
     nextPage(): number[] {
       try {
         db.exec("BEGIN");
-        const meta = readMeta(db);
-        if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION
-          || meta.generation !== snapshot.generation) {
-          throw new UsageLedgerRebuildRequiredError("content_changed");
-        }
+        assertPageReadable(db, path, snapshot.generation);
         const offsets: number[] = [];
         while (offsets.length < CANDIDATE_PAGE_SIZE) {
           // Refill only a branch that ran dry, so a candidate fetched once is never fetched again.
@@ -1737,13 +1728,13 @@ async function readActive(
         requestUsageFilterIndexRebuild();
         throw new UsageLedgerRebuildRequiredError("content_changed");
       }
-      const pager = candidatePager(db, snapshot, query);
+      const pager = candidatePager(db, path, snapshot, query);
       db.exec("COMMIT");
       return {
         snapshot,
         get candidateRows() { return pager.candidateRows; },
         nextPage: () => pager.nextPage(),
-        nextIndexedRows: indexedRowPager(db, snapshot, query),
+        nextIndexedRows: indexedRowPager(db, path, snapshot, query),
         close: () => db.close(),
       };
     } catch (error) {
@@ -1871,13 +1862,13 @@ export async function readUsageFilterCandidatesPassive(
         // be reported as a complete zero.
         throw new UsageLedgerRebuildRequiredError("content_changed");
       }
-      const pager = candidatePager(db, snapshot, query);
+      const pager = candidatePager(db, path, snapshot, query);
       db.exec("COMMIT");
       return {
         snapshot,
         get candidateRows() { return pager.candidateRows; },
         nextPage: () => pager.nextPage(),
-        nextIndexedRows: indexedRowPager(db, snapshot, query),
+        nextIndexedRows: indexedRowPager(db, path, snapshot, query),
         close: () => db.close(),
       };
     } catch (error) {
@@ -1934,8 +1925,10 @@ export function publishedUsageFilterIndexGeneration(): string | null {
     return null;
   }
   try {
+    // One read transaction: the generation and the counts that validate it come from one snapshot.
+    db.exec("BEGIN");
     const meta = readMeta(db);
-    return meta.schemaVersion === USAGE_FILTER_INDEX_SCHEMA_VERSION ? meta.generation ?? null : null;
+    return meta.schemaVersion === USAGE_FILTER_INDEX_SCHEMA_VERSION && generationValidated(db, path, meta) ? meta.generation || null : null;
   } catch {
     return null;
   } finally {

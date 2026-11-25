@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetAppOwnedMemoryForTests } from "../../src/lib/app-owned-memory";
 import { getFilteredUsageAggregate, getUsageAggregate, resetUsageAggregateCacheForTests } from "../../src/server/management/usage-aggregate-cache";
+import { getUsageSourceFacets, resetUsageSourceFacetsForTests } from "../../src/server/management/usage-source-facets";
+import { settleUsageColdRebuildForTests, UsageColdReadPendingError } from "../../src/usage/cold-rebuild-slot";
+import { UsageLedgerRebuildRequiredError } from "../../src/usage/ledger-scanner";
 import {
   readUsageFilterCandidates,
   requestUsageFilterIndexRebuild,
@@ -233,6 +236,38 @@ describe("filtered usage index generation trust", () => {
     } finally {
       process.env.OPENCODEX_HOME = testDir;
       rmSync(homeB, { recursive: true, force: true });
+    }
+  });
+
+  test("an invalidation another process committed ends a picker hit and an open pager", async () => {
+    writeFileSync(ledgerPath(), row("r-0", "openai", "key-a") + filler);
+    // Another process records a destructive change it observed; this one saw nothing itself.
+    const peerInvalidates = () => {
+      const db = new Database(usageFilterIndexPath(testDir));
+      try {
+        db.query("INSERT INTO usage_filter_index_meta (key, value) VALUES ('source_invalidations', '1') ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1").run();
+      } finally {
+        db.close();
+      }
+    };
+    const source = { client: "all" as const, device: { kind: "all" as const } };
+    resetUsageSourceFacetsForTests();
+    expect(() => getUsageSourceFacets(source, ["key-a"])).toThrow(UsageColdReadPendingError);
+    await settleUsageColdRebuildForTests();
+    expect(getUsageSourceFacets(source, ["key-a"]).devices.length).toBeGreaterThan(0);
+    peerInvalidates();
+    expect(() => getUsageSourceFacets(source, ["key-a"])).toThrow(UsageColdReadPendingError);
+    await settleUsageColdRebuildForTests();
+
+    const candidates = await readUsageFilterCandidates({ provider: null, model: null, apiKeyId: "key-a" });
+    const rows = await readUsageFilterCandidates({ provider: null, model: null, apiKeyId: null });
+    try {
+      peerInvalidates();
+      expect(() => candidates!.nextPage()).toThrow(UsageLedgerRebuildRequiredError);
+      expect(() => rows!.nextIndexedRows()).toThrow(UsageLedgerRebuildRequiredError);
+    } finally {
+      candidates!.close();
+      rows!.close();
     }
   });
 });
