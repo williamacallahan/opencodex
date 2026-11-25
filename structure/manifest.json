@@ -1057,6 +1057,7 @@
         "src/usage/archive-totals.ts",
         "src/server/management/usage-archive-routes.ts",
         "src/server/management/route-registry.ts",
+        "src/server/background-lifecycle.ts",
         "src/usage/ledger-retention.ts",
         "src/usage/ledger-scanner.ts",
         "src/server/usage-ledger-retention.ts"

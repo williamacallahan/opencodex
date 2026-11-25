@@ -25,7 +25,10 @@ const MAX_SCAN_SLICE_MS = 8;
 
 export interface ScanUsageLedgerOptions {
   signal?: AbortSignal;
-  /** Another file of ledger rows, such as an archive segment; defaults to the live `usage.jsonl`. */
+  /**
+   * Another file of ledger rows, such as an archive segment; defaults to the live `usage.jsonl`. With
+   * it, `startAtBytes` may be any row start without the append-scan identity and digest.
+   */
   path?: string;
   /**
    * Receives each complete row and the absolute byte offset it starts at, so a derived
@@ -265,7 +268,9 @@ export async function scanUsageLedgerCooperatively(
   if (!Number.isSafeInteger(startAtBytes) || startAtBytes < 0) {
     throw new RangeError("usage ledger start offset must be a non-negative safe integer");
   }
-  if (startAtBytes > 0
+  // A live-ledger append scan must prove the prefix it skips is unchanged. A `path` file is an archive
+  // segment, immutable once published, so a seek into it needs only the LF boundary check below.
+  if (startAtBytes > 0 && options.path === undefined
     && (options.expectedIdentityKey === undefined
       || options.expectedProcessedThroughDigest === undefined)) {
     throw new TypeError(

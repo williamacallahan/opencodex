@@ -454,7 +454,7 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/server/audio-dictation.ts` | [`providers/codex-installation-identity.md`](providers/codex-installation-identity.md) |
 | `src/server/audio-live.ts` | [`providers/codex-installation-identity.md`](providers/codex-installation-identity.md) |
 | `src/server/auth-cors.ts` | [`transports/response-turn-membership.md`](transports/response-turn-membership.md)<br>[`providers/lm-studio-chat.md`](providers/lm-studio-chat.md)<br>[`providers/hosted-tool-denials.md`](providers/hosted-tool-denials.md) |
-| `src/server/background-lifecycle.ts` | [`telemetry.md`](telemetry.md) |
+| `src/server/background-lifecycle.ts` | [`usage-archive.md`](usage-archive.md)<br>[`telemetry.md`](telemetry.md) |
 | `src/server/capture-admission-policy.ts` | [`advisor.md`](advisor.md) |
 | `src/server/claude-messages.ts` | [`data-planes/error-detail.md`](data-planes/error-detail.md)<br>[`providers/codex-installation-identity.md`](providers/codex-installation-identity.md) |
 | `src/server/context-history.ts` | [`providers/codex-installation-identity.md`](providers/codex-installation-identity.md) |

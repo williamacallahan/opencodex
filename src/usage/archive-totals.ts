@@ -20,7 +20,7 @@ import { addEstimatedCost, cacheTokensFromUsage, computeEntryCost } from "./summ
 import { usageDisplayTotalTokens } from "./totals";
 
 /** Bump when a bucket's key or sums change meaning; every older file is then rebuilt. */
-export const ARCHIVE_TOTALS_FORMAT_VERSION = 1;
+export const ARCHIVE_TOTALS_FORMAT_VERSION = 2;
 const HOUR_MS = 60 * 60 * 1000;
 
 /** The dimensions a bucket is keyed by. A row that lacks one stores `""`, never drops it. */
@@ -57,6 +57,16 @@ export interface ArchiveTotalsFile {
   firstRowAt: number | null;
   lastRowAt: number | null;
   buckets: ArchiveHourBucket[];
+  /**
+   * For each UTC hour with rows, the byte offset of the first row (in file order) stamped in that
+   * hour, in file order. A row read seeks here instead of scanning the segment from its start.
+   */
+  hourOffsets: ArchiveHourOffset[];
+}
+
+export interface ArchiveHourOffset {
+  hour: number;
+  offset: number;
 }
 
 export function blankArchiveSums(): ArchiveSums {
@@ -111,6 +121,7 @@ export interface ArchiveTotalsBuildOptions {
 /** Read the whole segment once and publish its totals file. A segment that vanished publishes nothing. */
 export async function buildArchiveTotals(segmentPath: string, options: ArchiveTotalsBuildOptions = {}): Promise<ArchiveTotalsFile | null> {
   const buckets = new Map<string, ArchiveHourBucket>();
+  const hourOffsets = new Map<number, number>();
   let rows = 0;
   let untimedRows = 0;
   let firstRowAt: number | null = null;
@@ -118,7 +129,7 @@ export async function buildArchiveTotals(segmentPath: string, options: ArchiveTo
   const scan = await scanUsageLedgerCooperatively({
     path: segmentPath,
     ...(options.chunkBytes !== undefined ? { chunkBytes: options.chunkBytes } : {}),
-    onEntry: entry => {
+    onEntry: (entry, rowStartBytes) => {
       if (!Number.isFinite(entry.timestamp)) {
         untimedRows += 1;
         return;
@@ -126,7 +137,9 @@ export async function buildArchiveTotals(segmentPath: string, options: ArchiveTo
       rows += 1;
       firstRowAt = firstRowAt === null ? entry.timestamp : Math.min(firstRowAt, entry.timestamp);
       lastRowAt = lastRowAt === null ? entry.timestamp : Math.max(lastRowAt, entry.timestamp);
-      const keys = { hour: Math.floor(entry.timestamp / HOUR_MS) * HOUR_MS, ...archiveDimensionValues(entry) };
+      const hour = Math.floor(entry.timestamp / HOUR_MS) * HOUR_MS;
+      if (!hourOffsets.has(hour)) hourOffsets.set(hour, rowStartBytes);
+      const keys = { hour, ...archiveDimensionValues(entry) };
       const key = JSON.stringify(keys);
       let bucket = buckets.get(key);
       if (!bucket) {
@@ -146,6 +159,7 @@ export async function buildArchiveTotals(segmentPath: string, options: ArchiveTo
     firstRowAt,
     lastRowAt,
     buckets: [...buckets.values()],
+    hourOffsets: [...hourOffsets].map(([hour, offset]) => ({ hour, offset })),
   };
   const text = JSON.stringify(totals);
   atomicWriteFileStreamed(archiveTotalsPath(segmentPath), descriptor => writeFileSync(descriptor, text), {}, { recordOwnership: false });
@@ -167,6 +181,12 @@ function isBucket(value: unknown): value is ArchiveHourBucket {
     && ARCHIVE_SUMS.every(sum => isCount(bucket[sum]));
 }
 
+function isHourOffset(value: unknown): value is ArchiveHourOffset {
+  if (typeof value !== "object" || value === null) return false;
+  const entry = value as Record<string, unknown>;
+  return typeof entry.hour === "number" && Number.isFinite(entry.hour) && isCount(entry.offset) && Number.isSafeInteger(entry.offset);
+}
+
 /**
  * The totals file for a segment of `segmentBytes`, or undefined when it is missing, unreadable, from
  * another format version, or built from a different length: each of those means it must be rebuilt.
@@ -183,7 +203,8 @@ export function readArchiveTotals(segmentPath: string, segmentBytes: number): Ar
   const file = parsed as Record<string, unknown>;
   if (file.version !== ARCHIVE_TOTALS_FORMAT_VERSION || file.bytes !== segmentBytes
     || !isCount(file.rows) || !isCount(file.unparsableRows) || !isInstant(file.firstRowAt) || !isInstant(file.lastRowAt)
-    || !Array.isArray(file.buckets) || !file.buckets.every(isBucket)) return undefined;
+    || !Array.isArray(file.buckets) || !file.buckets.every(isBucket)
+    || !Array.isArray(file.hourOffsets) || !file.hourOffsets.every(isHourOffset)) return undefined;
   return parsed as ArchiveTotalsFile;
 }
 

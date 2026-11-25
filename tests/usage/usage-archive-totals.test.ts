@@ -13,7 +13,9 @@ import {
 import { enforceUsageLedgerSizeLimit } from "../../src/usage/ledger-retention";
 import { MIN_USAGE_LEDGER_MAX_BYTES, USAGE_ARCHIVE_RETENTION_DAYS } from "../../src/usage/retention-contract";
 import { usageLogPath } from "../../src/usage/log";
-import { setUsageLedgerRetention } from "../../src/server/usage-ledger-retention";
+import {
+  scheduleArchiveTotalsStartupBuild, setUsageLedgerRetention, stopArchiveTotalsStartupBuild,
+} from "../../src/server/usage-ledger-retention";
 
 let home: string;
 let previousHome: string | undefined;
@@ -108,6 +110,27 @@ describe("usage archive hourly totals", () => {
     const totals = readArchiveTotals(path, statSync(path).size);
     expect(totals?.rows).toBe(40);
     expect(totalsBy(totals!, bucket => bucket.provider)).toEqual(bruteForce(rows, row => row.provider));
+    // Each hour's offset is where its first row starts in the file.
+    const expectedOffsets: Array<{ hour: number; offset: number }> = [];
+    let offset = 0;
+    for (const row of rows) {
+      const hour = Date.parse(hourOf(row.timestamp));
+      if (!expectedOffsets.some(entry => entry.hour === hour)) expectedOffsets.push({ hour, offset });
+      offset += Buffer.byteLength(`${JSON.stringify(row)}\n`);
+    }
+    expect(totals?.hourOffsets).toEqual(expectedOffsets);
+  });
+
+  test("segments without totals get them from one background pass after startup, not before it is due", async () => {
+    const path = writeSegment(archiveDirectory(), "4246", jsonl(archiveRows(5)));
+    scheduleArchiveTotalsStartupBuild(50);
+    try {
+      expect(existsSync(archiveTotalsPath(path))).toBe(false);
+      const totals = await waitFor(() => readArchiveTotals(path, statSync(path).size));
+      expect(totals.rows).toBe(5);
+    } finally {
+      stopArchiveTotalsStartupBuild();
+    }
   });
 
   test("a corrupt row and a torn final row are counted as unparsable and the rest is still summed", async () => {

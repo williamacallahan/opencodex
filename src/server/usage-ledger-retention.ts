@@ -128,6 +128,34 @@ export function setUsageLedgerRetention(maxBytes: number | undefined, options: {
   if (maxBytes !== undefined) scheduleEnforcement();
 }
 
+/** The first minute after listen belongs to startup work and the first requests, not a segment scan. */
+const ARCHIVE_TOTALS_STARTUP_DELAY_MS = 60_000;
+let archiveTotalsStartupTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Build totals for segments that have none (written before totals existed, a crash, a format bump),
+ * once, a minute after the server starts serving, so the first archive read after a restart is not
+ * all `pending`. Scheduled from the background lifecycle's startup run, beside the storage policy's;
+ * the timer is unref'd and the work itself is a dynamic import, so startup pays one timer.
+ */
+export function scheduleArchiveTotalsStartupBuild(delayMs = ARCHIVE_TOTALS_STARTUP_DELAY_MS): void {
+  if (archiveTotalsStartupTimer) return;
+  archiveTotalsStartupTimer = setTimeout(() => {
+    archiveTotalsStartupTimer = null;
+    void import("../usage/archive-query")
+      .then(({ buildMissingArchiveTotals }) => buildMissingArchiveTotals())
+      .catch(error => {
+        console.warn(`[usage-archive] hourly totals for existing segments could not be built: ${error instanceof Error ? error.message : String(error)}`);
+      });
+  }, delayMs);
+  archiveTotalsStartupTimer.unref?.();
+}
+
+export function stopArchiveTotalsStartupBuild(): void {
+  if (archiveTotalsStartupTimer) clearTimeout(archiveTotalsStartupTimer);
+  archiveTotalsStartupTimer = null;
+}
+
 export function configuredUsageLedgerMaxBytes(): number | undefined {
   return configuredMaxBytes;
 }

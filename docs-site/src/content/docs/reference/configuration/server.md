@@ -583,8 +583,9 @@ directory and the cause. Create it with `mkdir -m 700 ~/.opencodex/usage-archive
 limit; the container image creates it for you.
 
 Beside each archive file the proxy writes a small `.hourly.json` file with that file's usage totals
-per UTC hour, in the background after the trim. Archive files from before this existed get theirs
-the first time the archive is read. A totals file is deleted together with its archive file.
+per UTC hour, in the background after the trim. Archive files without one (from before this
+existed, or from an older format) get theirs in the background about a minute after the proxy
+starts, or sooner when the archive is read. A totals file is deleted together with its archive file.
 
 Configure it in `config.json`, with `ocx config set usageLedgerMaxBytes <bytes>`, or through
 `GET`/`PUT /api/settings` (`null` clears the limit).

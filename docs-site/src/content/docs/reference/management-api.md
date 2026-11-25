@@ -628,15 +628,20 @@ The answer comes only from precomputed hourly totals, never from the rows themse
 - `summary` holds `requests`, `inputTokens`, `outputTokens`, `cacheReadInputTokens`,
   `cacheCreationInputTokens`, `totalTokens`, and `estimatedCostUsd` with its `pricedRequests`,
   `unpricedRequests`, and `unmeteredRequests`, computed with the same rules as `/api/usage`.
-- `byHour`, `byProvider`, `byModel`, `byHarness`, `byWorkloadLauncher`, `byWorkloadSource`,
-  `byClientHost`, `byClientAddress`, and `byAccount` each hold `rows` (`key` plus the same sums,
-  most requests first, at most 200) and `truncated`, the number of keys left out.
+- `byHour` is a time series: one entry (`key`, the hour's ISO start, plus the same sums) for every
+  UTC hour in the window that has rows, oldest first, never capped.
+- `byProvider`, `byModel`, `byHarness`, `byWorkloadLauncher`, `byWorkloadSource`, `byClientHost`,
+  `byClientAddress`, and `byAccount` each hold `rows` (`key` plus the same sums, most requests
+  first, at most 200) and `truncated`, the number of keys left out.
 - `coverage` gives `earliestRowAt` and `latestRowAt` of the whole archive, `segments` (archive
   files in the window), `unparsableRows` in them, and `liveLedgerSince`, the first row still in
-  `usage.jsonl`. Rows from that time on are not in this answer; add `/api/usage` for them.
+  `usage.jsonl`. Rows from that time on are not in this answer; add `/api/usage` for them. While
+  some archive file has no totals yet, its first row comes from its file name and its last row from
+  its modification time, and `coverage.approximate` is `true`.
 - `coverage.pending` is `true` when an archive file in the window has no totals yet, and
   `pendingSegments` names them. The request starts their build in the background and answers with
-  what is available, so a pending answer is incomplete; ask again shortly.
+  what is available, so a pending answer is incomplete; ask again shortly. The proxy also builds
+  missing totals in the background about a minute after it starts.
 - `coverage.duplicateSegments` counts leftover archive files skipped because their rows are
   already counted from another file or are still in `usage.jsonl`, so no row is counted twice.
 
@@ -644,9 +649,16 @@ The answer comes only from precomputed hourly totals, never from the rows themse
 requests one workload sent. It takes the same `since`, `until`, and filters, plus an exact
 `workload` and `limit` (1 to 500, default 100). The window is not widened, `until` is exclusive,
 and it may span at most six hours. `entries` holds the rows oldest first, in the same shape and
-with the same redaction as `GET /api/request-history`. The read scans the archive files in the
-window and stops after five seconds: `truncated: true` with `truncatedReason` `limit` means more
-rows matched than were returned, and `deadline` means the read stopped early with the rows it had.
+with the same redaction as `GET /api/request-history`. Each archive file is read from the first
+row of the hour before `since`, using the offsets its totals record, and up to an hour past
+`until`, so a row logged slightly out of order is still found; every row is then filtered by its
+own time. An archive file whose totals are not built yet is not read: it is listed in
+`coverage.pendingSegments` with `coverage.pending: true` and its build starts in the background.
+`coverage.segments` lists each file read with the byte offset it started from (`fromByte`) and why
+its read ended (`endedBy`: `window-end`, `segment-end`, `limit`, or `deadline`). The top-level
+`endedBy` is `window-end` when every file was read through the window, `limit` when more rows
+matched than were returned, or `deadline` when the read stopped after five seconds with the rows it
+had; `truncated` is `true` for the last two.
 
 :::caution
 Storage cleanup endpoints can move or permanently remove archived session data. Always preview

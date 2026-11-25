@@ -27,7 +27,7 @@ interface TotalsBody {
   until: string;
   coverage: { segments: number; pending: boolean; pendingSegments: string[]; duplicateSegments: number; unparsableRows: number; earliestRowAt: string | null; latestRowAt: string | null; liveLedgerSince: string | null };
   summary: ArchiveSumsBody;
-  byHour: BreakdownBody;
+  byHour: Array<{ key: string } & ArchiveSumsBody>;
   byProvider: BreakdownBody;
   byHarness: BreakdownBody;
   byClientHost: BreakdownBody;
@@ -84,7 +84,7 @@ describe("GET /api/usage/archive", () => {
     expect(body.summary).toMatchObject(plainSummary(inside));
     expect(body.coverage).toMatchObject({ segments: 1, pending: false, pendingSegments: [], duplicateSegments: 0, unparsableRows: 0, liveLedgerSince: null });
     expect(body.coverage.earliestRowAt).toBe(iso(rows[0]!.timestamp));
-    expect(body.byHour.rows.map(row => row.key).sort()).toEqual([...new Set(inside.map(row => iso(Math.floor(row.timestamp / HOUR) * HOUR)))].sort());
+    expect(body.byHour.map(row => row.key)).toEqual([...new Set(inside.map(row => iso(Math.floor(row.timestamp / HOUR) * HOUR)))]);
   });
 
   test("filters match stored values exactly, and an empty value selects rows that lack the dimension", async () => {
@@ -120,10 +120,15 @@ describe("GET /api/usage/archive", () => {
     const query = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 6 * HOUR);
     const first = await archiveGet(query);
     expect(first.body.coverage).toMatchObject({ segments: 1, pending: true, pendingSegments: [path.split("/").at(-1)] });
+    // Coverage comes from the segment's name and mtime until its totals exist, and says so.
+    expect(first.body.coverage).toMatchObject({ earliestRowAt: iso(ARCHIVE_FIRST_ROW_AT), approximate: true });
+    expect(Date.parse(first.body.coverage.latestRowAt!)).toBeGreaterThanOrEqual(rows.at(-1)!.timestamp);
     expect(first.body.summary.requests).toBe(0);
     await scheduleArchiveTotalsBuild(path);
     const second = await archiveGet(query);
     expect(second.body.coverage.pending).toBe(false);
+    expect(second.body.coverage).toMatchObject({ latestRowAt: iso(rows.at(-1)!.timestamp) });
+    expect(second.body.coverage).not.toHaveProperty("approximate");
     expect(second.body.summary).toMatchObject(plainSummary(rows));
 
     // A totals file from an older format is pending again and rebuilt by the read.
@@ -141,6 +146,14 @@ describe("GET /api/usage/archive", () => {
     expect(body.byClientHost.rows).toHaveLength(200);
     expect(body.byClientHost.truncated).toBe(50);
     expect(body.byClientHost.rows[0]).toMatchObject({ key: "host-0", requests: 6 });
+  });
+
+  test("byHour is every hour with rows, oldest first, however many there are", async () => {
+    const rows = archiveRows(300, HOUR);
+    await builtSegment("506", rows);
+    const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 31 * 24 * HOUR));
+    expect(body.byHour.map(row => row.key)).toEqual(rows.map(row => iso(Math.floor(row.timestamp / HOUR) * HOUR)));
+    expect(body.byHour).not.toHaveProperty("truncated");
   });
 
   test("a leftover prefix of a segment and an unpublished trim of the live ledger are not counted again", async () => {

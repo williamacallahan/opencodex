@@ -26,6 +26,7 @@ import {
   blankArchiveSums,
   perArchiveDimension,
   readArchiveTotals,
+  scheduleArchiveTotalsBuild,
   type ArchiveDimension,
   type ArchiveSums,
   type ArchiveTotalsFile,
@@ -145,6 +146,22 @@ export function segmentOverlaps(state: ArchiveSegmentState, since: number, until
   return segmentFirstRowAt(state) < until && state.mtimeMs >= since;
 }
 
+/**
+ * Build the totals of every counted segment that lacks current ones, newest first since recent days
+ * are asked about most, one at a time through the build queue. A failed segment logs one warning and
+ * is left for the next read to queue again; nothing retries in a loop.
+ */
+export async function buildMissingArchiveTotals(configDir = getConfigDir()): Promise<void> {
+  const missing = readArchiveListing(configDir).segments.filter(state => !state.totals).reverse();
+  for (const state of missing) {
+    try {
+      await scheduleArchiveTotalsBuild(state.path);
+    } catch (error) {
+      console.warn(`[usage-archive] hourly totals for ${state.segment.name} could not be built: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
 export type ArchiveFilter = Partial<Record<ArchiveDimension, string>>;
 
 export interface ArchiveBreakdown {
@@ -160,7 +177,10 @@ export interface ArchiveTotalsAnswer {
   unparsableRows: number;
   earliestRowAt: number | null;
   latestRowAt: number | null;
-  byHour: ArchiveBreakdown;
+  /** Some segment had no totals, so its first row came from its name and its last from its mtime. */
+  spanApproximate: boolean;
+  /** Every hour of the window that has rows, oldest first; the window itself bounds its length. */
+  byHour: Array<{ key: string } & ArchiveSums>;
   byDimension: { [dimension in ArchiveDimension]: ArchiveBreakdown };
 }
 
@@ -173,8 +193,8 @@ function tally<K>(map: Map<K, ArchiveSums>, key: K, sums: ArchiveSums): void {
   addArchiveSums(current, sums);
 }
 
-function topRows<K>(map: Map<K, ArchiveSums>, label: (key: K) => string): ArchiveBreakdown {
-  const rows = [...map].map(([key, sums]) => ({ key: label(key), ...sums }))
+function topRows(map: Map<string, ArchiveSums>): ArchiveBreakdown {
+  const rows = [...map].map(([key, sums]) => ({ key, ...sums }))
     .sort((left, right) => right.requests - left.requests || right.totalTokens - left.totalTokens || left.key.localeCompare(right.key));
   return { rows: rows.slice(0, ARCHIVE_BREAKDOWN_ROWS), truncated: Math.max(0, rows.length - ARCHIVE_BREAKDOWN_ROWS) };
 }
@@ -190,10 +210,16 @@ export function answerArchiveTotals(listing: ArchiveListing, since: number, unti
   let unparsableRows = 0;
   let earliestRowAt: number | null = null;
   let latestRowAt: number | null = null;
+  let spanApproximate = false;
   for (const state of listing.segments) {
     const totals = state.totals;
-    if (totals?.firstRowAt != null) earliestRowAt = Math.min(earliestRowAt ?? totals.firstRowAt, totals.firstRowAt);
-    if (totals?.lastRowAt != null) latestRowAt = Math.max(latestRowAt ?? totals.lastRowAt, totals.lastRowAt);
+    // Without totals the name gives the first row and the mtime bounds the last, so coverage never
+    // understates what the archive holds while builds are pending.
+    const first = totals ? totals.firstRowAt : archiveLabelTime(state.segment.label) ?? null;
+    const last = totals ? totals.lastRowAt : state.mtimeMs;
+    spanApproximate ||= !totals;
+    if (first !== null) earliestRowAt = Math.min(earliestRowAt ?? first, first);
+    if (last !== null) latestRowAt = Math.max(latestRowAt ?? last, last);
     if (!segmentOverlaps(state, since, until)) continue;
     segmentsInRange += 1;
     if (!totals) {
@@ -216,7 +242,8 @@ export function answerArchiveTotals(listing: ArchiveListing, since: number, unti
     unparsableRows,
     earliestRowAt,
     latestRowAt,
-    byHour: topRows(byHour, hour => new Date(hour).toISOString()),
-    byDimension: perArchiveDimension(dimension => topRows(byDimension[dimension], key => key)),
+    spanApproximate,
+    byHour: [...byHour].sort(([left], [right]) => left - right).map(([hour, sums]) => ({ key: new Date(hour).toISOString(), ...sums })),
+    byDimension: perArchiveDimension(dimension => topRows(byDimension[dimension])),
   };
 }

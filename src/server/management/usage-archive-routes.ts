@@ -8,7 +8,7 @@
  * Neither route includes rows still in the live ledger: `coverage.liveLedgerSince` says where it
  * begins, and `/api/usage` answers for it.
  */
-import { answerArchiveTotals, readArchiveListing, type ArchiveFilter } from "../../usage/archive-query";
+import { answerArchiveTotals, readArchiveListing, type ArchiveFilter, type ArchiveSegmentState } from "../../usage/archive-query";
 import { readArchivedRows, type ArchivedRowsQuery } from "../../usage/archive-rows";
 import { ARCHIVE_DIMENSIONS, archiveTotalsBuildQueued, buildArchiveTotalsInBackground, type ArchiveDimension } from "../../usage/archive-totals";
 import { parseUsageTimeWindow } from "../../usage/time-range";
@@ -67,6 +67,13 @@ export function parseArchiveFilter(params: URLSearchParams): ArchiveFilter {
   return filter;
 }
 
+/** Never inline: a read answers with what is built and leaves the rest to the background queue. */
+function queueTotalsBuilds(pending: readonly ArchiveSegmentState[]): void {
+  for (const state of pending) {
+    if (!archiveTotalsBuildQueued(state.path)) buildArchiveTotalsInBackground(state.path);
+  }
+}
+
 const breakdownName = (dimension: ArchiveDimension): string => `by${dimension[0]!.toUpperCase()}${dimension.slice(1)}`;
 const isoOrNull = (at: number | null): string | null => at === null ? null : new Date(at).toISOString();
 
@@ -87,9 +94,7 @@ function archiveTotalsResponse(ctx: ManagementContext): Response {
   const until = Math.ceil(window.until / HOUR_MS) * HOUR_MS;
   const listing = readArchiveListing();
   const answer = answerArchiveTotals(listing, since, until, filter);
-  for (const state of answer.pendingSegments) {
-    if (!archiveTotalsBuildQueued(state.path)) buildArchiveTotalsInBackground(state.path);
-  }
+  queueTotalsBuilds(answer.pendingSegments);
   const breakdowns = Object.fromEntries(ARCHIVE_DIMENSIONS.map(dimension => [breakdownName(dimension), answer.byDimension[dimension]]));
   return jsonResponse({
     since: new Date(since).toISOString(),
@@ -97,6 +102,7 @@ function archiveTotalsResponse(ctx: ManagementContext): Response {
     coverage: {
       earliestRowAt: isoOrNull(answer.earliestRowAt),
       latestRowAt: isoOrNull(answer.latestRowAt),
+      ...(answer.spanApproximate ? { approximate: true } : {}),
       segments: answer.segmentsInRange,
       pending: answer.pendingSegments.length > 0,
       pendingSegments: answer.pendingSegments.map(state => state.segment.name),
@@ -113,7 +119,7 @@ function archiveTotalsResponse(ctx: ManagementContext): Response {
 const MAX_ROWS_WINDOW_MS = 6 * HOUR_MS;
 const MAX_ROWS_LIMIT = 500;
 const DEFAULT_ROWS_LIMIT = 100;
-/** No management route shares a deadline constant; this bounds a read of several 100 MB segments. */
+/** No management route shares a deadline constant; with the hour seek a six-hour read covers about eight hours of rows. */
 const ARCHIVE_ROWS_DEADLINE_MS = 5_000;
 
 function parseRowsLimit(params: URLSearchParams): number {
@@ -140,16 +146,19 @@ async function archiveRowsResponse(ctx: ManagementContext): Promise<Response> {
   }
   const listing = readArchiveListing();
   const result = await readArchivedRows(listing, query, AbortSignal.timeout(ARCHIVE_ROWS_DEADLINE_MS));
+  queueTotalsBuilds(result.pending);
   const projectDiagnostics = upstreamDiagnosticLogProjection();
   return jsonResponse({
     since: new Date(query.since).toISOString(),
     until: new Date(query.until).toISOString(),
     // The request-history DTO and its redaction, so an archived row exposes exactly what a live one does.
     entries: result.rows.map(row => requestLogDto(requestLogEntryFromPersistedUsage(row, { projectDiagnostics }), { includeDecodeRate: false, projectDiagnostics })),
-    truncated: result.truncated !== false,
-    ...(result.truncated !== false ? { truncatedReason: result.truncated } : {}),
+    endedBy: result.endedBy,
+    truncated: result.endedBy !== "window-end",
     coverage: {
-      segments: result.segmentsRead,
+      segments: result.segments,
+      pending: result.pending.length > 0,
+      pendingSegments: result.pending.map(state => state.segment.name),
       duplicateSegments: listing.skipped.length,
       liveLedgerSince: isoOrNull(listing.liveLedgerSince),
     },

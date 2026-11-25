@@ -22,9 +22,11 @@ body, API key or account identifier beyond `accountLogLabel` enters a bucket.
 
 The file carries `version` (`ARCHIVE_TOTALS_FORMAT_VERSION`), the segment's `bytes`, the `rows`
 counted, `unparsableRows` (rows that fail to parse or to normalize, exceed the 1 MiB row ceiling,
-lack a finite `timestamp`, or a torn final row), and `firstRowAt`/`lastRowAt`. A reader serves it
-only when the version is current and `bytes` equals the segment's length; anything else is
-rebuilt.
+lack a finite `timestamp`, or a torn final row), `firstRowAt`/`lastRowAt`, and `hourOffsets`: for
+each UTC hour with rows, the byte offset of the first row (in file order) stamped in that hour,
+listed in file order, which is what a row read seeks to. A reader serves the file only when the
+version is current (2 since `hourOffsets` was added) and `bytes` equals the segment's length;
+anything else is rebuilt.
 
 A build reads the segment through `scanUsageLedgerCooperatively` in `src/usage/ledger-scanner.ts`
 with its `path` option, so archive reads share the live ledger's chunked reads, row ceiling,
@@ -36,15 +38,22 @@ once. Builds run one at a time in arrival order, and a queued segment is not que
 A trim that publishes a segment queues its build from `src/server/usage-ledger-retention.ts` after
 the trim has returned, in a separate async chain: a failed build logs one `[usage-retention]`
 warning and never fails or delays the trim. Segments with no current totals (written before totals
-existed, interrupted by a crash, or from an older format) are built lazily when a read finds them.
+existed, interrupted by a crash, or from an older format) are built two ways. A read that finds one
+in its window queues it. And `scheduleArchiveTotalsStartupBuild`, in the same file, is called from
+the background lifecycle's `scheduleStartupRun` in `src/server/background-lifecycle.ts` beside the
+storage policy's startup run: it arms one unref'd 60-second timer, so `startServer` only sets a
+timer and awaits nothing, and when it fires `buildMissingArchiveTotals` in
+`src/usage/archive-query.ts` queues every counted segment without totals, newest first, one at a
+time. A segment that fails logs one `[usage-archive]` warning and waits for the next read; nothing
+retries in a loop. Releasing the last background lifecycle lease cancels a timer that has not fired.
 
 Every place that deletes a segment deletes its totals file with it (`removeArchiveSegment`), and the
 31-day prune also deletes any totals file whose segment is gone. A totals file is written after its
 segment, so its own mtime is never the retention clock.
 
 `tests/usage/usage-archive-totals.test.ts` covers the trim-time build against a plain sum, the lazy
-build, unparsable rows, format and length mismatches, the prune, a failing build beside a published
-trim, and the yields.
+build and its hour offsets, the startup pass, unparsable rows, format and length mismatches, the
+prune, a failing build beside a published trim, and the yields.
 
 ## Counting each row once
 
@@ -72,7 +81,11 @@ The route never builds inline. A counted segment that may overlap the window (it
 last row, or for a pending one its name's first-row time and its mtime) but has no current totals
 is listed in `coverage.pendingSegments` and queued for a background build. The answer never
 includes rows still in `usage.jsonl`; `coverage.liveLedgerSince` is the live ledger's first timed
-row. Each breakdown keeps the 200 keys with the most requests and reports the rest as `truncated`.
+row. `coverage.earliestRowAt`/`latestRowAt` span every counted segment: a segment without totals
+contributes its name's first-row time and its mtime, and `coverage.approximate: true` says so.
+`byHour` is the window's time series, every hour with rows in chronological order and bounded only
+by the window (at most 768 hours). Every other breakdown keeps the 200 keys with the most requests
+and reports the rest as `truncated`.
 `tests/usage/usage-archive-route.test.ts` covers hour widening, filters, the 400 cases, pending and
 rebuilt totals, the cap, and the counting rule.
 
@@ -81,13 +94,21 @@ rebuilt totals, the cap, and the counting rule.
 `GET /api/usage/archive/rows`, in the same route file, reads archived rows for a window of at most
 six hours (not widened, `until` exclusive) with the same filters plus an exact `workload`, and a
 `limit` of 1 to 500 (default 100). `src/usage/archive-rows.ts` reads the counted segments that may
-overlap the window, oldest first, through `scanUsageLedgerCooperatively` with an abort signal that
-combines the limit and a five-second deadline (`AbortSignal.timeout`; no management route shares a
-deadline constant). It keeps at most `limit + 1` matching rows, so `truncatedReason: "limit"` means
-more matched; a deadline abort returns the rows read so far with `truncatedReason: "deadline"`. A
-segment pruned or replaced mid-read keeps the rows already read. Rows go through the same
+overlap the window, oldest first. Rows are appended in arrival order, but a retry can log one
+slightly out of time order, so each segment is read from `archiveSeekOffset`: the smallest
+`hourOffsets` offset among hours at or after the hour before `since`'s hour (the minimum also
+catches a later-stamped row appended before that hour's first row). The scan starts there through
+`scanUsageLedgerCooperatively` with `startAtBytes`, which for a `path` file needs only the scanner's
+LF-boundary check, since a published segment is immutable. It stops at the first row stamped an hour
+or more past `until`, at `limit + 1` matching rows, or at a five-second deadline
+(`AbortSignal.timeout`; no management route shares a deadline constant), and every row is filtered
+by its own timestamp. A segment without current totals has no offsets, so it is never scanned from
+its start: it is reported in `coverage.pendingSegments` and its build is queued. `coverage.segments`
+lists each segment read with its `fromByte` and `endedBy` (`window-end`, `segment-end`, `limit`,
+`deadline`), and the top-level `endedBy` is `window-end`, `limit` or `deadline`. A segment pruned or
+replaced mid-read keeps the rows already read. Rows go through the same
 `requestLogEntryFromPersistedUsage` and `requestLogDto` projection as `/api/request-history`, so an
-archived row exposes exactly the fields, and the redaction, of a live one. Without a byte index into
-a segment, a narrow window still scans each overlapping segment from its start; the deadline is what
-bounds that. `tests/usage/usage-archive-rows.test.ts` covers the window, filters, the row shape
-against `/api/request-history`, the limit, the deadline, and the 400 cases.
+archived row exposes exactly the fields, and the redaction, of a live one.
+`tests/usage/usage-archive-rows.test.ts` covers the window, filters, the seek to the hour before
+`since` with an out-of-order row, pending segments, the row shape against `/api/request-history`,
+the limit, the deadline, and the 400 cases.
