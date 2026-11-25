@@ -9,16 +9,31 @@
  * project discovery. Token refresh at Google's or Anthropic's standard OAuth endpoint remains,
  * because a pool cannot serve without it.
  *
- * The live server binds its config object once at startup (`setLiveStateStoreConfig`), so a
+ * The live server claims its config object once at startup (`setLiveStateStoreConfig`), so a
  * management write that changes the field takes effect without a restart.
  */
 import type { OcxConfig } from "../types";
 import { markProxyError } from "./client-error-body";
 
-let bound: Pick<OcxConfig, "nativeHarnessOnly"> | null = null;
+type HarnessPolicy = Pick<OcxConfig, "nativeHarnessOnly">;
 
-export function bindNativeHarnessConfig(config: Pick<OcxConfig, "nativeHarnessOnly"> | null): void {
+let bound: HarnessPolicy | null = null;
+
+export function bindNativeHarnessConfig(config: HarnessPolicy | null): void {
   bound = config;
+}
+
+/**
+ * Bind a starting server's policy and return its release, which puts back what was bound before only while this
+ * policy is still the bound one. A failed start releases at once, so an embedded server that never listened leaves
+ * the running server's policy in place; a stopped server releases after its listeners drain.
+ */
+export function claimNativeHarnessPolicy(config: HarnessPolicy): () => void {
+  const previous = bound;
+  bound = config;
+  return () => {
+    if (bound === config) bound = previous;
+  };
 }
 
 export function nativeHarnessOnly(): boolean {

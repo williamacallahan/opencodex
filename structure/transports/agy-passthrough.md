@@ -81,7 +81,10 @@ fallback. `tests/server/agy-passthrough.test.ts` and
 ## `nativeHarnessOnly`
 
 `src/lib/native-harness.ts` owns the top-level switch, bound once from the live config by
-`setLiveStateStoreConfig`. A malformed hand edit parses as on. When it is on:
+`setLiveStateStoreConfig`. The binding is process-wide, so `startServer` claims it and releases it:
+a start that fails puts back the policy that was bound before, and a stopped server puts it back
+after its listeners drain only while its own policy is still the bound one
+(`tests/server/harness-only-server-lifecycle.test.ts`). A malformed hand edit parses as on. When it is on:
 
 - Antigravity accounts serve only the `/agy` lane. Building a Cloud Code request in the Google adapter
   (`src/adapters/google.ts`), Cloud Code image generation (`src/server/images.ts`), Cloud Code model

@@ -6,8 +6,12 @@ effort on POSIX and unavailable on Windows.
 
 Readers share one parsed store while the file's stat signature is unchanged and at least 50 ms
 old. Only a completed read or a completed write fills that cache: `mutateStore` reads past it and
-edits its own copy in place, so a write that fails leaves every reader on the bytes still on disk
-(`tests/oauth/oauth-store-cache.test.ts`).
+edits its own copy in place, so a write that fails leaves every reader on the bytes still on disk.
+A read stats the file before and after reading it and caches only when the two signatures match,
+so a file another process replaces in between is never cached under the newer signature. The
+account getters (`getAccountSet`, `listAccounts`, `getCredential`, `getAccountCredential`,
+`getAccountCredentialWithStatus`) return detached copies of what they were asked for, so a caller
+editing one cannot change the next read (`tests/oauth/oauth-store-cache.test.ts`).
 
 An `auth.json` that exists but cannot be loaded serves an empty account pool, which is otherwise
 indistinguishable from every account having signed out. `loadAuthStoreInternal` in

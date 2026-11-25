@@ -921,6 +921,7 @@
   "harness-only-client-refusal.test.ts": "server",
   "harness-only-sidecar-refusal.test.ts": "server",
   "harness-only-gates.test.ts": "server",
+  "harness-only-server-lifecycle.test.ts": "server",
   "server-antigravity-model-roster-routing.test.ts": "server",
   "antigravity-routing-carry.test.ts": "adapters/google",
   "server-antigravity-model-denial-recovery.test.ts": "server",

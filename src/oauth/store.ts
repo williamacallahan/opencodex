@@ -416,22 +416,29 @@ function reportUnreadableAuthStore(path: string, raw: string | undefined): void 
   logOAuthEvent("level=error OAuth account store unreadable; serving an empty pool", { reason });
 }
 
-function captureAuthStoreCache(path: string, store: AuthStore, hadLegacy: boolean): void {
+type AuthStoreSignature = Pick<AuthStoreCacheEntry, "dev" | "ino" | "size" | "mtimeNs" | "ctimeNs">;
+
+function authStoreSignature(path: string): AuthStoreSignature | null {
   try {
-    const st = statSync(path, { bigint: true });
-    authStoreCache = {
-      path,
-      dev: st.dev,
-      ino: st.ino,
-      size: st.size,
-      mtimeNs: st.mtimeNs,
-      ctimeNs: st.ctimeNs,
-      store,
-      hadLegacy,
-    };
+    const { dev, ino, size, mtimeNs, ctimeNs } = statSync(path, { bigint: true });
+    return { dev, ino, size, mtimeNs, ctimeNs };
   } catch {
-    authStoreCache = null;
+    return null;
   }
+}
+
+const sameSignature = (a: AuthStoreSignature, b: AuthStoreSignature) =>
+  a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
+
+/**
+ * Cache `store` under the file's current signature. `readFrom`, when given, is the signature taken before the bytes
+ * were read: a file replaced between that read and this stat must not lend its signature to the older roster.
+ */
+function captureAuthStoreCache(path: string, store: AuthStore, hadLegacy: boolean, readFrom?: AuthStoreSignature | null): void {
+  const signature = authStoreSignature(path);
+  authStoreCache = signature && (readFrom === undefined || (readFrom && sameSignature(readFrom, signature)))
+    ? { path, ...signature, store, hadLegacy }
+    : null;
 }
 
 /** Load and normalize the OAuth auth store with hardened permissions, and hand the result to the opt-in decision-quota slot (a no-op unless JEV quota signals are active). */
@@ -441,11 +448,7 @@ function loadAuthStoreInternal(options?: { bypassCache?: boolean }): { store: Au
     try {
       const st = statSync(path, { bigint: true });
       if (
-        st.dev === authStoreCache.dev
-        && st.ino === authStoreCache.ino
-        && st.size === authStoreCache.size
-        && st.mtimeNs === authStoreCache.mtimeNs
-        && st.ctimeNs === authStoreCache.ctimeNs
+        sameSignature(st, authStoreCache)
         && (process.platform === "win32" || (st.mode & 0o777n) === 0o600n)
         && Date.now() - statTimeMs(st.mtimeNs) >= AUTH_STORE_STAT_GUARD_MS
       ) {
@@ -467,6 +470,7 @@ function loadAuthStoreInternal(options?: { bypassCache?: boolean }): { store: Au
   }
   let result: { store: AuthStore; hadLegacy: boolean };
   let raw: string | undefined;
+  const readFrom = options?.bypassCache ? null : authStoreSignature(path);
   try {
     raw = readFileSync(path, "utf-8");
     result = normalizeAuthStore(JSON.parse(raw));
@@ -481,7 +485,7 @@ function loadAuthStoreInternal(options?: { bypassCache?: boolean }): { store: Au
   clearUnreadableAuthStoreRecord();
   // A bypassing caller (mutateStore) edits this object in place before it is written; caching it would serve
   // an unwritten change to every reader when the write fails. `persist` caches the store once it is on disk.
-  if (!options?.bypassCache) captureAuthStoreCache(path, result.store, result.hadLegacy);
+  if (!options?.bypassCache) captureAuthStoreCache(path, result.store, result.hadLegacy, readFrom);
   // Outside the parse try: roster publication is advisory and must never route a loaded store into the invalid-config backup path.
   notifyAuthStoreLoaded(result.store);
   return result;
@@ -1058,7 +1062,8 @@ export function mutateStore<T>(fn:(store:AuthStore)=>T|Promise<T>, retainedValue
 export function getCredential(provider: string): OAuthCredentials | null {
   const set = loadAuthStore()[provider];
   if (!set) return null;
-  return set.accounts.find(a => a.id === set.activeAccountId)?.credential ?? null;
+  const credential = set.accounts.find(a => a.id === set.activeAccountId)?.credential;
+  return credential ? structuredClone(credential) : null;
 }
 
 /**
@@ -1452,14 +1457,16 @@ export async function removeCredential(provider: string): Promise<"removed" | "n
 // Multi-account API
 // ---------------------------------------------------------------------------
 
+// The loaded store is shared with every reader through the stat-validated cache, so each getter hands out a
+// detached copy of only what was asked for; a caller editing it cannot change the next read.
 export function getAccountSet(provider: string): ProviderAccountSet | null {
   const set = loadAuthStore()[provider];
-  return set ? { ...set, accounts: [...set.accounts] } : null;
+  return set ? structuredClone(set) : null;
 }
 
 export function listAccounts(provider: string): ProviderAccount[] {
   const accounts = loadAuthStore()[provider]?.accounts;
-  return accounts ? [...accounts] : [];
+  return accounts ? structuredClone(accounts) : [];
 }
 
 export function listLiveOAuthAccountKeys(
@@ -1474,7 +1481,8 @@ export function listLiveOAuthAccountKeys(
 }
 
 export function getAccountCredential(provider: string, accountId: string): OAuthCredentials | null {
-  return loadAuthStore()[provider]?.accounts.find(a => a.id === accountId)?.credential ?? null;
+  const credential = loadAuthStore()[provider]?.accounts.find(a => a.id === accountId)?.credential;
+  return credential ? structuredClone(credential) : null;
 }
 
 /**
@@ -1491,7 +1499,7 @@ export function getAccountCredentialWithStatus(
   const account = loadAuthStore()[provider]?.accounts.find(a => a.id === accountId);
   if (!account?.credential) return null;
   return {
-    credential: account.credential,
+    credential: structuredClone(account.credential),
     needsReauth: account.needsReauth === true,
     paused: account.paused === true,
   };

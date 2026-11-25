@@ -210,11 +210,13 @@ export { waitForFailedStartRollback } from "./index/spend-ledger-lifecycle";
 
 export function startServer(port?: number, deps: StartServerDeps = {}): Server<WsData> {
   const spendLedgerLifecycle = acquireSpendLedgerServerLifecycle(getConfigDir());
-  try { return withLocalCredentialObservation(() => startServerWithSpendLedgerOwner(port, deps, spendLedgerLifecycle)); }
-  catch (error) { recordFailedStartRollback(error, spendLedgerLifecycle.releaseAfterFailedStart()); throw error; }
+  // The process-wide nativeHarnessOnly policy this start claims; a failed start hands it straight back.
+  const harnessPolicy: { release?: () => void } = {};
+  try { return withLocalCredentialObservation(() => startServerWithSpendLedgerOwner(port, deps, spendLedgerLifecycle, harnessPolicy)); }
+  catch (error) { harnessPolicy.release?.(); recordFailedStartRollback(error, spendLedgerLifecycle.releaseAfterFailedStart()); throw error; }
 }
 
-function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartServerDeps, spendLedgerLifecycle: SpendLedgerServerLifecycle): Server<WsData> {
+function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartServerDeps, spendLedgerLifecycle: SpendLedgerServerLifecycle, harnessPolicy: { release?: () => void }): Server<WsData> {
   const localAttestationSecret = deps.localAttestationSecret ?? createLocalAttestationSecret();
   // Captured before loadConfig() starts the optional ACL flight so stop() drains the same dir
   // even if OPENCODEX_HOME changes underneath a long-lived process.
@@ -232,7 +234,7 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
   const config = migrateStartupZaiResponses(migrateStartupXaiResponses(startupConfig));
   warnPlaintextV2AgentMessagesStartup(config);
   warnAgentTaskRecoveryStartup(config);
-  setLiveStateStoreConfig(config);
+  harnessPolicy.release = setLiveStateStoreConfig(config);
   applyProxyEnv(config, true);
   assertServerAuthConfig(config);
   const managementAuth = deps.managementAuthState ?? initializeManagementAuthState(config);
@@ -779,7 +781,7 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
             // hardening deadline can settle before its child exits, so also wait for that
             // child's reap before stop() promises the directory is removable. The spend owner
             // is retained when a listener stop failed because the socket may live.
-            try { if (listenersStopped) { try { codexHealthCooldownStore.flushForShutdown(); } finally { spendLedgerLifecycle.release(); } } }
+            try { if (listenersStopped) { try { codexHealthCooldownStore.flushForShutdown(); } finally { harnessPolicy.release?.(); spendLedgerLifecycle.release(); } } }
             finally { await flushConfigDirHardeningAndReaps(startupConfigDir); }
           }
         },

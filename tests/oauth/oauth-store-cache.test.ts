@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, renameSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as atomicWrites from "../../src/config/atomic-write";
 import {
   clearAuthStoreCacheForTests,
+  getAccountCredential,
   getAccountSet,
+  getCredential,
   listAccounts,
   mutateStore,
   saveCredential,
@@ -118,5 +120,51 @@ describe("OAuth store stat-validated read cache", () => {
       writeSpy.mockRestore();
     }
     expect(getAccountSet("google-antigravity")!.accounts[0]!.needsReauth).toBeUndefined();
+  });
+
+  test("a file replaced between the read and its stat is not cached under the newer file's signature", async () => {
+    await saveCredential("google-antigravity", { access: "old-token", refresh: "ref-1", expires: Date.now() + 3_600_000, accountId: "acct-1" });
+    const authPath = join(home, "auth.json");
+    const past = new Date(Date.now() - 5_000);
+    utimesSync(authPath, past, past);
+    const replacement = JSON.parse(readFileSync(authPath, "utf8")) as Record<string, { accounts: { credential: { access: string } }[] }>;
+    replacement["google-antigravity"]!.accounts[0]!.credential.access = "new-token";
+    clearAuthStoreCacheForTests();
+    const fs = await import("node:fs");
+    const read = fs.readFileSync;
+    let replaced = false;
+    const readSpy = spyOn(fs, "readFileSync").mockImplementation(((target: Parameters<typeof read>[0], ...rest: unknown[]) => {
+      const bytes = (read as (...args: unknown[]) => unknown)(target, ...rest);
+      if (String(target) === authPath && !replaced) {
+        // Another process (`ocx logout`, a login) replaces the store after this read and before the loader's stat.
+        replaced = true;
+        writeFileSync(`${authPath}.next`, JSON.stringify(replacement), { mode: 0o600 });
+        renameSync(`${authPath}.next`, authPath);
+        utimesSync(authPath, past, past);
+      }
+      return bytes;
+    }) as typeof read);
+    try {
+      expect(getCredential("google-antigravity")?.access).toBe("old-token");
+    } finally {
+      readSpy.mockRestore();
+    }
+    expect(replaced).toBe(true);
+    expect(getCredential("google-antigravity")?.access).toBe("new-token");
+  });
+
+  test("a caller editing a returned set, row or credential does not change the next read", async () => {
+    await saveCredential("google-antigravity", { access: "tok-1", refresh: "ref-1", expires: Date.now() + 3_600_000, accountId: "acct-1" });
+    const past = new Date(Date.now() - 5_000);
+    utimesSync(join(home, "auth.json"), past, past);
+    const id = getAccountSet("google-antigravity")!.accounts[0]!.id;
+    getAccountSet("google-antigravity")!.accounts[0]!.needsReauth = true;
+    listAccounts("google-antigravity")[0]!.paused = true;
+    getAccountCredential("google-antigravity", id)!.access = "edited-by-caller";
+    getCredential("google-antigravity")!.refresh = "edited-by-caller";
+    const row = getAccountSet("google-antigravity")!.accounts[0]!;
+    expect(row.needsReauth).toBeUndefined();
+    expect(row.paused).toBeUndefined();
+    expect(row.credential).toMatchObject({ access: "tok-1", refresh: "ref-1" });
   });
 });

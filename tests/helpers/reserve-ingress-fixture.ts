@@ -117,7 +117,7 @@ export async function reserveIngressFixture(options: {
     const realSetLive = liveStores.setLiveStateStoreConfig;
     const liveSpy = spyOn(liveStores, "setLiveStateStoreConfig").mockImplementation(config => {
       liveConfig = config;
-      realSetLive(config);
+      return realSetLive(config);
     });
     restores.push(() => liveSpy.mockRestore());
     const realToken = mainAccount.getValidMainAccountToken;

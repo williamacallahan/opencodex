@@ -12,7 +12,7 @@ import { reconcileCodexQuotaAccounts } from "../codex/quota";
 import { reconcileQuotaRecovery, sweepExpiredQuotaRecovery } from "../codex/quota-401-recovery";
 import { bindUpstreamRequestCompressionConfig } from "../server/responses/request-compression";
 import { bindWorkflowBudgetConfig } from "./workflow-budget-config";
-import { bindNativeHarnessConfig } from "./native-harness";
+import { claimNativeHarnessPolicy } from "./native-harness";
 import {
   listLiveCodexAccountIds,
   reconcileCodexRoutingHealth,
@@ -81,7 +81,8 @@ export function notifyLiveConfigObservers(config: OcxConfig): void {
   }
 }
 
-export function setLiveStateStoreConfig(config: OcxConfig): void {
+/** Install the live server config; returns the release of the `nativeHarnessOnly` policy it claimed. */
+export function setLiveStateStoreConfig(config: OcxConfig): () => void {
   liveServerConfig = config;
   bindComboCooldownRelays(selector => {
     try { return hasUpstreamSeatPool(routeConcreteModel(config, selector)); }
@@ -91,8 +92,9 @@ export function setLiveStateStoreConfig(config: OcxConfig): void {
   // never come through here, so the outbound compression opt-in follows the running server only.
   bindUpstreamRequestCompressionConfig(config);
   bindWorkflowBudgetConfig(config);
-  bindNativeHarnessConfig(config);
+  const releaseNativeHarnessPolicy = claimNativeHarnessPolicy(config);
   notifyLiveConfigObservers(config);
+  return releaseNativeHarnessPolicy;
 }
 
 export function reconcileLiveStateStores() {

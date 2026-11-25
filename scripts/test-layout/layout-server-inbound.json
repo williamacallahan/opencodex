@@ -40,6 +40,7 @@
   "harness-only-client-refusal.test.ts": "server",
   "harness-only-sidecar-refusal.test.ts": "server",
   "harness-only-gates.test.ts": "server",
+  "harness-only-server-lifecycle.test.ts": "server",
   "messages-sse-baseline-contract.test.ts": "claude-integration",
   "messages-sse-control-fields.test.ts": "claude-integration",
   "messages-sse-continuation.test.ts": "claude-integration",
