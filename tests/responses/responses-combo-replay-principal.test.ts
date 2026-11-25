@@ -104,7 +104,8 @@ test.each([false, true])("bridge Combo retains bearer-only loopback principal th
         _reasoningReplayScope: { clientThreadId: THREAD, clientPrincipalId: ownerPrincipal } } : {}),
     }) });
     const admission = resolveResponsesApiAuth(req, { hostname: "127.0.0.1", apiKeys: config.apiKeys });
-    expect(admission).toEqual({ kind: "loopback", source: "loopback" });
+    // Credential fields only; 87a27d3c7 attaches request attribution to every admission.
+    expect(admission).toMatchObject({ kind: "loopback", source: "loopback" });
     const principal = resolveContextPrincipal(req, config, admission!);
     if (seed) { expect(principal).toBeDefined(); ownerPrincipal = principal; }
     else if (caller === "owner") expect(principal).toBe(ownerPrincipal);
