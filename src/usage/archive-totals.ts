@@ -6,8 +6,9 @@
  * trim publishes it, so its totals stay valid while the file's `version` is current and its `bytes`
  * equal the segment's length; anything else is rebuilt. A build reads the segment through the ledger
  * scanner (the same 1 MiB row ceiling, torn-row rule, and cooperative yields as every ledger read),
- * keeps only the buckets in memory, and publishes the file with an asynchronous write and rename,
- * serialized a slice at a time.
+ * and keeps only the buckets in memory. While the archive's trim is suspended no totals file is
+ * published: every queued build is refused (`ArchiveTotalsPublishingSuspendedError`), and existing
+ * files are only read.
  *
  * Rows are attributed per attempt, as `src/usage/archive-row-attribution.ts` describes: a bucket is
  * keyed by hour, the row's own dimensions, and one attribution's provider, model and account. Its
@@ -19,19 +20,17 @@
  * keys per segment and folds the rest into `(other)`, a segment keeps at most
  * {@link MAX_BUCKETS_PER_SEGMENT} buckets, folding any further combination into one all-`(other)`
  * bucket for its hour, across at most {@link MAX_HOURS_PER_SEGMENT} hours, and at most
- * {@link MAX_OVERLAPS_PER_SEGMENT} overlap records. Builds run one at a time, in the background, each
- * started from a timer at least {@link BUILD_GAP_MS} after the previous one finished.
+ * {@link MAX_OVERLAPS_PER_SEGMENT} overlap records.
  */
-import { readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { nextAtomicTempSequence } from "../config/atomic-write";
-import { archiveTotalsName, noteArchiveChanged } from "./archive-segments";
+import { archiveTotalsName } from "./archive-segments";
 import {
   ATTEMPT_SUMS, ATTRIBUTION_DIMENSIONS, ROW_DIMENSIONS, ROW_SUMS, archiveRowAttribution,
   type AttemptSums, type AttributionDimension, type RowDimension, type RowSums,
 } from "./archive-row-attribution";
 import { OVERFLOW_KEY, RETAINED_KEYS } from "./attribution-breakdown";
-import { scanUsageLedgerCooperatively, UsageLedgerRebuildRequiredError } from "./ledger-scanner";
+import { scanUsageLedgerCooperatively } from "./ledger-scanner";
 
 /** Bump when a bucket's key or sums change meaning; every older file is then rebuilt. */
 export const ARCHIVE_TOTALS_FORMAT_VERSION = 4;
@@ -42,10 +41,6 @@ export const MAX_BUCKETS_PER_SEGMENT = 5_000;
 export const MAX_HOURS_PER_SEGMENT = 31 * 24;
 /** Distinct multi-bucket row shapes kept per segment; beyond it a shared total may count such a row twice. */
 export const MAX_OVERLAPS_PER_SEGMENT = 5_000;
-/** Buckets serialized per turn when a totals file is written. */
-const SERIALIZE_SLICE_BUCKETS = 1_000;
-/** Idle time between two builds, so a backlog of segments never runs back to back. */
-export const BUILD_GAP_MS = 250;
 /** The largest instant a `Date` can hold; a row stamped outside `[0, this]` is treated as untimed. */
 export const MAX_DATE_MS = 8_640_000_000_000_000;
 
@@ -228,35 +223,7 @@ export async function buildArchiveTotals(segmentPath: string, options: ArchiveTo
     overflowRows,
     foldedRows,
   };
-  await writeTotalsFile(archiveTotalsPath(segmentPath), totals);
-  noteArchiveChanged();
   return totals;
-}
-
-/**
- * Publish a totals file without blocking the serving loop: serialized a slice of buckets per turn,
- * written asynchronously to a temp file, and renamed into place. No fsync: a totals file is
- * rebuildable, and the reader rejects a torn or wrong-length one, which only queues a rebuild.
- */
-async function writeTotalsFile(target: string, totals: ArchiveTotalsFile): Promise<void> {
-  const { buckets, ...header } = totals;
-  const parts = [JSON.stringify(header).slice(0, -1), ',"buckets":['];
-  for (let start = 0; start < buckets.length; start += SERIALIZE_SLICE_BUCKETS) {
-    if (start > 0) {
-      parts.push(",");
-      await new Promise<void>(resolve => setTimeout(resolve, 0));
-    }
-    parts.push(JSON.stringify(buckets.slice(start, start + SERIALIZE_SLICE_BUCKETS)).slice(1, -1));
-  }
-  parts.push("]}");
-  const temp = `${target}.ocx.${process.pid}.${nextAtomicTempSequence()}.tmp`;
-  try {
-    await writeFile(temp, parts.join(""), { mode: 0o600 });
-    await rename(temp, target);
-  } catch (error) {
-    await rm(temp, { force: true });
-    throw error;
-  }
 }
 
 export function archiveTotalsPath(segmentPath: string): string {
@@ -319,65 +286,45 @@ export async function readArchiveTotals(segmentPath: string, segmentBytes: numbe
 }
 
 /** Why a build failed: the segment changed while read, a filesystem error, or anything else. */
-export type ArchiveBuildFailure = { reason: "segment-changed" } | { reason: "io-error"; code: string } | { reason: "build-error" };
+export type ArchiveBuildFailure =
+  | { reason: "segment-changed" } | { reason: "io-error"; code: string } | { reason: "build-error" } | { reason: "publishing-suspended" };
 
-function classifyBuildFailure(error: unknown): ArchiveBuildFailure {
-  if (error instanceof UsageLedgerRebuildRequiredError) return { reason: "segment-changed" };
-  if (error instanceof Error && "code" in error && typeof error.code === "string") return { reason: "io-error", code: error.code };
-  return { reason: "build-error" };
+/**
+ * Totals files are not published while the archive's trim is suspended: a build wrote a temp file by
+ * name into the legacy archive directory and renamed it over its destination, which is a write into a
+ * directory whose files the hub can no longer prove are its own (structure/usage-archive.md,
+ * "Suspended trim"). Every queued build, whether a trim, a read or the startup pass asked for it, is
+ * refused with this before it reads or writes anything.
+ */
+export class ArchiveTotalsPublishingSuspendedError extends Error {
+  constructor() {
+    super("hourly totals are not written into the legacy usage archive while its trim is suspended");
+    this.name = "ArchiveTotalsPublishingSuspendedError";
+  }
 }
 
-const scheduled = new Map<string, Promise<ArchiveTotalsFile | null>>();
+
 /**
- * Builds that failed in this process, keyed by segment path (whose name carries its byte length) and
- * format version. They are not queued again automatically until the process restarts, so a segment
- * that always fails never turns every archive read into another full build.
+ * Builds refused or failed in this process, keyed by segment path (whose name carries its byte length)
+ * and format version, so a read can list the segment in `coverage.failed` instead of pending.
  */
 const failed = new Map<string, ArchiveBuildFailure>();
 const failureKey = (segmentPath: string): string => `${segmentPath}\0${ARCHIVE_TOTALS_FORMAT_VERSION}`;
-let queueTail: Promise<unknown> = Promise.resolve();
 
-/**
- * Queue a background build of one segment's totals. Builds run one at a time in arrival order, each
- * started from a timer {@link BUILD_GAP_MS} after the queue frees, so neither the caller's turn nor
- * the previous build's tail runs the next one. A segment already queued is not queued twice. The
- * returned promise rejects when the build fails, and the failure is remembered.
- */
-export function scheduleArchiveTotalsBuild(segmentPath: string, options: ArchiveTotalsBuildOptions = {}): Promise<ArchiveTotalsFile | null> {
-  const existing = scheduled.get(segmentPath);
-  if (existing) return existing;
-  const run = queueTail
-    .then(() => new Promise<void>(resolve => setTimeout(resolve, BUILD_GAP_MS)))
-    .then(() => buildArchiveTotals(segmentPath, options))
-    .then(
-      totals => {
-        failed.delete(failureKey(segmentPath));
-        return totals;
-      },
-      (error: unknown) => {
-        failed.set(failureKey(segmentPath), classifyBuildFailure(error));
-        throw error;
-      },
-    )
-    .finally(() => scheduled.delete(segmentPath));
-  queueTail = run.catch(() => undefined);
-  scheduled.set(segmentPath, run);
-  return run;
+/** Refuse a build of one segment's totals while publishing is suspended, remembering the refusal. */
+export function scheduleArchiveTotalsBuild(segmentPath: string): Promise<ArchiveTotalsFile | null> {
+  failed.set(failureKey(segmentPath), { reason: "publishing-suspended" });
+  return Promise.reject(new ArchiveTotalsPublishingSuspendedError());
 }
 
-/** The failure of this segment's last build in this process, if it failed. */
+/** The failure of this segment's last build in this process, if it failed or was refused. */
 export function archiveTotalsBuildFailure(segmentPath: string): ArchiveBuildFailure | undefined {
   return failed.get(failureKey(segmentPath));
 }
 
-/** Whether this segment's build is queued or running. */
-export function archiveTotalsBuildQueued(segmentPath: string): boolean {
-  return scheduled.has(segmentPath);
-}
-
 /** Queue a build unless one is queued or already failed, reporting a failure as one warning. */
 export function buildArchiveTotalsInBackground(segmentPath: string): Promise<unknown> | undefined {
-  if (scheduled.has(segmentPath) || failed.has(failureKey(segmentPath))) return undefined;
+  if (failed.has(failureKey(segmentPath))) return undefined;
   return scheduleArchiveTotalsBuild(segmentPath).catch(error => {
     console.warn(`[usage-archive] hourly totals for ${basename(segmentPath)} could not be built: ${error instanceof Error ? error.message : String(error)}`);
   });

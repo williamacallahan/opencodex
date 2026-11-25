@@ -28,4 +28,6 @@ export interface UsageLedgerRetentionStatus {
   /** Absent when no limit is configured. */
   maxBytes?: number;
   currentBytes: number;
+  /** Present when the ledger is over its limit and the trim is suspended, so the limit is not enforced. */
+  enforcement?: "suspended";
 }

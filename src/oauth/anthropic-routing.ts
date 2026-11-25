@@ -652,8 +652,9 @@ function createAnthropicRouting(instance: AnthropicInstanceId): AnthropicRouting
    *
    * This predicate now runs on the INITIAL resolution of every Anthropic request, not just after a
    * 429, so an uncached implementation puts a synchronous file read in front of ordinary traffic:
-   * `getAccountSet` goes through `loadAuthStore`, which has no cache of its own and chmods the
-   * config dir, chmods the secret, reads the whole file and normalizes it on every call.
+   * `getAccountSet` goes through `loadAuthStore`, which `stat`s the store on every call and, whenever
+   * its signature cache misses, chmods the config dir, chmods the secret, reads the whole file and
+   * normalizes it.
    *
    * Two seconds matches the generic module's `PRESENCE_CACHE_TTL_MS` for the same reason: short
    * enough that a login in another window is visible before the operator can switch back and send a

@@ -65,8 +65,9 @@ const DEFAULT_COOLDOWN_MS = 60_000;
 /**
  * How long a presence answer may be reused before the store is consulted again.
  *
- * `loadAuthStore` has no cache: every call chmods the config dir and the secret, reads the whole
- * file, parses it and normalizes the store (store.ts:136-151). Since presence now decides
+ * `loadAuthStore` caches a read only while the file's identity, size, times and 0600 mode match it,
+ * so every call still `stat`s the store, and any miss chmods the config dir and the secret, reads
+ * the whole file, parses it and normalizes the store (`loadAuthStoreInternal` in store.ts). Since presence now decides
  * activation, this predicate runs on paths that have not seen a 429 at all — the streaming and
  * non-streaming runTurn entry points evaluate it once per request — so an uncached check would put
  * a synchronous file read in front of every request for every OAuth provider.

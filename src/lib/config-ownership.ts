@@ -11,13 +11,14 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Database } from "bun:sqlite";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { GenerationContext } from "./state-store-sweeper";
 import { renameAtomicFile } from "./windows-atomic-replace";
 import {
   canonicalRootUnchanged,
   elevatedRemovalRefusal,
   ownedEntryPresent,
+  PRESERVED_USAGE_HISTORY,
   removeOwnedEntry,
   rootIdentity,
   uninstallRunsElevated,
@@ -968,9 +969,12 @@ function removeCanonicalOwnedConfigState(configDir: string, identity: RootIdenti
   // The lock holder retired its own lock file on release; one that remains (Windows) is reported.
   const residualPaths = readdirSync(configDir).map(name => join(configDir, name));
   if (residualPaths.length > 0) {
+    const keptHistory = residualPaths.some(path => PRESERVED_USAGE_HISTORY.some(name => basename(path) === name));
     return {
       status: "partial",
-      reason: "unowned files remain in the config directory",
+      reason: keptHistory
+        ? "the usage ledger and usage archive were kept so request history survives uninstall; remove them yourself when it is no longer needed"
+        : "unowned files remain in the config directory",
       residualPaths,
     };
   }

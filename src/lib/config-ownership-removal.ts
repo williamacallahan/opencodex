@@ -280,11 +280,27 @@ export interface OwnedRemovalOptions {
 }
 
 /**
+ * The usage ledger and its archive outlive uninstall: the operator's order keeps identified request
+ * records at least 30 days, and older manifests list `usage-archive` (and possibly its children) as
+ * disposable. Such an entry is left in place, before any link or directory branch can touch it, and
+ * the caller reports it among the files that remain.
+ */
+export const PRESERVED_USAGE_HISTORY = ["usage.jsonl", "usage-archive"] as const;
+
+function isPreservedUsageHistory(parts: readonly string[]): boolean {
+  const [first] = parts;
+  if (first === undefined) return false;
+  if (samePath(first, "usage-archive")) return true;
+  return parts.length === 1 && samePath(first, "usage.jsonl");
+}
+
+/**
  * Remove the recorded entry `parts` below the canonical `rootPath`. A final-component link is
  * unlinked itself, never its target; a directory is emptied and removed with the chain rechecked for
  * every child and before the rmdir.
  */
 export function removeOwnedEntry(rootPath: string, parts: readonly string[], options: OwnedRemovalOptions = {}): void {
+  if (isPreservedUsageHistory(parts)) return;
   assertRealDirectoryChain(rootPath, parts.slice(0, -1), options);
   const path = join(rootPath, ...parts);
   const entry = lstatSync(path);

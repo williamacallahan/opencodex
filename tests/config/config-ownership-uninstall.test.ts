@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -89,6 +89,48 @@ describe("owned config uninstall", () => {
       expect(result.residualPaths).toEqual([join(alias, "config", "nested")]);
       expect(existsSync(join(dir, "config.json"))).toBe(false);
       expect(existsSync(join(dir, "nested", "owned.txt"))).toBe(false);
+    } finally {
+      removeTreeWithRetry(parent);
+    }
+  });
+
+  (process.platform === "win32" ? test.skip : test)("keeps the usage ledger and every recorded archive path, twice, and still removes other owned state (file links require POSIX)", () => {
+    const parent = mkdtempSync(join(tmpdir(), "ocx-config-usage-history-"));
+    const dir = join(parent, "config");
+    const archive = join(dir, "usage-archive");
+    const segment = join(archive, "2026-11-01T08-30-00.000Z_123-456.jsonl");
+    const target = join(parent, "outside.txt");
+    try {
+      // A manifest an older build wrote: the archive directory itself and one of its children are listed.
+      for (const path of [join(dir, "config.json"), archive, segment, join(archive, "nested", "child.txt")]) {
+        expect(recordOwnedConfigPath(dir, path)).toBe(true);
+      }
+      expect(manifestPaths(dir)).toContain("usage.jsonl");
+      writeFileSync(join(dir, "config.json"), "owned");
+      writeFileSync(join(dir, "usage.jsonl"), "{\"requestId\":\"recent\"}\n");
+      mkdirSync(join(archive, "nested"), { recursive: true });
+      const files: Record<string, string> = {
+        [segment]: "{\"requestId\":\"old\"}\n",
+        [`${segment.slice(0, -".jsonl".length)}.hourly.json`]: "{}",
+        [`${segment}.ocx.1.2.tmp`]: "temp",
+        [join(archive, "operator-notes.txt")]: "notes",
+        [join(archive, "nested", "child.txt")]: "child",
+      };
+      for (const [path, bytes] of Object.entries(files)) writeFileSync(path, bytes);
+      writeFileSync(target, "target");
+      symlinkSync(target, join(archive, "link.jsonl"));
+
+      const first = removeOwnedConfigState(dir);
+      expect(first.status).toBe("partial");
+      expect(first.residualPaths).toEqual(expect.arrayContaining([join(dir, "usage.jsonl"), archive]));
+      expect(existsSync(join(dir, "config.json"))).toBe(false);
+      const second = removeOwnedConfigState(dir);
+      expect(second.status).not.toBe("removed");
+
+      expect(readFileSync(join(dir, "usage.jsonl"), "utf8")).toBe("{\"requestId\":\"recent\"}\n");
+      for (const [path, bytes] of Object.entries(files)) expect(readFileSync(path, "utf8")).toBe(bytes);
+      expect(readlinkSync(join(archive, "link.jsonl"))).toBe(target);
+      expect(readFileSync(target, "utf8")).toBe("target");
     } finally {
       removeTreeWithRetry(parent);
     }
