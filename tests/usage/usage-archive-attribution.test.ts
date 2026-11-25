@@ -68,11 +68,19 @@ function byKey<T extends Figures>(rows: readonly T[], keyOf: (row: T) => string)
   return out;
 }
 
-/** Replace the live ledger with one that starts later, as a published trim leaves it. */
-function retireLiveLedger(): void {
-  writeFileSync(usageLogPath(), jsonl([{ ...ROWS[0], requestId: "after-trim", timestamp: AT + 30 * 24 * HOUR }]));
+/**
+ * Replace the live ledger with one that starts later, as a published trim leaves it, and wait until
+ * the usage filter index verifies where it starts, which a read schedules in the background.
+ */
+async function retireLiveLedger(): Promise<void> {
+  const startsAt = AT + 30 * 24 * HOUR;
+  writeFileSync(usageLogPath(), jsonl([{ ...ROWS[0], requestId: "after-trim", timestamp: startsAt }]));
   resetUsageReadCacheForTests();
   noteArchiveChanged();
+  const verified = async () => (await get<{ coverage: { liveLedgerSince: string | null } }>(`/api/usage/archive?since=${AT}&until=${AT + HOUR}`)).coverage.liveLedgerSince;
+  for (const started = Date.now(); await verified() !== new Date(startsAt).toISOString(); await Bun.sleep(25)) {
+    if (Date.now() - started > 10_000) throw new Error("the live ledger's earliest row was never verified");
+  }
 }
 
 beforeEach(() => {
@@ -102,7 +110,7 @@ describe("archive attribution matches the live summary", () => {
     const live = await get<LiveBody>(`/api/usage?range=all&${liveWindow}`);
     const liveOpenai = await get<LiveBody>(`/api/usage?range=all&${liveWindow}&provider=openai`);
     // The same rows in the live ledger would make the segment look like its copy, so it moves on first.
-    retireLiveLedger();
+    await retireLiveLedger();
     const archive = await get<ArchiveBody>(`/api/usage/archive?${archiveWindow}`);
     expect(archive.attribution).toBe("per-attempt");
     expect(pick(archive.summary)).toEqual(pick(live.summary));
@@ -130,7 +138,7 @@ describe("archive attribution matches the live summary", () => {
     await writeArchiveTotals(writeSegment(join(home, "usage-archive"), "903", jsonl(ROWS), "2026-11-20T10-05-00.000Z"));
     const hour = Math.floor(AT / HOUR) * HOUR;
     const live = await get<LiveBody>(`/api/usage?range=all&since=${hour}&until=${hour + HOUR - 1}&provider=deepseek`);
-    retireLiveLedger();
+    await retireLiveLedger();
     const archive = await get<ArchiveBody & { complete: boolean }>(`/api/usage/archive?since=${hour}&until=${hour + HOUR}&provider=deepseek`);
     if (archive.complete) {
       expect(pick(archive.summary)).toEqual(pick(live.summary));
@@ -162,7 +170,7 @@ describe("archive attribution matches the live summary", () => {
     const live = await get<LiveBody>(`/api/usage?range=all&since=${hour}&until=${hour + HOUR - 1}`);
     const liveByProvider = Object.fromEntries(await Promise.all(["alpha", "beta"].map(async provider =>
       [provider, await get<LiveBody>(`/api/usage?range=all&since=${hour}&until=${hour + HOUR - 1}&provider=${provider}`)] as const)));
-    retireLiveLedger();
+    await retireLiveLedger();
     for (const provider of ["alpha", "beta"]) {
       const archive = await get<ArchiveBody & { complete: boolean }>(`/api/usage/archive?since=${hour}&until=${hour + HOUR}&provider=${provider}`);
       if (archive.complete) expect(pricing(archive.summary as unknown as Pricing)).toEqual(pricing(liveByProvider[provider]!.summary as unknown as Pricing));
@@ -193,7 +201,7 @@ describe("archive attribution matches the live summary", () => {
     await writeArchiveTotals(writeSegment(join(home, "usage-archive"), "905", jsonl([row]), "2026-11-20T10-05-00.000Z"));
     const hour = Math.floor(AT / HOUR) * HOUR;
     const live = await get<LiveBody>(`/api/usage?range=all&since=${hour}&until=${hour + HOUR - 1}&provider=openai`);
-    retireLiveLedger();
+    await retireLiveLedger();
     const archive = await get<ArchiveBody & { complete: boolean }>(`/api/usage/archive?since=${hour}&until=${hour + HOUR}&provider=openai`);
     expect(archive.complete).toBe(true);
     expect(pricing(archive.summary as unknown as Pricing)).toEqual(pricing(live.summary as unknown as Pricing));
@@ -214,7 +222,7 @@ describe("archive attribution matches the live summary", () => {
     await writeArchiveTotals(writeSegment(join(home, "usage-archive"), "902", jsonl([retried]), "2026-11-20T10-05-00.000Z"));
     const hour = Math.floor(AT / HOUR) * HOUR;
     const live = await get<LiveBody>(`/api/usage?range=all&since=${hour}&until=${hour + HOUR - 1}`);
-    retireLiveLedger();
+    await retireLiveLedger();
     const archive = await get<ArchiveBody>(`/api/usage/archive?since=${hour}&until=${hour + HOUR}&provider=openai`);
     expect(archive.summary.requests).toBe(1);
     expect(byKey(archive.byProvider.rows, row => row.key)).toEqual(byKey(live.providers, row => row.provider));

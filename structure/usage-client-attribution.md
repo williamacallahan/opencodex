@@ -96,10 +96,12 @@ passive candidate read decline a generation whose ledger is the same file but sh
 recorded source, or as long but different, even in a process that observed no earlier length
 (`markDestructiveWithoutWriting`). They mark the generation in memory only, and the next writer-owned
 refresh records the mark and rebuilds. A regrowth that restores the last 64 KiB before the indexed
-boundary would otherwise pass the append's boundary digest and keep the old rows and minimum. An active archive read
-first ingests up to 8 MiB to bring the index current, and starts a larger ingest in the background
-without waiting for it. It also never waits on an ingest already running, which may be a full rebuild
-(`structure/usage-archive.md`).
+boundary would otherwise pass the append's boundary digest and keep the old rows and minimum. An
+archive read never ingests to answer. When the minimum is unverified, an active read that has
+finished calls `scheduleUsageFilterIndexRefresh`, which starts one shared refresh per home on a later
+turn. That refresh uses busy timeout 0 and retries on timers, so SQLite's synchronous busy wait never
+holds the event loop. It joins no running ingest and does nothing unless the index is still behind. A
+passive read schedules nothing (`structure/usage-archive.md`).
 
 Each candidate page is one keyset statement per branch, and every branch index is ordered
 `(generation, <equality prefix>, byte_offset, ...)` so its own `ORDER BY byte_offset LIMIT` is

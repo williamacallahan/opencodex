@@ -44,11 +44,6 @@ const LISTING_TTL_MS = 5_000;
 const LISTING_MAX_AGE_MS = 60_000;
 /** Parsed buckets kept across requests: twenty segments at their bucket cap, a few tens of MB of heap. */
 export const TOTALS_CACHE_MAX_BUCKETS = 100_000;
-/**
- * The most live-ledger bytes a read ingests into the usage filter index to verify the ledger's
- * minimum timestamp before answering; a larger ingest runs in the background and the read withholds.
- */
-export const LIVE_MINIMUM_INGEST_BYTES = 8 * 1024 * 1024;
 
 export const yieldToEventLoop = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0));
 
@@ -233,8 +228,7 @@ export async function readArchiveListing(configDir = getConfigDir(), signal?: Ab
     signal?.throwIfAborted();
     listingCache = cache;
   }
-  const minimum = live ? await verifiedUsageLedgerMinimum({ ingestBytes: LIVE_MINIMUM_INGEST_BYTES }) : undefined;
-  signal?.throwIfAborted();
+  const minimum = live ? verifiedUsageLedgerMinimum() : undefined;
   const { counted, ambiguous } = countedArchiveSegments(cache.entries, live?.head ?? null);
   const byLabelTime = (left: ArchiveSegmentEntry, right: ArchiveSegmentEntry): number =>
     (archiveLabelTime(left.label) ?? Number.NEGATIVE_INFINITY) - (archiveLabelTime(right.label) ?? Number.NEGATIVE_INFINITY);

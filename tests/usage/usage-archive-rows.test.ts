@@ -152,6 +152,40 @@ describe("GET /api/usage/archive/rows", () => {
     expect({ incomplete: cold.incomplete, ambiguous: cold.coverage.ambiguousSegments }).toEqual({ incomplete: warm.incomplete, ambiguous: warm.coverage.ambiguousSegments });
   });
 
+  test("a read that withholds for an unverified live ledger leaves the index to catch up behind it, without holding the next read or the event loop", async () => {
+    const path = await builtSegment("607", archiveRows(4, 60_000));
+    const padding = "x".repeat(2_000);
+    // About 7.5 MiB, under the 8 MiB a read once ingested before answering.
+    const live = archiveRows(3_300, 1_000, 100).map(row => ({ ...row, timestamp: row.timestamp + 24 * HOUR, padding }));
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), jsonl(live));
+    const query = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR);
+    let last = performance.now();
+    let longestGap = 0;
+    const ticker = setInterval(() => {
+      const now = performance.now();
+      longestGap = Math.max(longestGap, now - last);
+      last = now;
+    }, 5);
+    try {
+      const first = (await rowsGet(query)).body;
+      expect(first).toMatchObject({ incomplete: true, coverage: { ambiguousSegments: [basename(path)] } });
+      // The next read answers at once, before the catch-up the first one scheduled has finished.
+      const startedAt = performance.now();
+      const next = (await rowsGet(query)).body;
+      expect(performance.now() - startedAt).toBeLessThan(1_000);
+      expect(next).toMatchObject({ incomplete: true, coverage: { ambiguousSegments: [basename(path)] } });
+      let caughtUp = next;
+      for (const started = Date.now(); caughtUp.incomplete && Date.now() - started < 60_000; caughtUp = (await rowsGet(query)).body) await Bun.sleep(25);
+      expect(caughtUp).toMatchObject({ incomplete: false, coverage: { ambiguousSegments: [] } });
+      expect(caughtUp.entries).toHaveLength(4);
+    } finally {
+      clearInterval(ticker);
+    }
+    // The whole background ingest never kept a 5 ms timer waiting for long.
+    expect(longestGap).toBeLessThan(250);
+  }, 90_000);
+
   test("a limit returns that many rows and says more matched", async () => {
     await builtSegment("604", archiveRows(30, 60_000));
     const { body } = await rowsGet(`${window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR)}&limit=5`);

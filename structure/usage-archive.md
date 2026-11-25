@@ -150,10 +150,13 @@ generation, accepted only when the generation passes `generationValidated` and i
 revision is exactly the current one (`verifiedUsageLedgerMinimum`); the publish that records the
 revision writes the minimum in the same transaction. A `MIN(timestamp)` over `usage_rows` gives the
 same value but scans the generation (47 ms warm and 873 ms cold for 653,415 rows on a 968 MB
-ledger), since no index leads with `(generation, timestamp)`. An active read ingests at most
-`LIVE_MINIMUM_INGEST_BYTES` (8 MiB) to bring the index current. A larger ingest, or any rebuild
-of an append, starts in the background, and until then every counted segment in the window is withheld. A
-passive read only reads. Segments are filtered by their loaded span before this check, so a read
+ledger), since no index leads with `(generation, timestamp)`. A read only reads that metadata
+(0.4 ms). It never ingests to answer: inline catch-up once held the rows slot for 950 ms on a dense
+8 MiB suffix and blocked the event loop for 598 ms under SQLite contention. Until the minimum is
+verified, every counted segment in the window is withheld. Once its read is done, an active route
+schedules one shared background refresh (`scheduleUsageFilterIndexRefresh`), and a later read
+answers exactly. On prefixes of the 968 MB clone, that refresh caught up 8 MiB in 0.11 s and 64 MiB
+in 0.71 s, and never kept a 5 ms timer waiting more than 22 ms. A passive read schedules nothing. Segments are filtered by their loaded span before this check, so a read
 that learns a span agrees with one that knew it already. Ambiguous segments are read only to
 learn their span and are reported: a window one may reach lists it in `coverage.ambiguousSegments`
 (the deprecated `coverage.duplicateSegments` is the archive-wide count of the name and inode

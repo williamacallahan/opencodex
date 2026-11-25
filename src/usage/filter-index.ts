@@ -1324,6 +1324,7 @@ async function refreshUsageFilterIndex(
   dir: string,
   path: string,
   extendOnly = false,
+  busyTimeoutMs = SQLITE_BUSY_TIMEOUT_MS,
 ): Promise<UsageFilterIndexSnapshot> {
   // An ingest in flight may be a full rebuild; an extend-only caller never waits on one.
   if (ingestFlight?.path === path) {
@@ -1332,7 +1333,7 @@ async function refreshUsageFilterIndex(
   }
   if (extendOnly && (rebuildRequestedPaths.has(path) || !existsSync(path))) throw new UsageFilterIndexRebuildNeededError();
   const promise = (async () => {
-    const db = openIndexForWrite(dir, path);
+    const db = openIndexForWrite(dir, path, busyTimeoutMs);
     try {
       if (rebuildRequestedPaths.delete(path)) {
         const rebuilt = await rebuild(db, dir, path, readMeta(db));
@@ -1957,22 +1958,18 @@ export function publishedUsageFilterIndexGeneration(): string | null {
 }
 
 /**
- * What the index can say about the earliest timed row of the live ledger as it is now:
- * `verified` when its validated published generation was ingested from exactly the current ledger
- * revision; `behind` with the bytes still to ingest when only an ingest stands between it and that
- * (an append to the same file, or no usable index); `unavailable` when no usage ledger exists or the
- * index cannot be read. A read never writes.
+ * What the index can say about the earliest timed row of the live ledger as it is now: `verified`
+ * when its validated published generation was ingested from exactly the current ledger revision;
+ * `behind` when only an ingest stands between it and that; `unavailable` when no usage ledger exists
+ * or the index cannot be read. Reading writes nothing.
  */
-export type UsageLedgerMinimum =
-  | { state: "verified"; minTimestamp: number | null }
-  | { state: "behind"; bytesToIngest: number; appendOnly: boolean }
-  | { state: "unavailable" };
+type UsageLedgerMinimum = { state: "verified"; minTimestamp: number | null } | { state: "behind" } | { state: "unavailable" };
 
 function readUsageLedgerMinimum(): UsageLedgerMinimum {
   const revision = currentUsageLogRevision();
   if (!revision) return { state: "unavailable" };
   const path = indexPathForCurrentHome();
-  if (!existsSync(path)) return { state: "behind", bytesToIngest: revision.size, appendOnly: false };
+  if (!existsSync(path)) return { state: "behind" };
   let db: Database;
   try {
     db = new Database(path, { readonly: true });
@@ -1983,22 +1980,14 @@ function readUsageLedgerMinimum(): UsageLedgerMinimum {
     // One read transaction: the minimum, the revision it covers and the counts that validate it.
     db.exec("BEGIN");
     const meta = readMeta(db);
+    if (markDestructiveWithoutWriting(path, meta, revision)) return { state: "behind" };
     const usable = meta.schemaVersion === USAGE_FILTER_INDEX_SCHEMA_VERSION && meta.generation !== ""
       && generationValidated(db, path, meta) && !rebuildRequestedPaths.has(path);
-    if (!usable || usageLogIdentityKey(meta.revision) !== usageLogIdentityKey(revision)) {
-      return { state: "behind", bytesToIngest: revision.size, appendOnly: false };
-    }
-    if (markDestructiveWithoutWriting(path, meta, revision)) return { state: "behind", bytesToIngest: revision.size, appendOnly: false };
-    if (usageLogRevisionKey(meta.revision) === usageLogRevisionKey(revision)) {
-      // The publish that recorded this revision wrote the minimum of its finite row timestamps.
-      return meta.indexedRows > 0 && !hasPublishedRows(db, meta.generation)
-        ? { state: "behind", bytesToIngest: revision.size, appendOnly: false }
-        : { state: "verified", minTimestamp: meta.minTimestamp };
-    }
-    const recorded = meta.revision?.size ?? 0;
-    return revision.size > recorded
-      ? { state: "behind", bytesToIngest: revision.size - recorded, appendOnly: true }
-      : { state: "behind", bytesToIngest: revision.size, appendOnly: false };
+    if (!usable || usageLogRevisionKey(meta.revision) !== usageLogRevisionKey(revision)) return { state: "behind" };
+    // The publish that recorded this revision wrote the minimum of its finite row timestamps.
+    return meta.indexedRows > 0 && !hasPublishedRows(db, meta.generation)
+      ? { state: "behind" }
+      : { state: "verified", minTimestamp: meta.minTimestamp };
   } catch {
     return { state: "unavailable" };
   } finally {
@@ -2009,33 +1998,51 @@ function readUsageLedgerMinimum(): UsageLedgerMinimum {
 /**
  * The live ledger's earliest finite row timestamp, verified against the exact current ledger
  * revision by the filter index's validated published generation, or undefined when it cannot be
- * verified now. When the index is at most `ingestBytes` behind, an active read brings it current
- * first; a larger ingest is started in the background, so a later call can verify. A passive read
- * starts nothing.
+ * verified now. Only metadata is read: a request never ingests to answer this, and a miss is
+ * caught up by {@link scheduleUsageFilterIndexRefresh}.
  */
-export async function verifiedUsageLedgerMinimum(options: { ingestBytes: number }): Promise<number | null | undefined> {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const known = readUsageLedgerMinimum();
-    if (known.state === "verified") return known.minTimestamp;
-    if (known.state === "unavailable" || isPassiveRead()) return undefined;
-    const dir = getConfigDir();
-    const path = usageFilterIndexPath(dir);
-    // An ingest already running may be a full rebuild: never wait on it here.
-    if (ingestFlight?.path === path) return undefined;
-    if (known.bytesToIngest > options.ingestBytes) {
-      void refreshUsageFilterIndex(dir, path).catch(() => { /* a later call retries */ });
-      return undefined;
+export function verifiedUsageLedgerMinimum(): number | null | undefined {
+  const known = readUsageLedgerMinimum();
+  return known.state === "verified" ? known.minTimestamp : undefined;
+}
+
+let scheduledRefresh: { path: string } | null = null;
+const SCHEDULED_REFRESH_BUSY_ATTEMPTS = 8;
+
+/**
+ * Bring the index up to the current ledger in the background, once per home however many requests
+ * ask: started on a later turn than the caller's, it never waits on SQLite's synchronous busy handler
+ * (busy timeout 0, retried on timers with capped backoff), joins no ingest already running, and
+ * does nothing unless the index is still behind when it starts. A passive read schedules nothing.
+ */
+export function scheduleUsageFilterIndexRefresh(): void {
+  if (isPassiveRead()) return;
+  const dir = getConfigDir();
+  const path = usageFilterIndexPath(dir);
+  if (scheduledRefresh?.path === path || ingestFlight?.path === path) return;
+  const run = { path };
+  scheduledRefresh = run;
+  void (async () => {
+    let delay = RECLAIM_BUSY_FIRST_DELAY_MS;
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    // A foreign or unreadable index is not caught up by an ingest; only one that is behind is.
+    if (getConfigDir() !== dir || readUsageLedgerMinimum().state !== "behind") return;
+    for (let attempt = 0; attempt < SCHEDULED_REFRESH_BUSY_ATTEMPTS && getConfigDir() === dir; attempt += 1) {
+      if (ingestFlight?.path === path) return;
+      try {
+        await refreshUsageFilterIndex(dir, path, false, 0);
+        return;
+      } catch (error) {
+        if (!isBusyError(error)) throw error;
+      }
+      await new Promise<void>(resolve => setTimeout(resolve, delay).unref?.());
+      delay = Math.min(delay * 2, RECLAIM_BUSY_MAX_DELAY_MS);
     }
-    try {
-      // An append that turns out to need a rebuild is not done here either: that rebuild reads the whole file.
-      await refreshUsageFilterIndex(dir, path, known.appendOnly);
-    } catch (error) {
-      if (error instanceof UsageFilterIndexRebuildNeededError) void refreshUsageFilterIndex(dir, path).catch(() => { /* a later call retries */ });
-      return undefined;
-    }
-    // A request appended after the refresh moves the revision again; the next pass ingests it.
-  }
-  return undefined;
+  })().catch(error => {
+    console.warn(`[usage] the usage filter index could not catch up in the background: ${error instanceof Error ? error.message : String(error)}`);
+  }).finally(() => {
+    if (scheduledRefresh === run) scheduledRefresh = null;
+  });
 }
 
 /**

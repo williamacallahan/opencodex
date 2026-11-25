@@ -11,6 +11,7 @@
  */
 import { REQUEST_HISTORY_MAX_PAGE_SIZE } from "../../routing/history/indexer";
 import { answerArchiveTotals, type ArchiveFilter } from "../../usage/archive-answer";
+import { scheduleUsageFilterIndexRefresh } from "../../usage/filter-index";
 import {
   ambiguousWindowSegments, loadWindowSegments, mayDuplicateLiveLedger, missingWindowSegments, queueMissingTotals, readArchiveListing,
   type ArchiveSegmentState,
@@ -115,6 +116,7 @@ async function archiveTotalsResponse(ctx: ManagementContext): Promise<Response> 
   const complete = answer.pendingSegments.length === 0 && answer.failedSegments.length === 0 && answer.inexactSegments.length === 0
     && ambiguous.length === 0 && missing.length === 0;
   const capped = answer.foldedRows > 0 || answer.overlapRowsDropped > 0 || ARCHIVE_DIMENSIONS.some(dimension => answer.overflowRows[dimension] > 0);
+  catchUpLiveLedgerMinimum(listing);
   // A breakdown whose pricing classes cannot be rebuilt carries them as null rather than a guess.
   const unpriced = new Set(answer.unpricedBreakdowns);
   const breakdowns = Object.fromEntries(ARCHIVE_DIMENSIONS.map(dimension => {
@@ -176,6 +178,15 @@ function parseRowsLimit(params: URLSearchParams): number {
   return limit;
 }
 
+/**
+ * A read that withheld segments because the live ledger's minimum was unverified asks the usage
+ * filter index to catch up, once its own read is done: in the background, so this request and the
+ * next never wait for the ingest, and a later read can answer exactly.
+ */
+function catchUpLiveLedgerMinimum(listing: Awaited<ReturnType<typeof readArchiveListing>>): void {
+  if (listing.liveLedgerPresent && !listing.liveLedgerVerified) scheduleUsageFilterIndexRefresh();
+}
+
 async function archiveRowsResponse(ctx: ManagementContext): Promise<Response> {
   const params = ctx.url.searchParams;
   let query: ArchivedRowsQuery;
@@ -219,6 +230,7 @@ async function archiveRowsResponse(ctx: ManagementContext): Promise<Response> {
     return response;
   }
   const { listing, ambiguous, missing, result } = queued.value;
+  catchUpLiveLedgerMinimum(listing);
   const projectDiagnostics = upstreamDiagnosticLogProjection();
   const pending = result.pending.filter(state => !state.failure);
   return jsonResponse({

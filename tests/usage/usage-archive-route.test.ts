@@ -248,7 +248,7 @@ describe("GET /api/usage/archive", () => {
     const liveLabel = iso(live[0]!.timestamp).replaceAll(":", "-");
     await builtSegment(liveIno, live.slice(0, 4), liveLabel);
 
-    const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 24 * HOUR));
+    const body = await untilLiveLedgerSince(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 24 * HOUR), iso(live[0]!.timestamp));
     // Both copies of ledger 505 and the live-head copy reach the window, so it is declined.
     expect(body).toMatchObject({ complete: false, summary: null });
     expect(body.coverage.ambiguousSegments!.filter(name => name.includes("_505-"))).toHaveLength(2);
@@ -267,7 +267,7 @@ describe("GET /api/usage/archive", () => {
     await builtSegment("508", rows.slice(0, 8));
     mkdirSync(dirname(usageLogPath()), { recursive: true });
     writeFileSync(usageLogPath(), jsonl(rows.slice(8)));
-    const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 24 * HOUR));
+    const body = await untilLiveLedgerSince(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 24 * HOUR), iso(rows[8]!.timestamp));
     expect(body).toMatchObject({ complete: false, summary: null, coverage: { segments: 0, liveLedgerSince: iso(rows[8]!.timestamp) } });
     expect(body.coverage.ambiguousSegments).toHaveLength(2);
   });
@@ -513,7 +513,7 @@ describe("GET /api/usage/archive", () => {
     mkdirSync(dirname(usageLogPath()), { recursive: true });
     writeFileSync(usageLogPath(), jsonl([...a, ...b, ...c]));
     noteArchiveChanged();
-    const { body } = await archiveGet(window(day + HOUR, day + 2 * HOUR));
+    const body = await untilLiveLedgerSince(window(day + HOUR, day + 2 * HOUR), iso(b[0]!.timestamp));
     expect(body).toMatchObject({ complete: false, summary: null });
     expect(body.coverage.ambiguousSegments).toEqual([basename(segmentB)]);
     expect(body.coverage.liveLedgerSince).toBe(iso(b[0]!.timestamp));
@@ -548,8 +548,8 @@ describe("GET /api/usage/archive", () => {
   }, 30_000);
 
   test("while the live ledger's earliest row is unverified the archive withholds, and once the index catches up the same window answers exactly", async () => {
-    // The 2026-11-24 window from the archive, while usage.jsonl holds 2026-11-25 onward and is too
-    // large for a read to index before answering.
+    // The 2026-11-24 window from the archive, while usage.jsonl holds 2026-11-25 onward and the
+    // filter index has not ingested it yet.
     const archived = archiveRows(4, 60_000).map(row => ({ ...row, timestamp: Date.UTC(2026, 10, 24, 10) + (row.timestamp - ARCHIVE_FIRST_ROW_AT) }));
     const segment = await builtSegment("532", archived, iso(archived[0]!.timestamp).replaceAll(":", "-"));
     const padding = "x".repeat(2_000);
@@ -650,8 +650,9 @@ describe("GET /api/usage/archive", () => {
     expect(whileHead).toMatchObject({ complete: false, summary: null });
     expect(whileHead.coverage.ambiguousSegments).toEqual([expect.stringContaining("_522-")]);
     // The ledger now starts later, on the same file: its head no longer names the segment, which counts.
-    writeFileSync(usageLogPath(), jsonl(archiveRows(2, undefined, 50)));
+    const later = archiveRows(2, undefined, 50);
+    writeFileSync(usageLogPath(), jsonl(later));
     noteArchiveChanged();
-    expect((await archiveGet(all)).body.summary.requests).toBe(5);
+    expect((await untilLiveLedgerSince(all, iso(later[0]!.timestamp))).summary.requests).toBe(5);
   });
 });
