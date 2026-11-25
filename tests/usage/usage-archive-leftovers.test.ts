@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { archiveTotalsName } from "../../src/usage/archive-segments";
+import { buildMissingArchiveTotals } from "../../src/usage/archive-query";
+import { archiveTotalsBuildFailure, scheduleArchiveTotalsBuild } from "../../src/usage/archive-totals";
 import { enforceUsageLedgerSizeLimit } from "../../src/usage/ledger-retention";
+import { usageLedgerRetentionStatus } from "../../src/server/usage-ledger-retention";
 import { MIN_USAGE_LEDGER_MAX_BYTES } from "../../src/usage/retention-contract";
 import { usageLogPath } from "../../src/usage/log";
 
@@ -47,53 +50,60 @@ afterEach(() => {
   removeTreeWithRetry(home);
 });
 
-describe("usage archive leftover cleanup", () => {
-  test("both leftover cleanups delete a removed segment's totals file, and only real segment names are candidates", () => {
+/** Every file under the archive, with its bytes, and every link with its target, so any write or delete shows. */
+function snapshot(root: string): Map<string, string> {
+  const files = new Map<string, string>();
+  const walk = (directory: string, prefix: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      const name = `${prefix}${entry.name}`;
+      if (entry.isSymbolicLink()) files.set(name, `link:${readlinkSync(path)}`);
+      else if (entry.isDirectory()) { files.set(`${name}/`, "dir"); walk(path, `${name}/`); }
+      else files.set(name, readFileSync(path).toString("base64"));
+    }
+  };
+  walk(root, "");
+  return files;
+}
+
+describe("the legacy usage archive is never written or deleted while its trim is suspended", () => {
+  test("a trim over the limit, segment totals builds and the startup pass leave every archive byte and the ledger as they were", async () => {
     const ledger = writeLedger();
     const ino = ledgerIno();
     const head = ledger.subarray(0, rowEnd(ledger, 0));
-    // Old: removed before the trim. Young: removed after the publish supersedes it.
-    const old = archived(`2026-11-01T08-30-00.000Z_${ino}-${head.byteLength}.jsonl`, head, 10 * 60_000);
-    const young = archived(`2026-10-02T00-00-00.000Z_${ino}-${head.byteLength}.jsonl`, head, 0);
-    for (const name of [old, young]) archived(archiveTotalsName(name), "{}", 0);
-    // Carries the inode marker and the ledger's bytes but is no segment: a substring match would delete it.
-    const notASegment = archived(`notes_${ino}-${head.byteLength}.txt`, head, 10 * 60_000);
-    expect(enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES).kind).toBe("replaced");
-    const names = readdirSync(archiveDirectory());
-    for (const name of [old, young, archiveTotalsName(old), archiveTotalsName(young)]) expect(names).not.toContain(name);
-    expect(names).toContain(notASegment);
+    const expired = 40 * 24 * 60 * 60_000;
+    // An exactly valid-looking unpublished leftover of the live ledger, old enough for every former cleanup rule.
+    const segment = archived(`2026-11-01T08-30-00.000Z_${ino}-${head.byteLength}.jsonl`, head, expired);
+    archived(archiveTotalsName(segment), "{}", expired);
+    archived(`${segment}.ocx.123.4.tmp`, head, expired);
+    archived("operator-notes.txt", "keep me", expired);
+    mkdirSync(join(archiveDirectory(), "nested"));
+    writeFileSync(join(archiveDirectory(), "nested", "child.jsonl"), head);
+    const outside = join(home, "outside-target.txt");
+    writeFileSync(outside, "target");
+    // Windows without symlink privilege cannot create the link; the byte checks below still run.
+    try {
+      symlinkSync(outside, join(archiveDirectory(), "link.jsonl"));
+    } catch (error) {
+      if (!["EPERM", "EACCES", "ENOSYS"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    }
+    const before = snapshot(archiveDirectory());
+
+    const result = enforceUsageLedgerSizeLimit(MIN_USAGE_LEDGER_MAX_BYTES);
+    expect(result).toEqual({ kind: "deferred", currentBytes: ledger.byteLength, reason: "archive-suspended" });
+    await expect(scheduleArchiveTotalsBuild(join(archiveDirectory(), segment))).rejects.toThrow();
+    expect(archiveTotalsBuildFailure(join(archiveDirectory(), segment))).toEqual({ reason: "publishing-suspended" });
+    await buildMissingArchiveTotals(4, home);
+
+    expect(snapshot(archiveDirectory())).toEqual(before);
+    expect(readFileSync(outside, "utf8")).toBe("target");
+    expect(readFileSync(usageLogPath()).equals(ledger)).toBe(true);
   });
 
-  test("a longer leftover of the same file is removed once a smaller cut publishes, after the limit was raised", () => {
-    // A trim with the minimum limit was killed before its rename, leaving a long segment. The operator
-    // raised the limit and restarted within five minutes, so the next trim's pre-check spares the young
-    // leftover, cuts less, and publishes a shorter segment of the same file.
+  test("the retention status says enforcement is suspended rather than that the ledger is under its limit", () => {
     const ledger = writeLedger();
-    const ino = ledgerIno();
-    const longCut = rowEnd(ledger, ledger.byteLength - 20 * 16 * 1024);
-    const leftover = archived(`2026-11-01T08-30-00.000Z_${ino}-${longCut}.jsonl`, ledger.subarray(0, longCut), 60_000);
-    const raised = 2 * 1024 * 1024;
-    const result = enforceUsageLedgerSizeLimit(raised);
-    expect(result.kind).toBe("replaced");
-    const published = result.kind === "replaced" ? result.archivePath.split("/").at(-1)! : "";
-    expect(statSync(join(archiveDirectory(), published)).size).toBeLessThan(longCut);
-    const names = readdirSync(archiveDirectory()).filter(name => name.endsWith(".jsonl"));
-    expect(names).toEqual([published]);
-    expect(names).not.toContain(leftover);
-    // The archive followed by the live ledger is still the original ledger, each row once.
-    expect(Buffer.concat([readFileSync(join(archiveDirectory(), published)), readFileSync(usageLogPath())]).equals(ledger)).toBe(true);
-  });
-
-  test("a longer leftover whose rows past the new segment are not the published ledger's head is kept", () => {
-    // The ledger was rolled back to an older snapshot on the same inode while the archive was not:
-    // the leftover's tail differs from what the ledger now holds, so it may be the only copy.
-    const ledger = writeLedger();
-    const ino = ledgerIno();
-    const longCut = rowEnd(ledger, ledger.byteLength - 20 * 16 * 1024);
-    const diverged = Buffer.from(ledger.subarray(0, longCut));
-    diverged[longCut - 100] = 0x79;
-    const leftover = archived(`2026-11-01T08-30-00.000Z_${ino}-${longCut}.jsonl`, diverged, 60_000);
-    expect(enforceUsageLedgerSizeLimit(2 * 1024 * 1024).kind).toBe("replaced");
-    expect(readdirSync(archiveDirectory())).toContain(leftover);
+    expect(usageLedgerRetentionStatus(MIN_USAGE_LEDGER_MAX_BYTES)).toEqual({
+      maxBytes: MIN_USAGE_LEDGER_MAX_BYTES, currentBytes: ledger.byteLength, enforcement: "suspended",
+    });
   });
 });

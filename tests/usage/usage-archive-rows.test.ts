@@ -1,17 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { closeRequestHistoryIndex } from "../../src/routing/history/indexer";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { loadWindowSegments, readArchiveListing } from "../../src/usage/archive-query";
 import { inArchiveRowsReadQueue, readArchivedRows } from "../../src/usage/archive-rows";
-import { readArchiveTotals, scheduleArchiveTotalsBuild } from "../../src/usage/archive-totals";
 import { resetUsageReadCacheForTests, usageLogPath } from "../../src/usage/log";
 import type { OcxConfig } from "../../src/types";
 import { ManagementRequest } from "../helpers/management-auth";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
-import { ARCHIVE_FIRST_ROW_AT, archiveRow, archiveRows, jsonl, writeSegment, type ArchiveFixtureRow } from "../helpers/usage-archive-rows";
+import { ARCHIVE_FIRST_ROW_AT, archiveRow, archiveRows, jsonl, writeArchiveTotals, writeSegment, type ArchiveFixtureRow } from "../helpers/usage-archive-rows";
 
 const config: OcxConfig = { port: 0, hostname: "127.0.0.1", defaultProvider: "test", providers: {} };
 const HOUR = 3_600_000;
@@ -26,7 +25,10 @@ interface RowsBody {
   endedBy: string;
   truncated: boolean;
   incomplete: boolean;
-  coverage: { segments: Array<{ segment: string; fromByte: number; endedBy: string }>; pending: boolean; pendingSegments: string[] };
+  coverage: {
+    segments: Array<{ segment: string; fromByte: number; endedBy: string }>; pending: boolean; pendingSegments: string[];
+    failed: Array<{ segment: string; reason: string }>;
+  };
   error?: { code: string };
 }
 
@@ -42,7 +44,7 @@ const window = (since: number, until: number): string => `since=${encodeURICompo
 
 async function builtSegment(ino: string, rows: readonly unknown[], label?: string): Promise<string> {
   const path = writeSegment(archiveDirectory(), ino, jsonl(rows), label);
-  await scheduleArchiveTotalsBuild(path);
+  await writeArchiveTotals(path);
   return path;
 }
 
@@ -104,14 +106,23 @@ describe("GET /api/usage/archive/rows", () => {
     expect(early.body.endedBy).toBe("window-end");
   });
 
-  test("a segment without totals is reported pending and queued for a build, never scanned from its start", async () => {
+  test("a segment without totals is reported pending, never scanned from its start, and its refused build writes nothing", async () => {
     const path = writeSegment(archiveDirectory(), "611", jsonl(archiveRows(10)));
-    const { body } = await rowsGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR));
-    expect(body).toMatchObject({ entries: [], coverage: { segments: [], pending: true, pendingSegments: [path.split("/").at(-1)] } });
-    // The request queued the build itself; nothing here starts one.
-    const deadline = Date.now() + 5_000;
-    while (!(await readArchiveTotals(path, statSync(path).size)) && Date.now() < deadline) await Bun.sleep(20);
-    expect((await rowsGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR))).body.entries).toHaveLength(9);
+    const query = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR);
+    const { body } = await rowsGet(query);
+    expect(body).toMatchObject({ entries: [], incomplete: true, coverage: { segments: [], pending: true, pendingSegments: [basename(path)] } });
+    // The read asked for a build, which is refused while the archive trim is suspended.
+    const again = await rowsGet(query);
+    expect(again.body).toMatchObject({
+      entries: [], incomplete: true,
+      coverage: { pending: false, pendingSegments: [], failed: [{ segment: basename(path), reason: "publishing-suspended" }] },
+    });
+    // The refusal is remembered: a later read reports it again without asking for another build.
+    const third = await rowsGet(query);
+    expect(third.body.coverage.failed).toEqual(again.body.coverage.failed);
+    expect(readdirSync(archiveDirectory())).toEqual([basename(path)]);
+    await writeArchiveTotals(path);
+    expect((await rowsGet(query)).body.entries).toHaveLength(9);
   });
 
   test("an archived row exposes exactly the fields the live request-history row does", async () => {

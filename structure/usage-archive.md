@@ -1,14 +1,42 @@
 # Usage archive reads
 
-The ledger trim in `src/usage/ledger-retention.ts` moves the oldest rows of `usage.jsonl` into
-`<config>/usage-archive/<first row UTC>_<ledger inode>-<cut offset>.jsonl` segments and deletes
-them after `USAGE_ARCHIVE_RETENTION_DAYS` (31) by mtime; [Dashboard Surfaces And
-Usage](dashboard-and-usage.md#usage-accounting) owns that write path. This doc owns what reads the
-archive. Segment names, the duplicate rule, and the head-row label that both sides use live in
-`src/usage/archive-segments.ts`.
+Earlier builds' ledger trim moved the oldest rows of `usage.jsonl` into
+`<config>/usage-archive/<first row UTC>_<ledger inode>-<cut offset>.jsonl` segments; that trim is
+now suspended (below), and [Dashboard Surfaces And Usage](dashboard-and-usage.md#usage-accounting)
+owns the write path. This doc owns what reads the archive. Segment names, the duplicate rule, and
+the head-row label live in `src/usage/archive-segments.ts`.
 
 The hub serves inference on the same event loop that answers these reads, so the governing rule
 here is that no request turn does work proportional to the archive's size.
+
+## Suspended trim
+
+The archive directory holds files earlier builds wrote, and the hub can no longer prove which of them
+are its own: a crashed copy and a published segment can be byte-identical, and an operator may have
+added files. So while the trim is suspended no code path writes, renames or deletes anything in it:
+`enforceUsageLedgerSizeLimit` in `src/usage/ledger-retention.ts` defers (`archive-suspended`) before
+it opens the archive directory, the runtime owner in `src/server/usage-ledger-retention.ts` only warns,
+and every totals build is refused before it reads the segment (below). Uninstall is not covered
+by this suspension (Known gaps). Existing segments and totals files are only read. The trim returns
+with the archive catalog, which publishes the archived prefix and the new live ledger in one
+durable decision. `tests/usage/usage-archive-leftovers.test.ts` drives a trim over the limit, a
+totals build and the startup pass over an archive holding a valid-looking segment and totals name, a
+temp-style name, a nested directory, an operator file and a link, and checks every byte, the link and
+its target, and the ledger are unchanged.
+
+## Known gaps until slice 2
+
+The read side is not yet exact in these cases; the totals route's `complete: false` covers only a
+segment with no usable totals.
+
+- Uninstall still removes `usage.jsonl` and `usage-archive` (catalog-owned removal lands with slice 3/4).
+
+- The span cache is keyed on totals path and mtime, so a totals file replaced with the same mtime keeps
+  serving the old span.
+- A segment whose rows are all unparsable has a null span and is treated as outside every window.
+- The first read after a restart reads every segment's totals file once, with no budget on that cold
+  pass.
+- A segment's byte length is taken from its name, not its actual size, when matching its totals.
 
 ## Attribution
 
@@ -51,37 +79,36 @@ counted, `unparsableRows`, `firstRowAt`/`lastRowAt`, `buckets`, `overlaps`, `ove
 dimension, and `foldedRows`. A row is unparsable when it fails to parse or normalize, exceeds the
 1 MiB row ceiling, is a torn final row, has no integer timestamp in `[0, 8.64e15]`, has a non-string
 dimension, or contributes a non-finite or negative sum. A reader serves the file only when the
-version is current and `bytes` equals the segment's length; anything else is rebuilt.
+version is current and `bytes` equals the segment's length. Anything else is not served, and while
+the trim is suspended it is not rebuilt either: the segment is reported failed (`publishing-suspended`).
 
-A build reads the segment through `scanUsageLedgerCooperatively` in `src/usage/ledger-scanner.ts`
-with its `path` option, so archive reads share the live ledger's chunked reads, row ceiling, torn-row
-rule and yields (every 8 ms of row work, and every 1 MiB or 1,000 rows at a chunk boundary). The file
-is serialized 1,000 buckets per turn, written asynchronously to a temp file and renamed into place,
-with no fsync: it is rebuildable, and the reader rejects a torn or wrong-length one. Builds run one at
-a time, each from a timer `BUILD_GAP_MS` (250 ms) after the previous one finished. A failed build is
-remembered in process by segment path and format version, with its reason (`segment-changed`,
-`io-error` with the code, or `build-error`), and is not queued again until the process restarts.
+`buildArchiveTotals` reads the segment through `scanUsageLedgerCooperatively` in
+`src/usage/ledger-scanner.ts` with its `path` option, so archive reads share the live ledger's chunked
+reads, row ceiling, torn-row rule and yields (every 8 ms of row work, and every 1 MiB or 1,000 rows at
+a chunk boundary), and returns the totals in memory; it publishes nothing. While the trim is suspended
+no totals file is written: earlier builds wrote a temp file by name into the archive directory and
+renamed it over its destination. `scheduleArchiveTotalsBuild` refuses every build with
+`ArchiveTotalsPublishingSuspendedError` before reading anything, and remembers the refusal in process
+by segment path and format version with reason `publishing-suspended`, so a read lists the segment in
+`coverage.failed` and does not queue it again until the process restarts. The other reasons the type
+keeps (`segment-changed`, `io-error` with the code, `build-error`) belong to builds into the hub's own
+store once it exists.
 
-A trim that publishes a segment queues its build from `src/server/usage-ledger-retention.ts` from a
-timer after the trim's turn has ended; a failure logs one `[usage-retention]` warning and never fails
-the trim. Segments without current totals are built two ways. A read that finds one in its window
-queues it. And `scheduleArchiveTotalsStartupBuild`, called from the background lifecycle's
-`scheduleStartupRun` in `src/server/background-lifecycle.ts`, arms one unref'd timer 60 seconds after
-the server starts serving (so `startServer` only sets a timer): each pass, `buildMissingArchiveTotals`
-in `src/usage/archive-query.ts` builds at most `ARCHIVE_TOTALS_PASS_SEGMENTS` (4) segments, newest
-first, and the timer re-arms after `ARCHIVE_TOTALS_PASS_INTERVAL_MS` (5 minutes) while any remain.
-Releasing the last background lifecycle lease cancels a pending pass and stops a running one from
-re-arming.
-
-Every place that deletes a segment deletes its totals file with it, as a separate step, and the
-31-day prune also deletes any totals file whose segment is gone (`segmentNameOfTotals`), each isolated
-so one file that cannot be removed never stops the trim. Every in-process archive write calls
-`noteArchiveChanged`, which invalidates the cached listing and live-ledger head below.
+A segment without current totals is asked for two ways, and both reach that refusal. A read that finds
+one in its window queues it. And `scheduleArchiveTotalsStartupBuild`, called from the background
+lifecycle's `scheduleStartupRun` in `src/server/background-lifecycle.ts`, arms one unref'd timer 60
+seconds after the server starts serving (so `startServer` only sets a timer): each pass,
+`buildMissingArchiveTotals` in `src/usage/archive-query.ts` takes at most
+`ARCHIVE_TOTALS_PASS_SEGMENTS` (4) segments, newest first, and the timer re-arms after
+`ARCHIVE_TOTALS_PASS_INTERVAL_MS` (5 minutes) while any remain. Releasing the last background
+lifecycle lease cancels a pending pass and stops a running one from re-arming.
 
 `tests/usage/usage-archive-totals.test.ts`, `tests/usage/usage-archive-totals-bounds.test.ts` and
-`tests/usage/usage-archive-attribution.test.ts` cover the builds, the bounds, the pacing, the
-startup passes, and equality with `/api/usage` over the same rows, including a failover combo and a
-retry on a second account.
+`tests/usage/usage-archive-attribution.test.ts` cover the builds, the bounds, the refused startup
+passes, and equality with `/api/usage` over the same rows, including a failover combo and a retry on
+a second account. Their fixtures write segments and totals files directly
+(`writeArchiveTotals` in `tests/helpers/usage-archive-rows.ts`), standing in for files earlier builds
+published.
 
 ## Counting each row once
 
@@ -92,21 +119,19 @@ counts, among segments with the same inode and label, only the one with the late
 on a tie). It skips a segment named with the live ledger's inode and head label (`ledgerHeadLabel`),
 a trim that stopped before its rename. The live head is cached by the same identity
 `usageLogIdentityKey` uses (device, inode, birth time) and dropped on every in-process archive write,
-so a new ledger that reuses a retired inode never makes a published segment look unpublished. After a
-publish, `ledger-retention.ts` also deletes a same-inode leftover that is longer than the new segment,
-but only when the new segment is its prefix and its remaining bytes are the head of the ledger just
-published; a ledger rolled back to an older snapshot fails that check, and the leftover stays.
+so a new ledger that reuses a retired inode never makes a published segment look unpublished. These
+are read-side rules only: nothing deletes a duplicate or leftover segment any more.
 
 ## Reading without blocking
 
 `readArchiveListing` lists the directory asynchronously and caches it for 5 seconds; after that it
 re-lists only when the directory's mtime moved, at least every 60 seconds, and at once after any
-in-process archive write. A segment may overlap a window by its exact span once its totals have been
-read; before that, by the first-row time in its name less `ARCHIVE_APPEND_SLACK_MS` and its mtime.
-The slack is one hour: a row is stamped when its request starts and appended when it completes, and
-no hub setting bounds a request's total duration (streams are bounded by idle and connect timeouts
-such as `DEFAULT_CONNECT_TIMEOUT_MS` in `src/stall-timeout.ts`, not wall clock), so one hour matches
-the row reads' own slack.
+in-process archive write. `entryMayOverlap` decides whether a segment may overlap a window by its
+exact span once its totals have been read, and otherwise always answers yes: a name's first-row label
+and a file's mtime are not a trustworthy span (a row is stamped when its request starts and appended
+when it completes, no hub setting bounds a request's total duration, and an mtime can be changed), so
+a segment is never dropped by them. Its totals file is read once to learn its span, which is then
+cached by totals mtime, or, without usable totals, it is reported pending or failed.
 
 `answerArchiveTotals` in `src/usage/archive-answer.ts` loads, folds and drops one segment's totals at
 a time, keeping only its span and hour index, so a request never holds more than one segment's
@@ -132,8 +157,11 @@ Requests count each row once in every total, through the overlap records. `byHou
 rows in chronological order; every other breakdown keeps its 200 top keys and reports the rest as
 `truncated`. `coverage` sums `overflowRows`, `foldedRows` and `overlapRowsDropped` over the window's
 segments and sets `capped` when any is positive, because a filtered or per-dimension figure may then
-undercount. A segment without current totals is listed as pending and queued; one whose build failed
-is listed in `coverage.failed`. `coverage.earliestRowAt`/`latestRowAt` are approximate
+undercount. When any segment that may overlap the window has no usable totals, the answer sets
+`complete: false` and carries `summary`, `byHour` and every breakdown as `null`, because those rows are
+uncounted and a number would look exact; otherwise it sets `complete: true`. A segment without
+current totals is listed as pending and queued; one whose build failed
+or was refused (`publishing-suspended`) is listed in `coverage.failed`. `coverage.earliestRowAt`/`latestRowAt` are approximate
 (`coverage.approximate`) while some totals file has not been read. `tests/usage/usage-archive-route.test.ts`
 and `tests/usage/usage-archive-leftovers.test.ts` cover the route and the counting rule.
 

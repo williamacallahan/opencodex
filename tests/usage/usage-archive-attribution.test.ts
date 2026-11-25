@@ -4,12 +4,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { closeRequestHistoryIndex } from "../../src/routing/history/indexer";
 import { handleManagementAPI } from "../../src/server/management-api";
-import { scheduleArchiveTotalsBuild } from "../../src/usage/archive-totals";
 import { resetUsageReadCacheForTests, usageLogPath } from "../../src/usage/log";
 import type { OcxConfig } from "../../src/types";
 import { ManagementRequest } from "../helpers/management-auth";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
-import { jsonl, writeSegment } from "../helpers/usage-archive-rows";
+import { jsonl, writeArchiveTotals, writeSegment } from "../helpers/usage-archive-rows";
 
 const config: OcxConfig = { port: 0, hostname: "127.0.0.1", defaultProvider: "test", providers: {} };
 const HOUR = 3_600_000;
@@ -83,7 +82,7 @@ describe("archive attribution matches the live summary", () => {
   test("totals, per-provider and per-model figures, and a provider filter equal /api/usage over the same rows", async () => {
     mkdirSync(dirname(usageLogPath()), { recursive: true });
     writeFileSync(usageLogPath(), jsonl(ROWS));
-    await scheduleArchiveTotalsBuild(writeSegment(join(home, "usage-archive"), "901", jsonl(ROWS), "2026-11-20T10-05-00.000Z"));
+    await writeArchiveTotals(writeSegment(join(home, "usage-archive"), "901", jsonl(ROWS), "2026-11-20T10-05-00.000Z"));
     const hour = Math.floor(AT / HOUR) * HOUR;
     const liveWindow = `since=${hour}&until=${hour + HOUR - 1}`;
     const archiveWindow = `since=${hour}&until=${hour + HOUR}`;
@@ -116,7 +115,7 @@ describe("archive attribution matches the live summary", () => {
     };
     mkdirSync(dirname(usageLogPath()), { recursive: true });
     writeFileSync(usageLogPath(), jsonl([retried]));
-    await scheduleArchiveTotalsBuild(writeSegment(join(home, "usage-archive"), "902", jsonl([retried]), "2026-11-20T10-05-00.000Z"));
+    await writeArchiveTotals(writeSegment(join(home, "usage-archive"), "902", jsonl([retried]), "2026-11-20T10-05-00.000Z"));
     const hour = Math.floor(AT / HOUR) * HOUR;
     const live = await get<LiveBody>(`/api/usage?range=all&since=${hour}&until=${hour + HOUR - 1}`);
     const archive = await get<ArchiveBody>(`/api/usage/archive?since=${hour}&until=${hour + HOUR}&provider=openai`);

@@ -559,34 +559,24 @@ with `POST /api/storage/cleanup-policy/run`.
 `usageLedgerMaxBytes` is unset by default, and unset means the request history in `usage.jsonl`
 grows without limit. Nothing deletes history you did not ask to have deleted.
 
-Set it to a byte ceiling and the proxy trims an already-oversized ledger when the policy is
-installed at startup or through `PUT /api/settings`, and trims again after any append crosses it,
-keeping the newest whole rows and dropping the oldest. It trims a little below the ceiling rather
-than exactly to it, so the next append does not immediately re-cross the line. The minimum accepted
-value is 1 MiB; a smaller number, or one that is not a safe integer, is rejected at the write
-boundary and ignored if read from a hand-edited file.
+Trimming is currently suspended, so a limit is stored and reported but not enforced: the ledger
+keeps every row and grows past the ceiling. Earlier releases trimmed by moving the oldest rows into
+the `usage-archive` directory beside `usage.jsonl` and deleting archive files by age, and that
+cleanup could delete rows that were meant to be kept, or files the proxy never wrote. Trimming
+returns once the proxy can publish the archived rows and the shorter ledger in one safe step.
+Meanwhile, when `usage.jsonl` is larger than `usageLedgerMaxBytes` (checked when the limit is
+installed and after an append crosses it), the proxy logs one `[usage-retention]` warning per run, and
+`usageLedgerRetention` in `GET /api/settings` carries `enforcement: "suspended"` for as long as the
+ledger stays over the limit. The minimum
+accepted value is 1 MiB; a smaller number, or one that is not a safe integer, is rejected at the
+write boundary and ignored if read from a hand-edited file.
 
-Rows are copied byte for byte and never rewritten, so every field survives a trim — including
-fields a newer build wrote that an older one does not understand. The replacement is refused
-outright if anything appended to the ledger while it ran, so a request logged during a trim is
-never lost; the next append tries again. Trimming also refreshes what the dashboard shows, so
-`/api/logs` stops serving rows the ledger no longer has.
-
-Trimmed rows are moved, not deleted. Before each trim the proxy copies the rows it is about to
-remove, byte for byte, into a new file in the `usage-archive` directory beside `usage.jsonl`, named
-after the UTC time of the first of those rows that carries one (when none of the first 64 does, the
-name starts with `untimed-` and the time of the trim), and deletes archive files last written more
-than 31 days ago. The
-directory must already exist and be writable: if it is missing or the copy fails, nothing is
-trimmed, the ledger keeps growing, and the proxy logs a `[usage-retention]` warning naming the
-directory and the cause. Create it with `mkdir -m 700 ~/.opencodex/usage-archive` before setting a
-limit; the container image creates it for you.
-
-Beside each archive file the proxy writes a small `.hourly.json` file with that file's usage totals
-per UTC hour, in the background after the trim. Archive files without one (from before this
-existed, or from an older format) get theirs in the background, starting about a minute after the
-proxy starts and building four of them every five minutes, newest first, or sooner when the archive
-is read. A totals file is deleted together with its archive file.
+The proxy writes, renames, and deletes nothing in `usage-archive`. Archive files and their
+`.hourly.json` totals that an earlier release wrote are still read by `GET /api/usage/archive`. An
+archive file without a current totals file is listed under `coverage.pendingSegments` on the first
+read after the proxy starts and under `coverage.failed` (`publishing-suspended`) from then on, instead
+of being built; while any such file may overlap the window the answer has `complete: false` and no
+totals.
 
 Configure it in `config.json`, with `ocx config set usageLedgerMaxBytes <bytes>`, or through
 `GET`/`PUT /api/settings` (`null` clears the limit).

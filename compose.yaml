@@ -20,7 +20,8 @@ services:
     volumes:
       - ocx-state:/home/bun/.opencodex
       - codex-state:/home/bun/.codex
-      # Ledger rows trimmed by usageLedgerMaxBytes, kept 31 days; the hub refuses to trim without it.
+      # Usage rows earlier releases trimmed by usageLedgerMaxBytes. Trimming is suspended: nothing
+      # is written, pruned or deleted here now.
       - ocx-usage-archive:/home/bun/.opencodex/usage-archive
     tmpfs:
       - /tmp:size=64m,mode=1777
