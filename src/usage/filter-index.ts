@@ -74,7 +74,7 @@ import {
   type UsageLedgerScanResult,
 } from "./ledger-scanner";
 import { LINKED_CLIENT_FOLDED_CLIENTS, USAGE_CODEX_CLIENT_LABELS, type UsageSourceFields, type UsageSourceFilter } from "./source-filter";
-import { noteUsageRevision, usageRevisionEpoch } from "./revision-observation";
+import { noteUsageRevision, setDestructiveUsageRevisionListener } from "./revision-observation";
 import { usageAttributions } from "./summary";
 import type { UsageTimeWindow } from "./time-range";
 
@@ -187,6 +187,8 @@ const META_KEYS = {
   oversizedRows: "oversized_rows",
   minTimestamp: "min_timestamp",
   maxTimestamp: "max_timestamp",
+  validatedInvalidations: "validated_invalidations",
+  sourceInvalidations: "source_invalidations",
 } as const;
 
 /** The file at the index path is not this projection. It is left untouched. */
@@ -353,6 +355,7 @@ interface IndexMeta {
   oversizedRows: number;
   minTimestamp: number | null;
   maxTimestamp: number | null;
+  validatedInvalidations: number;
 }
 
 let ingestFlight: { path: string; promise: Promise<UsageFilterIndexSnapshot> } | null = null;
@@ -434,6 +437,7 @@ function readMeta(db: Database): IndexMeta {
     oversizedRows: metaNumber(db, META_KEYS.oversizedRows),
     minTimestamp: minTimestamp === "" ? null : Number(minTimestamp),
     maxTimestamp: maxTimestamp === "" ? null : Number(maxTimestamp),
+    validatedInvalidations: metaNumber(db, META_KEYS.validatedInvalidations),
   };
 }
 
@@ -454,6 +458,7 @@ function writeMetaStatements(db: Database, meta: IndexMeta): void {
   setMeta(db, META_KEYS.oversizedRows, meta.oversizedRows);
   setMeta(db, META_KEYS.minTimestamp, meta.minTimestamp === null ? "" : meta.minTimestamp);
   setMeta(db, META_KEYS.maxTimestamp, meta.maxTimestamp === null ? "" : meta.maxTimestamp);
+  setMeta(db, META_KEYS.validatedInvalidations, meta.validatedInvalidations);
 }
 
 function emptyMeta(generation: string): IndexMeta {
@@ -468,6 +473,7 @@ function emptyMeta(generation: string): IndexMeta {
     oversizedRows: 0,
     minTimestamp: null,
     maxTimestamp: null,
+    validatedInvalidations: 0,
   };
 }
 
@@ -980,8 +986,7 @@ async function reclaimUntilDone(dir: string, path: string, current: () => boolea
 
 async function reclaimRetiredGenerations(dir: string, path: string): Promise<void> {
   if (getConfigDir() !== dir || !existsSync(path)) return;
-  // A held lock fails at once, from the first schema read on, and is retried by the caller off
-  // the event loop.
+  // A held lock fails at once, from the first schema read on; the caller retries off the event loop.
   const db = openIndexForWrite(dir, path, 0);
   try {
     for (;;) {
@@ -999,8 +1004,7 @@ async function reclaimRetiredGenerations(dir: string, path: string): Promise<voi
             const rows = db.query(
               "DELETE FROM usage_rows WHERE generation = ? AND byte_offset IN (SELECT byte_offset FROM usage_rows WHERE generation = ? ORDER BY byte_offset LIMIT ?)",
             ).run(generation, generation, RECLAIM_BATCH_ROWS).changes;
-            // One ledger row can carry thousands of attempt attributions, so this batch is bounded
-            // by attribution rows (the table's whole key), not by ledger offsets.
+            // Bounded by attribution rows (the whole key): one ledger row can carry thousands.
             const attributions = db.query(
               "DELETE FROM usage_attributions WHERE generation = ? AND (byte_offset, provider, model) IN (SELECT byte_offset, provider, model FROM usage_attributions WHERE generation = ? ORDER BY byte_offset, provider, model LIMIT ?)",
             ).run(generation, generation, RECLAIM_BATCH_ROWS).changes;
@@ -1036,6 +1040,8 @@ export async function settleUsageFilterIndexReclaimForTests(): Promise<void> {
 interface PublishFence {
   generation: string;
   indexedOffset: number;
+  /** A full ingest's `source_invalidations` at its start; publication is refused if it moved. */
+  invalidations?: number;
 }
 
 /**
@@ -1055,7 +1061,8 @@ function publish(
   db.exec("BEGIN IMMEDIATE");
   try {
     if (metaText(db, META_KEYS.generation) !== fence.generation
-      || metaNumber(db, META_KEYS.indexedOffset) !== fence.indexedOffset) {
+      || metaNumber(db, META_KEYS.indexedOffset) !== fence.indexedOffset
+      || (fence.invalidations !== undefined && sourceInvalidations(db) !== fence.invalidations)) {
       db.exec("ROLLBACK");
       return false;
     }
@@ -1077,19 +1084,53 @@ function assertHomeUnchanged(dir: string): void {
 }
 
 /**
- * Per index path, the published generation this process trusts and the destructive epoch of the
- * ledger it was trusted under (`src/usage/revision-observation.ts`). The index judges an append
- * from its own recorded size and boundary digest, so a shrink another cache observed, followed by
- * regrowth past the indexed size, would otherwise extend a generation whose early rows changed.
- * A generation this process neither built nor checked is trusted only while no destructive change
- * has been observed; after one, only a full ingest that publishes under an unchanged epoch is.
+ * Generation validity lives in the index database, so restarted, peer and passive readers agree. An
+ * append is judged by size and boundary digest, blind to a shrink another cache saw before regrowth:
+ * every observer of a destructive change (`revision-observation.ts`) increments `source_invalidations`,
+ * and a full ingest publishes the count it started under, fenced, as `validated_invalidations`. Equal
+ * counts mean valid (adopted by any process); until its increment commits, the observer declines too.
  */
-const trustedGenerations = new Map<string, { generation: string; epoch: number }>();
+const pendingInvalidations = new Map<string, number>();
+let invalidationTicket = 0;
 
-function generationTrusted(path: string, generation: string, epoch: number): boolean {
-  const trusted = trustedGenerations.get(path);
-  return trusted?.generation === generation ? trusted.epoch === epoch : epoch === 0;
+function sourceInvalidations(db: Database): number {
+  return metaNumber(db, META_KEYS.sourceInvalidations);
 }
+
+function generationValidated(db: Database, path: string, meta: IndexMeta): boolean {
+  return meta.validatedInvalidations === sourceInvalidations(db) && !pendingInvalidations.has(path);
+}
+
+function recordSourceInvalidation(): void {
+  const dir = getConfigDir();
+  const path = usageFilterIndexPath(dir);
+  // No index yet: the first ingest reads the file as it is now.
+  if (!existsSync(path)) return;
+  invalidationTicket += 1;
+  pendingInvalidations.set(path, invalidationTicket);
+  persistSourceInvalidation(dir, path, invalidationTicket, RECLAIM_BUSY_FIRST_DELAY_MS);
+}
+
+function persistSourceInvalidation(dir: string, path: string, ticket: number, delayMs: number): void {
+  if (pendingInvalidations.get(path) !== ticket) return; // superseded by a newer one or a replacement
+  try {
+    const db = openIndexForWrite(dir, path, 0);
+    try {
+      db.query(`INSERT INTO ${META_TABLE} (key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1`)
+        .run(META_KEYS.sourceInvalidations);
+    } finally { db.close(); }
+    if (pendingInvalidations.get(path) === ticket) pendingInvalidations.delete(path);
+  } catch (error) {
+    if (!isBusyError(error)) {
+      // Left pending: this process keeps declining the generation until it publishes a replacement.
+      console.warn(`[usage] a destructive usage log change could not be recorded in the filter index: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    setTimeout(() => persistSourceInvalidation(dir, path, ticket, Math.min(delayMs * 2, RECLAIM_BUSY_MAX_DELAY_MS)), delayMs).unref?.();
+  }
+}
+
+setDestructiveUsageRevisionListener(recordSourceInvalidation);
 
 async function rebuild(
   db: Database,
@@ -1097,7 +1138,10 @@ async function rebuild(
   path: string,
   prior: IndexMeta,
 ): Promise<UsageFilterIndexSnapshot | null> {
-  const epoch = noteUsageRevision(currentUsageLogRevision());
+  // A destructive change seen now is recorded before the count this ingest is validated against.
+  noteUsageRevision(currentUsageLogRevision());
+  const validatedAgainst = sourceInvalidations(db);
+  const pendingAtStart = pendingInvalidations.get(path);
   const staging = randomUUID();
   beginStaging(db, path, staging);
   let published = false;
@@ -1115,6 +1159,7 @@ async function rebuild(
       oversizedRows: result.scan.oversizedRows,
       minTimestamp: result.minTimestamp,
       maxTimestamp: result.maxTimestamp,
+      validatedInvalidations: validatedAgainst,
     };
     await testHooks?.beforePublish?.({
       dbPath: path,
@@ -1124,13 +1169,19 @@ async function rebuild(
     // The ledger this ingest read is the live home's; publishing it under another home would
     // mix two installations.
     assertHomeUnchanged(dir);
-    if (!publish(db, { generation: prior.generation, indexedOffset: prior.indexedOffset }, next)) {
+    // A destructive change seen now, here or by any process, retires the staged rows; the caller retries.
+    const live = currentUsageLogRevision();
+    noteUsageRevision(live);
+    if (usageLogIdentityKey(live) !== usageLogIdentityKey(result.scan.revision)
+      || pendingInvalidations.get(path) !== pendingAtStart) {
+      return null;
+    }
+    if (!publish(db, { generation: prior.generation, indexedOffset: prior.indexedOffset, invalidations: validatedAgainst }, next)) {
       return null;
     }
     published = true;
-    // Fenced on the epoch the ingest started under: a destructive change observed during it leaves
-    // the new generation untrusted, so the next refresh ingests again.
-    if (noteUsageRevision(currentUsageLogRevision()) === epoch) trustedGenerations.set(path, { generation: staging, epoch });
+    // An observation this process could not record yet predates this ingest, which supersedes it.
+    if (pendingAtStart !== undefined && pendingInvalidations.get(path) === pendingAtStart) pendingInvalidations.delete(path);
     scheduleRetiredGenerationReclaim(dir, path);
     await testHooks?.afterPublish?.({ dbPath: path, generation: staging });
     hardenSidecars(path);
@@ -1206,7 +1257,7 @@ async function refreshOnce(
   if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION
     || !meta.generation
     || usageLogIdentityKey(meta.revision) !== usageLogIdentityKey(revision)
-    || !generationTrusted(path, meta.generation, noteUsageRevision(revision))) {
+    || (noteUsageRevision(revision), !generationValidated(db, path, meta))) {
     return rebuildOrRetry(db, dir, path, meta);
   }
   if (revision === null) return snapshotFrom(meta, 0, ingestPassesFor(path));
@@ -1670,7 +1721,8 @@ async function readActive(
     try {
       const meta = readMeta(db);
       if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION
-        || meta.generation !== refreshed.generation) {
+        || meta.generation !== refreshed.generation
+        || !generationValidated(db, path, meta)) {
         throw new UsageLedgerRebuildRequiredError("content_changed");
       }
       const snapshot: UsageFilterIndexSnapshot = {
@@ -1787,12 +1839,14 @@ export async function readUsageFilterCandidatesPassive(
       || !tables.has("usage_filter_index_writers")) {
       throw new UsageFilterIndexForeignError();
     }
+    // Recorded before the snapshot below, so a destructive change seen now is part of its verdict.
+    noteUsageRevision(currentUsageLogRevision());
     db.exec("BEGIN");
     try {
       const meta = readMeta(db);
       const revision = currentUsageLogRevision();
       if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || !meta.generation
-        || !generationTrusted(path, meta.generation, noteUsageRevision(revision))) {
+        || !generationValidated(db, path, meta)) {
         throw new UsageLedgerRebuildRequiredError("content_changed");
       }
       if (usageLogIdentityKey(meta.revision) !== usageLogIdentityKey(revision)
@@ -1855,7 +1909,7 @@ export function usageFilterIndexExtendable(generation: string, revision: UsageLo
     const meta = readMeta(db);
     if (meta.schemaVersion !== USAGE_FILTER_INDEX_SCHEMA_VERSION || meta.generation !== generation) return false;
     if (usageLogIdentityKey(meta.revision) !== usageLogIdentityKey(revision)) return false;
-    if (!generationTrusted(path, generation, usageRevisionEpoch(revision))) return false;
+    if (!generationValidated(db, path, meta)) return false;
     const recorded = meta.revision?.size ?? 0;
     const size = revision?.size ?? 0;
     return size > recorded || (size === recorded && usageLogRevisionKey(meta.revision) === usageLogRevisionKey(revision));
@@ -1937,7 +1991,7 @@ export function resetUsageFilterIndexForTests(): void {
   ingestFlight = null;
   reclaimRun = null;
   reclaimAgain = false;
-  trustedGenerations.clear();
+  pendingInvalidations.clear();
   ingestPassesByPath.clear();
   rebuildRequestedPaths.clear();
   sidecarOwnershipChecked.clear();

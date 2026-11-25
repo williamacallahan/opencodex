@@ -22,6 +22,15 @@ export interface ObservedUsageRevision {
 }
 
 const highWater = new Map<string, { size: number; revisionKey: string; epoch: number }>();
+/**
+ * Told of every destructive observation, so a durable consumer can record it for other processes.
+ * The filter index registers here (`src/usage/filter-index.ts`) instead of being imported.
+ */
+let destructiveListener: ((revision: UsageLogRevision | null) => void) | null = null;
+
+export function setDestructiveUsageRevisionListener(listener: ((revision: UsageLogRevision | null) => void) | null): void {
+  destructiveListener = listener;
+}
 /** Distinct ledger files remembered; each mark is a few strings. */
 const MAX_TRACKED_FILES = 64;
 
@@ -49,6 +58,7 @@ export function noteUsageRevision(revision: UsageLogRevision | null): number {
     mark.epoch += 1;
     mark.size = size;
     mark.revisionKey = revisionKey;
+    destructiveListener?.(revision);
   } else if (size > mark.size) {
     mark.size = size;
     mark.revisionKey = revisionKey;

@@ -147,13 +147,19 @@ generation that claims rows it no longer holds is rebuilt rather than served as 
 both the active and the passive read.
 
 The index judges an append from its own recorded size and boundary digest, so it cannot see a
-shrink another cache observed if the file then grows past the indexed size again. Each process
-therefore trusts a published generation only under the ledger's destructive epoch
-(`src/usage/revision-observation.ts`) it was trusted at: its own full ingest records the epoch it
-started under when that epoch is unchanged at publish, and a generation it neither built nor checked
-is trusted only while no destructive change has been observed. An untrusted generation is never
-extended or served: the active refresh ingests in full, an extend-only refresh and
-`usageFilterIndexExtendable` refuse, and the passive read returns no answer.
+shrink another cache observed if the file then grows past the indexed size again. Whether the
+published generation may be extended or served is therefore recorded in the index database, so a
+restarted process, a peer process and a passive reader reach the same verdict. Every process that
+observes a destructive change (`src/usage/revision-observation.ts`) increments
+`source_invalidations` there; a full ingest records the count it started under as the generation's
+`validated_invalidations` inside its publish transaction, which is refused, and the staging retired
+for a retry, if the count moved or the live file changed identity. A generation is valid while the
+two counts are equal: any process adopts it, and only an invalid one is replaced. An invalid
+generation is never extended or served: the active refresh ingests in full, the active reader
+re-checks the counts in its own read transaction, an extend-only refresh and
+`usageFilterIndexExtendable` refuse, and the passive read returns no answer. Until its increment
+commits (the write uses busy timeout 0 and retries with backoff), the observing process also
+declines the generation itself; an increment still unwritten when that process exits is lost.
 
 A staging generation registers itself and its writer pid before its first row. A failed attempt
 ends its own lease in a finally; a process that dies without running it leaves a lease whose pid is
