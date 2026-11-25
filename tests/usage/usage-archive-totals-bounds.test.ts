@@ -61,6 +61,7 @@ describe("usage archive totals bounds", () => {
         path: join(archiveDirectory(), `seg-${index}.jsonl`), mtimeMs: hour + (index + 1) * 3_600_000, segmentRevision: "1", totalsRevision: "1",
       })),
       ambiguous: [],
+      missing: [],
       liveLedgerSince: null,
     };
     const held: Array<WeakRef<object>> = [];
