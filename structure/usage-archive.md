@@ -33,7 +33,6 @@ segment with no usable totals.
 
 - The span cache is keyed on totals path and mtime, so a totals file replaced with the same mtime keeps
   serving the old span.
-- A segment whose rows are all unparsable has a null span and is treated as outside every window.
 - The first read after a restart reads every segment's totals file once, with no budget on that cold
   pass.
 - A segment's byte length is taken from its name, not its actual size, when matching its totals.
@@ -73,14 +72,22 @@ combinations, spans at most `MAX_HOURS_PER_SEGMENT` (744, the retention window's
 would open one more is unparsable), and keeps at most `MAX_OVERLAPS_PER_SEGMENT` (5,000) overlap
 records. A file is therefore at most about 5,744 buckets of roughly 600 bytes of JSON, under 4 MB.
 
-The file carries `version` (`ARCHIVE_TOTALS_FORMAT_VERSION`, 4), the segment's `bytes`, the `rows`
-counted, `unparsableRows`, `firstRowAt`/`lastRowAt`, `buckets`, `overlaps`, `overlapRowsDropped`,
-`hourOffsets` (for each UTC hour, the byte offset of its first row in file order), `overflowRows` per
-dimension, and `foldedRows`. A row is unparsable when it fails to parse or normalize, exceeds the
-1 MiB row ceiling, is a torn final row, has no integer timestamp in `[0, 8.64e15]`, has a non-string
-dimension, or contributes a non-finite or negative sum. A reader serves the file only when the
-version is current and `bytes` equals the segment's length. Anything else is not served, and while
-the trim is suspended it is not rebuilt either: the segment is reported failed (`publishing-suspended`).
+The file carries `version` (`ARCHIVE_TOTALS_FORMAT_VERSION`, 5), the segment's `bytes`, the `rows`
+counted, `unparsableRows`, `firstRowAt`/`lastRowAt` of the counted rows, `buckets`, `overlaps`,
+`overlapRowsDropped`, `hourOffsets` (for each UTC hour, the byte offset of its first row in file
+order), `overflowRows` per dimension, `foldedRows`, `uncounted` and `oversizedRows`. A row is
+unparsable when it fails to parse or normalize, exceeds the 1 MiB row ceiling, is a torn final row,
+has no integer timestamp in `[0, 8.64e15]`, has a non-string dimension, or contributes a non-finite or
+negative sum. Of those, a row that parsed as a usage row but was not counted (no usable timestamp, no
+attribution, a bad sum, or an hour past the cap) is recorded in `uncounted`: its count and the span
+of the finite timestamps among them, taken before the row is dropped. `oversizedRows` were never
+parsed, so they could be stamped anywhere. `uncountedCoverage` reads that as `exact`, a span, or
+`anywhere`; the segment's overlap with a window uses the counted span joined with the uncounted one,
+or always overlaps when it is `anywhere`. A reader serves the file only when the version is 5, or
+the previous version 4 (`ARCHIVE_TOTALS_LEGACY_VERSION`, same buckets, no `uncounted`: its
+`unparsableRows` count as `anywhere`), and `bytes` equals the segment's length. Anything else is not
+served, and while the trim is suspended it is not rebuilt either: the segment is reported failed
+(`publishing-suspended`).
 
 `buildArchiveTotals` reads the segment through `scanUsageLedgerCooperatively` in
 `src/usage/ledger-scanner.ts` with its `path` option, so archive reads share the live ledger's chunked
@@ -157,9 +164,13 @@ Requests count each row once in every total, through the overlap records. `byHou
 rows in chronological order; every other breakdown keeps its 200 top keys and reports the rest as
 `truncated`. `coverage` sums `overflowRows`, `foldedRows` and `overlapRowsDropped` over the window's
 segments and sets `capped` when any is positive, because a filtered or per-dimension figure may then
-undercount. When any segment that may overlap the window has no usable totals, the answer sets
-`complete: false` and carries `summary`, `byHour` and every breakdown as `null`, because those rows are
-uncounted and a number would look exact; otherwise it sets `complete: true`. A segment without
+undercount. `coverage.inexact` lists each segment whose totals cannot make the window exact, with its
+reason: `uncounted-rows` (its uncounted rows may lie in the window), `overlap-dropped` (it holds
+multi-attempt rows whose once-only count was not recorded, so `requests` could count them twice), or
+`folded-keys` (a filter selects a dimension it folded into `(other)`). When any segment that may
+overlap the window has no usable totals or is inexact, the answer sets `complete: false` and carries
+`summary`, `byHour` and every breakdown as `null`, because a number would look exact; otherwise it
+sets `complete: true`. A segment without
 current totals is listed as pending and queued; one whose build failed
 or was refused (`publishing-suspended`) is listed in `coverage.failed`. `coverage.earliestRowAt`/`latestRowAt` are approximate
 (`coverage.approximate`) while some totals file has not been read. `tests/usage/usage-archive-route.test.ts`
@@ -174,7 +185,8 @@ account filter matches a row when any of its attributions matches. Reads run one
 `inArchiveRowsReadQueue` in `src/usage/archive-rows.ts`; a request that waits longer than the
 five-second deadline answers 503 `archive_rows_busy` with `Retry-After: 1`, and the request's own
 abort signal ends its wait or its read at once. Each segment is read from `archiveSeekOffset` (the
-smallest `hourOffsets` offset among hours at or after the hour before `since`'s) to its end: a row is
+smallest `hourOffsets` offset among hours at or after the hour before `since`'s, or byte 0 when its
+uncounted rows, which have no hour offset, may lie in the window) to its end: a row is
 stamped when its request starts and appended when it ends, and no setting bounds a request's
 duration, so a row in the window can follow rows stamped hours later and no offset can prove the
 window's rows are over. A read also stops at `limit + 1` matching rows or the deadline, and a segment

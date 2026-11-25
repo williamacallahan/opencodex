@@ -12,7 +12,7 @@
  */
 import { ATTRIBUTION_DIMENSIONS } from "./archive-row-attribution";
 import {
-  archiveSpan, entryMayOverlap, loadTotals, segmentOverlaps, segmentState, yieldToEventLoop,
+  archiveSpan, entryMayOverlap, loadTotals, segmentOverlaps, segmentState, uncountedMayOverlap, yieldToEventLoop,
   type ArchiveListing, type ArchiveSegmentEntry, type ArchiveSegmentState,
 } from "./archive-query";
 import {
@@ -82,8 +82,17 @@ export interface ArchiveBreakdown {
   truncated: number;
 }
 
+/**
+ * Why a segment's totals cannot give this window an exact figure: rows it did not count may be stamped
+ * in the window (`uncounted-rows`); it could not record every multi-attempt request's once-only count
+ * (`overlap-dropped`); or the filter selects values it folded into `(other)` (`folded-keys`).
+ */
+export type ArchiveInexactReason = "uncounted-rows" | "overlap-dropped" | "folded-keys";
+
 export interface ArchiveTotalsAnswer {
   summary: ArchiveSums;
+  /** Segments in the window whose totals were read but cannot make its figures exact, each with why. */
+  inexactSegments: Array<{ segment: string; reason: ArchiveInexactReason }>;
   /** Every counted segment that may overlap the window, with its span, hour index and build failure. */
   windowSegments: ArchiveSegmentState[];
   segmentsInRange: number;
@@ -152,7 +161,7 @@ export async function answerArchiveTotals(
   const overflowRows = perArchiveDimension(() => 0);
   const answer = {
     windowSegments: [] as ArchiveSegmentState[], pendingSegments: [] as ArchiveSegmentState[], failedSegments: [] as ArchiveSegmentState[],
-    segmentsInRange: 0, unparsableRows: 0, foldedRows: 0, overlapRowsDropped: 0,
+    inexactSegments: [] as ArchiveTotalsAnswer["inexactSegments"], segmentsInRange: 0, unparsableRows: 0, foldedRows: 0, overlapRowsDropped: 0,
   };
 
   /** Fold one segment and let go of its buckets: only the returned state outlives this call. */
@@ -165,6 +174,10 @@ export async function answerArchiveTotals(
       (state.failure ? answer.failedSegments : answer.pendingSegments).push(state);
       return state;
     }
+    const inexact = (reason: ArchiveInexactReason): void => { answer.inexactSegments.push({ segment: state.name, reason }); };
+    if (uncountedMayOverlap(state.built!, since, until)) inexact("uncounted-rows");
+    if (totals.overlapRowsDropped > 0) inexact("overlap-dropped");
+    if (filters.length > 0 && (totals.foldedRows > 0 || filters.some(([dimension]) => totals.overflowRows[dimension] > 0))) inexact("folded-keys");
     answer.unparsableRows += totals.unparsableRows;
     answer.foldedRows += totals.foldedRows;
     answer.overlapRowsDropped += totals.overlapRowsDropped;

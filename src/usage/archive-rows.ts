@@ -12,7 +12,7 @@
  * is reported pending rather than scanned from its start. Segments are read oldest first under the
  * totals' counting rule, so a row is returned once.
  */
-import { segmentOverlaps, type ArchiveSegmentBuilt, type ArchiveSegmentState } from "./archive-query";
+import { segmentOverlaps, uncountedMayOverlap, type ArchiveSegmentBuilt, type ArchiveSegmentState } from "./archive-query";
 import type { ArchiveFilter } from "./archive-answer";
 import { ATTRIBUTION_DIMENSIONS, ROW_DIMENSIONS, rowAttributionKeys, rowDimensionValues } from "./archive-row-attribution";
 import { scanUsageLedgerCooperatively, UsageLedgerRebuildRequiredError } from "./ledger-scanner";
@@ -154,7 +154,8 @@ export async function readArchivedRows(
       outOfTime = true;
       continue;
     }
-    const fromByte = archiveSeekOffset(state.built, query.since);
+    // Rows the totals did not count have no hour offset, so a window they may reach is read from the start.
+    const fromByte = uncountedMayOverlap(state.built, query.since, query.until) ? 0 : archiveSeekOffset(state.built, query.since);
     if (fromByte === undefined) continue;
     const read: ArchiveSegmentRead = { segment: state.name, fromByte, endedBy: "segment-end" };
     segments.push(read);

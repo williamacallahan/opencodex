@@ -33,7 +33,12 @@ import { OVERFLOW_KEY, RETAINED_KEYS } from "./attribution-breakdown";
 import { scanUsageLedgerCooperatively } from "./ledger-scanner";
 
 /** Bump when a bucket's key or sums change meaning; every older file is then rebuilt. */
-export const ARCHIVE_TOTALS_FORMAT_VERSION = 4;
+export const ARCHIVE_TOTALS_FORMAT_VERSION = 5;
+/**
+ * The previous version, still read: its buckets mean the same, but it does not record where the rows
+ * it did not count were stamped, so a reader treats its `unparsableRows` as possibly in any window.
+ */
+export const ARCHIVE_TOTALS_LEGACY_VERSION = 4;
 const HOUR_MS = 60 * 60 * 1000;
 /** About 600 bytes of JSON per bucket, so with the folded hour buckets a totals file stays near 3.5 MB. */
 export const MAX_BUCKETS_PER_SEGMENT = 5_000;
@@ -68,8 +73,20 @@ export interface ArchiveOverlap {
   count: number;
 }
 
+/**
+ * Rows read as usage rows but not counted into any bucket: no integer timestamp a `Date` can hold, no
+ * attribution, a non-finite or negative sum, or an hour past {@link MAX_HOURS_PER_SEGMENT}. `firstAt`
+ * and `lastAt` span those with a finite timestamp, recorded before the row is rejected, so a window
+ * they reach knows its counted figures are missing rows.
+ */
+export interface ArchiveUncountedRows {
+  rows: number;
+  firstAt: number | null;
+  lastAt: number | null;
+}
+
 export interface ArchiveTotalsFile {
-  version: typeof ARCHIVE_TOTALS_FORMAT_VERSION;
+  version: typeof ARCHIVE_TOTALS_FORMAT_VERSION | typeof ARCHIVE_TOTALS_LEGACY_VERSION;
   segment: string;
   /** The segment's byte length when the totals were built. */
   bytes: number;
@@ -96,6 +113,10 @@ export interface ArchiveTotalsFile {
   overflowRows: { [dimension in ArchiveDimension]: number };
   /** Attributions counted in their hour's all-`(other)` bucket because the segment already held its bucket cap. */
   foldedRows: number;
+  /** Version 5 only: the counted rows' exclusions, by where they were stamped. */
+  uncounted?: ArchiveUncountedRows;
+  /** Version 5 only: rows over the 1 MiB ceiling, never parsed, so stamped anywhere. */
+  oversizedRows?: number;
 }
 
 export interface ArchiveHourOffset {
@@ -135,7 +156,7 @@ export async function buildArchiveTotals(segmentPath: string, options: ArchiveTo
   let foldedRows = 0;
   let overlapRowsDropped = 0;
   let rows = 0;
-  let rejectedRows = 0;
+  const uncounted: ArchiveUncountedRows = { rows: 0, firstAt: null, lastAt: null };
   let firstRowAt: number | null = null;
   let lastRowAt: number | null = null;
 
@@ -175,7 +196,12 @@ export async function buildArchiveTotals(segmentPath: string, options: ArchiveTo
       // that would open one more (a hand-edited or wildly misstamped one) is not counted, so neither
       // the hour index nor the per-hour folded buckets can grow past the ceiling.
       if (!attributed || (!hourOffsets.has(hour) && hourOffsets.size >= MAX_HOURS_PER_SEGMENT)) {
-        rejectedRows += 1;
+        uncounted.rows += 1;
+        // Where it was stamped is kept before it is dropped: a window reaching it is not exact.
+        if (Number.isFinite(entry.timestamp)) {
+          uncounted.firstAt = uncounted.firstAt === null ? entry.timestamp : Math.min(uncounted.firstAt, entry.timestamp);
+          uncounted.lastAt = uncounted.lastAt === null ? entry.timestamp : Math.max(uncounted.lastAt, entry.timestamp);
+        }
         return;
       }
       rows += 1;
@@ -213,7 +239,7 @@ export async function buildArchiveTotals(segmentPath: string, options: ArchiveTo
     segment: basename(segmentPath),
     bytes: scan.revision.size,
     rows,
-    unparsableRows: scan.invalidRows + scan.oversizedRows + rejectedRows,
+    unparsableRows: scan.invalidRows + scan.oversizedRows + uncounted.rows,
     firstRowAt,
     lastRowAt,
     buckets,
@@ -222,6 +248,8 @@ export async function buildArchiveTotals(segmentPath: string, options: ArchiveTo
     hourOffsets: [...hourOffsets].map(([hour, offset]) => ({ hour, offset })),
     overflowRows,
     foldedRows,
+    uncounted,
+    oversizedRows: scan.oversizedRows,
   };
   return totals;
 }
@@ -261,6 +289,25 @@ function isOverflowCounts(value: unknown): value is ArchiveTotalsFile["overflowR
   return ARCHIVE_DIMENSIONS.every(dimension => isCount(counts[dimension]));
 }
 
+function isUncounted(value: unknown): value is ArchiveUncountedRows {
+  if (typeof value !== "object" || value === null) return false;
+  const uncounted = value as Record<string, unknown>;
+  const finiteOrNull = (at: unknown): boolean => at === null || (typeof at === "number" && Number.isFinite(at));
+  return isCount(uncounted.rows) && finiteOrNull(uncounted.firstAt) && finiteOrNull(uncounted.lastAt);
+}
+
+/**
+ * Where a segment's totals may be missing rows: `exact` when every usage row it read was counted, a
+ * span when uncounted rows were stamped there, or `anywhere` when that is unknown (oversized rows are
+ * never parsed, and a version-4 file did not record where its unparsable rows were stamped).
+ */
+export function uncountedCoverage(totals: ArchiveTotalsFile): "exact" | "anywhere" | { firstAt: number; lastAt: number } {
+  if (totals.version === ARCHIVE_TOTALS_LEGACY_VERSION) return totals.unparsableRows > 0 ? "anywhere" : "exact";
+  if ((totals.oversizedRows ?? 0) > 0) return "anywhere";
+  const { firstAt, lastAt } = totals.uncounted ?? { firstAt: null, lastAt: null };
+  return firstAt !== null && lastAt !== null ? { firstAt, lastAt } : "exact";
+}
+
 /**
  * The totals file for a segment of `segmentBytes`, or undefined when it is missing, invalid, from
  * another format version, or built from a different length: each of those means it must be rebuilt.
@@ -285,7 +332,8 @@ export async function readArchiveTotals(segmentPath: string, segmentBytes: numbe
   }
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const file = parsed as Record<string, unknown>;
-  if (file.version !== ARCHIVE_TOTALS_FORMAT_VERSION || file.bytes !== segmentBytes
+  if (file.version === ARCHIVE_TOTALS_FORMAT_VERSION && (!isUncounted(file.uncounted) || !isCount(file.oversizedRows))) return undefined;
+  if ((file.version !== ARCHIVE_TOTALS_FORMAT_VERSION && file.version !== ARCHIVE_TOTALS_LEGACY_VERSION) || file.bytes !== segmentBytes
     || !isCount(file.rows) || !isCount(file.unparsableRows) || !isInstant(file.firstRowAt) || !isInstant(file.lastRowAt)
     || !Array.isArray(file.buckets) || !file.buckets.every(isBucket)
     || !Array.isArray(file.overlaps) || !file.overlaps.every(isOverlap(file.buckets.length)) || !isCount(file.overlapRowsDropped)

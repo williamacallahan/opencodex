@@ -7,7 +7,8 @@ import {
   archiveRows, bruteForce, hourOf, jsonl, writeArchiveTotals, writeSegment,
 } from "../helpers/usage-archive-rows";
 import {
-  ARCHIVE_TOTALS_FORMAT_VERSION, archiveTotalsBuildFailure, archiveTotalsPath, buildArchiveTotals, readArchiveTotals,
+  ARCHIVE_TOTALS_FORMAT_VERSION, ARCHIVE_TOTALS_LEGACY_VERSION, archiveTotalsBuildFailure, archiveTotalsPath, buildArchiveTotals, readArchiveTotals,
+  uncountedCoverage,
   type ArchiveTotalsFile,
 } from "../../src/usage/archive-totals";
 import {
@@ -124,14 +125,29 @@ describe("usage archive hourly totals", () => {
     expect(totalsBy(totals!, () => "all").get("all")).toEqual(bruteForce(rows, () => "all").get("all")!);
   });
 
-  test("totals of another format version, or of a different segment length, are not served", async () => {
+  test("totals of an unknown format version, or of a different segment length, are not served", async () => {
     const path = writeSegment(archiveDirectory(), "4244", jsonl(archiveRows(3)));
     const built = await writeArchiveTotals(path);
     const size = statSync(path).size;
     expect(await readArchiveTotals(path, size)).toEqual(built!);
     expect(await readArchiveTotals(path, size + 1)).toBeUndefined();
-    writeFileSync(archiveTotalsPath(path), JSON.stringify({ ...built, version: ARCHIVE_TOTALS_FORMAT_VERSION - 1 }));
+    writeFileSync(archiveTotalsPath(path), JSON.stringify({ ...built, version: ARCHIVE_TOTALS_LEGACY_VERSION - 1 }));
     expect(await readArchiveTotals(path, size)).toBeUndefined();
+    // A current-version file without its uncounted-row record is not one this build wrote.
+    const { uncounted: _uncounted, ...withoutCoverage } = built!;
+    writeFileSync(archiveTotalsPath(path), JSON.stringify(withoutCoverage));
+    expect(await readArchiveTotals(path, size)).toBeUndefined();
+  });
+
+  test("a previous-version file is still served, but its unparsable rows may lie in any window", async () => {
+    const path = writeSegment(archiveDirectory(), "4246", `${jsonl(archiveRows(3))}{"requestId": not json\n`);
+    const built = await writeArchiveTotals(path);
+    const { uncounted: _uncounted, oversizedRows: _oversized, ...legacy } = { ...built!, version: ARCHIVE_TOTALS_LEGACY_VERSION };
+    writeFileSync(archiveTotalsPath(path), JSON.stringify(legacy));
+    const read = await readArchiveTotals(path, statSync(path).size);
+    expect(read?.version).toBe(ARCHIVE_TOTALS_LEGACY_VERSION);
+    expect(uncountedCoverage(read!)).toBe("anywhere");
+    expect(uncountedCoverage(built!)).toBe("exact");
   });
 
   test("the build yields to the event loop between chunks instead of reading the segment in one turn", async () => {

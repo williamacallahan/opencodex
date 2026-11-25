@@ -107,7 +107,7 @@ async function archiveTotalsResponse(ctx: ManagementContext): Promise<Response> 
   const listing = await readArchiveListing();
   const answer = await answerArchiveTotals(listing, since, until, filter);
   queueMissingTotals(answer.windowSegments);
-  const complete = answer.pendingSegments.length === 0 && answer.failedSegments.length === 0;
+  const complete = answer.pendingSegments.length === 0 && answer.failedSegments.length === 0 && answer.inexactSegments.length === 0;
   const capped = answer.foldedRows > 0 || answer.overlapRowsDropped > 0 || ARCHIVE_DIMENSIONS.some(dimension => answer.overflowRows[dimension] > 0);
   const breakdowns = Object.fromEntries(ARCHIVE_DIMENSIONS.map(dimension => [breakdownName(dimension), answer.byDimension[dimension]]));
   return jsonResponse({
@@ -122,6 +122,7 @@ async function archiveTotalsResponse(ctx: ManagementContext): Promise<Response> 
       pending: answer.pendingSegments.length > 0,
       pendingSegments: answer.pendingSegments.map(state => state.name),
       failed: failedCoverage(answer.failedSegments),
+      inexact: answer.inexactSegments,
       duplicateSegments: listing.skipped.length,
       unparsableRows: answer.unparsableRows,
       // Per-segment caps folded some keys into `(other)`: a filtered or per-dimension figure may undercount.
@@ -131,9 +132,10 @@ async function archiveTotalsResponse(ctx: ManagementContext): Promise<Response> 
       overlapRowsDropped: answer.overlapRowsDropped,
       liveLedgerSince: isoOrNull(listing.liveLedgerSince),
     },
-    // A segment that may overlap the window but has no usable totals (pending or failed) leaves its
-    // rows uncounted, so no figure is exact: the answer says so and carries no numbers rather than
-    // numbers that look complete.
+    // A segment that may overlap the window but has no usable totals (pending or failed), or whose
+    // totals left rows, a once-only count or a filtered value out of the window (inexact), leaves the
+    // figures short or doubled: the answer says so and carries no numbers rather than numbers that
+    // look complete.
     ...(complete
       ? { complete: true, summary: answer.summary, byHour: answer.byHour, ...breakdowns }
       : { complete: false, summary: null, byHour: null, ...Object.fromEntries(Object.keys(breakdowns).map(name => [name, null])) }),

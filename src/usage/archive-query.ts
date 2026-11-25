@@ -29,6 +29,7 @@ import {
   archiveTotalsBuildFailure,
   buildArchiveTotalsInBackground,
   readArchiveTotals,
+  uncountedCoverage,
   type ArchiveBuildFailure,
   type ArchiveHourOffset,
   type ArchiveTotalsFile,
@@ -65,6 +66,8 @@ export interface ArchiveSegmentBuilt {
   firstRowAt: number | null;
   lastRowAt: number | null;
   hourOffsets: ArchiveHourOffset[];
+  /** Where rows the totals did not count were stamped (`uncountedCoverage`). */
+  uncounted: ReturnType<typeof uncountedCoverage>;
 }
 
 /** A segment in a window: its span and hour index when its totals are built and current. */
@@ -181,14 +184,33 @@ export async function readArchiveListing(configDir = getConfigDir()): Promise<Ar
   return { segments: counted, skipped, liveLedgerSince: live?.since ?? null };
 }
 
-/** First and last row of every totals file read, kept apart from the buckets so coverage stays exact. */
-const spanCache = new Map<string, { totalsMtimeMs: number; firstRowAt: number | null; lastRowAt: number | null }>();
-
-/** The exact span of a segment whose current totals file has been read, else undefined. */
-export function knownSpan(entry: ArchiveSegmentEntry): { firstRowAt: number | null; lastRowAt: number | null } | undefined {
-  const known = spanCache.get(totalsPathOf(entry));
-  return known !== undefined && known.totalsMtimeMs === entry.totalsMtimeMs ? known : undefined;
+/**
+ * The span a segment's rows can occupy, counted or not, from its totals: the counted rows' span joined
+ * with where its uncounted rows were stamped, or `null` (unknown) when those could be anywhere. Kept
+ * apart from the buckets so overlap decisions stay exact.
+ */
+export function rowCoverage(totals: Pick<ArchiveTotalsFile, "firstRowAt" | "lastRowAt"> & { uncounted: ReturnType<typeof uncountedCoverage> }): { firstRowAt: number | null; lastRowAt: number | null } | null {
+  if (totals.uncounted === "anywhere") return null;
+  if (totals.uncounted === "exact") return { firstRowAt: totals.firstRowAt, lastRowAt: totals.lastRowAt };
+  return {
+    firstRowAt: Math.min(totals.firstRowAt ?? totals.uncounted.firstAt, totals.uncounted.firstAt),
+    lastRowAt: Math.max(totals.lastRowAt ?? totals.uncounted.lastAt, totals.uncounted.lastAt),
+  };
 }
+
+const spanCache = new Map<string, { totalsMtimeMs: number; span: { firstRowAt: number | null; lastRowAt: number | null } | null }>();
+
+/**
+ * The span a segment's rows can occupy, once its current totals file has been read: `null` when its
+ * totals cannot say (uncounted rows could be anywhere), undefined when they have not been read.
+ */
+export function knownSpan(entry: ArchiveSegmentEntry): { firstRowAt: number | null; lastRowAt: number | null } | null | undefined {
+  const known = spanCache.get(totalsPathOf(entry));
+  return known !== undefined && known.totalsMtimeMs === entry.totalsMtimeMs ? known.span : undefined;
+}
+
+const spanReaches = (span: { firstRowAt: number | null; lastRowAt: number | null }, since: number, until: number): boolean =>
+  span.firstRowAt !== null && span.lastRowAt !== null && span.firstRowAt < until && span.lastRowAt >= since;
 
 /**
  * Whether a segment may hold rows in `[since, until)`: decided by its exact span once its totals have
@@ -199,14 +221,19 @@ export function knownSpan(entry: ArchiveSegmentEntry): { firstRowAt: number | nu
  */
 export function entryMayOverlap(entry: ArchiveSegmentEntry, since: number, until: number): boolean {
   const span = knownSpan(entry);
-  if (span) return span.firstRowAt !== null && span.lastRowAt !== null && span.firstRowAt < until && span.lastRowAt >= since;
-  return true;
+  return span ? spanReaches(span, since, until) : true;
 }
 
 export function segmentOverlaps(state: ArchiveSegmentState, since: number, until: number): boolean {
   if (!state.built) return entryMayOverlap(state, since, until);
-  const { firstRowAt, lastRowAt } = state.built;
-  return firstRowAt !== null && lastRowAt !== null && firstRowAt < until && lastRowAt >= since;
+  const span = rowCoverage(state.built);
+  return span ? spanReaches(span, since, until) : true;
+}
+
+/** Whether rows the segment's totals did not count may lie in `[since, until)`. */
+export function uncountedMayOverlap(built: ArchiveSegmentBuilt, since: number, until: number): boolean {
+  if (built.uncounted === "exact") return false;
+  return built.uncounted === "anywhere" || (built.uncounted.firstAt < until && built.uncounted.lastAt >= since);
 }
 
 /** Least-recently-used parsed totals, keyed by totals path and bounded by their bucket count. */
@@ -270,7 +297,7 @@ export async function loadTotals(entry: ArchiveSegmentEntry): Promise<ArchiveTot
     return undefined;
   }
   unusableTotals.delete(key);
-  spanCache.set(key, { totalsMtimeMs: entry.totalsMtimeMs, firstRowAt: totals.firstRowAt, lastRowAt: totals.lastRowAt });
+  spanCache.set(key, { totalsMtimeMs: entry.totalsMtimeMs, span: rowCoverage({ ...totals, uncounted: uncountedCoverage(totals) }) });
   totalsCache.set(key, { totalsMtimeMs: entry.totalsMtimeMs, bytes: entry.bytes, totals });
   cachedBuckets += totals.buckets.length;
   evictTotals();
@@ -281,7 +308,9 @@ export async function loadTotals(entry: ArchiveSegmentEntry): Promise<ArchiveTot
 export function segmentState(entry: ArchiveSegmentEntry, totals: ArchiveTotalsFile | undefined): ArchiveSegmentState {
   return {
     ...entry,
-    built: totals ? { firstRowAt: totals.firstRowAt, lastRowAt: totals.lastRowAt, hourOffsets: totals.hourOffsets } : undefined,
+    built: totals
+      ? { firstRowAt: totals.firstRowAt, lastRowAt: totals.lastRowAt, hourOffsets: totals.hourOffsets, uncounted: uncountedCoverage(totals) }
+      : undefined,
     failure: totals ? undefined : archiveTotalsBuildFailure(entry.path),
   };
 }

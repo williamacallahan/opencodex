@@ -5,7 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { archiveTotalsReads } from "../../src/usage/archive-query";
 import { noteArchiveChanged } from "../../src/usage/archive-segments";
-import { ARCHIVE_TOTALS_FORMAT_VERSION, archiveTotalsPath } from "../../src/usage/archive-totals";
+import { ARCHIVE_TOTALS_FORMAT_VERSION, MAX_HOURS_PER_SEGMENT, MAX_OVERLAPS_PER_SEGMENT, archiveTotalsPath } from "../../src/usage/archive-totals";
 import { usageLogPath } from "../../src/usage/log";
 import type { OcxConfig } from "../../src/types";
 import { ManagementRequest } from "../helpers/management-auth";
@@ -31,6 +31,7 @@ interface TotalsBody {
   coverage: {
     segments: number; pending: boolean; pendingSegments: string[]; failed: Array<{ segment: string; reason: string; code?: string }>;
     duplicateSegments: number; unparsableRows: number; earliestRowAt: string | null; latestRowAt: string | null; liveLedgerSince: string | null;
+    inexact?: Array<{ segment: string; reason: string }>;
   };
   summary: ArchiveSumsBody;
   byHour: Array<{ key: string } & ArchiveSumsBody>;
@@ -45,7 +46,7 @@ interface TotalsBody {
 
 async function archiveGet(query: string): Promise<{ status: number; body: TotalsBody }> {
   const req = new ManagementRequest(`http://localhost/api/usage/archive?${query}`, { method: "GET" });
-  const response = await handleManagementAPI(req, new URL(req.url), config, { refreshCodexCatalog: async () => {} });
+  const response = await handleManagementAPI(req, new URL(req.url), config, {});
   if (!response) throw new Error("no management route for /api/usage/archive");
   return { status: response.status, body: await response.json() as TotalsBody };
 }
@@ -290,6 +291,46 @@ describe("GET /api/usage/archive", () => {
     expect((await archiveGet(query)).body.coverage).toMatchObject({ segments: 1, pending: true });
     await writeArchiveTotals(path);
     expect((await archiveGet(query)).body.summary.requests).toBe(1);
+  });
+
+  test("a matching row in a segment's 745th distinct hour is counted or the total is declined, never dropped", async () => {
+    const rows = archiveRows(MAX_HOURS_PER_SEGMENT + 1, HOUR);
+    await builtSegment("516", rows);
+    const last = rows.at(-1)!.timestamp;
+    const { body } = await archiveGet(window(last, last + HOUR));
+    // The raw-row oracle for this window is one request.
+    if (body.complete) expect(body.summary.requests).toBe(1);
+    else expect(body.coverage.inexact).toEqual([{ segment: expect.stringContaining("_516-"), reason: "uncounted-rows" }]);
+    if (!body.complete) expect(body.summary).toBeNull();
+    // A window over hours the segment counted stays exact.
+    const early = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR));
+    expect(early.body).toMatchObject({ complete: true });
+    expect(early.body.summary.requests).toBe(2);
+  });
+
+  test("multi-attempt requests past the overlap cap are counted once each or the total is declined", async () => {
+    const attempt = (ordinal: number, provider: string) => ({
+      ordinal, provider, model: "m", adapter: "openai-responses", status: 200, durationMs: 1, sendCount: 1, recoveryKinds: [],
+      usageStatus: "reported", usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    // 101 providers give 5,050 distinct pairs, fifty more than a segment records.
+    const rows: unknown[] = [];
+    for (let left = 0; left < 101; left++) {
+      for (let right = left + 1; right < 101; right++) {
+        rows.push({
+          requestId: `pair-${left}-${right}`, timestamp: ARCHIVE_FIRST_ROW_AT, provider: "combo", model: "c", status: 200, durationMs: 2,
+          usageStatus: "reported", usage: { inputTokens: 2, outputTokens: 2 },
+          attempts: [attempt(1, `provider-${left}`), attempt(2, `provider-${right}`)],
+        });
+      }
+    }
+    expect(rows.length).toBeGreaterThan(MAX_OVERLAPS_PER_SEGMENT);
+    await builtSegment("517", rows);
+    const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR));
+    // The raw-row oracle counts each request once.
+    if (body.complete) expect(body.summary.requests).toBe(rows.length);
+    else expect(body.coverage.inexact).toEqual([{ segment: expect.stringContaining("_517-"), reason: "overlap-dropped" }]);
+    if (!body.complete) expect(body.summary).toBeNull();
   });
 
   test("coverage reports the per-segment caps, so a caller knows a breakdown may fold keys", async () => {
