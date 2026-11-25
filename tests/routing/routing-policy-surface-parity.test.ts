@@ -460,7 +460,9 @@ describe("a policy fallback candidate receives the caller's intent", () => {
     } as OcxConfig;
   }
 
-  async function secondCandidateBody(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async function candidateBodies(
+    path: string, body: Record<string, unknown>, config = fallbackConfig(),
+  ): Promise<Record<string, Record<string, unknown>>> {
     takeSpendHome();
     const sent: Record<string, Record<string, unknown>> = {};
     const realFetch = globalThis.fetch;
@@ -483,14 +485,18 @@ describe("a policy fallback candidate receives the caller's intent", () => {
       const response = await handler(new Request(`http://localhost${path}`, {
         method: "POST", headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
         body: JSON.stringify(body),
-      }), fallbackConfig(), { model: "", provider: "" });
+      }), config, { model: "", provider: "" });
       await response.text();
       expect(response.status).toBe(200);
     } finally {
       globalThis.fetch = realFetch;
     }
     expect(sent["a.fixture.test"]).toBeDefined();
-    return sent["b.fixture.test"] ?? {};
+    return sent;
+  }
+
+  async function secondCandidateBody(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return (await candidateBodies(path, body))["b.fixture.test"] ?? {};
   }
 
   test("a Messages effort survives a first candidate with an empty effort ladder", async () => {
@@ -508,5 +514,18 @@ describe("a policy fallback candidate receives the caller's intent", () => {
   ] as const)("a native Responses retry keeps %s", async (_label, selector, field, expected) => {
     const sent = await secondCandidateBody("/v1/responses", { ...selector, stream: false, input: "hello" });
     expect(sent[field]).toBe(expected);
+  });
+
+  test("a Messages sampling control skips only the Responses candidate that rejects it", async () => {
+    const config = fallbackConfig();
+    config.providers.a = { adapter: "openai-responses", baseUrl: "https://a.fixture.test/v1", authMode: "key", apiKey: "a",
+      models: ["m0"], noTemperatureModels: ["m0"], noTopPModels: ["m0"], retryOn429: { enabled: false } };
+    const sent = await candidateBodies("/v1/messages", {
+      model: MODEL, max_tokens: 64, stream: false, temperature: 0.3, top_p: 0.9,
+      messages: [{ role: "user", content: "hello" }],
+    }, config);
+    expect(sent["a.fixture.test"]).not.toHaveProperty("temperature");
+    expect(sent["a.fixture.test"]).not.toHaveProperty("top_p");
+    expect(sent["b.fixture.test"]).toMatchObject({ temperature: 0.3, top_p: 0.9 });
   });
 });

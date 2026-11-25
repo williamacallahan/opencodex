@@ -331,26 +331,33 @@ export function stripCanonicalOnlyInputItems(body: unknown): unknown {
 }
 
 /**
- * Sampling fields a model on the provider's `noStopModels` / `noPenaltyModels` list rejects on
- * every wire. Claude inbound translates `stop_sequences` into a Responses `stop`
- * (`src/claude/inbound.ts`), and a direct Responses caller can send penalties. Some listed models
- * only have the Responses wire (xAI grok-4.20-multi-agent-0309 answers Chat Completions with 400),
- * so the Chat adapter's omission cannot cover them. Returns the input unchanged when nothing is
- * removed, so the caller-owned raw body is never mutated.
+ * Sampling fields a model on the provider's `noTemperatureModels` / `noTopPModels` /
+ * `noStopModels` / `noPenaltyModels` list rejects on every wire. Claude inbound translates
+ * `stop_sequences` into a Responses `stop` (`src/claude/inbound.ts`), and a direct Responses
+ * caller can send penalties. Some listed models only have the Responses wire (xAI
+ * grok-4.20-multi-agent-0309 answers Chat Completions with 400), so the Chat adapter's omission
+ * cannot cover them. A combo or policy route keeps the caller's temperature and top_p in its shared
+ * body for later candidates, so this per-target copy is where a rejecting model loses them.
+ * Returns the input unchanged when nothing is removed, so the caller-owned raw body is never
+ * mutated.
  */
 export function stripRejectedSamplingParams(
   body: unknown,
-  provider: { noStopModels?: string[]; noPenaltyModels?: string[] },
+  provider: { noTemperatureModels?: string[]; noTopPModels?: string[]; noStopModels?: string[]; noPenaltyModels?: string[] },
   modelId: string,
 ): unknown {
   if (!isPlainObject(body)) return body;
-  const dropStop = Object.hasOwn(body, "stop") && modelInList(provider.noStopModels, modelId);
-  const penalties = ["presence_penalty", "frequency_penalty"].filter(field => Object.hasOwn(body, field));
-  const dropPenalties = penalties.length > 0 && modelInList(provider.noPenaltyModels, modelId);
-  if (!dropStop && !dropPenalties) return body;
+  const dropped = [
+    ...(Object.hasOwn(body, "temperature") && modelInList(provider.noTemperatureModels, modelId) ? ["temperature"] : []),
+    ...(Object.hasOwn(body, "top_p") && modelInList(provider.noTopPModels, modelId) ? ["top_p"] : []),
+    ...(Object.hasOwn(body, "stop") && modelInList(provider.noStopModels, modelId) ? ["stop"] : []),
+    ...(modelInList(provider.noPenaltyModels, modelId)
+      ? ["presence_penalty", "frequency_penalty"].filter(field => Object.hasOwn(body, field))
+      : []),
+  ];
+  if (dropped.length === 0) return body;
   const next = { ...body };
-  if (dropStop) delete next.stop;
-  if (dropPenalties) for (const field of penalties) delete next[field];
+  for (const field of dropped) delete next[field];
   return next;
 }
 

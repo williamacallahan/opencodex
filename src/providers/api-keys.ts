@@ -284,7 +284,7 @@ export function addProviderApiKey(config: OcxConfig, name: string, key: string, 
           const activeCandidate = stored.find(({ id }) => !pool.find(e => e.id === id)?.disabled);
           if (activeCandidate) fresh.apiKey = activeCandidate.marker;
           return { changed: true, selectionChanged: true, value: stored[0]!.id };
-        });
+        }, undefined, { callbackWritesOutsideConfig: true });
         if (committed.status === "committed") {
           invalidateResolvedProviderKeyCache();
           return { id: committed.value };

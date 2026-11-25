@@ -116,6 +116,10 @@ export function commitProviderApiKeySelection<T>(
   name: string,
   mutation: (provider: OcxProviderConfig) => SelectionMutation<T>,
   expectedSelection?: ProviderApiKeySelection,
+  // Only a mutation that writes the OS keychain (the GCP credential add) skips the unlocked no-op
+  // precheck. Every other caller keeps it: a key rotation that changes nothing must not need the
+  // zero-wait config lock, or a busy lock replaces the upstream refusal with a proxy failure.
+  options: { callbackWritesOutsideConfig?: boolean } = {},
 ): ProviderApiKeyCommit<T> {
   const outcome = mutatePersistedConfig<ProviderApiKeyCommit<T> & { notify?: boolean }>(fresh => {
     const provider = fresh.providers[name];
@@ -134,7 +138,7 @@ export function commitProviderApiKeySelection<T>(
       changed: result.changed || notify,
       value: { status: "committed", provider: structuredClone(provider), value: result.value, notify },
     };
-  }, { callbackWritesOutsideConfig: true });
+  }, options);
   if (outcome.status === "unavailable") return { status: "unavailable" };
   const committed = outcome.value;
   if (committed.status !== "unavailable") config.providers[name] = structuredClone(committed.provider);

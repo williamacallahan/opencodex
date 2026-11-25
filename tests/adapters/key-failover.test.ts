@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -221,6 +222,23 @@ describe("rotateKeyOn429", () => {
     expect(rotateKeyOn429(config, "p", null, now)).toBeNull();
     // after alpha's cooldown expires the pool recovers
     expect(rotateKeyOn429(config, "p", null, now + 61_000)?.apiKey).toBe("key-alpha-000111222333");
+  });
+
+  test("an exhausted pool returns the upstream refusal while another writer holds the config lock", () => {
+    const config = makeConfig({ apiKey: "key-alpha-000111222333", apiKeyPool: pool3() });
+    const now = 1_000_000;
+    rotateKeyOn429(config, "p", null, now);
+    rotateKeyOn429(config, "p", null, now);
+    // Every key now cools; the third 429 changes no config, so it must not need the lock.
+    const lock = new Database(join(home, "config-mutation.sqlite"), { create: true });
+    lock.exec("BEGIN IMMEDIATE");
+    try {
+      expect(rotateKeyOn429(config, "p", null, now)).toBeNull();
+    } finally {
+      lock.exec("ROLLBACK");
+      lock.close();
+    }
+    expect(getKeyCooldownUntil("p", "k3", now)).toBe(now + 60_000);
   });
 
   test("returns null for oauth/forward providers and single-key pools", () => {
