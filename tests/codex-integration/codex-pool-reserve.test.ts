@@ -909,6 +909,31 @@ describe("automatic Luna Reserve selection and shared HTTP/WebSocket wire model"
       }
     } finally { release(); }
   });
+  test("a key scoped to Luna keeps its native compact when the hub moves it to Reserve", async () => {
+    // Reserve is a capacity substitution the hub makes on its own; the key's scope covers the model
+    // its caller selected, as on the ordinary Responses path.
+    reserve(); noReserve(A);
+    const cfg = config(); cfg.providers.openai = { ...base, codexAccountMode: "pool" };
+    cfg.apiKeys = [{ id: "luna-only", name: "luna-only", key: "ocx_data_" + "f".repeat(40), createdAt: "2026-11-25T00:00:00Z",
+      allowedModels: ["openai/gpt-6-luna"] }];
+    const sends: Array<{ url: string; model: string }> = [];
+    spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const model = (await request.json()).model as string;
+      sends.push({ url: request.url, model });
+      return Response.json({ id: "resp_pool_reserve", object: "response", status: "completed", created_at: 1,
+        model, output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } });
+    }, { preconnect() {} }));
+    const release = acquireOwnedSpendHome();
+    try {
+      const response = await handleResponsesCompact(new Request("http://localhost/v1/responses/compact", { method: "POST",
+        headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "openai/gpt-6-luna", input: "ping", stream: false }),
+      }), cfg, { model: "", provider: "" }, undefined, { kind: "configured", keyId: "luna-only", source: "bearer" });
+      await response.text();
+      expect(response.status).toBe(200);
+      expect(sends).toEqual([{ url: `${CODEX_RESPONSES_HTTP_URL}/compact`, model: "gpt-reserve" }]);
+    } finally { release(); }
+  });
 });
 
 describe("request-local native Luna capacity intent", () => {

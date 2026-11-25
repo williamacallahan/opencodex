@@ -1234,12 +1234,15 @@ export async function handleResponsesCompact(
         }
         // The adapter's wire-model projection, then its per-model sampling filter for this physical
         // send, matched against the final model and the catalog ids from before any rewrite.
-        const projected = poolReserveWireBody({ ...replayBody as typeof compactBody, model: compactWireModelId(sendProvider, route.modelId) }, sendProvider);
-        // The one authorization of the model this native send emits, after the virtual, bracket and
-        // Reserve projections and for this attempt's provider (a proactive or queued key pick can
-        // rebuild it), against the scope captured at admission. A denial throws before any byte is
-        // sent and localDispatchRefusal answers 403.
-        assertRouteAllowedByScope(admissionScope, clientModelLabel, { providerName: route.providerName, modelId: projected.model });
+        // The one authorization of the model this native send emits, after the virtual and bracket
+        // projections and for this attempt's provider (a proactive or queued key pick can rebuild
+        // it), against the scope captured at admission. A denial throws before any byte is sent and
+        // localDispatchRefusal answers 403. The Reserve move below is the hub's own capacity
+        // substitution, not the caller's selection, so, as on the ordinary Responses path, it is
+        // not scoped.
+        const wireModelId = compactWireModelId(sendProvider, route.modelId);
+        assertRouteAllowedByScope(admissionScope, clientModelLabel, { providerName: route.providerName, modelId: wireModelId });
+        const projected = poolReserveWireBody({ ...replayBody as typeof compactBody, model: wireModelId }, sendProvider);
         return stripRejectedSamplingParams(projected, sendProvider, [selectedModelId, route.modelId]) as typeof compactBody;
       };
       const doFetch = (upstreamRecovery?: UpstreamSendRecovery) => fetchWithHeaderTimeout(
