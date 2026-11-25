@@ -48,6 +48,30 @@ function invalidateLedgerReaders(): void {
   try { rehydrateRequestLogsAfterLedgerReplacement(); } catch { /* the ring refills as rows arrive */ }
 }
 
+/** Builds the hourly totals of a segment a trim just published. */
+type SegmentPublishedHook = (segmentPath: string) => unknown;
+
+const scheduleSegmentTotals: SegmentPublishedHook = async segmentPath => {
+  const { scheduleArchiveTotalsBuild } = await import("../usage/archive-totals");
+  await scheduleArchiveTotalsBuild(segmentPath);
+};
+let onSegmentPublished: SegmentPublishedHook = scheduleSegmentTotals;
+
+/**
+ * Runs after the trim returned, in its own async chain: the ledger is already published, so a totals
+ * build that fails costs only a lazy rebuild when the archive is next read, never the trim.
+ */
+function buildTotalsAfterTrim(segmentPath: string): void {
+  const hook = onSegmentPublished;
+  void (async () => {
+    try {
+      await hook(segmentPath);
+    } catch (error) {
+      console.warn(`[usage-retention] the ledger was trimmed but the archive segment's hourly totals could not be built: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  })();
+}
+
 function enforceNow(): void {
   // Re-entrancy guard, not a lock. The compaction's own publication writes nothing through
   // appendUsageEntry -- this exists so a future caller cannot start a second pass over a file
@@ -56,7 +80,10 @@ function enforceNow(): void {
   enforcing = true;
   try {
     const result = enforceUsageLedgerSizeLimit(configuredMaxBytes);
-    if (result.kind === "replaced") invalidateLedgerReaders();
+    if (result.kind === "replaced") {
+      invalidateLedgerReaders();
+      buildTotalsAfterTrim(result.archivePath);
+    }
   } catch (error) {
     // Never fail a request because history could not be trimmed. The limit is not enforced and
     // says so; the next append tries again from a fresh revision.
@@ -86,9 +113,13 @@ function scheduleEnforcement(): void {
   scheduledEnforcement.unref?.();
 }
 
-/** Install or update the policy. `undefined` removes the hook entirely. */
-export function setUsageLedgerRetention(maxBytes: number | undefined): void {
+/**
+ * Install or update the policy. `undefined` removes the hook entirely. `onSegmentPublished` replaces
+ * the totals build that follows each trim; only a test that needs that build to fail passes it.
+ */
+export function setUsageLedgerRetention(maxBytes: number | undefined, options: { onSegmentPublished?: SegmentPublishedHook } = {}): void {
   configuredMaxBytes = maxBytes;
+  onSegmentPublished = options.onSegmentPublished ?? scheduleSegmentTotals;
   if (scheduledEnforcement !== null) {
     clearTimeout(scheduledEnforcement);
     scheduledEnforcement = null;

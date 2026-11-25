@@ -705,8 +705,8 @@ function finalizeThroughput(totals: UsageSummaryTotals): void {
   totals.throughputTokensPerSec = tokensPerSecond(totals.throughputOutputTokens ?? 0, totals.throughputDurationMs!) ?? undefined;
 }
 
-function addEstimatedCost(
-  totals: UsageSummaryTotals,
+export function addEstimatedCost(
+  totals: Pick<UsageSummaryTotals, "estimatedCostUsd" | "pricedRequests" | "unpricedRequests" | "unmeteredRequests">,
   entry: Pick<PersistedUsageEntry, "usageStatus" | "usage" | "attempts">,
   costInfo: EntryCostInfo,
 ): void {

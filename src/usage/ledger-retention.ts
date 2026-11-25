@@ -28,6 +28,15 @@ import { getConfigDir } from "../config";
 import { atomicWriteFileStreamed } from "../config/atomic-write";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
 import {
+  archiveSegmentName,
+  firstRowBoundary,
+  parseArchiveSegmentName,
+  removeArchiveSegment,
+  removeOrphanArchiveTotals,
+  segmentTimeLabel,
+  usageArchiveDirectory,
+} from "./archive-segments";
+import {
   currentUsageLogRevision,
   exactFileIdentity,
   usageLogIdentityKey,
@@ -57,27 +66,8 @@ export class UsageLedgerRevisionChangedError extends Error {
 export type UsageLedgerRetentionResult =
   | { kind: "disabled" }
   | { kind: "unchanged"; currentBytes: number }
-  | { kind: "replaced"; currentBytes: number; removedBytes: number }
+  | { kind: "replaced"; currentBytes: number; removedBytes: number; archivePath: string }
   | { kind: "deferred"; currentBytes: number; reason: "revision-changed" | "no-boundary" };
-
-/**
- * The first LF at or after `from`, so the retained span starts on a row boundary.
- *
- * Any nonempty suffix that is not LF-terminated is uncommitted by the scanner's definition, even
- * if it happens to parse. Starting anywhere but after an LF would publish half a row as a whole
- * one, which is the shape that makes a ledger unreadable rather than merely shorter.
- */
-function firstRowBoundary(fd: number, from: number, end: number): number | null {
-  const buffer = Buffer.allocUnsafe(COPY_CHUNK_BYTES);
-  for (let position = from; position < end;) {
-    const read = readSync(fd, buffer, 0, Math.min(buffer.byteLength, end - position), position);
-    if (read <= 0) return null;
-    const index = buffer.subarray(0, read).indexOf(0x0a);
-    if (index >= 0) return position + index + 1;
-    position += read;
-  }
-  return null;
-}
 
 function copyRange(sourceFd: number, targetFd: number, from: number, to: number): void {
   const buffer = Buffer.allocUnsafe(COPY_CHUNK_BYTES);
@@ -90,51 +80,14 @@ function copyRange(sourceFd: number, targetFd: number, from: number, to: number)
   }
 }
 
-function readRange(fd: number, from: number, to: number): Buffer {
-  const bytes = Buffer.allocUnsafe(to - from);
-  for (let offset = 0; offset < bytes.byteLength;) {
-    const read = readSync(fd, bytes, offset, bytes.byteLength - offset, from + offset);
-    if (read <= 0) throw new Error("usage ledger shrank while it was read");
-    offset += read;
-  }
-  return bytes;
-}
-
-function rowTimestamp(line: Buffer): Date | undefined {
-  let row: unknown;
-  try {
-    row = JSON.parse(line.toString("utf8"));
-  } catch {
-    // A hand-edited or torn row cannot name the segment; the next row may.
-    return undefined;
-  }
-  const at = typeof row === "object" && row !== null && "timestamp" in row && typeof row.timestamp === "number"
-    ? new Date(row.timestamp)
-    : undefined;
-  return at && !Number.isNaN(at.getTime()) ? at : undefined;
-}
-
-/** Names a segment whose cut span holds no row with a usable timestamp, in place of the row time. */
-const UNTIMED_SEGMENT_MARKER = "untimed";
-/** Rows read for a timestamp before the segment is named from the trim time instead. */
-const MAX_TIMESTAMP_SCAN_ROWS = 64;
 /** A segment this young may belong to a trim still running in another process, short of its rename. */
 const UNPUBLISHED_SEGMENT_MIN_AGE_MS = 5 * 60 * 1000;
 
-/**
- * The name prefix of the segment archiving `[0, end)`: the timestamp of the first row in that span
- * that parses with a numeric one, else the marker plus the trim time. A row that cannot name it
- * never stops the trim, which would otherwise leave the ledger growing past its limit for good.
- */
-function segmentTimeLabel(fd: number, end: number, now: Date): string {
-  for (let position = 0, rows = 0; position < end && rows < MAX_TIMESTAMP_SCAN_ROWS; rows++) {
-    const rowEnd = firstRowBoundary(fd, position, end);
-    if (rowEnd === null) break;
-    const at = rowTimestamp(readRange(fd, position, rowEnd - 1));
-    if (at) return at.toISOString().replaceAll(":", "-");
-    position = rowEnd;
-  }
-  return `${UNTIMED_SEGMENT_MARKER}-${now.toISOString().replaceAll(":", "-")}`;
+/** Segments of the ledger file with this inode; another writer's in-flight `.tmp` and totals files never match. */
+function segmentsOf(directory: string, ino: string): string[] {
+  return readdirSync(directory, { withFileTypes: true })
+    .filter(entry => entry.isFile() && parseArchiveSegmentName(entry.name)?.ino === ino)
+    .map(entry => entry.name);
 }
 
 /**
@@ -146,17 +99,12 @@ function segmentTimeLabel(fd: number, end: number, now: Date): string {
  * still the ledger's own prefix, and never while it is young enough to be another process's trim
  * that has not reached its rename yet.
  */
-/** Another writer's temp file, named by `atomicWriteFileStreamed` while it copies; its rename is still ahead. */
-const isInFlightTemp = (name: string): boolean => name.endsWith(".tmp");
-
 function removeUnpublishedSegments(directory: string, sourceFd: number, sourceIno: string, sourceSize: number, now: number): void {
-  const marker = `_${sourceIno}-`;
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.includes(marker) || isInFlightTemp(entry.name)) continue;
-    const path = join(directory, entry.name);
+  for (const name of segmentsOf(directory, sourceIno)) {
+    const path = join(directory, name);
     const stat = statSync(path);
     if (stat.size > sourceSize || now - stat.mtimeMs < UNPUBLISHED_SEGMENT_MIN_AGE_MS) continue;
-    if (isPrefixOf(path, stat.size, sourceFd)) unlinkSync(path);
+    if (isPrefixOf(path, stat.size, sourceFd)) removeArchiveSegment(directory, name);
   }
 }
 
@@ -168,15 +116,14 @@ function removeUnpublishedSegments(directory: string, sourceFd: number, sourceIn
  */
 function removeSupersededSegments(archivePath: string, sourceIno: string): void {
   const directory = dirname(archivePath);
-  const marker = `_${sourceIno}-`;
   const archiveFd = openSync(archivePath, "r");
   try {
     const archiveSize = Number(fstatSync(archiveFd).size);
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (!entry.isFile() || !entry.name.includes(marker) || isInFlightTemp(entry.name) || path === archivePath) continue;
+    for (const name of segmentsOf(directory, sourceIno)) {
+      const path = join(directory, name);
+      if (path === archivePath) continue;
       const size = statSync(path).size;
-      if (size <= archiveSize && isPrefixOf(path, size, archiveFd)) unlinkSync(path);
+      if (size <= archiveSize && isPrefixOf(path, size, archiveFd)) removeArchiveSegment(directory, name);
     }
   } finally {
     closeSync(archiveFd);
@@ -209,6 +156,7 @@ function isPrefixOf(path: string, size: number, ledgerFd: number): boolean {
  * segment's OLDEST row, while the file is written by the trim, after every row it holds was
  * appended, so its mtime is never earlier than any of them. An expired mtime therefore proves
  * every row in the file is past the floor. Any file counts, so a temp a crash left behind ages out too.
+ * A totals file is built after its segment, so its own mtime says nothing; it goes with its segment.
  */
 function pruneUsageArchive(directory: string, now: number): void {
   const cutoff = now - USAGE_ARCHIVE_RETENTION_DAYS * DAY_MS;
@@ -217,6 +165,7 @@ function pruneUsageArchive(directory: string, now: number): void {
     const path = join(directory, entry.name);
     if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
   }
+  removeOrphanArchiveTotals(directory);
 }
 
 /**
@@ -228,12 +177,12 @@ function pruneUsageArchive(directory: string, now: number): void {
  */
 function archiveTrimmedSpan(sourceFd: number, start: number, source: UsageLogRevision): string {
   const configDir = getConfigDir();
-  const directory = join(configDir, "usage-archive");
+  const directory = usageArchiveDirectory(configDir);
   try {
     const now = new Date();
     pruneUsageArchive(directory, now.getTime());
     removeUnpublishedSegments(directory, sourceFd, source.ino, source.size, now.getTime());
-    const path = join(directory, `${segmentTimeLabel(sourceFd, start, now)}_${source.ino}-${start}.jsonl`);
+    const path = join(directory, archiveSegmentName(segmentTimeLabel(sourceFd, start, now), source.ino, start));
     // Uninstall removes an owned directory with everything in it, so one manifest entry covers
     // every segment; one entry per segment would fill the capped manifest in about a year.
     recordOwnedConfigPath(configDir, directory);
@@ -339,7 +288,7 @@ export function enforceUsageLedgerSizeLimit(
       const failedPath = detail && "path" in detail && typeof detail.path === "string" ? detail.path : archivePath;
       console.warn(`[usage-retention] the ledger was trimmed but a superseded archive segment could not be removed (${code}): ${failedPath}`);
     }
-    return { kind: "replaced", currentBytes: captured.size - start, removedBytes: start };
+    return { kind: "replaced", currentBytes: captured.size - start, removedBytes: start, archivePath };
   } catch (error) {
     if (error instanceof UsageLedgerRevisionChangedError) {
       return { kind: "deferred", currentBytes: captured.size, reason: "revision-changed" };

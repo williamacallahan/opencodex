@@ -1046,6 +1046,19 @@
       ]
     },
     {
+      "path": "usage-archive.md",
+      "tier": 5,
+      "title": "Usage Archive Reads",
+      "scope": "Hourly totals built for usage archive segments and the management reads answered from them.",
+      "documents": [
+        "src/usage/archive-segments.ts",
+        "src/usage/archive-totals.ts",
+        "src/usage/ledger-retention.ts",
+        "src/usage/ledger-scanner.ts",
+        "src/server/usage-ledger-retention.ts"
+      ]
+    },
+    {
       "path": "usage-client-attribution.md",
       "tier": 5,
       "title": "Usage Client Attribution",
