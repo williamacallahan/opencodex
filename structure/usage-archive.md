@@ -153,9 +153,11 @@ same value but scans the generation (47 ms warm and 873 ms cold for 653,415 rows
 ledger), since no index leads with `(generation, timestamp)`. A read only reads that metadata
 (0.4 ms). It never ingests to answer: inline catch-up once held the rows slot for 950 ms on a dense
 8 MiB suffix and blocked the event loop for 598 ms under SQLite contention. Until the minimum is
-verified, every counted segment in the window is withheld. Once its read is done, an active route
-schedules one shared background refresh (`scheduleUsageFilterIndexRefresh`), and a later read
-answers exactly. On prefixes of the 968 MB clone, that refresh caught up 8 MiB in 0.11 s and 64 MiB
+verified, every counted segment in the window is withheld. An active route schedules one shared
+background refresh (`scheduleUsageFilterIndexRefresh`, via `catchUpLiveLedgerMinimum`) only when its
+read finished, was neither abandoned nor past its deadline, and withheld an in-window segment for
+this reason. A later read then answers exactly. A rows read cut short by its deadline also queues no
+totals builds: its unread totals are not missing. On prefixes of the 968 MB clone, that refresh caught up 8 MiB in 0.11 s and 64 MiB
 in 0.71 s, and never kept a 5 ms timer waiting more than 22 ms. A passive read schedules nothing. Segments are filtered by their loaded span before this check, so a read
 that learns a span agrees with one that knew it already. Ambiguous segments are read only to
 learn their span and are reported: a window one may reach lists it in `coverage.ambiguousSegments`

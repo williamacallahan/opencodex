@@ -677,9 +677,10 @@ The answer comes only from precomputed hourly totals, never from the rows themse
   That time comes from the usage filter index for the exact current `usage.jsonl`, not from its
   first row, since a restored `usage.jsonl` can hold earlier rows after it. When the index is
   behind `usage.jsonl`, missing, or invalid, `liveLedgerSince` is `null`, every archive file in
-  the window is listed in `coverage.ambiguousSegments`, and the answer is incomplete. The read then
-  asks the index to catch up in the background without waiting for it, and a later read answers
-  without any other action. While
+  the window is listed in `coverage.ambiguousSegments`, and the answer is incomplete. A read that
+  finished and withheld a file for this reason asks the index to catch up in the background
+  without waiting for it, and a later read answers without any other action. A cancelled or
+  timed-out read, and one that withheld nothing, starts no index work. While
   some archive file has no totals yet, its first row comes from its file name and its last row from
   its modification time, and `coverage.approximate` is `true`.
 - `coverage.pending` is `true` when an archive file in the window has no totals yet and no build

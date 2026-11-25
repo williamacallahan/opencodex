@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -8,6 +8,7 @@ import { handleManagementAPI } from "../../src/server/management-api";
 import { knownSpan, loadTotals, loadWindowSegments, readArchiveListing, segmentMayOverlapNow } from "../../src/usage/archive-query";
 import { noteArchiveChanged } from "../../src/usage/archive-segments";
 import { inArchiveRowsReadQueue, readArchivedRows } from "../../src/usage/archive-rows";
+import { usageFilterIndexPath } from "../../src/usage/filter-index";
 import * as ledgerScannerModule from "../../src/usage/ledger-scanner";
 import { resetUsageReadCacheForTests, usageLogPath } from "../../src/usage/log";
 import type { OcxConfig } from "../../src/types";
@@ -185,6 +186,53 @@ describe("GET /api/usage/archive/rows", () => {
     // The whole background ingest never kept a 5 ms timer waiting for long.
     expect(longestGap).toBeLessThan(250);
   }, 90_000);
+
+  test("a rows request abandoned during its last totals stat starts no index work and queues no build", async () => {
+    const path = await builtSegment("608", archiveRows(4, 60_000));
+    const totalsPath = path.replace(/\.jsonl$/, ".hourly.json");
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), jsonl(archiveRows(50, 60_000, 100).map(row => ({ ...row, timestamp: row.timestamp + 24 * HOUR }))));
+    const query = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR);
+    const request = new AbortController();
+    const realStat = fsPromises.stat;
+    let totalsStats = 0;
+    // A load stats the totals file once before reading it and once in its final check.
+    const stats = spyOn(fsPromises, "stat").mockImplementation((async (...args: Parameters<typeof fsPromises.stat>) => {
+      const result = await realStat(...args);
+      if (String(args[0]) === totalsPath && ++totalsStats === 2) request.abort();
+      return result;
+    }) as typeof fsPromises.stat);
+    const realScan = ledgerScannerModule.scanUsageLedgerCooperatively;
+    let ledgerScans = 0;
+    const scans = spyOn(ledgerScannerModule, "scanUsageLedgerCooperatively").mockImplementation(options => {
+      if (options.path === undefined || options.path === usageLogPath()) ledgerScans += 1;
+      return realScan(options);
+    });
+    try {
+      const req = new ManagementRequest(`http://localhost/api/usage/archive/rows?${query}`, { method: "GET", signal: request.signal });
+      const response = await handleManagementAPI(req, new URL(req.url), config, {});
+      expect((await response!.json() as RowsBody).endedBy).toBe("deadline");
+      await Bun.sleep(300);
+    } finally {
+      stats.mockRestore();
+      scans.mockRestore();
+    }
+    expect(existsSync(usageFilterIndexPath(home))).toBe(false);
+    expect(ledgerScans).toBe(0);
+    // Its valid totals were not queued as missing: the next read finds them, not a refused build.
+    expect((await rowsGet(query)).body.coverage.failed).toEqual([]);
+  });
+
+  test("a totals window no archive segment reaches starts no index work", async () => {
+    await builtSegment("609", archiveRows(4, 60_000));
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), jsonl(archiveRows(50, 60_000, 100).map(row => ({ ...row, timestamp: row.timestamp + 24 * HOUR }))));
+    const outside = ARCHIVE_FIRST_ROW_AT + 10 * 24 * HOUR;
+    const { body } = await managementGet<{ coverage: { ambiguousSegments: string[] } }>(`/api/usage/archive?${window(outside, outside + HOUR)}`);
+    expect(body.coverage.ambiguousSegments).toEqual([]);
+    await Bun.sleep(300);
+    expect(existsSync(usageFilterIndexPath(home))).toBe(false);
+  });
 
   test("a limit returns that many rows and says more matched", async () => {
     await builtSegment("604", archiveRows(30, 60_000));

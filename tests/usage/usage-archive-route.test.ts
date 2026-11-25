@@ -250,7 +250,7 @@ describe("GET /api/usage/archive", () => {
     const liveLabel = iso(live[0]!.timestamp).replaceAll(":", "-");
     await builtSegment(liveIno, live.slice(0, 4), liveLabel);
 
-    const body = await untilLiveLedgerSince(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 24 * HOUR), iso(live[0]!.timestamp));
+    const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 24 * HOUR));
     // Both copies of ledger 505 and the live-head copy reach the window, so it is declined.
     expect(body).toMatchObject({ complete: false, summary: null });
     expect(body.coverage.ambiguousSegments!.filter(name => name.includes("_505-"))).toHaveLength(2);
@@ -258,7 +258,6 @@ describe("GET /api/usage/archive", () => {
     const liveWindow = await archiveGet(window(live[0]!.timestamp, live[0]!.timestamp + HOUR));
     expect(liveWindow.body).toMatchObject({ complete: false, summary: null });
     expect(liveWindow.body.coverage.ambiguousSegments).toEqual([expect.stringContaining(`_${liveIno}-`)]);
-    expect(liveWindow.body.coverage.liveLedgerSince).toBe(iso(live[0]!.timestamp));
   });
 
   test("after a limit change, a newer shorter segment and an older longer one of the same file are both reported, neither counted", async () => {
@@ -269,8 +268,8 @@ describe("GET /api/usage/archive", () => {
     await builtSegment("508", rows.slice(0, 8));
     mkdirSync(dirname(usageLogPath()), { recursive: true });
     writeFileSync(usageLogPath(), jsonl(rows.slice(8)));
-    const body = await untilLiveLedgerSince(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 24 * HOUR), iso(rows[8]!.timestamp));
-    expect(body).toMatchObject({ complete: false, summary: null, coverage: { segments: 0, liveLedgerSince: iso(rows[8]!.timestamp) } });
+    const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 24 * HOUR));
+    expect(body).toMatchObject({ complete: false, summary: null, coverage: { segments: 0 } });
     expect(body.coverage.ambiguousSegments).toHaveLength(2);
   });
 
@@ -551,6 +550,8 @@ describe("GET /api/usage/archive", () => {
 
   test("passive reads of a stable truncated ledger do not keep its rebuild from publishing, and a second truncation during it still does", async () => {
     const rows = archiveRows(40, 60_000).map(row => ({ ...row, timestamp: row.timestamp + 10 * 24 * HOUR }));
+    // A segment in the window, which each read withholds while the live minimum is unverified.
+    await builtSegment("536", archiveRows(3, 60_000));
     mkdirSync(dirname(usageLogPath()), { recursive: true });
     writeFileSync(usageLogPath(), jsonl(rows));
     const query = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR);

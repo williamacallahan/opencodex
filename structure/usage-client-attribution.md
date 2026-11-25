@@ -101,8 +101,9 @@ publishes, so a fresh ticket from every read meanwhile would fail that rebuild's
 time. A different destructive revision during the rebuild still gets a new ticket and still retires
 the staging. A regrowth that restores the last 64 KiB before the indexed
 boundary would otherwise pass the append's boundary digest and keep the old rows and minimum. An
-archive read never ingests to answer. When the minimum is unverified, an active read that has
-finished calls `scheduleUsageFilterIndexRefresh`, which starts one shared refresh per home on a later
+archive read never ingests to answer. When the minimum is unverified, an active read that finished
+within its deadline, and withheld an archive segment for that reason, calls
+`scheduleUsageFilterIndexRefresh`, which starts one shared refresh per home on a later
 turn. That refresh uses busy timeout 0 and retries on timers, so SQLite's synchronous busy wait never
 holds the event loop. It joins no running ingest and does nothing unless the index is still behind. A
 passive read schedules nothing (`structure/usage-archive.md`).

@@ -116,7 +116,7 @@ async function archiveTotalsResponse(ctx: ManagementContext): Promise<Response> 
   const complete = answer.pendingSegments.length === 0 && answer.failedSegments.length === 0 && answer.inexactSegments.length === 0
     && ambiguous.length === 0 && missing.length === 0;
   const capped = answer.foldedRows > 0 || answer.overlapRowsDropped > 0 || ARCHIVE_DIMENSIONS.some(dimension => answer.overflowRows[dimension] > 0);
-  catchUpLiveLedgerMinimum(listing);
+  catchUpLiveLedgerMinimum(listing, answer.liveDuplicateSegments.length, ctx.req.signal);
   // A breakdown whose pricing classes cannot be rebuilt carries them as null rather than a guess.
   const unpriced = new Set(answer.unpricedBreakdowns);
   const breakdowns = Object.fromEntries(ARCHIVE_DIMENSIONS.map(dimension => {
@@ -179,12 +179,13 @@ function parseRowsLimit(params: URLSearchParams): number {
 }
 
 /**
- * A read that withheld segments because the live ledger's minimum was unverified asks the usage
- * filter index to catch up, once its own read is done: in the background, so this request and the
- * next never wait for the ingest, and a later read can answer exactly.
+ * A finished read that withheld an in-window segment only because the live ledger's minimum was
+ * unverified asks the usage filter index to catch up: in the background, so this request and the next
+ * never wait for the ingest, and a later read can answer exactly. An abandoned or expired request, or
+ * one that withheld nothing, starts no maintenance.
  */
-function catchUpLiveLedgerMinimum(listing: Awaited<ReturnType<typeof readArchiveListing>>): void {
-  if (listing.liveLedgerPresent && !listing.liveLedgerVerified) scheduleUsageFilterIndexRefresh();
+function catchUpLiveLedgerMinimum(listing: Awaited<ReturnType<typeof readArchiveListing>>, withheld: number, request: AbortSignal): void {
+  if (withheld > 0 && !listing.liveLedgerVerified && !request.aborted) scheduleUsageFilterIndexRefresh();
 }
 
 async function archiveRowsResponse(ctx: ManagementContext): Promise<Response> {
@@ -214,23 +215,23 @@ async function archiveRowsResponse(ctx: ManagementContext): Promise<Response> {
       listing = { segments: [], ambiguous: [], missing: [], liveLedgerSince: null, liveLedgerPresent: false, liveLedgerVerified: false };
     }
     const loaded = await loadWindowSegments(listing, query.since, query.until, deadline);
-    queueMissingTotals(loaded);
+    // A load cut short by the deadline leaves totals unread, not missing: nothing is queued from it.
+    if (!deadline.aborted) queueMissingTotals(loaded);
     // A segment the live ledger may also hold is withheld and reported, like an ambiguous one.
     const states = loaded.filter(state => !state.built || !mayDuplicateLiveLedger(state, listing));
-    const ambiguous = [
-      ...await ambiguousWindowSegments(listing, query.since, query.until, deadline),
-      ...loaded.filter(state => state.built && mayDuplicateLiveLedger(state, listing)),
-    ];
+    const withheld = loaded.filter(state => state.built && mayDuplicateLiveLedger(state, listing));
+    const ambiguous = [...await ambiguousWindowSegments(listing, query.since, query.until, deadline), ...withheld];
     const missing = await missingWindowSegments(listing, query.since, query.until, deadline);
-    return { listing, ambiguous, missing, result: await readArchivedRows(states, query, deadline) };
+    const result = await readArchivedRows(states, query, deadline);
+    return { listing, ambiguous, missing, result, withheld: deadline.aborted ? 0 : withheld.length };
   }, abandoned);
   if (queued.kind === "busy") {
     const response = jsonResponse({ error: { code: "archive_rows_busy", message: "another archive row read is running; retry shortly" } }, 503, ctx.req, ctx.config);
     response.headers.set("Retry-After", "1");
     return response;
   }
-  const { listing, ambiguous, missing, result } = queued.value;
-  catchUpLiveLedgerMinimum(listing);
+  const { listing, ambiguous, missing, result, withheld } = queued.value;
+  catchUpLiveLedgerMinimum(listing, withheld, abandoned);
   const projectDiagnostics = upstreamDiagnosticLogProjection();
   const pending = result.pending.filter(state => !state.failure);
   return jsonResponse({
