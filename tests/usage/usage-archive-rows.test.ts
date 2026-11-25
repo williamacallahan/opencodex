@@ -27,6 +27,7 @@ interface RowsBody {
   incomplete: boolean;
   coverage: {
     segments: Array<{ segment: string; fromByte: number; endedBy: string }>; pending: boolean; pendingSegments: string[];
+    ambiguousSegments?: string[]; duplicateSegments?: number;
     failed: Array<{ segment: string; reason: string }>;
   };
   error?: { code: string };
@@ -209,6 +210,15 @@ describe("GET /api/usage/archive/rows", () => {
     const expected = rows.filter(row => row.timestamp >= day + HOUR && row.timestamp < day + 2 * HOUR);
     expect(expected.length).toBeGreaterThan(0);
     expect(body.entries.map(entry => entry.requestId)).toEqual(expected.map(row => row.requestId));
+  });
+
+  test("two copies of one ledger are reported and left unread, with the deprecated count beside them", async () => {
+    const rows = archiveRows(4);
+    await builtSegment("615", rows, "untimed-2026-11-02T00-00-00.000Z");
+    await builtSegment("615", rows, "untimed-2026-11-03T00-00-00.000Z");
+    const { body } = await rowsGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR));
+    expect(body).toMatchObject({ entries: [], incomplete: true, coverage: { duplicateSegments: 2 } });
+    expect(body.coverage.ambiguousSegments).toHaveLength(2);
   });
 
   test("an in-window row appended after rows hours later is still returned", async () => {

@@ -127,6 +127,8 @@ async function archiveTotalsResponse(ctx: ManagementContext): Promise<Response> 
       inexact: answer.inexactSegments,
       // Read only to report: neither counted nor skipped, since nothing proves which copy is archived once.
       ambiguousSegments: ambiguous.map(entry => entry.name),
+      // Deprecated: the archive-wide count of those files, kept for existing callers; it decides nothing.
+      duplicateSegments: listing.ambiguous.length,
       unparsableRows: answer.unparsableRows,
       // Per-segment caps folded some keys into `(other)`: a filtered or per-dimension figure may undercount.
       capped,
@@ -206,6 +208,7 @@ async function archiveRowsResponse(ctx: ManagementContext): Promise<Response> {
       pendingSegments: pending.map(state => state.name),
       failed: failedCoverage(result.pending.filter(state => state.failure)),
       ambiguousSegments: ambiguous.map(entry => entry.name),
+      duplicateSegments: listing.ambiguous.length,
       liveLedgerSince: isoOrNull(listing.liveLedgerSince),
     },
   }, 200, ctx.req, ctx.config);

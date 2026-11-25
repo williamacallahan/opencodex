@@ -177,7 +177,11 @@ export function countedArchiveSegments<T extends ArchiveSegmentName>(
   live: LiveLedgerHead | null,
 ): { counted: T[]; ambiguous: T[] } {
   const byInode = new Map<string, T[]>();
-  for (const segment of segments) byInode.set(segment.ino, [...(byInode.get(segment.ino) ?? []), segment]);
+  for (const segment of segments) {
+    const group = byInode.get(segment.ino);
+    if (group) group.push(segment);
+    else byInode.set(segment.ino, [segment]);
+  }
   const counted: T[] = [];
   const ambiguous: T[] = [];
   for (const group of byInode.values()) {

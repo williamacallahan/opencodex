@@ -684,6 +684,10 @@ The answer comes only from precomputed hourly totals, never from the rows themse
   current `usage.jsonl`. Older releases could leave a copy behind that is byte-identical to the
   published file, so these files are neither counted nor skipped, and the answer is incomplete.
   They are only read, never moved or deleted.
+- `coverage.duplicateSegments` is deprecated and kept for existing callers: it is the number of
+  such files in the whole archive, not only in the window, and it no longer decides what is
+  counted. Earlier releases counted the newest of each group and reported the files they skipped
+  here; read `coverage.ambiguousSegments` and `complete` instead.
 
 `GET /api/usage/archive/rows` returns the archived rows themselves, for questions such as which
 requests one workload sent. It takes the same `since`, `until`, and filters, plus an exact

@@ -120,6 +120,7 @@ byte-identical, so neither an mtime nor a name proves which rows are archived on
 `countedArchiveSegments` therefore counts a segment only when it is the only one of its inode and does
 not match the live head; every other segment is `ambiguous`. Ambiguous segments are read only to
 learn their span and are reported: a window one may reach lists it in `coverage.ambiguousSegments`
+(the deprecated `coverage.duplicateSegments` keeps the archive-wide count for existing callers)
 and answers `complete: false` with no numbers (the rows route answers `incomplete: true` and does not
 read it). They are never counted, skipped silently, adopted, or deleted. The live head is cached by
 the same identity `usageLogIdentityKey` uses (device, inode, birth time) and dropped on every

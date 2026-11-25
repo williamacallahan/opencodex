@@ -33,6 +33,7 @@ interface TotalsBody {
     unparsableRows: number; earliestRowAt: string | null; latestRowAt: string | null; liveLedgerSince: string | null;
     inexact?: Array<{ segment: string; reason: string }>;
     ambiguousSegments?: string[];
+    duplicateSegments?: number;
   };
   summary: ArchiveSumsBody;
   byHour: Array<{ key: string } & ArchiveSumsBody>;
@@ -349,6 +350,10 @@ describe("GET /api/usage/archive", () => {
     expect(body.complete).toBe(false);
     expect(body.summary).toBeNull();
     expect(body.coverage.ambiguousSegments?.sort()).toEqual([basename(first), basename(second)].sort());
+    // The deprecated listing-wide count stays for existing callers; it decides nothing.
+    expect(body.coverage.duplicateSegments).toBe(2);
+    const elsewhere = await archiveGet(window(ARCHIVE_FIRST_ROW_AT + 20 * 24 * HOUR, ARCHIVE_FIRST_ROW_AT + 21 * 24 * HOUR));
+    expect(elsewhere.body.coverage).toMatchObject({ ambiguousSegments: [], duplicateSegments: 2 });
     // Both stay where they are, unread by anything but this answer.
     expect(readdirSync(archiveDirectory()).sort()).toEqual([basename(first), basename(second), basename(archiveTotalsPath(first)), basename(archiveTotalsPath(second))].sort());
   });
