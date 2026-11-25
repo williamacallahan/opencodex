@@ -49,7 +49,10 @@ Casual-path consent guards require human interaction before transitioning an und
   turn, because the scanner reads its first chunk before it yields; it reads `usageLogPath(home)` and
   refuses any other file than the one keyed. A completed answer is served for
   `TELEMETRY_PREVIEW_FRESH_MS` (10 minutes) counted from completion, then served while a rebuild picks
-  up late appends, and dropped when the file shrinks or changes without growing. A running build is
+  up late appends. Each entry keeps the ledger revision last observed by a lookup or a completed scan
+  (`src/usage/revision-observation.ts`) and drops its answer when the file shrinks below it or changes
+  without growing; an epoch counter stops a build that started before that observation from
+  publishing after it. A running build is
   never evicted: with both entries building, another key answers `pending` without scanning, and
   admitting a key evicts the least recently used settled entry. Until a build completes the snapshot
   carries `preview: null` with `previewStatus: "pending"`, or `"unavailable"` while a failed build

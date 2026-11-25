@@ -1,5 +1,6 @@
 import { revisionAtPath } from "../usage/ledger-scanner";
-import { usageLogIdentityKey, usageLogPath, usageLogRevisionKey, type UsageLogRevision } from "../usage/log";
+import { usageLogIdentityKey, usageLogPath, type UsageLogRevision } from "../usage/log";
+import { observedUsageRevision, observeUsageRevision, type ObservedUsageRevision } from "../usage/revision-observation";
 import { aggregateTelemetryForDay, type DailyTelemetryAggregate } from "./aggregate";
 
 /**
@@ -27,9 +28,13 @@ interface PreviewEntry {
   identityKey: string;
   day: string;
   running: boolean;
-  completed?: { at: number; aggregate: DailyTelemetryAggregate; size: number; revisionKey: string };
+  completed?: { at: number; aggregate: DailyTelemetryAggregate };
   failedAt?: number;
   lastUsedAt: number;
+  /** The ledger revision last seen by a lookup or a completed scan of this entry. */
+  observed: ObservedUsageRevision;
+  /** Bumped when a lookup sees the file rewritten, so a build started before it cannot publish after it. */
+  epoch: number;
 }
 
 const entries = new Map<string, PreviewEntry>();
@@ -40,6 +45,7 @@ const entries = new Map<string, PreviewEntry>();
  */
 function launch(entry: PreviewEntry): void {
   entry.running = true;
+  const epoch = entry.epoch;
   setTimeout(() => {
     let revision: UsageLogRevision | null = null;
     void aggregateTelemetryForDay(entry.day, {
@@ -49,12 +55,12 @@ function launch(entry: PreviewEntry): void {
     }).then(
       aggregate => {
         entry.running = false;
-        entry.completed = {
-          at: Date.now(),
-          aggregate,
-          size: revision?.size ?? 0,
-          revisionKey: usageLogRevisionKey(revision),
-        };
+        // A rewrite observed while this scan ran makes its answer unknowable; the next lookup rebuilds.
+        if (epoch !== entry.epoch) return;
+        if (observeUsageRevision(entry.observed, revision) === "rewritten") {
+          entry.observed = observedUsageRevision(revision);
+        }
+        entry.completed = { at: Date.now(), aggregate };
         delete entry.failedAt;
       },
       () => {
@@ -63,12 +69,6 @@ function launch(entry: PreviewEntry): void {
       },
     );
   }, 0);
-}
-
-/** A file that shrank, or changed without growing, is no longer the file the answer was read from. */
-function rewrittenSince(completed: NonNullable<PreviewEntry["completed"]>, revision: UsageLogRevision | null): boolean {
-  const size = revision?.size ?? 0;
-  return size < completed.size || (size === completed.size && usageLogRevisionKey(revision) !== completed.revisionKey);
 }
 
 /** Room for a new key: the least recently used entry whose build has settled. A running build is never evicted. */
@@ -96,13 +96,20 @@ export function telemetryPreviewAggregate(day: string, configDir: string, now: n
   let entry = entries.get(key);
   if (!entry) {
     if (!admit()) return { status: "pending" };
-    entry = { path, identityKey, day, running: false, lastUsedAt: now };
+    entry = { path, identityKey, day, running: false, lastUsedAt: now, observed: observedUsageRevision(revision), epoch: 0 };
     entries.set(key, entry);
     launch(entry);
     return { status: "pending" };
   }
   entry.lastUsedAt = now;
-  if (entry.completed && rewrittenSince(entry.completed, revision)) delete entry.completed;
+  // Compared with the last OBSERVED revision: after seeing 170 bytes grow to 510, a rewrite to 340
+  // is a shrink even though 340 is more than the scan read.
+  if (observeUsageRevision(entry.observed, revision) === "rewritten") {
+    delete entry.completed;
+    entry.observed = observedUsageRevision(revision);
+    entry.epoch += 1;
+    if (entry.running) return { status: "pending" };
+  }
   if (entry.running) return entry.completed ? { status: "ready", aggregate: entry.completed.aggregate } : { status: "pending" };
   if (entry.failedAt !== undefined && now - entry.failedAt >= 0 && now - entry.failedAt < FAILED_BUILD_RETRY_MS) {
     return { status: "unavailable" };

@@ -395,4 +395,21 @@ describe("telemetry preview builds", () => {
     await settleTelemetryPreviewBuildForTests();
     expect(requests(telemetryPreviewAggregate(day, dir))).toBe(await oracle(dir));
   });
+
+  test("an answer is dropped when the file shrinks below the size last observed, not the size the scan read", async () => {
+    const dir = home(rows(1));
+    const ledger = join(dir, "usage.jsonl");
+    telemetryPreviewAggregate(day, dir);
+    await settleTelemetryPreviewBuildForTests();
+    expect(telemetryPreviewAggregate(day, dir).status).toBe("ready");
+    nodeFs.appendFileSync(ledger, rows(2)); // observed growth: still the same answer, dated
+    expect(telemetryPreviewAggregate(day, dir).status).toBe("ready");
+    // Rewritten in place to two rows of another day: longer than the scan read, shorter than observed.
+    const otherDay = rows(2).replaceAll(String(at), String(at - 3 * 86_400_000));
+    nodeFs.truncateSync(ledger, 0);
+    nodeFs.appendFileSync(ledger, otherDay);
+    expect(telemetryPreviewAggregate(day, dir).status).toBe("pending");
+    await settleTelemetryPreviewBuildForTests();
+    expect(requests(telemetryPreviewAggregate(day, dir))).toBe(await oracle(dir));
+  });
 });

@@ -610,3 +610,20 @@ test("Continue shows a spinner while the decision is being saved", async () => {
   expect(host.querySelector(".telemetry-consent-card")).toBeNull();
 });
 
+
+test("while the open dialog's preview is pending it reads the status again and keeps the person's checkbox", async () => {
+  setup();
+  const ready = makeStatus();
+  statusResponse = { ...ready, preview: null, previewStatus: "pending" };
+  await mountCard();
+  expect(host.querySelector(".telemetry-preview-pending")?.textContent).toContain("still being prepared");
+  const checkbox = host.querySelector<HTMLInputElement>(".telemetry-consent-checkbox")!;
+  await act(async () => { click(checkbox); });
+  expect(checkbox.checked).toBe(false);
+  statusResponse = ready;
+  await act(async () => { await Bun.sleep(5_150); });
+  expect(calls.filter(call => call.method === "GET")).toHaveLength(2);
+  expect(host.querySelector(".telemetry-preview-json")?.textContent).toContain(`"day": "2026-11-06"`);
+  expect(host.querySelector<HTMLInputElement>(".telemetry-consent-checkbox")!.checked).toBe(false);
+  expect(calls.some(call => call.method === "PUT")).toBe(false);
+}, 10_000);
