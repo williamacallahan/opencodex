@@ -91,7 +91,8 @@ function revisionFromStat(
   };
 }
 
-function revisionAtPath(path: string): UsageLogRevision | null {
+/** The revision of the file at `path`, or null when it is missing; opened without reading a byte. */
+export function revisionAtPath(path: string): UsageLogRevision | null {
   let fd: number;
   try {
     fd = openSync(path, "r");

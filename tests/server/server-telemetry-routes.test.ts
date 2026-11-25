@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleManagementAPI } from "../../src/server/management-api";
@@ -7,7 +7,10 @@ import type { ManagementPrincipal } from "../../src/server/management-auth";
 import type { ManagementRequestIngress } from "../../src/server/management/context";
 import { TELEMETRY_PREVIEW_HASH_PLACEHOLDER, readTelemetryInstallId, resetTelemetryInstallIdMemoForTests, telemetryIdPath } from "../../src/telemetry/install-id";
 import { buildTelemetryStatusSnapshot } from "../../src/telemetry/routes";
-import { resetTelemetryPreviewAggregateForTests, settleTelemetryPreviewBuildForTests } from "../../src/telemetry/preview-aggregate";
+import { resetTelemetryPreviewAggregateForTests, settleTelemetryPreviewBuildForTests, telemetryPreviewAggregate } from "../../src/telemetry/preview-aggregate";
+import { aggregateTelemetryForDay } from "../../src/telemetry/aggregate";
+import * as usageLedgerScanner from "../../src/usage/ledger-scanner";
+import * as nodeFs from "node:fs";
 import { latestCompletedUtcDay, readTelemetryState, recordPendingTelemetryDecision, runTelemetryTick } from "../../src/telemetry/scheduler";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -303,5 +306,93 @@ describe("/api/telemetry management routes", () => {
     expect(config.telemetry).toBeUndefined();
     const status = await call("GET", "/api/telemetry");
     expect(status.body).toMatchObject({ effective: false, decision: "declined" });
+  });
+});
+
+describe("telemetry preview builds", () => {
+  const homes: string[] = [];
+  const day = latestCompletedUtcDay();
+  const at = Date.parse(`${day}T12:00:00.000Z`);
+  const rows = (count: number) => Array.from({ length: count }, (_, index) => `${JSON.stringify({
+    requestId: `r-${index}`, timestamp: at, provider: "openai", model: "gpt-5.5", status: 200, durationMs: 1,
+    usageStatus: "reported", usage: { inputTokens: 10, outputTokens: 5 },
+  })}\n`).join("");
+  const home = (ledger: string | null) => {
+    const dir = mkdtempSync(join(tmpdir(), "ocx-telemetry-preview-"));
+    homes.push(dir);
+    if (ledger !== null) writeFileSync(join(dir, "usage.jsonl"), ledger);
+    return dir;
+  };
+  const requests = (result: ReturnType<typeof telemetryPreviewAggregate>) =>
+    result.status === "ready" ? JSON.stringify(result.aggregate) : result.status;
+  const oracle = async (dir: string) => {
+    const previous = process.env.OPENCODEX_HOME;
+    process.env.OPENCODEX_HOME = dir;
+    try { return JSON.stringify(await aggregateTelemetryForDay(day)); } finally { process.env.OPENCODEX_HOME = previous; }
+  };
+  let scans: ReturnType<typeof spyOn>;
+  let reads: ReturnType<typeof spyOn>;
+  let bytesRead = 0;
+
+  beforeEach(() => {
+    resetTelemetryPreviewAggregateForTests();
+    const originalScan = usageLedgerScanner.scanUsageLedgerCooperatively;
+    scans = spyOn(usageLedgerScanner, "scanUsageLedgerCooperatively").mockImplementation(options => originalScan(options));
+    const realReadSync = nodeFs.readSync;
+    bytesRead = 0;
+    reads = spyOn(nodeFs, "readSync").mockImplementation(((...args: Parameters<typeof nodeFs.readSync>) => {
+      const read = realReadSync(...args);
+      bytesRead += read;
+      return read;
+    }) as typeof nodeFs.readSync);
+  });
+
+  afterEach(async () => {
+    await settleTelemetryPreviewBuildForTests();
+    scans.mockRestore();
+    reads.mockRestore();
+    resetTelemetryPreviewAggregateForTests();
+    for (const dir of homes.splice(0)) removeTreeWithRetry(dir);
+  });
+
+  test("a cold request reads no ledger byte on its own turn, and the completed build equals a full read", async () => {
+    const dir = home(rows(50));
+    expect(telemetryPreviewAggregate(day, dir).status).toBe("pending");
+    expect(bytesRead).toBe(0);
+    await settleTelemetryPreviewBuildForTests();
+    // Positive control for the counter: the background build read the whole file.
+    expect(bytesRead).toBe(statSync(join(dir, "usage.jsonl")).size);
+    bytesRead = 0;
+    expect(requests(telemetryPreviewAggregate(day, dir))).toBe(await oracle(dir));
+    expect(telemetryPreviewAggregate(day, dir, Date.now() + 11 * 60_000).status).toBe("ready");
+  });
+
+  test("two consumers alternating between keys keep both answers, and a third waits while both build", async () => {
+    const dir = home(rows(5));
+    const other = home(rows(3));
+    telemetryPreviewAggregate(day, dir);
+    telemetryPreviewAggregate(day, other);
+    expect(telemetryPreviewAggregate(day, home(rows(1))).status).toBe("pending");
+    await settleTelemetryPreviewBuildForTests();
+    expect(scans).toHaveBeenCalledTimes(2);
+    expect(requests(telemetryPreviewAggregate(day, dir))).toBe(await oracle(dir));
+    expect(requests(telemetryPreviewAggregate(day, other))).toBe(await oracle(other));
+    expect(scans).toHaveBeenCalledTimes(4); // the two oracles; A/B/A started no third preview scan
+  });
+
+  test("each home is read from its own ledger, and a file rewritten in place is never served from its old rows", async () => {
+    const dir = home(rows(40));
+    const empty = home(null);
+    telemetryPreviewAggregate(day, dir);
+    telemetryPreviewAggregate(day, empty);
+    await settleTelemetryPreviewBuildForTests();
+    expect(requests(telemetryPreviewAggregate(day, empty))).toBe(await oracle(empty));
+    expect(requests(telemetryPreviewAggregate(day, dir))).toBe(await oracle(dir));
+    // Same inode, truncated to one row: the 40-row answer is dropped, not served as ready.
+    nodeFs.truncateSync(join(dir, "usage.jsonl"), 0);
+    nodeFs.appendFileSync(join(dir, "usage.jsonl"), rows(1));
+    expect(telemetryPreviewAggregate(day, dir).status).toBe("pending");
+    await settleTelemetryPreviewBuildForTests();
+    expect(requests(telemetryPreviewAggregate(day, dir))).toBe(await oracle(dir));
   });
 });
