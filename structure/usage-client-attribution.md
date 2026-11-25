@@ -134,9 +134,9 @@ without re-reading the ledger.
 
 Rows belong to a generation; a small registry lists every generation and meta names the one
 published. A rebuild stages a fresh generation under a writer lease and publishes it in one short
-transaction fenced on the generation and cursor it started from. A successful publish prunes every
-retired generation by equality; a generation whose writer is still alive is left alone, so that
-writer's own publish fails the fence and retries, and a reader only ever sees one complete
+transaction fenced on the generation and cursor it started from. That transaction switches the
+generation and ends the writer's lease and deletes no rows: the replaced generation's registry row,
+now without a lease, is its durable retirement record, and a reader only ever sees one complete
 generation. A
 crash before publish leaves the previously published generation complete. An append writes into the
 published generation and publishes its cursor, digest, counts and span in the same transaction,
@@ -147,16 +147,19 @@ generation that claims rows it no longer holds is rebuilt rather than served as 
 both the active and the passive read.
 
 A staging generation registers itself and its writer pid before its first row. A failed attempt
-discards its own generation in a finally; a process that dies without running it leaves a lease
-whose pid is no longer alive, and the next refresh reclaims that generation. A generation whose
-writer is alive is never reclaimed. The registry is the complete set of generations, so reclamation
-and pruning delete by equality instead of scanning the row table under the write lock. The registry
-row and the lease commit together, and reclamation re-reads the published generation and the lease
-inside its own write transaction before deleting, so a generation that registered while the
-pre-check was running is never treated as abandoned. A retired generation's dead writer record is
-removed with it; a live writer keeps its registry row and lease, so another writer's prune leaves
-its staging alone and its own publish fails the fence and retries. A lease whose generation is no
-longer registered cannot belong to a live writer and is pruned.
+ends its own lease in a finally; a process that dies without running it leaves a lease whose pid is
+no longer alive. Retired, failed and abandoned generations are all removed by one background
+reclaimer (`scheduleRetiredGenerationReclaim` in `src/usage/filter-index.ts`), scheduled after a
+publish or a failed attempt and whenever a refresh notices a leftover; neither publication nor a
+refresh deletes rows itself. Deleting a whole generation in one write transaction stalled the event
+loop for seconds (1.7 s, 1.3 s and a 1.3 s commit on a 725,946-row index), so the reclaimer removes
+at most 2,000 rows per table per transaction in primary-key order, commits, and yields a timer turn
+before the next batch; the registry and lease rows go with the last batch. A generation whose writer
+is alive is never reclaimed. The registry row and the lease commit together, and every batch re-reads
+the published generation and the lease inside its own write transaction before deleting, so a
+generation that registered, or was published, after the candidate check is never treated as retired;
+a live writer's staging is left alone and its own publish fails the fence and retries. A lease whose
+generation is no longer registered cannot belong to a live writer and is pruned.
 
 Opening the projection is safe against a concurrent first open. The busy timeout is set before the
 first read, and a classification that meets another writer's lock rethrows the busy error into the

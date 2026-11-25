@@ -850,13 +850,6 @@ function later(left: number | null, right: number | null): number | null {
   return Math.max(left, right);
 }
 
-function discardGeneration(db: Database, generation: string): void {
-  db.query("DELETE FROM usage_rows WHERE generation = ?").run(generation);
-  db.query("DELETE FROM usage_attributions WHERE generation = ?").run(generation);
-  db.query("DELETE FROM usage_filter_index_writers WHERE generation = ?").run(generation);
-  db.query("DELETE FROM usage_filter_index_generations WHERE generation = ?").run(generation);
-}
-
 /** Whether the process that staged a generation is still running. EPERM means it exists. */
 function processAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -905,57 +898,110 @@ function endLease(db: Database, generation: string): void {
 }
 
 /**
- * Remove staging generations left behind by writers that are gone.
- *
- * Every staging generation writes its lease before its first row and removes it with the rows,
- * so the lease table is the complete set of in-flight generations. A generation is reclaimed
- * only when it is not published and its recorded writer pid is dead; a live writer's staging is
- * never touched, which is what keeps this from repeating the multi-writer row loss it cleans up
- * after. The published generation never has a lease and is never a candidate.
+ * Generations whose rows may be removed: registered, not published, and not owned by a live
+ * writer. Every staging generation writes its lease before its first row, so the lease table is
+ * the complete set of in-flight generations; a retired published generation keeps its registry row
+ * (the durable retirement record) with no lease. A live writer's staging is never a candidate,
+ * which keeps this from repeating the multi-writer row loss it cleans up after.
  */
-function reclaimAbandonedStaging(db: Database, path: string, published: string): void {
-  // Cheap pre-check without the write lock: most refreshes have nothing to reclaim.
+function retiredGenerationCandidates(db: Database, published: string): { candidates: string[]; orphanLease: boolean } {
   const generations = db.query(
     "SELECT g.generation AS generation, w.pid AS pid FROM usage_filter_index_generations g LEFT JOIN usage_filter_index_writers w ON w.generation = g.generation",
   ).all() as Array<{ generation: string; pid: number | null }>;
-  const maybe = new Set<string>();
-  for (const entry of generations) {
-    if (entry.generation === published) continue;
-    // No lease means no live writer ever owned it; a dead pid means its writer is gone.
-    if (entry.pid === null || !processAlive(entry.pid)) maybe.add(entry.generation);
-  }
+  const candidates = generations
+    .filter(entry => entry.generation !== published && (entry.pid === null || !processAlive(entry.pid)))
+    .map(entry => entry.generation);
   // A lease whose generation is no longer registered cannot belong to a live writer, because
   // registration and the lease commit together.
   const orphanLease = db.query(
     "SELECT 1 AS present FROM usage_filter_index_writers WHERE generation NOT IN (SELECT generation FROM usage_filter_index_generations) LIMIT 1",
   ).get() !== null;
-  if (maybe.size === 0 && !orphanLease) return;
-  testHooks?.betweenReclaimCheckAndLock?.({ dbPath: path, candidates: [...maybe] });
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    // Re-read under the write lock: a writer may have registered its lease, or a publish may
-    // have moved the watermark, since the pre-check. Eligibility is decided here, not outside.
-    const currentPublished = metaText(db, META_KEYS.generation);
-    for (const generation of maybe) {
-      if (generation === currentPublished) continue;
-      const lease = db.query("SELECT pid FROM usage_filter_index_writers WHERE generation = ?")
-        .get(generation) as { pid: number } | null;
-      if (lease && processAlive(lease.pid)) continue;
-      db.query("DELETE FROM usage_rows WHERE generation = ?").run(generation);
-      db.query("DELETE FROM usage_attributions WHERE generation = ?").run(generation);
-      db.query("DELETE FROM usage_filter_index_writers WHERE generation = ?").run(generation);
-      db.query("DELETE FROM usage_filter_index_generations WHERE generation = ?").run(generation);
-    }
-    // A lease whose generation is no longer registered cannot belong to a live writer:
-    // registration is atomic, so this is a leftover record rather than an active one.
-    db.query(
-      "DELETE FROM usage_filter_index_writers WHERE generation NOT IN (SELECT generation FROM usage_filter_index_generations)",
-    ).run();
-    db.exec("COMMIT");
-  } catch (error) {
-    try { db.exec("ROLLBACK"); } catch { /* the close releases the lock */ }
-    throw error;
+  return { candidates, orphanLease };
+}
+
+/** Rows removed per table per transaction: one batch costs milliseconds, never a whole generation. */
+const RECLAIM_BATCH_ROWS = 2_000;
+let reclaimRun: { path: string; promise: Promise<void> } | null = null;
+let reclaimAgain = false;
+
+/**
+ * Remove retired, failed and abandoned generations in the background, a bounded primary-key batch
+ * per table per transaction, committing each batch before yielding. Publication and refresh only
+ * record retirement; a whole-generation DELETE under the write lock stalled the event loop for
+ * seconds (1.7 s, 1.3 s and a 1.3 s COMMIT on a 725,946-row index).
+ */
+function scheduleRetiredGenerationReclaim(dir: string, path: string): void {
+  if (reclaimRun?.path === path) {
+    reclaimAgain = true;
+    return;
   }
+  const run: { path: string; promise: Promise<void> } = {
+    path,
+    promise: new Promise<void>(resolve => setTimeout(resolve, 0))
+      .then(() => reclaimRetiredGenerations(dir, path))
+      .catch(error => {
+        console.warn(`[usage] retired usage index rows could not be reclaimed yet: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => {
+        if (reclaimRun !== run) return;
+        reclaimRun = null;
+        if (reclaimAgain) {
+          reclaimAgain = false;
+          scheduleRetiredGenerationReclaim(dir, path);
+        }
+      }),
+  };
+  reclaimRun = run;
+}
+
+async function reclaimRetiredGenerations(dir: string, path: string): Promise<void> {
+  if (getConfigDir() !== dir || !existsSync(path)) return;
+  const db = openIndexForWrite(dir, path);
+  try {
+    for (;;) {
+      const { candidates, orphanLease } = retiredGenerationCandidates(db, metaText(db, META_KEYS.generation));
+      if (candidates.length === 0 && !orphanLease) return;
+      testHooks?.betweenReclaimCheckAndLock?.({ dbPath: path, candidates });
+      for (const generation of candidates) {
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          // Eligibility is decided again under the write lock: a writer may have registered its
+          // lease, or a publish may have made this generation current, since the check above.
+          const lease = db.query("SELECT pid FROM usage_filter_index_writers WHERE generation = ?")
+            .get(generation) as { pid: number } | null;
+          if (generation !== metaText(db, META_KEYS.generation) && !(lease && processAlive(lease.pid))) {
+            const rows = db.query(
+              "DELETE FROM usage_rows WHERE generation = ? AND byte_offset IN (SELECT byte_offset FROM usage_rows WHERE generation = ? ORDER BY byte_offset LIMIT ?)",
+            ).run(generation, generation, RECLAIM_BATCH_ROWS).changes;
+            const attributions = db.query(
+              "DELETE FROM usage_attributions WHERE generation = ? AND byte_offset IN (SELECT byte_offset FROM usage_attributions WHERE generation = ? ORDER BY byte_offset LIMIT ?)",
+            ).run(generation, generation, RECLAIM_BATCH_ROWS).changes;
+            if (rows === 0 && attributions === 0) {
+              db.query("DELETE FROM usage_filter_index_writers WHERE generation = ?").run(generation);
+              db.query("DELETE FROM usage_filter_index_generations WHERE generation = ?").run(generation);
+            }
+          }
+          db.exec("COMMIT");
+        } catch (error) {
+          try { db.exec("ROLLBACK"); } catch { /* the close releases the lock */ }
+          throw error;
+        }
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+      }
+      if (orphanLease) {
+        db.query(
+          "DELETE FROM usage_filter_index_writers WHERE generation NOT IN (SELECT generation FROM usage_filter_index_generations)",
+        ).run();
+      }
+    }
+  } finally {
+    db.close();
+  }
+}
+
+/** Resolves once no reclamation is scheduled or running; for tests and benchmarks. */
+export async function settleUsageFilterIndexReclaimForTests(): Promise<void> {
+  while (reclaimRun) await reclaimRun.promise;
 }
 
 /** The watermark a publish must still be standing on: the generation and its cursor. */
@@ -986,27 +1032,10 @@ function publish(
       return false;
     }
     writeMetaStatements(db, next);
-    // A published staging generation no longer needs its writer lease.
+    // A published staging generation no longer needs its writer lease. The generation this one
+    // replaces keeps its registry row with no lease: that row is the retirement record, and its
+    // rows are reclaimed in bounded batches after this commit, never in it.
     endLease(db, next.generation);
-    // Delete retired generations by equality. The registry is small and known, so this never
-    // scans the row table under the write lock.
-    const retired = db.query(
-      "SELECT generation FROM usage_filter_index_generations WHERE generation <> ?",
-    ).all(next.generation) as Array<{ generation: string }>;
-    for (const { generation } of retired) {
-      if (generation === "") continue;
-      // A live writer still owns its staging generation. Its own publish will fail the fence
-      // and retry, so leaving it here is what keeps its rows from being deleted mid-ingest.
-      const liveLease = db.query("SELECT pid FROM usage_filter_index_writers WHERE generation = ?")
-        .get(generation) as { pid: number } | null;
-      if (liveLease && processAlive(liveLease.pid)) continue;
-      db.query("DELETE FROM usage_rows WHERE generation = ?").run(generation);
-      db.query("DELETE FROM usage_attributions WHERE generation = ?").run(generation);
-      db.query("DELETE FROM usage_filter_index_generations WHERE generation = ?").run(generation);
-      // Drop a dead writer's record with its generation; a live writer keeps its lease so the
-      // fence can make it retry rather than look abandoned.
-      db.query("DELETE FROM usage_filter_index_writers WHERE generation = ?").run(generation);
-    }
     db.exec("COMMIT");
     return true;
   } catch (error) {
@@ -1055,14 +1084,16 @@ async function rebuild(
       return null;
     }
     published = true;
+    scheduleRetiredGenerationReclaim(dir, path);
     await testHooks?.afterPublish?.({ dbPath: path, generation: staging });
     hardenSidecars(path);
     return snapshotFrom(next, result.rows, bumpIngestPasses(path));
   } finally {
     if (!published) {
-      // A failed or crashed attempt must not leave its staging behind.
-      discardGeneration(db, staging);
+      // A failed or crashed attempt must not leave its staging behind: ending its lease makes it a
+      // reclamation candidate, removed in the same bounded batches as a retired generation.
       endLease(db, staging);
+      scheduleRetiredGenerationReclaim(dir, path);
     }
   }
 }
@@ -1117,7 +1148,9 @@ async function refreshOnce(
 ): Promise<UsageFilterIndexSnapshot | null> {
   assertHomeUnchanged(dir);
   const meta = readMeta(db);
-  reclaimAbandonedStaging(db, path, meta.generation);
+  // A refresh only notices leftovers; removing them is the background reclaimer's bounded work.
+  const leftovers = retiredGenerationCandidates(db, meta.generation);
+  if (leftovers.candidates.length > 0 || leftovers.orphanLease) scheduleRetiredGenerationReclaim(dir, path);
   const revision = currentUsageLogRevision();
   const rebuildOrRetry = (db: Database, dir: string, path: string, meta: IndexMeta) => {
     if (extendOnly) throw new UsageFilterIndexRebuildNeededError();
@@ -1852,6 +1885,8 @@ export function requestUsageFilterIndexRebuild(): void {
 /** Test-only process-state reset for isolated harnesses. */
 export function resetUsageFilterIndexForTests(): void {
   ingestFlight = null;
+  reclaimRun = null;
+  reclaimAgain = false;
   ingestPassesByPath.clear();
   rebuildRequestedPaths.clear();
   sidecarOwnershipChecked.clear();

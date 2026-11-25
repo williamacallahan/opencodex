@@ -12,6 +12,7 @@ import {
 } from "../../src/lib/app-owned-memory";
 import { APP_OWNED_RETAINED_STORE_REGISTRATIONS } from "../../src/lib/app-owned-memory-stores";
 import {
+  discardRetainedUsageAggregate,
   getFilteredUsageAggregate,
   getJevStatsAggregate,
   getUsageAggregate,
@@ -24,7 +25,8 @@ import { resetUsageReadCacheForTests, type PersistedUsageEntry } from "../../src
 import * as usageLedgerScannerModule from "../../src/usage/ledger-scanner";
 import { getUsageSourceFacets, resetUsageSourceFacetsForTests } from "../../src/server/management/usage-source-facets";
 import { settleUsageColdRebuildForTests, startUsageColdRebuild, UsageColdReadPendingError } from "../../src/usage/cold-rebuild-slot";
-import { CANDIDATE_PAGE_SIZE, readUsageFilterCandidates, requestUsageFilterIndexRebuild } from "../../src/usage/filter-index";
+import { CANDIDATE_PAGE_SIZE, readUsageFilterCandidates, requestUsageFilterIndexRebuild, setUsageFilterIndexTestHooksForTests, settleUsageFilterIndexReclaimForTests, usageFilterIndexPath } from "../../src/usage/filter-index";
+import { Database } from "bun:sqlite";
 import { createSourceFacetAccumulator } from "../../src/usage/source-facets";
 import { rangeWindow } from "../../src/usage/summary";
 import { refreshUserCostOverlays } from "../../src/usage/user-cost-overlays";
@@ -311,6 +313,69 @@ describe("retained usage aggregate cache", () => {
       expect((await getFilteredUsageAggregate({ model: "m5" }, undefined, "background")).update).toBe("unchanged");
     } finally {
       scans.mockRestore();
+    }
+  });
+
+  test("a forced index rebuild publishes without deleting the old generation, which is reclaimed in batches afterwards", async () => {
+    const lines = Array.from({ length: 5_000 }, (_, index) => line(`r-${index}`)).join("");
+    writeFileSync(join(testDir, "usage.jsonl"), lines);
+    expect(requests(await getFilteredUsageAggregate({ provider: "openai" }))).toBe(5_000);
+    const indexDb = () => new Database(usageFilterIndexPath(testDir), { readonly: true });
+    const rowsOf = (generation: string) => {
+      const db = indexDb();
+      try { return (db.query("SELECT COUNT(*) AS n FROM usage_rows WHERE generation = ?").get(generation) as { n: number }).n; }
+      finally { db.close(); }
+    };
+    const published = () => {
+      const db = indexDb();
+      try { return (db.query("SELECT value FROM usage_filter_index_meta WHERE key = 'generation'").get() as { value: string }).value; }
+      finally { db.close(); }
+    };
+    const retired = published();
+    let retiredAtPublish = -1;
+    setUsageFilterIndexTestHooksForTests({ afterPublish: () => { retiredAtPublish = rowsOf(retired); } });
+    try {
+      requestUsageFilterIndexRebuild();
+      appendFileSync(join(testDir, "usage.jsonl"), line("appended"));
+      expect(requests(await getFilteredUsageAggregate({ provider: "openai" }))).toBe(5_001);
+    } finally {
+      setUsageFilterIndexTestHooksForTests(null);
+    }
+    // The publish transaction recorded the retirement and deleted nothing.
+    expect(retiredAtPublish).toBe(5_000);
+    expect(published()).not.toBe(retired);
+    await settleUsageFilterIndexReclaimForTests();
+    expect(rowsOf(retired)).toBe(0);
+    expect(rowsOf(published())).toBe(5_001);
+  });
+
+  test("a reservation re-made after expiry while the slot is busy is released, so a new filter still starts", async () => {
+    writeFileSync(join(testDir, "usage.jsonl"), line("a"));
+    const realNow = Date.now;
+    let offset = 0;
+    const clock = spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    try {
+      // Each filter's answer is published, never fetched, and expires; memory pressure then drops it,
+      // and the same filter asks again while another build holds the scan slot.
+      for (const model of ["e1", "e2", "e3", "e4"]) {
+        await expect(getFilteredUsageAggregate({ model }, undefined, "background")).rejects.toBeInstanceOf(UsageColdReadPendingError);
+        await settleUsageColdRebuildForTests();
+        offset += 60_000;
+        while (discardRetainedUsageAggregate() > 0) { /* evict */ }
+        let release!: () => void;
+        startUsageColdRebuild("fixture-occupant", () => new Promise<void>(resolve => { release = resolve; }));
+        await Bun.sleep(5);
+        const busy = await getFilteredUsageAggregate({ model }, undefined, "background").catch(error => error);
+        expect((busy as UsageColdReadPendingError).state).toBe("busy");
+        release();
+        await settleUsageColdRebuildForTests();
+      }
+      const unseen = await getFilteredUsageAggregate({ model: "unseen" }, undefined, "background").catch(error => error);
+      expect((unseen as UsageColdReadPendingError).state).toBe("started");
+      await settleUsageColdRebuildForTests();
+      expect((await getFilteredUsageAggregate({ model: "unseen" }, undefined, "background")).update).toBe("unchanged");
+    } finally {
+      clock.mockRestore();
     }
   });
 
