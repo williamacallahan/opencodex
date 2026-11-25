@@ -149,17 +149,30 @@ both the active and the passive read.
 The index judges an append from its own recorded size and boundary digest, so it cannot see a
 shrink another cache observed if the file then grows past the indexed size again. Whether the
 published generation may be extended or served is therefore recorded in the index database, so a
-restarted process, a peer process and a passive reader reach the same verdict. Every process that
-observes a destructive change (`src/usage/revision-observation.ts`) increments
-`source_invalidations` there; a full ingest records the count it started under as the generation's
-`validated_invalidations` inside its publish transaction, which is refused, and the staging retired
-for a retry, if the count moved or the live file changed identity. A generation is valid while the
-two counts are equal: any process adopts it, and only an invalid one is replaced. An invalid
-generation is never extended or served: the active refresh ingests in full, the active reader
-re-checks the counts in its own read transaction, an extend-only refresh and
-`usageFilterIndexExtendable` refuse, and the passive read returns no answer. Until its increment
-commits (the write uses busy timeout 0 and retries with backoff), the observing process also
-declines the generation itself; an increment still unwritten when that process exits is lost.
+restarted process, a peer process and a passive reader reach the same verdict. A writer-owned path
+that observes a destructive change (`src/usage/revision-observation.ts`) increments
+`source_invalidations` in the index of that ledger's own home; a full ingest records the count it
+started under as the generation's `validated_invalidations` inside its publish transaction, which
+is refused, and the staging retired for a retry, if the count moved or the live file changed
+identity. A generation is valid while the two counts are equal: any process adopts it, and only an
+invalid one is replaced. An invalid generation is never extended or served: the active refresh
+ingests in full, the active reader and every candidate or projected-row page re-check the counts in
+their own read transaction (a page of an invalidated generation throws rather than return partial
+counts), the published-generation lookup behind cached filtered and picker answers returns no
+generation, an extend-only refresh and `usageFilterIndexExtendable` refuse, and the passive read
+returns no answer. The passive read writes nothing: on a destructive change it declines the
+generation in its own process, and the next writer-owned refresh records the change. Until its
+increment commits (the write uses busy timeout 0 and retries with backoff), the observing process
+also declines the generation itself.
+
+Rewriting the live `usage.jsonl` in place is unsupported. Nothing in the product does it: one
+appender writes the ledger, and the trim that could shorten it is suspended. Truncation and
+replacement by a different file are detected from the file's identity and size wherever they are
+read. An in-place rewrite that keeps the same file and the index's boundary digest is detected only
+on a best-effort basis, and only by a process that saw the larger file first: an increment that
+process could not commit before it exited is lost, and another process's retained answers do not
+learn of it. The usage archive catalog's generations (slice 3) replace the live file instead of
+rewriting it, which removes this case.
 
 A staging generation registers itself and its writer pid before its first row. A failed attempt
 ends its own lease in a finally; a process that dies without running it leaves a lease whose pid is
