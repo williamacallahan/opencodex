@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { closeRequestHistoryIndex } from "../../src/routing/history/indexer";
+import { noteArchiveChanged } from "../../src/usage/archive-segments";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { resetUsageReadCacheForTests, usageLogPath } from "../../src/usage/log";
 import type { OcxConfig } from "../../src/types";
@@ -67,6 +68,13 @@ function byKey<T extends Figures>(rows: readonly T[], keyOf: (row: T) => string)
   return out;
 }
 
+/** Replace the live ledger with one that starts later, as a published trim leaves it. */
+function retireLiveLedger(): void {
+  writeFileSync(usageLogPath(), jsonl([{ ...ROWS[0], requestId: "after-trim", timestamp: AT + 30 * 24 * HOUR }]));
+  resetUsageReadCacheForTests();
+  noteArchiveChanged();
+}
+
 beforeEach(() => {
   previousHome = process.env.OPENCODEX_HOME;
   home = mkdtempSync(join(tmpdir(), "ocx-archive-attribution-"));
@@ -92,6 +100,9 @@ describe("archive attribution matches the live summary", () => {
     const archiveWindow = `since=${hour}&until=${hour + HOUR}`;
 
     const live = await get<LiveBody>(`/api/usage?range=all&${liveWindow}`);
+    const liveOpenai = await get<LiveBody>(`/api/usage?range=all&${liveWindow}&provider=openai`);
+    // The same rows in the live ledger would make the segment look like its copy, so it moves on first.
+    retireLiveLedger();
     const archive = await get<ArchiveBody>(`/api/usage/archive?${archiveWindow}`);
     expect(archive.attribution).toBe("per-attempt");
     expect(pick(archive.summary)).toEqual(pick(live.summary));
@@ -102,7 +113,6 @@ describe("archive attribution matches the live summary", () => {
     expect(byKey(archive.byModel.rows, row => row.key)["gpt-reserve"]).toEqual({ requests: 1, totalTokens: 220 });
     expect(archive.byProvider.rows.map(row => row.key)).not.toContain("combo");
 
-    const liveOpenai = await get<LiveBody>(`/api/usage?range=all&${liveWindow}&provider=openai`);
     const archiveOpenai = await get<ArchiveBody>(`/api/usage/archive?${archiveWindow}&provider=openai`);
     expect(pick(archiveOpenai.summary)).toEqual(pick(liveOpenai.summary));
     expect(pricing(archiveOpenai.summary as unknown as Pricing)).toEqual(pricing(liveOpenai.summary as unknown as Pricing));
@@ -115,6 +125,7 @@ describe("archive attribution matches the live summary", () => {
     await writeArchiveTotals(writeSegment(join(home, "usage-archive"), "903", jsonl(ROWS), "2026-11-20T10-05-00.000Z"));
     const hour = Math.floor(AT / HOUR) * HOUR;
     const live = await get<LiveBody>(`/api/usage?range=all&since=${hour}&until=${hour + HOUR - 1}&provider=deepseek`);
+    retireLiveLedger();
     const archive = await get<ArchiveBody & { complete: boolean }>(`/api/usage/archive?since=${hour}&until=${hour + HOUR}&provider=deepseek`);
     if (archive.complete) {
       expect(pick(archive.summary)).toEqual(pick(live.summary));
@@ -138,6 +149,7 @@ describe("archive attribution matches the live summary", () => {
     await writeArchiveTotals(writeSegment(join(home, "usage-archive"), "902", jsonl([retried]), "2026-11-20T10-05-00.000Z"));
     const hour = Math.floor(AT / HOUR) * HOUR;
     const live = await get<LiveBody>(`/api/usage?range=all&since=${hour}&until=${hour + HOUR - 1}`);
+    retireLiveLedger();
     const archive = await get<ArchiveBody>(`/api/usage/archive?since=${hour}&until=${hour + HOUR}&provider=openai`);
     expect(archive.summary.requests).toBe(1);
     expect(byKey(archive.byProvider.rows, row => row.key)).toEqual(byKey(live.providers, row => row.provider));

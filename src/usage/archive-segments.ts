@@ -165,12 +165,16 @@ export interface LiveLedgerHead {
 /**
  * Which segments to count so every archived row is counted once, and which cannot be decided.
  *
- * A segment is counted when it is the only one cut from its ledger file (inode) and is not named with
- * the live ledger's inode and head label. Every segment that shares its inode with another, and one
- * matching the live head, is `ambiguous`: a crashed copy taken before a trim's rename, a published
+ * A segment is counted when it is the only one cut from its ledger file (inode) and nothing says it
+ * may be a prefix of the live ledger. Every other segment is `ambiguous`: one sharing its inode with
+ * another; one named with the live ledger's inode (no trim of that file ever published, since a
+ * publish renames a new ledger into place); one whose label is the live head's (a ledger restored
+ * onto a new inode keeps its head, so a different inode is no evidence); and, while the live head has
+ * no timed row to compare, an untimed one. A crashed copy taken before a trim's rename, a published
  * segment, and a published segment beside a restored ledger can hold identical bytes, so neither the
- * newest mtime nor the name proves which rows are archived once. Ambiguous segments are only read and
- * reported; they are never counted, skipped silently, adopted, or deleted.
+ * newest mtime nor the name proves which rows are archived once. Only a different first row (a
+ * different label) is evidence of disjointness. Ambiguous segments are only read and reported; they
+ * are never counted, skipped silently, adopted, or deleted.
  */
 export function countedArchiveSegments<T extends ArchiveSegmentName>(
   segments: readonly T[],
@@ -186,7 +190,8 @@ export function countedArchiveSegments<T extends ArchiveSegmentName>(
   const ambiguous: T[] = [];
   for (const group of byInode.values()) {
     const [only] = group;
-    const liveHead = (segment: T): boolean => live !== null && live.label !== undefined && segment.ino === live.ino && segment.label === live.label;
+    const liveHead = (segment: T): boolean => live !== null && (segment.ino === live.ino
+      || (live.label !== undefined ? segment.label === live.label : segment.label.startsWith(`${UNTIMED_SEGMENT_MARKER}-`)));
     if (group.length === 1 && !liveHead(only!)) counted.push(only!);
     else ambiguous.push(...group);
   }

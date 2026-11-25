@@ -682,8 +682,9 @@ The answer comes only from precomputed hourly totals, never from the rows themse
   (with `code`), or `build-error`. They are not retried until the proxy restarts, so their rows are
   missing from this answer.
 - `coverage.ambiguousSegments` names archive files in the window that cannot be told apart from a
-  copy of other rows: several files cut from the same ledger, or one named after the start of the
-  current `usage.jsonl`. Older releases could leave a copy behind that is byte-identical to the
+  copy of other rows: several files cut from the same ledger, or one that may be a prefix of the
+  current `usage.jsonl` (cut from the same file, starting with the same first row, which a restored
+  ledger keeps, or untimed while `usage.jsonl` has no timed first row to compare). Older releases could leave a copy behind that is byte-identical to the
   published file, so these files are neither counted nor skipped, and the answer is incomplete.
   They are only read, never moved or deleted.
 - `coverage.duplicateSegments` is deprecated and kept for existing callers: it is the number of

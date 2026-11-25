@@ -120,8 +120,13 @@ different ledger file (inode). Earlier builds also left copies: several segments
 segment named with the live ledger's inode and head label (`ledgerHeadLabel`). A crashed copy taken
 before a trim's rename, a published segment, and a published segment beside a restored ledger can be
 byte-identical, so neither an mtime nor a name proves which rows are archived once.
-`countedArchiveSegments` therefore counts a segment only when it is the only one of its inode and does
-not match the live head; every other segment is `ambiguous`. Ambiguous segments are read only to
+`countedArchiveSegments` therefore counts a segment only when it is the only one of its inode and
+nothing says it may be a prefix of the live ledger; every other segment is `ambiguous`. A possible
+prefix is a segment named with the live ledger's inode (no trim of that file published, since a
+publish renames a new ledger into place), one whose label is the live head's (a ledger restored onto
+a new inode keeps its head, so a different inode is no evidence), and, while the live head has no
+timed row among its first 64, any untimed one. Only a different first row is evidence of
+disjointness. Ambiguous segments are read only to
 learn their span and are reported: a window one may reach lists it in `coverage.ambiguousSegments`
 (the deprecated `coverage.duplicateSegments` keeps the archive-wide count for existing callers)
 and answers `complete: false` with no numbers (the rows route answers `incomplete: true` and does not

@@ -398,6 +398,34 @@ describe("GET /api/usage/archive", () => {
     expect((await archiveGet(window(later, later + HOUR))).body).toMatchObject({ complete: false, summary: null });
   });
 
+  test("a lone segment that may be a prefix of the live ledger is reported, whether or not its head is timed", async () => {
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    // Sixty-four blank rows leave the live head without a timed row, so it has no label to compare.
+    const [row] = archiveRows(1);
+    const untimedHead = `${"\n".repeat(64)}${jsonl([row])}`;
+    writeFileSync(usageLogPath(), untimedHead);
+    const liveIno = String(statSync(usageLogPath(), { bigint: true }).ino);
+    const copy = writeSegment(archiveDirectory(), liveIno, untimedHead, "untimed-2026-11-02T00-00-00.000Z");
+    await writeArchiveTotals(copy);
+    const all = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + HOUR);
+    const untimed = await archiveGet(all);
+    expect(untimed.body).toMatchObject({ complete: false, summary: null });
+    expect(untimed.body.coverage.ambiguousSegments).toEqual([basename(copy)]);
+  });
+
+  test("restoring the live ledger's bytes onto a new inode leaves a segment of the same head ambiguous", async () => {
+    const rows = archiveRows(5);
+    const label = iso(rows[0]!.timestamp).replaceAll(":", "-");
+    const segment = await builtSegment("521", rows, label);
+    // The live ledger now holds the same rows on another inode, as a restore from backup would.
+    mkdirSync(dirname(usageLogPath()), { recursive: true });
+    writeFileSync(usageLogPath(), jsonl(rows));
+    noteArchiveChanged();
+    const { body } = await archiveGet(window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 6 * HOUR));
+    expect(body).toMatchObject({ complete: false, summary: null });
+    expect(body.coverage.ambiguousSegments).toEqual([basename(segment)]);
+  });
+
   test("coverage reports the per-segment caps, so a caller knows a breakdown may fold keys", async () => {
     const rows = Array.from({ length: 1_010 }, (_, index) => ({ ...archiveRow(0, 0), requestId: `cap-${index}`, clientHost: `host-${index}` }));
     await builtSegment("515", rows);
@@ -417,19 +445,17 @@ describe("GET /api/usage/archive", () => {
     expect(counts[0]).toBe(3);
   });
 
-  test("the live head is read again after an archive write, so a reused inode never hides a published segment", async () => {
-    // The ledger the trim cut keeps its inode in place here, as a filesystem reusing a retired inode would.
+  test("the live head is read again after an archive write, so a segment stops looking like its prefix once the head moves on", async () => {
     mkdirSync(dirname(usageLogPath()), { recursive: true });
     const old = archiveRows(5);
     writeFileSync(usageLogPath(), jsonl(old));
-    const ino = String(statSync(usageLogPath(), { bigint: true }).ino);
     const all = window(ARCHIVE_FIRST_ROW_AT, ARCHIVE_FIRST_ROW_AT + 24 * HOUR);
-    await builtSegment(ino, old, iso(old[0]!.timestamp).replaceAll(":", "-"));
-    // While the ledger starts with those rows, the segment may be an unpublished trim of it: reported, not counted.
+    await builtSegment("522", old, iso(old[0]!.timestamp).replaceAll(":", "-"));
+    // While the ledger starts with those rows, the segment may be a copy of them: reported, not counted.
     const whileHead = (await archiveGet(all)).body;
     expect(whileHead).toMatchObject({ complete: false, summary: null });
-    expect(whileHead.coverage.ambiguousSegments).toEqual([expect.stringContaining(`_${ino}-`)]);
-    // The trim publishes: the new ledger, on the same inode, starts later; the segment now counts.
+    expect(whileHead.coverage.ambiguousSegments).toEqual([expect.stringContaining("_522-")]);
+    // The ledger now starts later, on the same file: its head no longer names the segment, which counts.
     writeFileSync(usageLogPath(), jsonl(archiveRows(2, undefined, 50)));
     noteArchiveChanged();
     expect((await archiveGet(all)).body.summary.requests).toBe(5);
