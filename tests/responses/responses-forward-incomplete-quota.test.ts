@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,10 +35,13 @@ const provider: OcxProviderConfig = {
   authMode: "forward",
 };
 
+// The recorder drops quota outcomes from a superseded credential (76974c083), so the
+// fixture account must be a stored credential whose live generation the context carries.
+let fixtureGeneration = 0;
 function auth(fixedAccount = false): CodexAuthContext {
   return {
     kind: "pool", accountId: "incomplete-quota-fixture", accessToken: "test-token",
-    chatgptAccountId: "test-account", generation: 1,
+    chatgptAccountId: "test-account", generation: fixtureGeneration,
     writerGeneration: captureConfigGeneration(), fixedAccount,
   };
 }
@@ -52,6 +55,23 @@ function inspect(response: Record<string, unknown>): RequestLogContext {
 afterEach(() => clearCodexUpstreamHealth());
 
 describe("incomplete quota terminal attribution", () => {
+  let fixtureHome = "";
+  let previousFixtureHome: string | undefined;
+  beforeEach(() => {
+    previousFixtureHome = process.env.OPENCODEX_HOME;
+    fixtureHome = mkdtempSync(join(tmpdir(), "ocx-incomplete-quota-unit-"));
+    process.env.OPENCODEX_HOME = fixtureHome;
+    fixtureGeneration = saveCodexAccountCredential("incomplete-quota-fixture", {
+      accessToken: "test-token", refreshToken: "test-refresh",
+      expiresAt: Date.now() + 60 * 60_000, chatgptAccountId: "test-account",
+    });
+  });
+  afterEach(() => {
+    if (previousFixtureHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousFixtureHome;
+    removeTreeWithRetry(fixtureHome);
+  });
+
   for (const response of [
     { incomplete_details: { reason: "usage_limit_reached" } },
     { incomplete_details: { reason: "rate_limit_exceeded" } },
