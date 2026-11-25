@@ -178,4 +178,22 @@ describe("native compact endpoint", () => {
     expect(sent[0]!.body).not.toHaveProperty("temperature");
     expect(sent[0]!.body).not.toHaveProperty("top_p");
   });
+
+  test("a key scoped only to a virtual id cannot reach its wire model through native compact", async () => {
+    let upstream = 0;
+    globalThis.fetch = (async () => {
+      upstream++;
+      return Response.json({ object: "response.compaction", output: [{ type: "compaction", encrypted_content: "fixture" }] });
+    }) as typeof fetch;
+    const provider: OcxProviderConfig = { adapter: "openai-responses", baseUrl: "https://api.openai.com/v1",
+      authMode: "key", apiKey: "fixture", supportsNativeCompactEndpoint: true };
+    const config = { ...getDefaultConfig(), defaultProvider: "openai-apikey", providers: { "openai-apikey": provider },
+      apiKeys: [{ id: "scoped", name: "scoped", key: "ocx_data_" + "c".repeat(40), createdAt: "2026-11-25T00:00:00Z",
+        allowedModels: ["openai-apikey/gpt-5.6-sol-pro"] }] };
+    const response = await handleResponsesCompact(compactionRequest(baseCompactionBody({ model: "openai-apikey/gpt-5.6-sol-pro" })),
+      config, { model: "", provider: "" }, undefined, { kind: "configured", keyId: "scoped", source: "bearer" });
+    expect(response.status).toBe(403);
+    await response.text();
+    expect(upstream).toBe(0);
+  });
 });

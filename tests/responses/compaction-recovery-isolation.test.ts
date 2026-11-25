@@ -162,3 +162,17 @@ test("a repeated body observation keeps one snapshot charge, released before the
     translatorBudget.dispose();
   }
 });
+
+test("a routed compaction whose combo's first pick is bracketed is left to the combo dispatcher", async () => {
+  const config = settings();
+  config.compactionRecovery = undefined;
+  config.providers.source = { ...config.providers.source!, modelSuffixBracketStrip: true };
+  config.combos = { pinned: { strategy: "failover", targets: [{ provider: "source", model: "swe-2[1m]" }, { provider: "emergency", model: "rescue" }] } };
+  config.apiKeys = [{ id: "scoped", name: "scoped", key: "ocx_data_" + "e".repeat(40), createdAt: "2026-11-25T00:00:00Z",
+    allowedModels: ["source/swe-2[1m]", "emergency/rescue"] }];
+  const response = await handleResponsesCompact(request(body("combo/pinned"), "responses/compact"), config, { model: "", provider: "" },
+    undefined, { kind: "configured", keyId: "scoped", source: "bearer" });
+  await response.text();
+  expect(response.status).not.toBe(403);
+  expect(calls.length).toBeGreaterThan(0);
+});

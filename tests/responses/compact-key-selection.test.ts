@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +6,7 @@ import { markResponseNonReplayable } from "../../src/lib/upstream-retry";
 import { saveConfig } from "../../src/config";
 import { apiKeyAccountLogLabel } from "../../src/codex/account-label";
 import { captureProviderApiKeySelection } from "../../src/providers/api-key-selection";
+import * as keyFailover from "../../src/providers/key-failover";
 import { clearKeyCooldowns, forgetApiKeyRotationCursor, getKeyCooldownUntil, recordDistributedKeyFailure } from "../../src/providers/key-failover";
 import { providerRequestPacingStatus, resetProviderRequestPacingForTest, waitForProviderRequestSlot } from "../../src/providers/request-pacing";
 import { handleResponsesCompact } from "../../src/server/responses";
@@ -167,6 +168,29 @@ test("compact refreshes a queued stale revision and sends rebuilt Authorization 
     expect(result.logCtx.accountLogLabel).toBe(apiKeyAccountLogLabel(NAME, { entryId: "k2", reference: KEYS[1] }));
     noLeaks(config);
   } finally { abort.abort(); held.release(); await pending.catch(() => undefined); }
+});
+
+test("a proactive key pick that changes the wire projection is refused for a key scoped to the routed id", async () => {
+  const config = fixture(false);
+  config.apiKeys = [{ id: "scoped", name: "scoped", key: "ocx_data_" + "d".repeat(40), createdAt: "2026-11-25T00:00:00Z",
+    allowedModels: [`${NAME}/test[ctx]`] }];
+  // The provider row changes between routing and the pre-dispatch key pick, which rebuilds the
+  // transport from the current row: the send would now serialize the bracket-stripped id.
+  const real = keyFailover.selectProactiveApiKeyTransport;
+  const pick = spyOn(keyFailover, "selectProactiveApiKeyTransport").mockImplementation((current, name, routed, ...rest) => {
+    current.providers[name] = { ...current.providers[name]!, modelSuffixBracketStrip: true };
+    return real(current, name, routed, ...rest);
+  });
+  try {
+    const req = new Request("http://localhost/v1/responses/compact", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: `${NAME}/test[ctx]`, input: [{ role: "user", content: "fixture question" }], stream: false }) });
+    const response = await handleResponsesCompact(req, config, { model: "", provider: "" }, undefined,
+      { kind: "configured", keyId: "scoped", source: "bearer" });
+    expect(response.status).toBe(403);
+    await response.text();
+    expect(seen).toEqual([]);
+    noLeaks(config);
+  } finally { pick.mockRestore(); }
 });
 
 test("compact refuses after three queued rebuilds without spending a physical send", async () => {

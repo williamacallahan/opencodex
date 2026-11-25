@@ -608,7 +608,7 @@ export async function bufferCompactResponse(
 
 
 
-/** The model id a native compact send serializes for `provider`; authorization reads the same id. */
+/** The model id a native compact send serializes for `provider`, before any Reserve move. */
 function compactWireModelId(provider: Pick<OcxProviderConfig, "modelSuffixBracketStrip">, modelId: string): string {
   return provider.modelSuffixBracketStrip ? stripBracketedModelSuffix(modelId) : modelId;
 }
@@ -768,19 +768,6 @@ export async function handleResponsesCompact(
     logCtx.wireModel = virtual.wireModelId;
   } else {
     logCtx.resolvedModel = route.modelId;
-  }
-  // A key scoped to the routed id must also allow the id a native send serializes once bracket
-  // stripping changes it; a queued key selection re-runs this for its refreshed provider.
-  const authorizeCompactWireModel = (provider: Pick<OcxProviderConfig, "modelSuffixBracketStrip">): void => {
-    const wireModelId = compactWireModelId(provider, route.modelId);
-    if (wireModelId !== route.modelId) {
-      assertRouteAllowedByScope(admissionScope, clientModelLabel, { providerName: route.providerName, modelId: wireModelId });
-    }
-  };
-  try { authorizeCompactWireModel(route.provider); }
-  catch (err) {
-    if (err instanceof AdmissionModelDeniedError) return admissionModelDeniedResponse(projectAdmissionModelDeniedLog(err, logCtx));
-    throw err;
   }
   if (compactFastRow) {
     // Resolved AFTER the virtual-model rewrite above, and against `route.modelId`, which is
@@ -1248,6 +1235,11 @@ export async function handleResponsesCompact(
         // The adapter's wire-model projection, then its per-model sampling filter for this physical
         // send, matched against the final model and the catalog ids from before any rewrite.
         const projected = poolReserveWireBody({ ...replayBody as typeof compactBody, model: compactWireModelId(sendProvider, route.modelId) }, sendProvider);
+        // The one authorization of the model this native send emits, after the virtual, bracket and
+        // Reserve projections and for this attempt's provider (a proactive or queued key pick can
+        // rebuild it), against the scope captured at admission. A denial throws before any byte is
+        // sent and localDispatchRefusal answers 403.
+        assertRouteAllowedByScope(admissionScope, clientModelLabel, { providerName: route.providerName, modelId: projected.model });
         return stripRejectedSamplingParams(projected, sendProvider, [selectedModelId, route.modelId]) as typeof compactBody;
       };
       const doFetch = (upstreamRecovery?: UpstreamSendRecovery) => fetchWithHeaderTimeout(
@@ -1291,7 +1283,6 @@ export async function handleResponsesCompact(
                   ? buildResponsesTransport({ ...current, apiKey: resolveProviderApiKey(current.apiKey) }, { headers: req.headers, attribution: admission?.attribution })
                   : undefined;
                 sendHeaders = wireHeaders = headers = currentGateway ? new Headers(currentGateway.headers) : rebuilt;
-                authorizeCompactWireModel(current);
                 sendProvider = compactProvider = current;
                 compactUrl = currentGateway ? `${currentGateway.url.replace(/\/+$/, "")}/compact`
                   : `${(current.baseUrl ?? "").replace(/\/+$/, "")}/responses/compact`;
