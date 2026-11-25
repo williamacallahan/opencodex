@@ -280,7 +280,11 @@ async function appendAggregate(
       expectedProcessedThroughDigest: state.processedThroughDigest,
       onEntry: entry => candidate.add(entry),
     });
-    if (userCostOverlayVersion() !== state.overlayVersion || currentTimeZone() !== state.timeZone) {
+    // Rechecked immediately before publishing, not only before the scan: a destructive change
+    // observed while the suffix was read leaves the suffix valid but the cloned prefix wrong.
+    const live = currentUsageLogRevision();
+    if (userCostOverlayVersion() !== state.overlayVersion || currentTimeZone() !== state.timeZone
+      || usageLogIdentityKey(live) !== state.identityKey || noteUsageRevision(live) !== state.epoch) {
       if (retainedAggregate === state) retainedAggregate = null;
       rebuildAfterUnpin = true;
     } else {

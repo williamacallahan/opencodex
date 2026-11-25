@@ -21,7 +21,8 @@ import {
   type UsageAggregateResult,
 } from "../../src/server/management/usage-aggregate-cache";
 import type { OcxConfig } from "../../src/types/config";
-import { resetUsageReadCacheForTests, type PersistedUsageEntry } from "../../src/usage/log";
+import { currentUsageLogRevision, resetUsageReadCacheForTests, type PersistedUsageEntry } from "../../src/usage/log";
+import { noteUsageRevision } from "../../src/usage/revision-observation";
 import * as usageLedgerScannerModule from "../../src/usage/ledger-scanner";
 import { getUsageSourceFacets, resetUsageSourceFacetsForTests } from "../../src/server/management/usage-source-facets";
 import { settleUsageColdRebuildForTests, startUsageColdRebuild, UsageColdReadPendingError } from "../../src/usage/cold-rebuild-slot";
@@ -347,6 +348,33 @@ describe("retained usage aggregate cache", () => {
     await settleUsageFilterIndexReclaimForTests();
     expect(rowsOf(retired)).toBe(0);
     expect(rowsOf(published())).toBe(5_001);
+  });
+
+  test("an append that meets a destructive change before publishing is discarded, not served", async () => {
+    const path = join(testDir, "usage.jsonl");
+    const row = (requestId: string, provider: string) => `${JSON.stringify({ ...entry(requestId), provider, pad: "x".repeat(400) })}\n`;
+    const filler = Array.from({ length: 400 }, (_, index) => row(`f-${index}`, "anthropic")).join("");
+    writeFileSync(path, row("r-0", "openai") + filler);
+    await getUsageAggregate({});
+    appendFileSync(path, row("a1", "anthropic"));
+    const realScan = usageLedgerScannerModule.scanUsageLedgerCooperatively;
+    const scans = spyOn(usageLedgerScannerModule, "scanUsageLedgerCooperatively").mockImplementationOnce(async options => {
+      const scan = await realScan(options);
+      // While the suffix was read, another reader saw growth, then a shorter file whose first row changed.
+      appendFileSync(path, row("a2", "anthropic") + row("a3", "anthropic"));
+      noteUsageRevision(currentUsageLogRevision());
+      writeFileSync(path, row("r-0", "google") + filler + row("a1", "anthropic"));
+      noteUsageRevision(currentUsageLogRevision());
+      return scan;
+    });
+    try {
+      const result = await getUsageAggregate({});
+      const byProvider = Object.fromEntries(result.accumulator.summarize("all", NOW).providers.map(entry => [entry.provider, entry.requests]));
+      expect(byProvider).toMatchObject({ google: 1 });
+      expect(byProvider).not.toHaveProperty("openai");
+    } finally {
+      scans.mockRestore();
+    }
   });
 
   test("a reservation re-made after expiry while the slot is busy is released, so a new filter still starts", async () => {
