@@ -68,8 +68,9 @@ in unfiltered reports; unchanged attempt sets retain the recorded row status.
 `src/server/management/usage-aggregate-cache.ts` keys retained aggregates by both source
 dimensions, and `src/server/management/logs-usage-routes.ts` validates the complete query before
 special projections. The device inventory requires a dashboard session and refuses child scope.
-`src/usage/filter-index.ts` selects candidates for those dimensions and for provider, model,
-API-key and window bounds; its client, surface and admission columns mirror `source-filter.ts`
+`src/usage/filter-index.ts` reads candidates for those dimensions and for provider, model,
+API-key and window bounds. `src/usage/filter-index-candidate-plan.ts` builds the shared SQL for
+candidate reads and plan diagnostics. The client, surface and admission columns mirror `source-filter.ts`
 exactly, so the index can over-select but never reject a row the accumulator would keep. The
 accumulator re-applies the authoritative filter to every candidate, and whole-ledger invalid and
 oversized diagnostics come from the index rather than from the selected rows.
