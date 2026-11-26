@@ -323,7 +323,7 @@ class CodexHealthCooldownStore {
           if (!own || !isCodexHealthRowAlive(own, now, scope)) continue;
           const persisted = serializeForDisk(own);
           const other = out[key];
-          const winner = other && codexHealthRowHorizon(other) > codexHealthRowHorizon(persisted) ? other : persisted;
+          const winner = other && codexHealthRowHorizon(other, scope) > codexHealthRowHorizon(persisted, scope) ? other : persisted;
           const lastProbeAt = Math.max(other?.lastProbeAt ?? 0, persisted.lastProbeAt ?? 0);
           out[key] = scope === "reserve" && lastProbeAt > 0 ? { ...winner, lastProbeAt } : winner;
         }

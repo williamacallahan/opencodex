@@ -437,16 +437,16 @@ export function noteScopedCodexSuccess(
         cooldownSource: _source,
         ...withoutExpiredCooldown
       } = retainedBase;
-      return withoutExpiredCooldown;
+      return { ...withoutExpiredCooldown, consecutiveFailures: 0 };
     })();
   const wallNow = Date.now();
   if (reserveSuccess) {
-    const updated = { ...retained, consecutiveFailures: 0, reserveSuccess };
+    const updated = { ...retained, reserveSuccess };
     setScopedHealth(accountId, scope, updated);
     if (isCodexHealthRowAlive(updated, wallNow, scope)) codexHealthCooldownStore.markScopedReplaced(accountId, scope);
     else codexHealthCooldownStore.markScopedDeleted(accountId, scope);
   } else if (Object.keys(retained).length > 1) {
-    setScopedHealth(accountId, scope, { ...retained, consecutiveFailures: 0 });
+    setScopedHealth(accountId, scope, retained);
     if (isCodexHealthRowAlive(retained, wallNow, scope)) codexHealthCooldownStore.markScopedReplaced(accountId, scope);
     else codexHealthCooldownStore.markScopedDeleted(accountId, scope);
   } else {
