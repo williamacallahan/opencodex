@@ -899,7 +899,7 @@ A tool loop normally returns to the store that served its last turn. If that own
 is excluded by quota, or confirms it is out of capacity, the combo can continue on strict native
 Reserve or the planned relay without sending either store the other's encrypted reasoning. It keeps
 the tool calls and their matching results. If the client replays the full history with `store: false`
-(Pi does this on every turn), the turn is not tied to the seat that issued its reasoning: that seat
+(Pi does this on every turn), the turn is not tied to the seat that issued its reasoning: when its issuer proof matches, that seat
 still receives its own encrypted reasoning, and every other seat or relay keeps its own reasoning and
 skips older foreign reasoning that has no usable summary for that turn. A turn-state handle, an unresolved response ID, or an item reference still
 requires its owner. If neither destination is allowed, the client gets the original refusal.

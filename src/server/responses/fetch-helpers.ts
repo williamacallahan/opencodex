@@ -1,5 +1,5 @@
 import type { NativeResponseControl } from "./native-response-control";
-import { ownsDispatchReceipt, physicalAdmission, PHYSICAL_DISPATCH, settlePhysicalDispatch, PROVIDER_HEADER_DEADLINE as HEADER_DEADLINE, type ProviderHeaderDeadline as HeaderDeadline } from "../../lib/provider-admission-wait";
+import { BEFORE_DISPATCH_COMMIT, captureBeforeDispatchCommits, ownsDispatchReceipt, physicalAdmission, PHYSICAL_DISPATCH, settlePhysicalDispatch, PROVIDER_HEADER_DEADLINE as HEADER_DEADLINE, type ProviderHeaderDeadline as HeaderDeadline } from "../../lib/provider-admission-wait";
 import type { CodexWsPreOutputRefusalHold } from "./codex-ws-wire";
 import type { Server } from "bun";
 import {
@@ -392,12 +392,16 @@ export function providerFetch(
       // mutator, and the copy it receives is deliberately not threaded onward. `Connection`
       // is decided inside `dispatch`, which runs after this, so the fresh-connection policy
       // wins regardless of what any caller or hook put in the header.
-      options.beforeDispatch?.(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
+      // Guard effects (a probe lease's "dispatched" mark) wait for the send to be admitted at the wire.
+      const commitBeforeDispatch = options.beforeDispatch
+        ? captureBeforeDispatchCommits(() => options.beforeDispatch!(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))))
+        : undefined;
       // No proxy option is attached here: a `dispatchOverride` may rebuild this request against
       // a different destination, so the route is decided at the physical send instead.
       const sharedReceipt = (init as Record<symbol, ((body: BodyInit | null | undefined) => void) | undefined> | undefined)?.[WS_FALLBACK_RECEIPT];
       let notified = false;
       const dispatchInit = { ...withUpstreamHttpVersion(input, init, provider), timeout: 0,
+        ...(commitBeforeDispatch ? { [BEFORE_DISPATCH_COMMIT]: commitBeforeDispatch } : {}),
         ...(sharedReceipt ? { [PHYSICAL_DISPATCH]: sharedReceipt } : options.onPhysicalDispatch ? { [PHYSICAL_DISPATCH]: (body: BodyInit | null | undefined) => {
           if (!notified) { options.onPhysicalDispatch!(body); notified = true; }
         } } : {}),
@@ -446,10 +450,19 @@ export function providerFetch(
       // there would silently negotiate a transport the operator ruled out.
       const check = physicalAdmission.getStore();
       let notified = false;
+      let commitWsBeforeDispatch: (() => void) | undefined;
+      const wsBeforeDispatch = options.beforeDispatch ? (wsHeaders: Headers): void => {
+        const next = captureBeforeDispatchCommits(() => options.beforeDispatch!(wsHeaders));
+        if (!next) return;
+        const prior = commitWsBeforeDispatch;
+        commitWsBeforeDispatch = () => { prior?.(); next(); };
+      } : undefined;
       const notifyOnce = (body: BodyInit | null | undefined): void => {
         check?.();
         if (notified) return;
         options.onPhysicalDispatch?.(body);
+        commitWsBeforeDispatch?.();
+        commitWsBeforeDispatch = undefined;
         binding.onSent?.();
         notified = true;
       };
@@ -458,7 +471,7 @@ export function providerFetch(
       const binding: CodexWsExecutor = { provider, http: markEgressTransparentExecutor(fallback) };
       const wsSend = codexWsExecutor((url: Parameters<typeof globalThis.fetch>[0], wsInit?: RequestInit) => codexWsUpstreamFetch(String(url),
         { ...(wsInit ?? init), [TURN_STATE_BINDING_INIT]: dialHeaders => turnStateBinding(providerName, dialHeaders) },
-        fallback, runtime, options.onCodexWsQuota, options.beforeDispatch, options.nativeControl,
+        fallback, runtime, options.onCodexWsQuota, wsBeforeDispatch, options.nativeControl,
         async () => { (await waitForPacing(init.signal ?? undefined))?.release(); }, notifyOnce, options.preOutputRefusalHold, options.onContinuationDispatch, provider.headers),
         binding);
       // A WS frame is a physical send like any other, so it runs the same override: that is where a

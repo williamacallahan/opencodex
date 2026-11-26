@@ -47,6 +47,7 @@ import { isMainAccountPolicyBindingPending, isNativeMainTrafficBlocked, nativeMa
 import type { NativeMainStartupBlockReason } from "./native-profile-startup";
 import { waitForMainAccountPolicyBinding } from "./main-account-policy-wait";
 import { markCodexQuotaProbeLeaseDispatched } from "./routing/probe-lease";
+import { deferBeforeDispatchCommit } from "../lib/provider-admission-wait";
 import {
   codexQuotaScopeForModel,
   getCodexQuotaHealthSnapshot,
@@ -771,7 +772,9 @@ export function createCodexAuthDispatchGuard(
     reserveGuard?.(headers);
     // Every check passed: the request goes upstream now, so the lease's probe has run.
     const leaseId = codexProbeLeaseId(ctx);
-    if (leaseId) markCodexQuotaProbeLeaseDispatched(ctx.accountId, ctx.probeQuotaScope, leaseId);
+    // Marked only once the physical send is admitted: a veto after this guard sends nothing, and the
+    // lease must still hand back the seat's earlier probe stamp.
+    if (leaseId) deferBeforeDispatchCommit(() => markCodexQuotaProbeLeaseDispatched(ctx.accountId, ctx.probeQuotaScope, leaseId));
   };
 }
 

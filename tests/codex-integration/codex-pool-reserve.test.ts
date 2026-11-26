@@ -19,8 +19,9 @@ import { codexFailureWindowOutcomeMeta } from "../../src/codex/routing/failure-w
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import {
   codexPoolAffinityKey, resolveCodexAuthContext, applyCodexAuthContextToProvider, materializeCodexUpstreamAuth,
-  createCodexAuthDispatchGuard, CodexAccountCooldownError, CodexReserveUnavailableError, CodexPoolExhaustedError, CodexPoolAccountCreditsOffError, cooldownErrorResponse,
+  createCodexAuthDispatchGuard, releaseCodexAuthContextProbeLease, CodexAccountCooldownError, CodexReserveUnavailableError, CodexPoolExhaustedError, CodexPoolAccountCreditsOffError, cooldownErrorResponse,
 } from "../../src/codex/auth-context";
+import { providerFetch } from "../../src/server/responses/fetch-helpers";
 import { createResponsesPassthroughAdapter } from "../../src/adapters/openai-responses";
 import { prepareCodexWsRequest, CODEX_RESPONSES_HTTP_URL } from "../../src/server/responses/codex-ws-request";
 import { withTestTranslatorBudget } from "../helpers/translator-budget";
@@ -1034,5 +1035,34 @@ describe("request-local native Luna capacity intent", () => {
     releaseCodexQuotaScopeProbeLease(B, "reserve", third, t + 4);
     expect(scopedHealthFor(B, "reserve")?.lastProbeAt).toBe(t + 4);
     expect(canTryUnknownCodexReserve(B, t + 5)).toBe(false);
+  });
+  describe("a Reserve trial vetoed at the physical send", () => {
+    const send = async (admit: () => void) => {
+      ordinary(A, 40);
+      const cfg = config();
+      const ctx = await resolveCodexAuthContext(new Headers(), cfg, "pool", { modelId: "gpt-6-luna", poolCapacityIntent: "reserve-only" });
+      expect(ctx.kind === "pool" && ctx.accountId === B && ctx.poolReserve === true).toBe(true);
+      const upstream = mock(async () => Response.json({}));
+      const dispatch = providerFetch({ ...base, fetch: upstream as unknown as typeof fetch }, undefined, {
+        httpOnly: true, providerName: "openai", modelId: "gpt-6-luna",
+        onPhysicalDispatch: admit,
+        beforeDispatch: createCodexAuthDispatchGuard(ctx, cfg, "gpt-6-luna"),
+      });
+      const outcome = await dispatch("https://chatgpt.com/backend-api/codex/responses", { method: "POST", body: "{}" }).then(() => "sent", () => "refused");
+      releaseCodexAuthContextProbeLease(ctx);
+      return { outcome, upstream };
+    };
+    test("leaves the seat probeable when admission refuses after the guard passed", async () => {
+      const { outcome, upstream } = await send(() => { throw new Error("Reserve seat dispatch was not admitted"); });
+      expect(outcome).toBe("refused");
+      expect(upstream).not.toHaveBeenCalled();
+      expect(canTryUnknownCodexReserve(B, now + 1)).toBe(true);
+    });
+    test("keeps the probe interval once the send is admitted", async () => {
+      const { outcome, upstream } = await send(() => {});
+      expect(outcome).toBe("sent");
+      expect(upstream).toHaveBeenCalledTimes(1);
+      expect(canTryUnknownCodexReserve(B, now + 1)).toBe(false);
+    });
   });
 });
