@@ -12,7 +12,7 @@ import { applyAccountQuotaFromUpstreamHeaders, clearAccountQuota, getAccountQuot
 import { resetQuotaQueryBackoffForTests } from "../../src/codex/quota-query-backoff";
 import { POOL_RESERVE_FRESHNESS_MS, poolLunaReserveSelection } from "../../src/codex/pool-reserve";
 import { clearAccountNeedsReauth } from "../../src/codex/account-runtime-state";
-import { clearCodexUpstreamHealth, clearThreadAccountMap, getCodexQuotaHealthSnapshot, recordCodexUpstreamOutcome } from "../../src/codex/routing";
+import { clearCodexAccountCooldown, clearCodexUpstreamHealth, clearThreadAccountMap, getCodexQuotaHealthSnapshot, recordCodexUpstreamOutcome } from "../../src/codex/routing";
 import { bindThreadAffinity, deleteThreadAffinity, getThreadAffinity } from "../../src/codex/routing/thread-affinity";
 import { forgetCodexFailureWindows, isCodexFailureWindowDegraded, noteCodexFailureWindowSample } from "../../src/codex/routing/failure-window";
 import { codexFailureWindowOutcomeMeta } from "../../src/codex/routing/failure-window";
@@ -1159,5 +1159,45 @@ describe("sustained Reserve refusal backoff", () => {
     const next = await build(cfg);
     expect(next.ctx.accountId).toBe(B);
     expect(JSON.parse(next.request.body).model).toBe("gpt-reserve");
+  });
+
+  test("an operator clear ends a multi-hour Reserve wait after its cooldown lapsed", () => {
+    const cfg = config();
+    for (let i = 0; i < 3; i++) { refuse(cfg, B); now += 2 * 60 * MIN; }
+    refuse(cfg, B);
+    now += 40 * MIN;
+    expect(canTryUnknownCodexReserve(B, now)).toBe(false);
+    expect(clearCodexAccountCooldown(B, now)).toBe(true);
+    expect(scopedHealthFor(B, "reserve")?.consecutiveFailures ?? 0).toBe(0);
+    expect(canTryUnknownCodexReserve(B, now)).toBe(true);
+  });
+
+  test("a replaced credential ends the old Reserve backoff", async () => {
+    ordinary(A, 40);
+    const cfg = config();
+    for (let i = 0; i < 3; i++) { refuse(cfg, B); now += 20 * MIN; }
+    expect(scopedHealthFor(B, "reserve")?.consecutiveFailures).toBe(3);
+    now += MIN;
+    saveCodexAccountCredential(B, { accessToken: "fixture-access-replaced", refreshToken: "fixture-refresh-replaced",
+      chatgptAccountId: `fixture-workspace-${B}`, expiresAt: now + 86_400_000 });
+    const next = await build(cfg);
+    expect(next.ctx.accountId).toBe(B);
+    expect(JSON.parse(next.request.body).model).toBe("gpt-reserve");
+  });
+
+  test("an incomplete Reserve terminal restarts the backoff instead of repeating it", async () => {
+    ordinary(A, 40);
+    const cfg = config();
+    for (let i = 0; i < 3; i++) { refuse(cfg, B); now += 60 * MIN; }
+    const probe = await build(cfg);
+    if (probe.ctx.kind !== "pool" || !probe.ctx.probeLeaseId) throw new Error("expected a discovery lease");
+    expect(probe.ctx.accountId).toBe(B);
+    recordCodexUpstreamOutcome(cfg, B, 200, { ...codexFailureWindowOutcomeMeta(probe.ctx),
+      probeQuotaScope: "reserve", probeLeaseId: probe.ctx.probeLeaseId });
+    expect(scopedHealthFor(B, "reserve")?.consecutiveFailures).toBe(0);
+    expect(scopedHealthFor(B, "reserve")?.reserveSuccess).toBeUndefined();
+    now += 5 * MIN;
+    refuse(cfg, B);
+    expect(scopedHealthFor(B, "reserve")?.consecutiveFailures).toBe(1);
   });
 });

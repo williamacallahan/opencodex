@@ -328,8 +328,8 @@ function windowStartedAfter(percent: number | undefined, resetAt: number | undef
 
 /**
  * A seat's multi-episode Reserve backoff describes the plan window that was spent when it was
- * earned. Once the ordinary quota is observed unspent after the last refusal, or the spent window
- * is a newer one, the seat's next depletion asks Reserve again at once.
+ * earned. Once the ordinary quota is observed unspent after the last refusal, the spent window
+ * is a newer one, or the credential was replaced, the seat's next depletion asks Reserve at once.
  */
 export function releaseStaleReserveBackoff(accountId: string, plan: unknown, now: number): void {
   const health = scopedHealthFor(accountId, "reserve");
@@ -337,11 +337,11 @@ export function releaseStaleReserveBackoff(accountId: string, plan: unknown, now
   if (!health || health.consecutiveFailures < 2 || refusedAt === undefined || health.probeLeaseId !== undefined
     || (health.cooldownUntil ?? 0) > now || (health.quotaAvoidUntil ?? 0) > now) return;
   const quota = getAccountQuota(accountId);
-  if (!quota) return;
-  const unspentSince = quota.updatedAt > refusedAt && isCompleteCodexQuotaRecoverySnapshot(quota, plan);
-  if (!unspentSince
-    && !windowStartedAfter(quota.weeklyPercent, quota.weeklyResetAt, WEEK_MS, refusedAt)
-    && !windowStartedAfter(quota.monthlyPercent, quota.monthlyResetAt, MONTH_MS, refusedAt)) return;
+  const replaced = (readCodexAccountRecord(accountId)?.replacedAt ?? 0) > refusedAt;
+  const cycled = !!quota && ((quota.updatedAt > refusedAt && isCompleteCodexQuotaRecoverySnapshot(quota, plan))
+    || windowStartedAfter(quota.weeklyPercent, quota.weeklyResetAt, WEEK_MS, refusedAt)
+    || windowStartedAfter(quota.monthlyPercent, quota.monthlyResetAt, MONTH_MS, refusedAt));
+  if (!replaced && !cycled) return;
   if (health.reserveSuccess) setScopedHealth(accountId, "reserve", { consecutiveFailures: 0, reserveSuccess: health.reserveSuccess });
   else deleteScopedHealth(accountId, "reserve");
 }

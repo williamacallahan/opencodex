@@ -4,7 +4,7 @@ import { MAIN_CODEX_ACCOUNT_ID } from "../account-id";
 import { POOL_KEY_CODEX } from "../pool-rotation";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import type { OcxConfig } from "../../types";
-import type { CodexCooldownSource } from "./cooldown-math";
+import { codexReserveProbeIntervalMs, type CodexCooldownSource } from "./cooldown-math";
 import {
   codexHealthCooldownStore,
   codexHealthRowHorizon,
@@ -315,12 +315,15 @@ export function isCodexAccountInCooldown(accountId: string, now = Date.now()): b
  */
 export function clearCodexAccountCooldown(accountId: string, now = Date.now()): boolean {
   ensureLoaded();
-  const clear = (health: CodexUpstreamHealth): CodexUpstreamHealth | null => {
+  const clear = (health: CodexUpstreamHealth, scope?: CodexQuotaScope): CodexUpstreamHealth | null => {
     const cooldownUntil = health.cooldownUntil;
     const liveCooldown = typeof cooldownUntil === "number" && Number.isFinite(cooldownUntil) && cooldownUntil > now;
     const avoidUntil = health.quotaAvoidUntil;
     const liveAvoidance = typeof avoidUntil === "number" && Number.isFinite(avoidUntil) && avoidUntil > now;
-    if (!liveCooldown && !liveAvoidance) return null;
+    // A Reserve seat can sit in a multi-hour probe wait long after its cooldown lapsed.
+    const liveReserveWait = scope === "reserve" && (health.consecutiveFailures >= 2
+      || (health.lastProbeAt !== undefined && now - health.lastProbeAt < codexReserveProbeIntervalMs(accountId, health)));
+    if (!liveCooldown && !liveAvoidance && !liveReserveWait) return null;
     const {
       capacityEvidence: _capacity, cooldownUntil: _until,
       cooldownSince: _since,
@@ -335,6 +338,11 @@ export function clearCodexAccountCooldown(accountId: string, now = Date.now()): 
       quotaAvoidUntil: _avoid,
       ...rest
     } = health;
+    // A cleared Reserve seat is asked again at once and restarts its probe backoff.
+    if (scope === "reserve") {
+      const { lastProbeAt: _probe, lastFailureAt: _failedAt, lastFailureStatus: _status, ...fresh } = rest;
+      return { ...fresh, consecutiveFailures: 0, cooldownGeneration: (health.cooldownGeneration ?? 0) + 1 };
+    }
     return {
       ...rest,
       cooldownGeneration: (health.cooldownGeneration ?? 0) + 1,
@@ -355,7 +363,7 @@ export function clearCodexAccountCooldown(accountId: string, now = Date.now()): 
     }
   }
   for (const [scope, health] of quotaScopedHealth.get(accountId) ?? []) {
-    const next = clear(health);
+    const next = clear(health, scope);
     if (next) {
       setScopedHealth(accountId, scope, next);
       if (isCodexHealthRowAlive(next, wallNow, scope)) codexHealthCooldownStore.markScopedReplaced(accountId, scope);

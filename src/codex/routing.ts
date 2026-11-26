@@ -1319,7 +1319,7 @@ export function recordCodexUpstreamOutcome(
       if (!meta.poolReserve && scopedProbe.cooldownUntil && probeMayClearCooldown(scopedProbe, meta)) {
         deleteScopedHealth(accountId, meta.probeQuotaScope);
       } else if (ownsProbeLease(scopedProbe, meta)) {
-        setScopedHealth(accountId, meta.probeQuotaScope, withProbeLeaseReleased(scopedProbe, now));
+        setScopedHealth(accountId, meta.probeQuotaScope, { ...withProbeLeaseReleased(scopedProbe, now), ...(meta.poolReserve && reserveSuccessIsCurrent ? { consecutiveFailures: 0, lastFailureAt: undefined } : {}) });
       }
     }
     if (quotaScope && reserveSuccessIsCurrent && (!meta.poolReserve || meta.reserveServed)) {
