@@ -31,7 +31,7 @@ import { isCodexPoolRefreshCooling } from "./pool-refresh-backoff";
 import {
   classifyCodexUpstreamOutcome,
   computeCodexUsageScore,
-  computeQuotaCooldown, computeReserveRefusalCooldown,
+  computeQuotaCooldown, computeReserveRefusalCooldown, nextReserveRefusalEpisodes,
   quotaAvoidUntilFor,
   CODEX_FAILURE_WINDOW_MS, CODEX_TRANSIENT_SOFT_AVOID_ESCALATION_MS,
   type CodexUpstreamOutcome,
@@ -1451,7 +1451,7 @@ export function recordCodexUpstreamOutcome(
       const cooldownGeneration = (scopedPrior?.cooldownGeneration ?? 0) + 1;
       const ownsLease = meta.probeQuotaScope === quotaScope && ownsProbeLease(scopedPrior, meta);
       const cooldown: CodexUpstreamHealth = {
-        consecutiveFailures: 0,
+        consecutiveFailures: meta.poolReserve ? nextReserveRefusalEpisodes(accountId, scopedPrior, ownsLease, now) : 0,
         lastFailureStatus,
         lastFailureAt: now,
         cooldownUntil: until, capacityEvidence,

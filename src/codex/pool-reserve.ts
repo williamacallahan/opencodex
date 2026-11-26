@@ -10,8 +10,8 @@ import { getEligiblePoolAccounts, isCodexAccountSelectable, shouldFailover } fro
 import { peekConversationStateIssuer, peekConversationStateStoredIssuerAccount, CODEX_UNKNOWN_CONVERSATION_STATE_ISSUER, getThreadAffinity, isThreadAffinityExpired, isThreadAffinityGenerationLive } from "./routing/thread-affinity";
 import { isCodexAccountGenerationLive } from "./account-store";
 import { hasUnrecoveredCodexQuotaRefusal, scopedHealthFor, type CodexQuotaScope } from "./routing/health-store";
-import { canTryUnknownCodexReserve } from "./routing/probe-lease";
-import { CODEX_QUOTA_PROBE_INTERVAL_MS } from "./routing/cooldown-math";
+import { canTryUnknownCodexReserve, releaseStaleReserveBackoff } from "./routing/probe-lease";
+import { codexReserveProbeIntervalMs } from "./routing/cooldown-math";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers-destination";
 
 const LABEL = "Luna Reserve";
@@ -99,6 +99,7 @@ export function poolReserveHoldResetAt(accountId: string, now = Date.now()): num
 
 function reserveSeatEvidence(account: NonNullable<OcxConfig["codexAccounts"]>[number], now: number, pinned: boolean) {
   const { id } = account;
+  releaseStaleReserveBackoff(id, account.plan, now);
   if (codexUsageLimitResetAt(getAccountQuota(id), account.plan, now) === undefined
     || scopedHealthFor(id, "reserve")?.probeLeaseId !== undefined) return;
   if (pinned ? hasFreshPoolReserve(id, now) : hasVerifiedPoolReserve(id, now)) return "verified";
@@ -116,7 +117,7 @@ export function createPoolReserveWalk(config: OcxConfig, now = Date.now()): Pool
     const health = scopedHealthFor(account.id, "reserve");
     const unreported = !holdsPoolReserveWindow(account.id);
     const held = health && ((health.cooldownUntil ?? 0) > now || (health.quotaAvoidUntil ?? 0) > now
-      || (unreported && health.lastProbeAt !== undefined && now - health.lastProbeAt < CODEX_QUOTA_PROBE_INTERVAL_MS));
+      || (unreported && health.lastProbeAt !== undefined && now - health.lastProbeAt < codexReserveProbeIntervalMs(account.id, health)));
     if (held && (unreported || hasFreshPoolReserve(account.id, now))) {
       hasHeldSeat = isCodexAccountSelectable(config, account.id, now, undefined, { poolCapacity: "reserve", modelEligibleAccountIds: new Set([account.id]) });
     }

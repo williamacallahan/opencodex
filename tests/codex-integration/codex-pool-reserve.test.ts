@@ -40,7 +40,7 @@ import { handleResponses } from "../../src/server/responses/core";
 import { handleResponsesCompact } from "../../src/server/responses/compact";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { canTryUnknownCodexReserve, markCodexQuotaProbeLeaseDispatched, releaseCodexQuotaScopeProbeLease, tryAcquireCodexQuotaScopeProbeLease } from "../../src/codex/routing/probe-lease";
-import { scopedHealthFor, setScopedHealth } from "../../src/codex/routing/health-store";
+import { flushCodexHealthCooldowns, reloadCodexHealthCooldownsForTests, scopedHealthFor, setScopedHealth } from "../../src/codex/routing/health-store";
 import { CODEX_QUOTA_PROBE_INTERVAL_MS } from "../../src/codex/routing/cooldown-math";
 
 const A = "pool-reserve-a";
@@ -1064,5 +1064,100 @@ describe("request-local native Luna capacity intent", () => {
       expect(upstream).toHaveBeenCalledTimes(1);
       expect(canTryUnknownCodexReserve(B, now + 1)).toBe(false);
     });
+  });
+});
+
+// A seat whose included usage is spent keeps refusing Reserve until its plan window resets, so each
+// refused probe episode doubles the wait toward six hours instead of re-asking every five minutes.
+describe("sustained Reserve refusal backoff", () => {
+  const MIN = 60_000;
+  const refuse = (cfg: OcxConfig, id: string) => {
+    const lease = tryAcquireCodexQuotaScopeProbeLease(id, "reserve", now, true);
+    if (!lease) throw new Error("expected a Reserve discovery lease");
+    recordCodexUpstreamOutcome(cfg, id, 429, { modelId: "gpt-reserve", poolReserve: true, now, probeQuotaScope: "reserve", probeLeaseId: lease });
+  };
+  /** Milliseconds until the seat may be asked for Reserve again, found by bisecting the public gate. */
+  const dueAfterMs = (id: string) => {
+    let lo = 0;
+    let hi = 7 * 60 * MIN;
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (canTryUnknownCodexReserve(id, now + mid)) hi = mid; else lo = mid;
+    }
+    return hi;
+  };
+
+  test("consecutive refused probe episodes back off to six hours and desynchronize seats", () => {
+    const cfg = config();
+    const expected = [5, 15, 30, 60, 120, 360, 360].map(minutes => minutes * MIN);
+    const dues: Record<string, number[]> = { [A]: [], [B]: [] };
+    for (const base of expected) {
+      for (const id of [A, B]) refuse(cfg, id);
+      for (const id of [A, B]) {
+        const due = dueAfterMs(id);
+        expect(due).toBeGreaterThanOrEqual(base);
+        expect(due).toBeLessThanOrEqual(Math.round(base * 1.15));
+        dues[id]!.push(due);
+      }
+      now += Math.max(dues[A]!.at(-1)!, dues[B]!.at(-1)!);
+    }
+    expect(dues[A]![0]).toBe(5 * MIN);
+    expect(dues[B]![0]).toBe(5 * MIN);
+    expect(dues[A]!.slice(1).some((due, index) => due !== dues[B]![index + 1])).toBe(true);
+  });
+
+  test("concurrent refusals inside one episode do not advance the backoff", () => {
+    const cfg = config();
+    for (let i = 0; i < 3; i++) {
+      recordCodexUpstreamOutcome(cfg, B, 429, { modelId: "gpt-reserve", poolReserve: true, now });
+      now += 1_000;
+    }
+    expect(scopedHealthFor(B, "reserve")?.consecutiveFailures).toBe(1);
+    // The last sibling stamped the probe clock one second before `now`; the wait is still the five-minute episode-1 wait.
+    expect(dueAfterMs(B)).toBe(5 * MIN - 1_000);
+  });
+
+  test("a multi-hour Reserve hold is restored after a restart", () => {
+    const cfg = config();
+    for (let i = 0; i < 3; i++) { refuse(cfg, B); now += 2 * 60 * MIN; }
+    refuse(cfg, B);
+    now += 40 * MIN;
+    expect(flushCodexHealthCooldowns()).toBe(true);
+    reloadCodexHealthCooldownsForTests();
+    expect(scopedHealthFor(B, "reserve")?.consecutiveFailures).toBe(4);
+    expect(canTryUnknownCodexReserve(B, now)).toBe(false);
+    now += 30 * MIN;
+    expect(canTryUnknownCodexReserve(B, now)).toBe(true);
+  });
+
+  test("a served Reserve turn returns the seat to the five-minute probe interval", async () => {
+    ordinary(A, 40);
+    const cfg = config();
+    for (let i = 0; i < 3; i++) { refuse(cfg, B); now += 60 * MIN; }
+    expect(scopedHealthFor(B, "reserve")?.consecutiveFailures).toBe(3);
+    const probe = await build(cfg);
+    if (probe.ctx.kind !== "pool" || !probe.ctx.probeLeaseId) throw new Error("expected a discovery lease");
+    expect(probe.ctx.accountId).toBe(B);
+    recordCodexUpstreamOutcome(cfg, B, 200, { ...codexFailureWindowOutcomeMeta(probe.ctx), reserveServed: true,
+      probeQuotaScope: "reserve", probeLeaseId: probe.ctx.probeLeaseId });
+    expect(scopedHealthFor(B, "reserve")?.consecutiveFailures).toBe(0);
+    recordCodexUpstreamOutcome(cfg, B, 429, { modelId: "gpt-reserve", poolReserve: true, now });
+    expect(canTryUnknownCodexReserve(B, now + 5 * MIN + 1)).toBe(true);
+  });
+
+  test("a new ordinary quota cycle ends the old Reserve backoff", async () => {
+    ordinary(A, 40);
+    const cfg = config();
+    for (let i = 0; i < 3; i++) { refuse(cfg, B); now += 20 * MIN; }
+    expect(scopedHealthFor(B, "reserve")?.consecutiveFailures).toBe(3);
+    now += MIN;
+    updateAccountQuota(B, 14, now + 7 * 86_400_000);
+    expect((await build(cfg)).ctx.accountId).toBe(A);
+    expect(scopedHealthFor(B, "reserve")).toBeUndefined();
+    now += MIN;
+    updateAccountQuota(B, 100, now + 86_400_000);
+    const next = await build(cfg);
+    expect(next.ctx.accountId).toBe(B);
+    expect(JSON.parse(next.request.body).model).toBe("gpt-reserve");
   });
 });

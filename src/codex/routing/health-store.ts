@@ -441,12 +441,12 @@ export function noteScopedCodexSuccess(
     })();
   const wallNow = Date.now();
   if (reserveSuccess) {
-    const updated = { ...retained, reserveSuccess };
+    const updated = { ...retained, consecutiveFailures: 0, reserveSuccess };
     setScopedHealth(accountId, scope, updated);
     if (isCodexHealthRowAlive(updated, wallNow, scope)) codexHealthCooldownStore.markScopedReplaced(accountId, scope);
     else codexHealthCooldownStore.markScopedDeleted(accountId, scope);
   } else if (Object.keys(retained).length > 1) {
-    setScopedHealth(accountId, scope, retained);
+    setScopedHealth(accountId, scope, { ...retained, consecutiveFailures: 0 });
     if (isCodexHealthRowAlive(retained, wallNow, scope)) codexHealthCooldownStore.markScopedReplaced(accountId, scope);
     else codexHealthCooldownStore.markScopedDeleted(accountId, scope);
   } else {

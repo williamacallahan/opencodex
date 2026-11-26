@@ -5,7 +5,9 @@ import { isSelectableCodexPoolAccount } from "../account-id";
 import { isAccountNeedsReauth } from "../account-runtime-state";
 import { MAIN_CODEX_ACCOUNT_ID } from "../main-account";
 import type { OcxConfig } from "../../types";
-import { CODEX_QUOTA_PROBE_INTERVAL_MS, type CodexUpstreamOutcomeMeta } from "./cooldown-math";
+import { CODEX_QUOTA_PROBE_INTERVAL_MS, codexReserveProbeIntervalMs, type CodexUpstreamOutcomeMeta } from "./cooldown-math";
+import { CODEX_EXHAUSTED_USAGE_PERCENT, getAccountQuota, isCompleteCodexQuotaRecoverySnapshot } from "../quota";
+import { resetAtToMs } from "../quota-types";
 import {
   deleteScopedHealth,
   getAccountHealth,
@@ -313,7 +315,35 @@ export function canTryUnknownCodexReserve(accountId: string, now: number): boole
   const health = scopedHealthFor(accountId, "reserve");
   return !health?.probeLeaseId && (health?.cooldownUntil ?? 0) <= now
     && (health?.quotaAvoidUntil ?? 0) <= now
-    && (health?.lastProbeAt === undefined || now - health.lastProbeAt >= CODEX_QUOTA_PROBE_INTERVAL_MS);
+    && (health?.lastProbeAt === undefined || now - health.lastProbeAt >= codexReserveProbeIntervalMs(accountId, health));
+}
+
+const WEEK_MS = 7 * 86_400_000;
+const MONTH_MS = 30 * 86_400_000;
+
+function windowStartedAfter(percent: number | undefined, resetAt: number | undefined, spanMs: number, since: number): boolean {
+  return typeof percent === "number" && percent >= CODEX_EXHAUSTED_USAGE_PERCENT
+    && typeof resetAt === "number" && Number.isFinite(resetAt) && resetAt > 0 && resetAtToMs(resetAt) - spanMs > since;
+}
+
+/**
+ * A seat's multi-episode Reserve backoff describes the plan window that was spent when it was
+ * earned. Once the ordinary quota is observed unspent after the last refusal, or the spent window
+ * is a newer one, the seat's next depletion asks Reserve again at once.
+ */
+export function releaseStaleReserveBackoff(accountId: string, plan: unknown, now: number): void {
+  const health = scopedHealthFor(accountId, "reserve");
+  const refusedAt = health?.lastFailureAt;
+  if (!health || health.consecutiveFailures < 2 || refusedAt === undefined || health.probeLeaseId !== undefined
+    || (health.cooldownUntil ?? 0) > now || (health.quotaAvoidUntil ?? 0) > now) return;
+  const quota = getAccountQuota(accountId);
+  if (!quota) return;
+  const unspentSince = quota.updatedAt > refusedAt && isCompleteCodexQuotaRecoverySnapshot(quota, plan);
+  if (!unspentSince
+    && !windowStartedAfter(quota.weeklyPercent, quota.weeklyResetAt, WEEK_MS, refusedAt)
+    && !windowStartedAfter(quota.monthlyPercent, quota.monthlyResetAt, MONTH_MS, refusedAt)) return;
+  if (health.reserveSuccess) setScopedHealth(accountId, "reserve", { consecutiveFailures: 0, reserveSuccess: health.reserveSuccess });
+  else deleteScopedHealth(accountId, "reserve");
 }
 
 /** Side-effect-free check for a confirmed model-specific quota probe. */

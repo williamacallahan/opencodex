@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   CODEX_EXHAUSTED_USAGE_PERCENT,
   CODEX_UNKNOWN_USAGE_SCORE,
@@ -30,6 +31,60 @@ export const CODEX_MAX_QUOTA_AVOID_MS = 6 * 60 * 60_000;
 export const CODEX_QUOTA_PROBE_INTERVAL_MS = 5 * 60_000;
 /** Minimum gap between ChatGPT usage reads for an account whose exhausted window resets later. */
 export const CODEX_EXHAUSTED_QUOTA_PROBE_INTERVAL_MS = 15 * 60_000;
+
+/**
+ * Wait before a seat's Reserve is asked again, by consecutive refused probe episodes. ChatGPT never
+ * reports Reserve, and a seat refusing on `usage_limit_reached` stayed refused until its plan window
+ * reset (0 of 41 hours of probes recovered), so each refused episode doubles toward six hours.
+ */
+const CODEX_RESERVE_PROBE_BACKOFF_MS = [
+  CODEX_QUOTA_PROBE_INTERVAL_MS, 15 * 60_000, 30 * 60_000, 60 * 60_000, 120 * 60_000, 360 * 60_000,
+] as const;
+/** Per-seat spread added from the second episode so spent seats do not re-ask in lockstep. */
+const CODEX_RESERVE_PROBE_MAX_JITTER = 0.15;
+/** A refusal streak survives a quiet gap this long past its wait, across restarts. */
+export const CODEX_RESERVE_STREAK_RESET_GAP_MS = 12 * 60 * 60_000;
+
+type ReserveBackoffRow = Pick<import("./health-store").CodexUpstreamHealth, "consecutiveFailures">;
+
+function reserveBackoffBaseMs(health: ReserveBackoffRow | undefined): number {
+  const episodes = Math.max(1, Math.floor(health?.consecutiveFailures ?? 0));
+  return CODEX_RESERVE_PROBE_BACKOFF_MS[Math.min(episodes, CODEX_RESERVE_PROBE_BACKOFF_MS.length) - 1]!;
+}
+
+/** Episode 1 keeps the plain five minutes; later episodes add 0..15% deterministic per-seat jitter. */
+export function codexReserveProbeIntervalMs(accountId: string, health: ReserveBackoffRow | undefined): number {
+  const base = reserveBackoffBaseMs(health);
+  const episodes = Math.floor(health?.consecutiveFailures ?? 0);
+  if (episodes < 2 || !accountId) return base;
+  const digest = createHash("sha256").update(`${accountId}:${episodes}`).digest();
+  return Math.round(base * (1 + (digest.readUInt16BE(0) / 65_535) * CODEX_RESERVE_PROBE_MAX_JITTER));
+}
+
+/** Longest a persisted Reserve row can still matter: its worst-jitter wait plus streak retention. */
+export function codexReserveProbeHorizonMs(health: ReserveBackoffRow): number {
+  const episodes = Math.floor(health.consecutiveFailures ?? 0);
+  if (episodes < 2) return CODEX_QUOTA_PROBE_INTERVAL_MS;
+  return Math.round(reserveBackoffBaseMs(health) * (1 + CODEX_RESERVE_PROBE_MAX_JITTER)) + CODEX_RESERVE_STREAK_RESET_GAP_MS;
+}
+
+/**
+ * Episode count after another refused Reserve send. A refusal that arrives inside the previous wait
+ * without owning a probe lease is a sibling of the same episode, not a new failed probe.
+ */
+export function nextReserveRefusalEpisodes(
+  accountId: string,
+  prior: Pick<import("./health-store").CodexUpstreamHealth, "consecutiveFailures" | "lastFailureAt"> | undefined,
+  ownsLease: boolean,
+  now: number,
+): number {
+  const episodes = Math.max(1, Math.floor(prior?.consecutiveFailures ?? 0));
+  if (prior?.lastFailureAt === undefined || now < prior.lastFailureAt) return 1;
+  const wait = codexReserveProbeIntervalMs(accountId, prior);
+  const idle = now - prior.lastFailureAt;
+  if (idle > wait + CODEX_RESERVE_STREAK_RESET_GAP_MS) return 1;
+  return ownsLease || idle >= wait ? episodes + 1 : episodes;
+}
 
 type ExhaustedProbeQuota = Pick<StoredAccountQuota,
   "weeklyPercent" | "monthlyPercent" | "shortPercent" | "weeklyResetAt" | "monthlyResetAt" | "shortResetAt" | "credits" | "updatedAt">;

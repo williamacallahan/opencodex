@@ -888,8 +888,11 @@ fallback policy no longer allows from the primary is not kept. In `combo/gpt-6-l
 3. Native ordinary Luna on seats with included usage.
 4. The remaining targets (for example a metered fallback).
 
-The seats are not capped by the pool's recovery window; each is limited by its own five-minute probe
-interval and the request's send budget. A relay is the next target that can route, so a disabled
+The seats are not capped by the pool's recovery window; each is limited by its own probe
+interval and the request's send budget. A seat that refuses Reserve is asked again after five minutes;
+if that trial is refused too, the wait doubles each time (15 minutes, 30 minutes, 1 hour, 2 hours, then
+6 hours) with a small per-seat spread, because a seat whose plan window is spent stays refused until the window
+resets. A served Reserve turn or a new plan window resets the wait, and the wait survives a restart. A relay is the next target that can route, so a disabled
 target between native Luna and the relay does not change the order. A combo with `nativeAlias: true`
 and the bare `gpt-6-luna` alias sends Codex requests, and subagent fallbacks that name the alias,
 through this same order. Reserve is tried first because it serves only Luna; included usage is

@@ -12,7 +12,7 @@ import { atomicWriteFile } from "../../config/atomic-write";
 import { withConfigMutationLockSync } from "../../config/mutation-lock";
 import { getConfigDir } from "../../config/paths";
 import { registerOptionalShutdownHook } from "../../lib/optional-shutdown-hooks";
-import { CODEX_DEFAULT_QUOTA_COOLDOWN_MS, CODEX_QUOTA_PROBE_INTERVAL_MS } from "./cooldown-math";
+import { CODEX_DEFAULT_QUOTA_COOLDOWN_MS, codexReserveProbeHorizonMs } from "./cooldown-math";
 import type { CodexQuotaScope, CodexUpstreamHealth } from "./health-store";
 
 const FILE = "codex-health-cooldowns.json";
@@ -120,7 +120,7 @@ export function codexHealthRowHorizon(row: CodexUpstreamHealth, scope?: CodexQuo
     finiteNumber(row.quotaAvoidUntil) ?? 0,
     finiteNumber(row.softAvoidUntil) ?? 0,
     scope === "reserve" && row.lastProbeAt !== undefined
-      ? row.lastProbeAt + CODEX_QUOTA_PROBE_INTERVAL_MS : 0,
+      ? row.lastProbeAt + codexReserveProbeHorizonMs(row) : 0,
   );
 }
 
