@@ -244,7 +244,8 @@ async function expectPreFetchCredentialRefusal(config: OcxConfig, old: number, p
   expect(body).not.toContain(PROMPT);
   expect(sent).toHaveLength(0);
   expect(getCodexUpstreamHealth("pool-img")?.probeLeaseId).toBeUndefined();
-  expect(getCodexUpstreamHealth("pool-img")?.lastProbeAt).toBeGreaterThan(old);
+  // Nothing was sent, so the refused request must not consume the seat's probe interval.
+  expect(getCodexUpstreamHealth("pool-img")?.lastProbeAt ?? old).toBeLessThanOrEqual(old);
   expect(logs.join(" ")).not.toContain(privateValue);
   expect(logs.join(" ")).not.toContain(ADMISSION_SECRET);
   expect(logs.join(" ")).not.toContain(PROMPT);

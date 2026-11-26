@@ -144,6 +144,9 @@ function mainCredentialUnusableReason(
  * only then would the copy drain main's quota under another name (#7398). With main logged out or
  * refused, the copy is the one working route to that subscription. A main hard lock keeps the
  * exclusion: the copy shares main's quota, so serving it would defeat the lock.
+ *
+ * `gpt-reserve` (poolCapacity "reserve") is exempt from every exclusion: it spends neither included
+ * quota nor credits, so a hard-locked or live-main duplicate seat can still be probed for Reserve.
  */
 export function isCodexMainDuplicateExcluded(
   config: OcxConfig,
@@ -151,6 +154,7 @@ export function isCodexMainDuplicateExcluded(
   options: CodexAccountUsabilityOptions = {},
 ): boolean {
   if (!configuredCodexMainDuplicate(config, accountId)) return false;
+  if (options.poolCapacity === "reserve") return false;
   if (isMainAccountHardLocked(config)) return true;
   // These scopes must not read physical stored-main state, so they keep the exclusion.
   if (options.nativeMainSelectionOnly || options.requestOwnedMainCredential

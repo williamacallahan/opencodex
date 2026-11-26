@@ -878,16 +878,30 @@ combo re-decides each user turn by design and keeps only a tool loop on its targ
 session pin is described above.
 
 In a failover combo the pin never outlives your policy: a remembered target that the current
-fallback policy no longer allows from the primary is not kept. In `combo/gpt-6-luna`-style combos,
-portable turns try native Reserve, then the relay, then included Luna. Reserve is tried first because
-it serves only Luna; included usage is shared with other models.
+fallback policy no longer allows from the primary is not kept. In `combo/gpt-6-luna`-style combos
+(an OpenAI pool target followed by a codex-lb relay), portable turns use this order:
+
+1. Native Reserve (`gpt-reserve`) on every ChatGPT seat whose included usage is spent. Each such seat
+   is tried once, including a stored pool copy of a hard-locked native main login. Reserve spends
+   neither included usage nor credits, so the lock does not apply to it.
+2. The codex-lb relay, sent ordinary `gpt-6-luna` so its own pool prefers its Reserve.
+3. Native ordinary Luna on seats with included usage.
+4. The remaining targets (for example a metered fallback).
+
+The seats are not capped by the pool's recovery window; each is limited by its own five-minute probe
+interval and the request's send budget. A relay is the next target that can route, so a disabled
+target between native Luna and the relay does not change the order. A combo with `nativeAlias: true`
+and the bare `gpt-6-luna` alias sends Codex requests, and subagent fallbacks that name the alias,
+through this same order. Reserve is tried first because it serves only Luna; included usage is
+shared with other models.
 
 A tool loop normally returns to the store that served its last turn. If that owner is cooling down,
 is excluded by quota, or confirms it is out of capacity, the combo can continue on strict native
 Reserve or the planned relay without sending either store the other's encrypted reasoning. It keeps
-the tool calls and their matching results. If the client replays the full history with `store: false`,
-the replacement store keeps its own reasoning and skips older foreign reasoning that has no usable
-summary for that turn. A turn-state handle, an unresolved response ID, or an item reference still
+the tool calls and their matching results. If the client replays the full history with `store: false`
+(Pi does this on every turn), the turn is not tied to the seat that issued its reasoning: that seat
+still receives its own encrypted reasoning, and every other seat or relay keeps its own reasoning and
+skips older foreign reasoning that has no usable summary for that turn. A turn-state handle, an unresolved response ID, or an item reference still
 requires its owner. If neither destination is allowed, the client gets the original refusal.
 
 Tracking uses the client's thread or session id; a translated Claude Code turn, which sends

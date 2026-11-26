@@ -37,6 +37,9 @@ import type { RequestLogContext } from "../../src/server/request-log";
 import { clearRequestLogsForTests, getRequestLogEntries } from "../../src/server/request-log";
 import { readUsageEntries } from "../../src/usage/log";
 import { saveConfig } from "../../src/config";
+import { noteSubagentModelFailure, resetSubagentModelFallbackStateForTests } from "../../src/codex/subagent-model-fallback";
+import { codexAccountUnusableReason } from "../../src/codex/account-usability";
+import { reconcileMainCodexAccountRuntimeState } from "../../src/codex/account-lifecycle";
 import { startServer } from "../../src/server";
 import { createProtocolEnvelope } from "../../src/protocols/envelope";
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
@@ -250,6 +253,35 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(new Set(nativeAccounts).size).toBe(3);
   });
 
+  test("a subagent fallback naming the Luna combo keeps its Reserve legs instead of collapsing to one target", async () => {
+    const cfg = threeSpentSeats();
+    // One seat still has included usage, so the fallback candidate counts as available.
+    updateAccountQuota(A, 40, now + 86_400_000);
+    cfg.providers.primary = { adapter: "openai-responses", authMode: "key", apiKey: "primary-key", baseUrl: "https://primary.example.test/v1" };
+    cfg.combos!.luna!.alias = "luna-combo";
+    cfg.subagentModelFallback = ["luna-combo"];
+    resetSubagentModelFallbackStateForTests();
+    noteSubagentModelFailure("primary/gpt-6-luna", "429", cfg);
+    native = reserveRefused;
+    try {
+      const response = await handleResponses(new Request("http://localhost/v1/responses", { method: "POST",
+        headers: { "content-type": "application/json", "x-openai-subagent": "collab_spawn" },
+        body: JSON.stringify({ model: "primary/gpt-6-luna", input: "ping", stream: true }) }), cfg, { model: "", provider: "" }, { admission: local });
+      expect(await response.text()).toContain("response.completed");
+    } finally { resetSubagentModelFallbackStateForTests(); }
+    expect(calls).toEqual(["native:gpt-reserve", "native:gpt-reserve", "relay:gpt-6-luna"]);
+    expect(new Set(nativeAccounts).size).toBe(2);
+  });
+
+  test("an unroutable target between native Luna and the relay does not hide the relay leg", async () => {
+    const cfg = config({ dead: { adapter: "openai-responses", authMode: "key", apiKey: "dead-key", baseUrl: "https://dead.example.test/v1", disabled: true } }, [
+      { provider: "openai", model: "gpt-6-luna" }, { provider: "dead", model: "gpt-6-luna" }, { provider: "relay", model: "gpt-6-luna" },
+    ]);
+    seats(); native = body => body.model === "gpt-reserve" ? reserveRefused() : sse(body.model, "ok");
+    expect((await post(cfg)).text).toContain("response.completed");
+    expect(calls).toEqual(["native:gpt-reserve", "relay:gpt-6-luna"]);
+  });
+
   function addUnreportedSpentSeat(cfg: OcxConfig, id: string): void {
     cfg.codexAccounts!.push({ id, email: `${id}@example.test`, isMain: false, plan: "pro" });
     saveCodexAccountCredential(id, { accessToken: `fixture-${id}`, refreshToken: `fixture-refresh-${id}`,
@@ -312,13 +344,41 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(calls).toEqual(["native:gpt-reserve", ...Array(3).fill("relay:gpt-6-luna"), ...Array(2).fill("relay:gpt-6-sol")]);
   });
 
-  test("the default pool window refuses a fourth move and the relay serves without waiting", async () => {
+  test("a strict Reserve walk spends every spent seat, including a locked main's stored copy, without the pool recovery window", async () => {
     const cfg = eightSpentSeats();
+    cfg.codexMainAccountHardLock = true;
+    const mainWorkspace = "fixture-workspace-walk-h";
+    writeFileSync(join(home, "auth.json"), JSON.stringify({ tokens: { account_id: mainWorkspace, refresh_token: "fixture-refresh-main",
+      access_token: fakeChatGptJwt({ chatgpt_account_id: mainWorkspace, exp: Math.floor(now / 1000) + 3600 }) } }));
+    reconcileMainCodexAccountRuntimeState();
+    // Ordinary routing keeps the copy out; only gpt-reserve, which spends no included quota, may probe it.
+    expect(codexAccountUnusableReason(cfg, "walk-h")).toBe("duplicate_main");
+    expect(codexAccountUnusableReason(cfg, "walk-h", { poolCapacity: "reserve" })).toBeUndefined();
     native = reserveRefused;
     const result = await post(cfg, {}, {}, AbortSignal.timeout(2_000));
     expect(result.text).toContain("response.completed");
-    expect(calls).toEqual([...Array(4).fill("native:gpt-reserve"), "relay:gpt-6-luna"]);
-    expect(new Set(nativeAccounts).size).toBe(4);
+    expect(calls).toEqual([...Array(8).fill("native:gpt-reserve"), "relay:gpt-6-luna"]);
+    expect(new Set(nativeAccounts).size).toBe(8);
+    expect(nativeAccounts).toContain(mainWorkspace);
+  });
+
+  test("the pool recovery window still bounds ordinary account failover but not the strict Reserve walk", async () => {
+    configureSharedPoolBackpressure({ ...DEFAULT_POOL_BACKPRESSURE_POLICY, minRecoveryAllowance: 0 });
+    const ordinaryCfg = config();
+    updateAccountQuota(A, 40, now + 86_400_000); updateAccountQuota(B, 40, now + 86_400_000);
+    native = reserveRefused;
+    const refused = await post(ordinaryCfg, { model: "openai/gpt-6-sol" });
+    expect(refused.status).toBe(429);
+    expect(calls).toEqual(["native:gpt-6-sol"]);
+    calls.length = 0; nativeAccounts.length = 0; clearCodexUpstreamHealth();
+    const walked = await post(eightSpentSeats(), {}, {}, AbortSignal.timeout(2_000));
+    expect(walked.text).toContain("response.completed");
+    expect(calls).toEqual([...Array(8).fill("native:gpt-reserve"), "relay:gpt-6-luna"]);
+    resetSharedPoolBackpressureForTests();
+    calls.length = 0; nativeAccounts.length = 0; clearCodexUpstreamHealth();
+    clearAccountQuota(); updateAccountQuota(A, 40, now + 86_400_000); updateAccountQuota(B, 40, now + 86_400_000);
+    expect((await post(ordinaryCfg, { model: "openai/gpt-6-sol" })).status).toBe(429);
+    expect(calls).toEqual(["native:gpt-6-sol", "native:gpt-6-sol"]);
   });
 
   test.each([false, true])("a window admitting seven moves books each physical send once (enforced: %s)", async enforced => {
@@ -1021,6 +1081,29 @@ describe("combo Luna leg order: native Reserve, relay, native ordinary, metered"
     expect(calls).toEqual(["native:gpt-6-luna"]);
     expect(JSON.parse(wire).input[0]).toEqual(item);
     expect(logCtx.routeDecision?.selected.reason).toBe("luna-owner-encrypted-reasoning");
+  });
+
+  test.each([false, true])("a stateless store:false turn with summary-less reasoning stays on Reserve (issuer refuses: %s)", async issuerRefuses => {
+    const cfg = config(), lane = { "thread-id": "stateless-reasoning-owner" }; seats();
+    const item = { type: "reasoning", id: "rs_stateless_private", encrypted_content: "stateless-private-cipher", summary: [] };
+    native = body => issuedReasoning(body.model, item);
+    expect((await post(cfg, { store: false }, lane)).text).toContain(item.encrypted_content);
+    calls.length = 0; nativeAccounts.length = 0;
+    const wires: Record<string, string> = {};
+    native = body => { wires.native = JSON.stringify(body); return issuerRefuses ? reserveRefused() : sse(body.model, "ok"); };
+    relay = (_request, body) => { wires.relay = JSON.stringify(body); return sse(body.model, "ok"); };
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const input = [{ role: "user", content: "first" }, item, { role: "user", content: "second" }];
+    const result = await post(cfg, { input, store: false }, lane, undefined, { logCtx });
+    expect(result.status).toBe(200); expect(result.text).toContain("response.completed");
+    expect(logCtx.routeDecision?.selected.reason).not.toBe("luna-owner-encrypted-reasoning");
+    expect(calls[0]).toBe("native:gpt-reserve");
+    // The issuing seat still receives its own ciphertext; any other destination gets a body without it.
+    expect(wires.native).toContain(item.encrypted_content);
+    if (issuerRefuses) {
+      expect(calls).toEqual(["native:gpt-reserve", "relay:gpt-6-luna"]);
+      expect(wires.relay).not.toContain(item.id); expect(wires.relay).not.toContain(item.encrypted_content); expect(wires.relay).toContain("second");
+    } else expect(calls).toEqual(["native:gpt-reserve"]);
   });
 
   test.each([true, false])("an evicted response id follows its issuing key, not the latest completion (available: %s)", async available => {

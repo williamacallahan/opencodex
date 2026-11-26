@@ -96,7 +96,7 @@ test("metered metadata survives dashboard saves, explicit false clears it, malfo
 
 // A subagent fallback naming a combo alias is collapsed to one pick by the router and dispatched
 // outside the combo loop, so its metered pick must be refused there too.
-test("a subagent fallback that collapses a combo onto its metered target needs key consent", async () => {
+test("a subagent fallback that runs a combo still needs key consent for its metered target", async () => {
   const previous = { home: process.env.OPENCODEX_HOME, codex: process.env.CODEX_HOME };
   const home = mkdtempSync(join(tmpdir(), "ocx-metered-fallback-"));
   process.env.OPENCODEX_HOME = home;
@@ -129,12 +129,15 @@ test("a subagent fallback that collapses a combo onto its metered target needs k
       subagentModelFallback: ["chain-model"],
       apiKeys: [{ ...key, allowMeteredComboTargets: consent }],
     });
-    expect((await post(config(false), false)).status).toBe(503);
-    expect(urls).toEqual([]);
+    // The fallback runs the whole combo: an anonymous caller reprobes the cooled subscription target
+    // (500), a keyed caller finds no usable target (503), and neither reaches the metered target.
+    const paid = "https://paid.test/v1/chat/completions";
+    expect((await post(config(false), false)).status).toBe(500);
+    expect(urls).not.toContain(paid);
     expect((await post(config(false), true)).status).toBe(503);
-    expect(urls).toEqual([]);
+    expect(urls).not.toContain(paid);
     await post(config(true), true);
-    expect(urls).toEqual(["https://paid.test/v1/chat/completions"]);
+    expect(urls).toContain(paid);
   } finally {
     globalThis.fetch = originalFetch;
     resetSubagentModelFallbackStateForTests();

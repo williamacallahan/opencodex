@@ -50,6 +50,7 @@ export function tryAcquireCodexQuotaProbeLease(accountId: string, now = Date.now
     ...health,
     probeLeaseId,
     probeLeaseGeneration: health.cooldownGeneration ?? 0,
+    probeLeasePriorAt: health.lastProbeAt ?? null,
     lastProbeAt: now,
   });
   return probeLeaseId;
@@ -268,6 +269,7 @@ function settleCooldownRecoveryLease(claim: CooldownRecoveryLease, recovered: bo
       cooldownSource: _source,
       probeLeaseId: _leaseId,
       probeLeaseGeneration: _leaseGeneration,
+      probeLeasePriorAt: _leasePriorAt,
       // "The quota window moved" is a statement about the whole refusal, so the avoidance it
       // announced goes with the block it produced. Leaving it would make this escape hatch stop
       // escaping: the account would still be passed over by every selection it is meant to win.
@@ -300,6 +302,7 @@ export function tryAcquireCodexQuotaScopeProbeLease(
     ...health,
     probeLeaseId,
     probeLeaseGeneration: health?.cooldownGeneration ?? 0,
+    probeLeasePriorAt: health?.lastProbeAt ?? null,
     lastProbeAt: now,
   });
   return probeLeaseId;
@@ -324,12 +327,26 @@ export function canAcquireCodexQuotaScopeProbeLease(
 
 /**
  * Hand a probe lease back without recording an upstream outcome. Used by paths
- * that take a lease and then fail before any request reaches upstream.
+ * that take a lease and then fail before any request reaches upstream. Such a
+ * release restores the pre-acquire `lastProbeAt`: no probe ran, so the account
+ * must not wait out a probe interval for a send that never happened.
  */
 export function releaseCodexQuotaProbeLease(accountId: string, leaseId: string, now = Date.now()): void {
   const health = getAccountHealth(accountId);
   if (!health || health.probeLeaseId !== leaseId) return;
-  setAccountHealth(accountId, withProbeLeaseReleased(health, now));
+  setAccountHealth(accountId, withProbeLeaseReturnedUnsent(health, now));
+}
+
+/**
+ * The request is about to reach upstream under this lease. From here a release or an unrecorded
+ * ending counts as a probe that ran, so the pre-acquire pacing stamp is no longer restorable.
+ */
+export function markCodexQuotaProbeLeaseDispatched(accountId: string, scope: CodexQuotaScope | undefined, leaseId: string): void {
+  const health = scope ? scopedHealthFor(accountId, scope) : getAccountHealth(accountId);
+  if (!health || health.probeLeaseId !== leaseId || health.probeLeasePriorAt === undefined) return;
+  const { probeLeasePriorAt: _prior, ...rest } = health;
+  if (scope) setScopedHealth(accountId, scope, rest);
+  else setAccountHealth(accountId, rest);
 }
 
 /** Release a model-specific quota probe when the request never reaches upstream. */
@@ -341,7 +358,7 @@ export function releaseCodexQuotaScopeProbeLease(
 ): void {
   const health = scopedHealthFor(accountId, scope);
   if (!health || health.probeLeaseId !== leaseId) return;
-  setScopedHealth(accountId, scope, withProbeLeaseReleased(health, now));
+  setScopedHealth(accountId, scope, withProbeLeaseReturnedUnsent(health, now));
 }
 
 /**
@@ -365,6 +382,14 @@ export function probeMayClearCooldown(health: CodexUpstreamHealth | undefined, m
 
 /** Strip the in-flight lease while preserving every hard-cooldown field. */
 export function withProbeLeaseReleased(health: CodexUpstreamHealth, now: number): CodexUpstreamHealth {
-  const { probeLeaseId: _id, probeLeaseGeneration: _gen, ...rest } = health;
+  const { probeLeaseId: _id, probeLeaseGeneration: _gen, probeLeasePriorAt: _prior, ...rest } = health;
   return { ...rest, lastProbeAt: now };
+}
+
+/** A lease handed back before any send: restore the pacing stamp the acquire overwrote. */
+function withProbeLeaseReturnedUnsent(health: CodexUpstreamHealth, now: number): CodexUpstreamHealth {
+  // A lease whose prior stamp was lost keeps the conservative stamp-now behavior.
+  if (health.probeLeasePriorAt === undefined) return withProbeLeaseReleased(health, now);
+  const { probeLeaseId: _id, probeLeaseGeneration: _gen, probeLeasePriorAt: prior, lastProbeAt: _stamp, ...rest } = health;
+  return prior === null ? rest : { ...rest, lastProbeAt: prior };
 }

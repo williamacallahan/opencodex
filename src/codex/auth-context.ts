@@ -46,6 +46,7 @@ import {
 import { isMainAccountPolicyBindingPending, isNativeMainTrafficBlocked, nativeMainStartupGateSnapshot } from "./native-profile-startup";
 import type { NativeMainStartupBlockReason } from "./native-profile-startup";
 import { waitForMainAccountPolicyBinding } from "./main-account-policy-wait";
+import { markCodexQuotaProbeLeaseDispatched } from "./routing/probe-lease";
 import {
   codexQuotaScopeForModel,
   getCodexQuotaHealthSnapshot,
@@ -768,6 +769,9 @@ export function createCodexAuthDispatchGuard(
       ctx.reserveDispatchGeneration = trial?.cooldownGeneration ?? 0;
     }
     reserveGuard?.(headers);
+    // Every check passed: the request goes upstream now, so the lease's probe has run.
+    const leaseId = codexProbeLeaseId(ctx);
+    if (leaseId) markCodexQuotaProbeLeaseDispatched(ctx.accountId, ctx.probeQuotaScope, leaseId);
   };
 }
 
@@ -1605,7 +1609,7 @@ async function resolveCodexAuthContextUnannotated(
   // deferred credential must never become request auth through that fallback.
   try {
     assertCodexAccountValidationReady(accountId);
-    if (isCodexMainDuplicateExcluded(config, accountId)) throw new CodexPoolAuthenticationError(CODEX_MAIN_DUPLICATE_ACTION);
+    if (isCodexMainDuplicateExcluded(config, accountId, poolReserve ? { poolCapacity: "reserve" } : {})) throw new CodexPoolAuthenticationError(CODEX_MAIN_DUPLICATE_ACTION);
     assertPoolAccountCredits(accountId, poolCreditHoldResetAt(policy, accountId, config, Date.now(), poolReserve), poolCreditRecoveryNeeded(policy, accountId), quotaScope);
   } catch (cause) {
     // Nothing will reach upstream, so give the trial back instead of leaving the held account
@@ -1742,7 +1746,7 @@ async function resolveCodexAuthContextUnannotated(
   try {
     const token = await getValidCodexToken(accountId, { signal: options.signal });
     assertCodexAccountValidationReady(accountId);
-    if (isCodexMainDuplicateExcluded(config, accountId)) throw new CodexPoolAuthenticationError(CODEX_MAIN_DUPLICATE_ACTION);
+    if (isCodexMainDuplicateExcluded(config, accountId, poolReserve ? { poolCapacity: "reserve" } : {})) throw new CodexPoolAuthenticationError(CODEX_MAIN_DUPLICATE_ACTION);
     assertPoolAccountCredits(accountId, poolCreditHoldResetAt(policy, accountId, config, Date.now(), poolReserve), poolCreditRecoveryNeeded(policy, accountId), quotaScope);
     return bindPoolCreditPolicy({
       kind: "pool",

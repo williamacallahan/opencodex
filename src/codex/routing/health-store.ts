@@ -63,6 +63,11 @@ export type CodexUpstreamHealth = {
   probeLeaseId?: string;
   /** Cooldown generation at the moment the lease was granted. */
   probeLeaseGeneration?: number;
+  /**
+   * `lastProbeAt` before the in-flight lease overwrote it (`null`: none). Lets a lease handed back
+   * before any send restore the stamp; dropped with the lease, never persisted.
+   */
+  probeLeasePriorAt?: number | null;
   /** Last probe grant or conclusion; paces the probe interval. */
   lastProbeAt?: number;
   /**
@@ -322,6 +327,7 @@ export function clearCodexAccountCooldown(accountId: string, now = Date.now()): 
       cooldownSource: _source,
       probeLeaseId: _leaseId,
       probeLeaseGeneration: _leaseGeneration,
+      probeLeasePriorAt: _leasePriorAt,
       // Same reasoning as the probe recovery above: "the quota window moved" is a statement
       // about the whole refusal, so the avoidance it announced goes with the block it
       // produced. Keeping it would leave this escape hatch not escaping, because selection

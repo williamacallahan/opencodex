@@ -437,6 +437,31 @@ export async function prepareResponsesRequest(
       throw error;
     }
   }
+  // A combo keeps its failures inside the combo: no child may snapshot a body, register a
+  // route, or report events or sends to the parent's compaction recovery. Completion
+  // callbacks still flow through.
+  const dispatchCombo = (id: string, comboBody: unknown): Promise<Response> => requestDispatchers.handleComboResponses(req, comboBody, id, config, logCtx, {
+    ...options,
+    // Concrete combo child selectors no longer match the shadow source model. Carry the
+    // interception decision explicitly so provider-specific helper isolation still applies.
+    shadowCallIntercepted,
+    // Same handoff for a memory phase whose target is a combo: the child keeps the phase's effort
+    // override and stays out of the parent conversation.
+    memoryModelPhase: memoryModelComboRouted ? memoryModelPhase : undefined,
+    // The original request body was accepted above. Combo children are synthetic
+    // replays and must not repeat the caller-owned timeout transition.
+    onRequestBodyRead: undefined,
+    onRequestBodyAsSent: undefined,
+    onCompactionRecoveryRoute: undefined,
+    onCompactionRecoveryAdapterEvent: undefined,
+    onCompactionRecoverySendsReported: undefined,
+  });
+  /** A subagent fallback that names a combo runs the whole combo, never one collapsed target. */
+  const fallbackComboId = (to: string): string | null => {
+    const id = resolveComboId(config, to);
+    return id && Object.hasOwn(config.combos ?? {}, id) && !comboRowDisabled(config, id) ? id : null;
+  };
+  const comboBodyFor = (to: string): unknown => body && typeof body === "object" && !Array.isArray(body) ? { ...body, model: to } : body;
   const comboId = !concreteSelection ? comboIdFromRawBody(body, config) : null;
   // A decision model may be a plain model or a non-JEV combo. A JEV combo here would recurse
   // into another decision, so the call is refused and the parent decision fails open.
@@ -458,25 +483,7 @@ export async function prepareResponsesRequest(
     // The Antigravity direct lane is decided for one concrete route; a body that reached a combo
     // goes through the combo's own child loop with the full bridge conversation.
     restoreDirectRequestConversation(options, body, logCtx);
-    return requestDispatchers.handleComboResponses(req, body, comboId, config, logCtx, {
-      ...options,
-      // Concrete combo child selectors no longer match the shadow source model. Carry the
-      // interception decision explicitly so provider-specific helper isolation still applies.
-      shadowCallIntercepted,
-      // Same handoff for a memory phase whose target is a combo: the child keeps the phase's effort
-      // override and stays out of the parent conversation.
-      memoryModelPhase: memoryModelComboRouted ? memoryModelPhase : undefined,
-      // The original request body was accepted above. Combo children are synthetic
-      // replays and must not repeat the caller-owned timeout transition.
-      onRequestBodyRead: undefined,
-      // A combo keeps its failures inside the combo: no child may snapshot a body, register a
-      // route, or report events or sends to the parent's compaction recovery. Completion
-      // callbacks still flow through.
-      onRequestBodyAsSent: undefined,
-      onCompactionRecoveryRoute: undefined,
-      onCompactionRecoveryAdapterEvent: undefined,
-      onCompactionRecoverySendsReported: undefined,
-    });
+    return dispatchCombo(comboId, body);
   }
   let unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
     (body as { input?: unknown } | undefined)?.input,
@@ -1177,6 +1184,8 @@ export async function prepareResponsesRequest(
     subagentQuotaFailureModel = fallback?.to ?? parsed.modelId;
 
     if (fallback?.to && !slugsEquivalent(fallback.to, route.modelId)) {
+      const fallbackCombo = fallbackComboId(fallback.to);
+      if (fallbackCombo) return dispatchCombo(fallbackCombo, comboBodyFor(fallback.to));
       try {
         route = captureInboundRoutePolicy(
           routeModel(config, fallback.to, routeEvidence(options, parsed)),
@@ -1401,6 +1410,8 @@ export async function prepareResponsesRequest(
           subagentQuotaFailureModel = fallback?.to ?? parsed.modelId;
 
           if (fallback?.to && !slugsEquivalent(fallback.to, route.modelId)) {
+            const fallbackCombo = fallbackComboId(fallback.to);
+            if (fallbackCombo) return dispatchCombo(fallbackCombo, comboBodyFor(fallback.to));
             try {
               route = captureInboundRoutePolicy(
                 routeModel(config, fallback.to, routeEvidence(options, parsed)),

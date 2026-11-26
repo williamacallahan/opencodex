@@ -78,10 +78,19 @@ export function prepareLunaReplay(body: unknown, expanded: boolean, headers: Hea
   const verdict = canPortConversationState(collectConversationStateCarriers(full, assignment));
   if (!verdict.portable && verdict.reason !== "encrypted-reasoning") return { kind: "bound", reason: verdict.reason };
   let boundary: number | undefined;
+  let unportable = false;
   for (const [i, item] of input.entries()) {
     if (!isPlainObject(item) || item.type !== "reasoning" || !(item.id || item.encrypted_content)) continue;
     boundary ??= closedReasoningPrefix(input);
-    if (i >= boundary || !hasReasoningSummary(item)) return { kind: "bound", reason: "encrypted-reasoning" };
+    if (i >= boundary || !hasReasoningSummary(item)) unportable = true;
+  }
+  if (unportable) {
+    // A self-contained store:false transcript (Pi) carries no server-side state for these items, so
+    // every seat but the issuer can replay it without them; the issuer still gets the full ciphertext.
+    const stateless = !unreadableAssignment && isPlainObject(full) && full.store === false && full.previous_response_id == null
+      && full.conversation == null && full.background !== true && !Object.hasOwn(full, "stream_id");
+    const ported = stateless ? portSpentLunaReasoning(full, false, headers) : undefined;
+    return ported === undefined ? { kind: "bound", reason: "encrypted-reasoning" } : { kind: "portable", body: ported, ownerBody: full };
   }
   if (boundary === undefined) return verdict.portable ? { kind: "portable", body: full } : { kind: "bound", reason: verdict.reason };
   const scrubbed = sanitizeReasoningInputContent(full, { stripEncryptedContent: true, dropForeignItemId: true, preserveRawReasoningContent: true });
@@ -163,9 +172,16 @@ export function planLunaReserveLegs(
   hopAllowed: (from: ComboTarget, to: ComboTarget) => boolean,
   native = nativeLunaTarget(combo, resolve),
 ): LunaReserveLegPlan | undefined {
-  // Discovery of the owner-capable native target does not require a usable relay.
-  const relay = native && combo.targets[combo.targets.indexOf(native) + 1];
-  const relayRoute = native && relay ? resolve(relay) : undefined;
+  // Discovery of the owner-capable native target does not require a usable relay. The relay is the
+  // next target that can route at all, so a disabled or unreachable target between them is skipped.
+  let relay: ComboTarget | undefined;
+  let relayRoute: RouteResult | undefined;
+  if (native) {
+    for (const candidate of combo.targets.slice(combo.targets.indexOf(native) + 1)) {
+      relayRoute = resolve(candidate);
+      if (relayRoute) { relay = candidate; break; }
+    }
+  }
   if (!native || !relay || !relayRoute || relay.metered || !modelHasPoolReserve(relayRoute.modelId)
     || !isCodexLbProvider(relayRoute.provider) || relayRoute.staticPolicy.model.adapter !== "openai-responses"
     || !eligible(native) || !eligible(relay)

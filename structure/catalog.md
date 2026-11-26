@@ -392,7 +392,7 @@ Pool mode routes across main plus added Codex credentials. Key rules:
   probe that already lost cannot overwrite a newer binding or failure state. When every
   candidate is held the caller gets a typed withheld outcome, not a send. Recovery dispatches
   (retries and probes, never a new request's initial send) sit under a pool-wide ratio ceiling
-  measured over a sliding window (`src/routing/probe-lease.ts`).
+  measured over a sliding window (`src/routing/probe-lease.ts`). A strict Luna Reserve walk is exempt: each seat there is already bounded by its own lease, probe interval, send budget and leg deadline.
 
   Where that reaches production, because a primitive nobody calls bounds nothing: the two
   transient-hold branches of `resolveCodexAccountForThreadDetailed`

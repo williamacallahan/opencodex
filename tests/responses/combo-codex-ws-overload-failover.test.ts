@@ -450,7 +450,8 @@ describe("a failover combo moves past a native Codex overload that preceded any 
     expect((await send(cfg, "start", thread)).body).toContain(reasoning.encrypted_content);
     codexWsPool.dispose();
     const result = await send(cfg, [reasoning, { role: "user", content: "continue" }], thread);
-    expect(result.logCtx.routeDecision?.selected.reason).toBe("luna-owner-encrypted-reasoning");
+    // A self-contained store:false turn is portable, so the issuing seat is a pin rather than a bound owner.
+    expect(result.logCtx.routeDecision?.selected.reason).toBe("combo-conversation-pin");
     expect(FakeWebSocket.instances[1]?.sent.join("")).toContain(reasoning.encrypted_content);
     expect(result.body).toContain("response.output_item.added");
     expect(fallbackSends).toBe(0);

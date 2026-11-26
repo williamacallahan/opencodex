@@ -1101,7 +1101,9 @@ async function dispatchCodexAccountRetry(args: CodexPoolAccountRetryArgs, signal
             let admitted = false;
             const admit = (): boolean => {
               if (signal.aborted || (args.reserveDeadline !== undefined && Date.now() >= args.reserveDeadline)
-                || !(movingAccount && !transient
+                // A strict Reserve walk is already bounded per seat (probe lease, 5m lastProbeAt,
+                // request send budget, reserve deadline); the pool-wide recovery window is for failover.
+                || !(movingAccount && !transient && !args.reserveWalk
                   ? sharedPoolBackpressure().tryPermitRetryDispatch(Date.now(), () => claimRetrySend(physicalPermit))
                   : claimRetrySend(physicalPermit))) return false;
               admitted = true;

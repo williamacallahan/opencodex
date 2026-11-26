@@ -736,7 +736,8 @@ export async function executeComboResponses(
     && (options.sendBudget?.used ?? 0) === 0 && (options.inboundWire ?? "responses") === "responses"
     && !options.compactionRoutingOverride && !options.mainHardLockFallbackOverride
     ? portUnavailableLunaTurn(body, req.headers) : undefined;
-  const statelessReasoningReplay = ported !== undefined && isPlainObject(body) && body.store === false
+  const statelessReasoningReplay = (ported !== undefined || (lunaReplay?.kind === "portable" && lunaReplay.ownerBody !== undefined))
+    && isPlainObject(body) && body.store === false
     && body.previous_response_id == null && body.background !== true && !Object.hasOwn(body, "stream_id");
   if (ported !== undefined) replayEligibilityBody = ported;
   const lunaPair = native && !unreadableEncryptedAgentTask ? planLunaReserveLegs(combo, scopedRoute, targetEligible, comboHopAllowed, native) : undefined;

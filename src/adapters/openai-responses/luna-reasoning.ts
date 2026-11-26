@@ -57,6 +57,11 @@ export function projectLunaReasoning(parsed: OcxParsedRequest, stripsReasoning: 
     // summarized item from another issuer indispensable. Check the item, not the pin.
     boundary ??= parsed._lunaProjectForeignReasoning === "portable" ? body.input.length : closedReasoningPrefix(body.input);
     if (i >= boundary || !hasReasoningSummary(item)) {
+      // A stateless transcript holds no server-side copy, so a non-issuer seat replays without the item.
+      if (parsed._lunaProjectForeignReasoning === "portable" && parsed._lunaStatelessReasoningReplay) {
+        (input ??= body.input.slice())[i] = dropped;
+        continue;
+      }
       if (bound && parsed._recordedResponsesStore && (issuer === "unknown"
         || issuer === "foreign" && (parsed._lunaStatelessReasoningReplay || closedPortableHistory && i < boundary))) {
         (input ??= body.input.slice())[i] = dropped;

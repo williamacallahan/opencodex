@@ -110,7 +110,7 @@ function sanitizeStoredRow(raw: unknown, scope?: CodexQuotaScope): CodexUpstream
 }
 
 function serializeForDisk(health: CodexUpstreamHealth): CodexUpstreamHealth {
-  const { probeLeaseId: _id, probeLeaseGeneration: _gen, ...persisted } = health;
+  const { probeLeaseId: _id, probeLeaseGeneration: _gen, probeLeasePriorAt: _prior, ...persisted } = health;
   return persisted;
 }
 

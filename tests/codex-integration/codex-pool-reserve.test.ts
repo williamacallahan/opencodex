@@ -38,6 +38,9 @@ import { issueTurnStateHandle, noteTurnStateCaller, runTurnStateCallerScope, tur
 import { handleResponses } from "../../src/server/responses/core";
 import { handleResponsesCompact } from "../../src/server/responses/compact";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
+import { canTryUnknownCodexReserve, markCodexQuotaProbeLeaseDispatched, releaseCodexQuotaScopeProbeLease, tryAcquireCodexQuotaScopeProbeLease } from "../../src/codex/routing/probe-lease";
+import { scopedHealthFor, setScopedHealth } from "../../src/codex/routing/health-store";
+import { CODEX_QUOTA_PROBE_INTERVAL_MS } from "../../src/codex/routing/cooldown-math";
 
 const A = "pool-reserve-a";
 const B = "pool-reserve-b";
@@ -1007,5 +1010,29 @@ describe("request-local native Luna capacity intent", () => {
       expect((await response.json()).error.message).toContain("nothing was sent");
       expect(fetched).not.toHaveBeenCalled();
     } finally { release(); }
+  });
+  test("a Reserve discovery lease handed back before any send leaves the seat probeable, but a dispatched one keeps its probe interval", () => {
+    const t = now;
+    // A seat with no recorded probe goes back to having none.
+    const first = tryAcquireCodexQuotaScopeProbeLease(A, "reserve", t, true)!;
+    expect(first).toBeTruthy();
+    expect(canTryUnknownCodexReserve(A, t)).toBe(false);
+    releaseCodexQuotaScopeProbeLease(A, "reserve", first, t + 1);
+    expect(canTryUnknownCodexReserve(A, t + 2)).toBe(true);
+    // A seat whose last real probe is old keeps that stamp rather than the acquire time.
+    const lastProbeAt = t - 2 * CODEX_QUOTA_PROBE_INTERVAL_MS;
+    setScopedHealth(B, "reserve", { consecutiveFailures: 0, lastProbeAt });
+    const second = tryAcquireCodexQuotaScopeProbeLease(B, "reserve", t, true)!;
+    expect(scopedHealthFor(B, "reserve")?.lastProbeAt).toBe(t);
+    releaseCodexQuotaScopeProbeLease(B, "reserve", second, t + 1);
+    expect(scopedHealthFor(B, "reserve")?.lastProbeAt).toBe(lastProbeAt);
+    expect(scopedHealthFor(B, "reserve")?.probeLeaseId).toBeUndefined();
+    expect(canTryUnknownCodexReserve(B, t + 2)).toBe(true);
+    // Once the request is dispatched, handing the lease back records the probe that ran.
+    const third = tryAcquireCodexQuotaScopeProbeLease(B, "reserve", t + 3, true)!;
+    markCodexQuotaProbeLeaseDispatched(B, "reserve", third);
+    releaseCodexQuotaScopeProbeLease(B, "reserve", third, t + 4);
+    expect(scopedHealthFor(B, "reserve")?.lastProbeAt).toBe(t + 4);
+    expect(canTryUnknownCodexReserve(B, t + 5)).toBe(false);
   });
 });

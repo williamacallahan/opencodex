@@ -1334,3 +1334,21 @@ be present instead of familiar Codex percentages. Returned key rows without
 quota-mode evidence are unverified/nonzero; an empty pool is valid. A read does not alter stored key
 selection or prove that a credential can serve a model. Do not replace a failed
 measurement with a paid test request or repeatedly force-refresh it.
+
+## 31. Verify that Luna requests spend Reserve on every spent seat first
+
+```bash
+ocx account list openai --quota --json
+ocx logs filter --model gpt-reserve --time-window 1h --limit 50 --json
+ocx usage --range 1d --model gpt-reserve --json
+```
+
+The first command lists each seat's quota; a seat whose included usage is spent is a Reserve candidate.
+The second reads recent attempts: every automatic pool Reserve attempt logs the wire model
+`gpt-reserve`, so one request that walks several spent seats shows one row per seat before any
+ordinary `gpt-6-luna` row. The third reports the same attempts as model `gpt-reserve`.
+
+Compare the rows against the seats before concluding Reserve was skipped. Reserve is not tried on a
+seat that is paused, cooling from a recent Reserve refusal (the seat is asked again after five
+minutes), or whose included usage still has room. A bounded log window that shows no `gpt-reserve`
+row means none in that window, not none in stored history.
