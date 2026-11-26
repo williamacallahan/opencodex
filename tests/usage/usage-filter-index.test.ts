@@ -141,7 +141,8 @@ beforeEach(() => {
   refreshUserCostOverlays({ providers: {} } as unknown as OcxConfig);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await settleUsageFilterIndexReclaimForTests();
   resetUsageAggregateCacheForTests();
   resetUsageReadCacheForTests();
   resetAppOwnedMemoryForTests();
