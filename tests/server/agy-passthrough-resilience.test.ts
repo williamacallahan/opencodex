@@ -10,6 +10,7 @@ import { bindNativeHarnessConfig } from "../../src/lib/native-harness";
 import { clearGenericFailoverHealth, rotateGenericOAuthAccountOn429 } from "../../src/oauth/generic-account-failover";
 import { clearPoolRotationState } from "../../src/oauth/pool-kernel";
 import { getAccountSet, saveCredential } from "../../src/oauth/store";
+import { clearRequestLogsForTests, getRequestLogEntries } from "../../src/server/request-log";
 import { extractTopLevelJsonStringField, handleAgyPassthrough } from "../../src/server/agy-passthrough";
 import { chooseAgyAccount, resetAgyAccountState } from "../../src/server/agy-passthrough-accounts";
 import {
@@ -538,6 +539,196 @@ describe("agy passthrough resilience and zero-AST parsing", () => {
       setAgyIdleSocketTimeoutMsForTests(undefined);
       srv.closeAllConnections?.();
       await new Promise<void>(resolve => srv.close(() => resolve()));
+    }
+  });
+
+  test("handleAgyPassthrough performs one bounded same-account resend on headers-only upstream 503", async () => {
+    clearRequestLogsForTests();
+    const received: Array<{ auth: string | null; body: string }> = [];
+    const upstream = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        received.push({ auth: req.headers.get("authorization"), body: await req.text() });
+        if (received.length === 1) {
+          return new Response('{"error":{"code":503,"status":"UNAVAILABLE"}}', {
+            status: 503,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response('data: {"ok":true}\n\n', {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      },
+    });
+    const config: OcxConfig = {
+      port: 0,
+      defaultProvider: "google-antigravity",
+      apiKeys: [{ id: "k1", key: hubKey }],
+      nativeHarnessOnly: true,
+      providers: {
+        "google-antigravity": { adapter: "google", authMode: "oauth", baseUrl: upstream.url.origin },
+      },
+    };
+    saveConfig(config);
+    bindNativeHarnessConfig(config);
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const payload = '{"project":"proj-shared","prompt":"hello"}';
+      const req = new Request(`http://localhost/agy/${hubKey}/v1internal:streamGenerateContent?alt=sse`, {
+        method: "POST",
+        headers: { "user-agent": agyAgent, authorization: "Bearer client-503-retry", "content-type": "application/json" },
+        body: payload,
+      });
+      const res = await handleAgyPassthrough(req, { config, draining: false });
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe('data: {"ok":true}\n\n');
+      expect(received).toHaveLength(2);
+      expect(received[0]!.auth).toBe(received[1]!.auth);
+      expect(received[0]!.body).toBe(payload);
+      expect(received[1]!.body).toBe(payload);
+
+      const entry = getRequestLogEntries().at(-1);
+      expect(entry).toMatchObject({ status: 200, provider: "google-antigravity", model: "streamGenerateContent" });
+      expect(entry?.attempts).toHaveLength(2);
+      expect(entry?.attempts?.[0]).toMatchObject({
+        ordinal: 1,
+        status: 503,
+        sendCount: 1,
+        failureStage: "headers-only",
+        failureCause: "upstream-declined",
+      });
+      expect(entry?.attempts?.[1]).toMatchObject({
+        ordinal: 2,
+        status: 200,
+        sendCount: 1,
+        recoveryKinds: ["transient-5xx"],
+      });
+
+      const warnLines = warnSpy.mock.calls.map(call => String(call[0]));
+      expect(warnLines.some(line => line.includes("attempt=1 provider=google-antigravity model=streamGenerateContent status=503")
+        && line.includes("cause=upstream-declined final=200"))).toBe(true);
+      expect(warnLines.some(line => line.includes("final=503"))).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+      clearRequestLogsForTests();
+      await upstream.stop(true);
+    }
+  });
+
+  test("handleAgyPassthrough caps 503 resends at one retry and respects non-retryable boundaries", async () => {
+    clearRequestLogsForTests();
+    let mode: "always-503" | "no-retry-header" | "long-retry-after" | "short-retry-after" | "abort-during-wait" | "status-500" | "status-502" = "always-503";
+    let calls = 0;
+    const upstream = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        calls += 1;
+        if (mode === "always-503") {
+          return new Response(`{"attempt":${calls}}`, { status: 503, headers: { "content-type": "application/json" } });
+        }
+        if (mode === "no-retry-header") {
+          return new Response('{"error":"stop"}', { status: 503, headers: { "x-should-retry": "false" } });
+        }
+        if (mode === "long-retry-after") {
+          return new Response('{"error":"wait"}', { status: 503, headers: { "retry-after": "120" } });
+        }
+        if (mode === "short-retry-after") {
+          if (calls === 1) return new Response('{"error":"retry"}', { status: 503, headers: { "retry-after": "1" } });
+          return new Response('{"ok":true}', { status: 200, headers: { "content-type": "application/json" } });
+        }
+        if (mode === "abort-during-wait") {
+          return new Response('{"error":"wait"}', { status: 503, headers: { "retry-after": "5" } });
+        }
+        return new Response('{"error":"non-503"}', { status: mode === "status-500" ? 500 : 502 });
+      },
+    });
+    const config: OcxConfig = {
+      port: 0,
+      defaultProvider: "google-antigravity",
+      apiKeys: [{ id: "k1", key: hubKey }],
+      nativeHarnessOnly: true,
+      providers: {
+        "google-antigravity": { adapter: "google", authMode: "oauth", baseUrl: upstream.url.origin },
+      },
+    };
+    saveConfig(config);
+    bindNativeHarnessConfig(config);
+    const makeReq = (signal?: AbortSignal) => new Request(`http://localhost/agy/${hubKey}/v1internal:generateContent`, {
+      method: "POST",
+      headers: { "user-agent": agyAgent, authorization: "Bearer client-503-bounds", "content-type": "application/json" },
+      body: '{"project":"proj-shared"}',
+      ...(signal ? { signal } : {}),
+    });
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // 1. Double 503 caps at 2 total sends and passes through the second 503 untouched.
+      mode = "always-503";
+      calls = 0;
+      const double503 = await handleAgyPassthrough(makeReq(), { config, draining: false });
+      expect(double503.status).toBe(503);
+      expect(await double503.text()).toBe('{"attempt":2}');
+      expect(calls).toBe(2);
+
+      // 2. x-should-retry: false prevents resend (1 send only).
+      mode = "no-retry-header";
+      calls = 0;
+      const noRetry = await handleAgyPassthrough(makeReq(), { config, draining: false });
+      expect(noRetry.status).toBe(503);
+      expect(await noRetry.text()).toBe('{"error":"stop"}');
+      expect(calls).toBe(1);
+
+      // 3. Retry-After above RETRY_AFTER_CEILING_MS returns immediately without resending.
+      mode = "long-retry-after";
+      calls = 0;
+      const tLong = Date.now();
+      const longWait = await handleAgyPassthrough(makeReq(), { config, draining: false });
+      expect(Date.now() - tLong).toBeLessThan(300);
+      expect(longWait.status).toBe(503);
+      expect(longWait.headers.get("retry-after")).toBe("120");
+      expect(await longWait.text()).toBe('{"error":"wait"}');
+      expect(calls).toBe(1);
+
+      // 4. Retry-After within ceiling is honored before the single resend.
+      mode = "short-retry-after";
+      calls = 0;
+      const tShort = Date.now();
+      const shortWait = await handleAgyPassthrough(makeReq(), { config, draining: false });
+      expect(Date.now() - tShort).toBeGreaterThanOrEqual(900);
+      expect(shortWait.status).toBe(200);
+      expect(await shortWait.text()).toBe('{"ok":true}');
+      expect(calls).toBe(2);
+
+      // 5. Client abort during 503 backoff returns 499 without a second send and keeps attempt 1's 503.
+      mode = "abort-during-wait";
+      calls = 0;
+      const abortController = new AbortController();
+      setTimeout(() => abortController.abort(), 40);
+      const tAbort = Date.now();
+      const aborted = await handleAgyPassthrough(makeReq(abortController.signal), { config, draining: false });
+      expect(Date.now() - tAbort).toBeLessThan(1_000);
+      expect(aborted.status).toBe(499);
+      expect(calls).toBe(1);
+      const abortRow = getRequestLogEntries().at(-1);
+      expect(abortRow?.status).toBe(499);
+      expect(abortRow?.attempts).toHaveLength(1);
+      expect(abortRow?.attempts?.[0]?.status).toBe(503);
+
+      // 6. Non-503 5xx (500, 502) never resend on /agy.
+      for (const non503 of ["status-500", "status-502"] as const) {
+        mode = non503;
+        calls = 0;
+        const res = await handleAgyPassthrough(makeReq(), { config, draining: false });
+        expect(res.status).toBe(non503 === "status-500" ? 500 : 502);
+        await res.text();
+        expect(calls).toBe(1);
+      }
+    } finally {
+      warnSpy.mockRestore();
+      clearRequestLogsForTests();
+      await upstream.stop(true);
     }
   });
 });

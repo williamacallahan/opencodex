@@ -17,8 +17,12 @@ prefix on the public listener only, through one dynamic-import line in
   included, and the request bytes go to agy's default origin
   (`https://daily-cloudcode-pa.googleapis.com`, from the registry) unchanged. Google's status,
   headers and body return unchanged except for hop-by-hop framing; SSE streams pass through as bytes.
-- **One send.** No retry, no translation, no failover to another account inside a request. A 429
-  cools the account in the generic OAuth pool (`rotateGenericOAuthAccountOn429`) for later
+- **Single bounded 503 resend, no failover.** No translation and no failover to another account
+  inside a request. An unstarted headers-only upstream HTTP 503 (`upstream-declined`, authorized by
+  `authorizeResend("headers-only", …)` and not carrying `x-should-retry: false`) gets at most one
+  same-account resend after bounded jittered backoff (`RETRY_AFTER_CEILING_MS` cap honoring
+  `Retry-After`), while transport throws, non-503 statuses, client aborts, and draining stop
+  without resending. A 429 cools the account in the generic OAuth pool (`rotateGenericOAuthAccountOn429`) for later
   project-less calls. A 403 passes through while a bounded copy of its body is read: when
   `classifyAntigravityRefusal` (`src/adapters/antigravity-refusal.ts`) finds Google's verification
   demand, the account is marked `needs-reauth(verify)` with `markAccountNeedsReauthIfGeneration`,
@@ -168,4 +172,4 @@ Cloud Code capture with synthetic accounts: byte, path, query and header preserv
 affinity and project learning; usage balancing, same-project moves and sign-in-bound learned projects; 429 pass-through and cooldown; the verify-refusal quarantine and an untouched non-verify 403; refusals before any upstream call; and
 a translated Responses turn refused with the switch on. `tests/server/agy-passthrough-resilience.test.ts`
 covers zero-AST project extraction, cooled-down project-owner failover, async gzip/deflate/brotli decoding,
-bounded header timeouts, and redacted upstream failure logging.
+bounded header timeouts, single bounded same-account resend on headers-only 503s, and redacted upstream failure logging.

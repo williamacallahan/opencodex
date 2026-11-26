@@ -8,8 +8,9 @@
  * rides in the path), hop-by-hop framing, Host, and the headers the hub's own ingress proxies add.
  * Google's answer, errors and SSE streams included, returns with its status and bytes unchanged.
  *
- * One physical send per agy request (`agy-passthrough-send.ts`): no retry, no failover to another
- * account mid-request (the body names its account's project), no translation. The lane serves only
+ * Same-account pass-through for agy (`agy-passthrough-send.ts`): no account failover mid-request
+ * (the body names its account's project) and no translation, with at most one bounded resend when
+ * Google returns an unstarted headers-only HTTP 503 (`upstream-declined`). The lane serves only
  * while `nativeHarnessOnly` is on, because only then does the hub itself send Google nothing faked.
  * `agy-passthrough-accounts.ts` owns the account choice.
  */
@@ -23,7 +24,9 @@ import { readBoundedRequestBytes } from "./index/bounded-request";
 import { isDraining, tryAdmitTurn } from "./lifecycle";
 import { messagesEndToEndHeaders } from "./messages-native-integrity";
 import { disableResponsesRequestTimeout } from "./responses/fetch-helpers";
-import { addFinalRequestLog, nextRequestLogId, type RequestLogContext } from "./request-log";
+import { beginInferenceAttempt } from "./inference/attempt";
+import { addFinalRequestLog, nextRequestLogId, noteAttemptSend, type RequestLogContext } from "./request-log";
+import { attributePhysicalAttempt } from "./request-log-failure-attribution";
 import { chooseAgyAccount, learnAgyAccountProject, noteAgySent, type AgyAccountChoice } from "./agy-passthrough-accounts";
 import {
   createSettledPassthroughBody,
@@ -36,6 +39,16 @@ import { rotateGenericOAuthAccountOn429 } from "../oauth/generic-account-failove
 import { extractProjectId } from "../oauth/google-antigravity";
 import { oauthAccountLogLabel } from "../codex/account-label";
 import { nativeHarnessOnly } from "../lib/native-harness";
+import { deriveRequestFailureCause } from "../lib/request-failure-attribution";
+import { authorizeResend } from "../lib/request-resend-gate";
+import {
+  REPLAY_REFUSAL_NO_RETRY_HEADER,
+  REPLAY_REFUSAL_NO_RETRY_VALUE,
+  RETRY_AFTER_CEILING_MS,
+  releaseResponseBodyBestEffort,
+  retryBackoffDelayMs,
+  sleepWithAbort,
+} from "../lib/upstream-retry";
 import { ANTIGRAVITY_OAUTH_STORE_KEY } from "../providers/antigravity-quota-identity";
 import { PROVIDER_REGISTRY } from "../providers/registry";
 import { observedAntigravityAccountQuota, recordPassiveAccountQuota } from "../providers/quota/account-cache";
@@ -49,6 +62,9 @@ import type { OcxConfig, OcxProviderConfig } from "../types";
 const MAX_AGY_REQUEST_BYTES = 32 * 1024 * 1024;
 /** Bound on a relayed answer copied for reading; a larger one is not read (agy still gets it whole). */
 const MAX_OBSERVED_ANSWER_BYTES = 4 * 1024 * 1024;
+const MAX_AGY_503_SENDS = 2;
+const AGY_503_RETRY_BASE_DELAY_MS = 400;
+const AGY_503_RETRY_MAX_DELAY_MS = 5_000;
 /** agy's own quota calls; Google's answers to them are this pool's only quota reading. */
 const QUOTA_METHODS = new Set(["retrieveUserQuotaSummary", "fetchAvailableModels"] as const);
 type QuotaMethod = typeof QUOTA_METHODS extends Set<infer M> ? M : never;
@@ -701,18 +717,83 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
     reusedSocket,
   }, error);
 
-  let upstream: ExactResponse;
-  try {
-    upstream = await sendExactly(new URL(cloudCodeOrigin(config) + parts.method + url.search), headers, bytes, controller.signal);
-  } catch (error) {
+  const refuseAbortedOrUnreachable = () => {
     const cancelled = req.signal.aborted || controller.signal.aborted;
-    failLog("unknown", error);
-    settle(cancelled ? 499 : 502);
+    settle(isDraining() ? 503 : cancelled ? 499 : 502);
     if (isDraining()) return refuse(503, "hub is restarting");
     return cancelled ? refuse(499, "request cancelled") : refuse(503, "could not reach Google Cloud Code");
+  };
+
+  const targetUrl = new URL(cloudCodeOrigin(config) + parts.method + url.search);
+  const method = parts.method.slice("/v1internal:".length);
+  let upstream: ExactResponse | undefined;
+  for (let attempt = 0; attempt < MAX_AGY_503_SENDS; attempt += 1) {
+    const inferenceAttempt = beginInferenceAttempt(logCtx, {
+      provider: ANTIGRAVITY_OAUTH_STORE_KEY,
+      model: logCtx.model,
+      adapter: "google",
+    });
+    inferenceAttempt.seal(logCtx.accountLogLabel);
+    try {
+      upstream = await sendExactly(
+        targetUrl,
+        headers,
+        bytes,
+        controller.signal,
+        undefined,
+        undefined,
+        "POST",
+        () => noteAttemptSend(inferenceAttempt.attempt, undefined, attempt > 0 ? "transient-5xx" : undefined),
+      );
+    } catch (error) {
+      failLog("unknown", error);
+      return refuseAbortedOrUnreachable();
+    }
+    upstreamStatus = upstream.status;
+    noteAgySent(choice.accountId, quotaLogin);
+
+    const retryCause = upstream.status === 503 ? deriveRequestFailureCause({ status: upstream.status }) : undefined;
+    const retryAllowed = upstream.status === 503
+      && attempt + 1 < MAX_AGY_503_SENDS
+      && !req.signal.aborted
+      && !controller.signal.aborted
+      && !isDraining()
+      && upstream.headers.get(REPLAY_REFUSAL_NO_RETRY_HEADER) !== REPLAY_REFUSAL_NO_RETRY_VALUE
+      && retryCause !== undefined
+      && authorizeResend("headers-only", retryCause).allowed;
+    if (retryAllowed) {
+      const delayMs = retryBackoffDelayMs(attempt, {
+        baseDelayMs: AGY_503_RETRY_BASE_DELAY_MS,
+        maxDelayMs: AGY_503_RETRY_MAX_DELAY_MS,
+        headers: upstream.headers,
+        retryAfterIsLowerBound: true,
+      });
+      if (delayMs <= RETRY_AFTER_CEILING_MS) {
+        inferenceAttempt.finish(upstream.status);
+        attributePhysicalAttempt(inferenceAttempt.attempt);
+        // Clear the active attempt so an abort during the wait settles the request without overwriting attempt 1's 503.
+        delete logCtx.activeAttempt;
+        delete logCtx.activeAttemptStartedAt;
+        try {
+          await releaseResponseBodyBestEffort(upstream.body, controller.signal);
+          await sleepWithAbort(delayMs, controller.signal);
+        } catch {
+          return refuseAbortedOrUnreachable();
+        }
+        if (isDraining()) {
+          settle(503);
+          return refuse(503, "hub is restarting");
+        }
+        continue;
+      }
+    }
+    break;
   }
-  upstreamStatus = upstream.status;
-  noteAgySent(choice.accountId, quotaLogin);
+  if (!upstream) {
+    settle(503);
+    return refuse(503, "could not reach Google Cloud Code");
+  }
+
   if (upstream.status === 429) {
     // The pool needs no translatable provider row; give the cooldown owner the OAuth row it keys on.
     const poolRow: OcxProviderConfig = { adapter: "google", authMode: "oauth", baseUrl: REGISTRY_ORIGIN };
@@ -722,7 +803,6 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
   // A token Google rejected before its recorded expiry: mint a fresh one for the next request.
   if (upstream.status === 401) void forceRefreshOAuthAccessSnapshot(snapshot).catch(() => {});
   let clientBody = upstream.body;
-  const method = parts.method.slice("/v1internal:".length);
   if (upstream.status >= 200 && upstream.status < 300 && (method === "loadCodeAssist" || isQuotaMethod(method))) {
     const [forClient, forObserver] = upstream.body.tee();
     clientBody = forClient;
@@ -732,14 +812,15 @@ export async function handleAgyPassthrough(req: Request, ctx: AgyPassthroughCont
     clientBody = forClient;
     void quarantineVerifyRefusal(forObserver, upstream.headers.get("content-encoding"), choice.accountId, snapshot.generation, quotaWriterGeneration);
   }
+  const finalUpstream = upstream;
   return new Response(
     createSettledPassthroughBody({
       source: clientBody,
       settle,
       abort: () => controller.abort(),
       isAborted: () => req.signal.aborted,
-      onError: error => failLog("body", error, upstream.reusedSocket),
+      onError: error => failLog("body", error, finalUpstream.reusedSocket),
     }),
-    { status: upstream.status, statusText: upstream.statusText, headers: messagesEndToEndHeaders(upstream.headers) },
+    { status: finalUpstream.status, statusText: finalUpstream.statusText, headers: messagesEndToEndHeaders(finalUpstream.headers) },
   );
 }
