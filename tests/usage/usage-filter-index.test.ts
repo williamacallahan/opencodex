@@ -730,6 +730,7 @@ console.log(JSON.stringify({ requests: summary.summary.requests, candidates: res
         await getFilteredUsageAggregate({ provider: "kimi" });
       } finally {
         setUsageFilterIndexTestHooksForTests(null);
+        await settleUsageFilterIndexReclaimForTests();
         resetUsageAggregateCacheForTests();
       }
       appendRows([{ ...syntheticRow(9_000 + attempt), requestId: `append-${attempt}` }]);
@@ -1614,10 +1615,9 @@ describe("filtered usage index availability", () => {
       provider: null, model: null, apiKeyId: null,
     });
     expect(read).not.toBeNull();
-    // A full first page proves this reader has another page left to validate.
-    expect(read!.nextPage()).toHaveLength(2_000);
-
     try {
+      // A full first page proves this reader has another page left to validate.
+      expect(read!.nextPage()).toHaveLength(2_000);
       // Publish a new generation under the open reader through the normal rebuild flow.
       filterIndexModule.requestUsageFilterIndexRebuild();
       await getFilteredUsageAggregate({});
