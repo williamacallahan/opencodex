@@ -98,6 +98,7 @@ export function bindSharedCodexWireIdentity(
       if (session !== null) {
         const thread = safeCallerSessionId(incoming.headers.get("thread-id"));
         for (const [name, id] of Object.entries(claudeWirePair(session, thread, parsed._claudeAgentId))) headers.set(name, id);
+        if (parsed._claudeRelayRetryThread && isCodexRelaySend(provider)) headers.set("thread-id", parsed._claudeRelayRetryThread);
       }
       if (claudeWire.cacheKey === undefined) return build({ ...parsed, _sessionScopedCacheKey: undefined }, { ...incoming, headers });
       // A rejected alias cannot fall back to the generic translator's metadata-derived key.

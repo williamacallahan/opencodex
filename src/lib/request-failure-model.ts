@@ -225,6 +225,9 @@ const RECOVERY_KIND_CAUSE = {
   "oauth-account-429": "rate-limit",
   // A 402 is the account's quota, not a transient limit; only another account can serve it.
   "oauth-account-402": "quota-exhausted",
+  // codex-lb's owner of the earlier response is out of usage; only a fresh relay thread, which
+  // codex-lb may place on another account, can serve the portable history.
+  "relay-owner-spent": "quota-exhausted",
   "image-413": "payload-too-large",
   // The gateway rejects a body it accepts seconds later and the replay is byte-identical, so
   // nothing about the payload was wrong; the origin declined to take it at that moment.

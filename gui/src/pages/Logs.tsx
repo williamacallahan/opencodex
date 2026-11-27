@@ -370,6 +370,7 @@ const RECOVERY_KIND_KEYS = {
   "oauth-account-402": "logs.detail.attempt.recovery.oauthAccount402",
   "image-413": "logs.detail.attempt.recovery.image413",
   "empty-completion": "logs.detail.attempt.recovery.emptyCompletion",
+  "relay-owner-spent": "common.retry",
   "console-go-upload-retry": "logs.detail.attempt.recovery.consoleGoUpload",
   "opaque-blob-rejection": "logs.detail.attempt.recovery.opaqueBlobRejection",
   "reasoning-effort-downgrade": "logs.detail.attempt.recovery.reasoningEffortDowngrade",

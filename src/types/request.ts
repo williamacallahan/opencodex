@@ -131,6 +131,8 @@ export interface OcxParsedRequest {
   _sessionScopedCacheKey?: string;
   /** Raw `x-claude-code-agent-id` of a Claude Code subagent or fork request; hashed before it reaches any wire. */
   _claudeAgentId?: string;
+  /** One fresh physical relay thread for a declined translated Messages turn. */
+  _claudeRelayRetryThread?: string;
   /** Cursor-only thread owner; may be an opaque process-local Desktop session/thread identity. */
   _cursorClientThreadId?: string;
   /** Conversation/provider/account/model-bound namespace for reasoning replay state. */

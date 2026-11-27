@@ -133,7 +133,9 @@ import { classifyTransportFailureKind, transportErrorCode } from "../../lib/upst
 import { captureAccountAutoPauseAttempt, wasAccountAutoPaused, wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
 import { codexFailureWindowOutcomeMeta, recordCodexUpstreamOutcome } from "../../codex/routing";
 import { describeUpstreamConnectFailure } from "./upstream-error";
-import { markUpstreamNotStarted } from "./combo-luna-legs";
+import { isCodexRelaySend } from "../../adapters/openai-responses/transport";
+import { isPlainObject } from "../../lib/plain-data";
+import { markUpstreamNotStarted, portUnavailableLunaTurn } from "./combo-luna-legs";
 import { terminalOwnerCapacityStatus } from "./owner-capacity-refusal";
 import {
   rateLimitRetryPolicyFor,
@@ -1144,7 +1146,7 @@ export async function preparePassthroughExchange(
         `${route.providerName}|${route.modelId}|${recovery}`,
         { allowFinalRecoveryReserve: transientSendPolicy() === null },
       );
-      if (recovery === "empty-completion") allowance.attempts = Math.min(1, allowance.attempts);
+      if (recovery === "empty-completion" || recovery === "relay-owner-spent") allowance.attempts = Math.min(1, allowance.attempts);
       // An unfunded combo rung keeps the upstream refusal for combo failover instead of a budget 429.
       if (preserveFailureResponse && allowance.attempts < 1) { request.releaseBodyObservation?.(); return { failed: preserveFailureResponse }; }
       const recoveryAccounting = nativeSendAccounting(allowance.permit);
@@ -1182,7 +1184,7 @@ export async function preparePassthroughExchange(
           },
           { abortSignal: upstream.signal, label: safeHostLabel(request.url), destination: errorDestinationLabel(request.url), attempts: allowance.attempts,
             onSendsConsumed: recoveryAccounting.report,
-            claimAmbiguousResend: recovery === "empty-completion" ? undefined : claimPreHeaderResend },
+            claimAmbiguousResend: recovery === "empty-completion" || recovery === "relay-owner-spent" ? undefined : claimPreHeaderResend },
         );
       } catch (err) {
         return { failed: transportFailureResponse(err) };
@@ -1738,6 +1740,35 @@ export async function preparePassthroughExchange(
         consoleGoUploadRetryGuard.attempted,
         upstream.signal,
       );
+      if (uploadRejectionBody !== undefined && !parsed._claudeRelayRetryThread && !options.comboAttempt
+        && inboundWire === "anthropic" && options.claudeCodexWire?.sessionId && isCodexRelaySend(route.provider, request.url)
+        && !upstream.signal.aborted && !configuredTransientSendBudgetExhausted() && !sendBudgetState.ambiguousResendSpent
+        && upstreamResponse.headers.get("x-should-retry") !== "false" && !isCodexWsUpstreamResponse(upstreamResponse)) {
+        const rejection = parseOutboundRequestBody(uploadRejectionBody)?.error;
+        if (isPlainObject(rejection) && rejection.code === "previous_response_not_found"
+          && rejection.message === "The previous response owner is out of usage. Resend the full conversation without previous_response_id."
+          && replayGuard.isSelfContained()) {
+          const wire = new Headers(request.headers);
+          const body = parseOutboundRequestBody(request.body);
+          if (wire.has("thread-id") && !wire.has("x-codex-turn-state") && body && !body.conversation && !body.prompt
+            && !(isPlainObject(body.client_metadata) && "x-codex-turn-state" in body.client_metadata)
+            && portUnavailableLunaTurn(body, wire) !== undefined) {
+            const fresh = portUnavailableLunaTurn(parsed._rawBody, wire);
+            if (fresh !== undefined) {
+              parsed._rawBody = fresh;
+              parsed._claudeRelayRetryThread = crypto.randomUUID();
+              parsed._stripReasoningEncryptedContent = true;
+              parsed._dropForeignReasoningItemIds = true;
+              replayGuard.authorize();
+              const result = await rebuildAndRefetch("relay-owner-spent", upstreamResponse);
+              if ("failed" in result) return result.failed;
+              void upstreamResponse.body?.cancel().catch(() => {});
+              upstreamResponse = result;
+              continue passthroughRecovery;
+            }
+          }
+        }
+      }
       if (uploadRejectionBody !== undefined
         && !configuredTransientSendBudgetExhausted()
         && isTransientConsoleGoUploadRejection({

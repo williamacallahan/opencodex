@@ -78,3 +78,34 @@ test("the upstream sees fixed per-agent cache keys and distinct threads under th
   expect(threads.every(Boolean)).toBe(true);
   expect(new Set(threads).size).toBe(3);
 });
+
+test("a spent relay thread accepts the complete Claude turn on a fresh thread", async () => {
+  const refusal = { error: { type: "invalid_request_error", code: "previous_response_not_found",
+    message: "The previous response owner is out of usage. Resend the full conversation without previous_response_id." } };
+  let firstThread: string | null = null;
+  let firstInput = "", firstCache: unknown, firstSession: string | null = null;
+  globalThis.fetch = Object.assign(async (url: RequestInfo | URL, init?: RequestInit) => {
+    expect(String(url)).toBe("https://relay.example/backend-api/codex/responses");
+    const headers = new Headers(init?.headers), thread = headers.get("thread-id");
+    const body = JSON.parse(String(init?.body));
+    expect(body.store).toBe(false); expect(body.previous_response_id).toBeUndefined();
+    expect(thread).toBeTruthy();
+    const history = JSON.stringify(body.input);
+    if (!firstThread) { firstThread = thread; firstInput = history; firstCache = body.prompt_cache_key; firstSession = headers.get("session_id"); }
+    if (thread === firstThread) return Response.json(refusal, { status: 400 });
+    expect(history).toBe(firstInput); expect(history).toContain("call_test"); expect(history).toContain("tool result"); expect(history).toContain("wake up");
+    expect(body.prompt_cache_key).toBe(firstCache); expect(headers.get("session_id")).toBe(firstSession);
+    return new Response([
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"continued"}\n\n',
+      'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_good","status":"completed","usage":{"input_tokens":20,"output_tokens":1}}}\n\n',
+    ].join(""), { headers: { "Content-Type": "text/event-stream" } });
+  }, originalFetch);
+  const config = { port: 0, defaultProvider: "relay", providers: { relay: { adapter: "openai-responses", baseUrl: "https://relay.example/backend-api/codex", responsesPath: "/responses", apiKey: "fixture-key", upstreamWebsocket: false } } } satisfies OcxConfig;
+  const response = await handleClaudeMessages(new Request("http://localhost/v1/messages", { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "relay/gpt-6.2-sol", stream: true, max_tokens: 128, metadata: { user_id: userId },
+      messages: [{ role: "user", content: "start" }, { role: "system", content: "follow the instructions" },
+        { role: "assistant", content: [{ type: "tool_use", id: "call_test", name: "example", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "call_test", content: "tool result" }] }, { role: "user", content: "wake up" }],
+      tools: [{ name: "example", input_schema: { type: "object", properties: {} } }] }) }), config, { model: "", provider: "" });
+  const text = await response.text(); expect(response.status).toBe(200); expect(text).toContain("continued"); expect(text).toContain("event: message_stop");
+});
