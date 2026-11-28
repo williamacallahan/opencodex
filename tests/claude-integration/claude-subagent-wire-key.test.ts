@@ -110,6 +110,38 @@ test("a spent relay thread accepts the complete Claude turn on a fresh thread", 
   const text = await response.text(); expect(response.status).toBe(200); expect(text).toContain("continued"); expect(text).toContain("event: message_stop");
 });
 
+test("a fresh thread whose owner is spent later is replaced again and the session stays on the newest thread", async () => {
+  const refusal = { error: { type: "invalid_request_error", code: "previous_response_not_found",
+    message: "The previous response owner is out of usage. Resend the full conversation without previous_response_id." } };
+  const spent = new Set<string>();
+  const sent: Array<{ thread: string | null; status: number }> = [];
+  globalThis.fetch = Object.assign(async (_url: RequestInfo | URL, init?: RequestInit) => {
+    const thread = new Headers(init?.headers).get("thread-id");
+    if (sent.length === 0 && thread) spent.add(thread);
+    const refused = thread !== null && spent.has(thread);
+    sent.push({ thread, status: refused ? 400 : 200 });
+    if (refused) return Response.json(refusal, { status: 400 });
+    return new Response('event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_good","status":"completed","usage":{"input_tokens":20,"output_tokens":1}}}\n\n',
+      { headers: { "Content-Type": "text/event-stream" } });
+  }, originalFetch);
+  const config = { port: 0, defaultProvider: "relay", providers: { relay: { adapter: "openai-responses", baseUrl: "https://relay.example/backend-api/codex", responsesPath: "/responses", apiKey: "fixture-key", upstreamWebsocket: false } } } satisfies OcxConfig;
+  const sessionUser = "user_ghi789_account__session_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const run = async (text: string) => {
+    const response = await handleClaudeMessages(new Request("http://localhost/v1/messages", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "relay/gpt-6.2-sol", stream: true, max_tokens: 128, metadata: { user_id: sessionUser }, messages: [{ role: "user", content: text }] }) }), config, { model: "", provider: "" });
+    await response.text();
+    expect(response.status).toBe(200);
+  };
+  await run("one"); await run("two");
+  const second = sent[1]!.thread!;
+  spent.add(second);
+  await run("three"); await run("four");
+  expect(sent.map(row => row.status)).toEqual([400, 200, 200, 400, 200, 200]);
+  expect(sent[3]!.thread).toBe(second);
+  expect(sent[4]!.thread).not.toBe(second);
+  expect(sent[5]!.thread).toBe(sent[4]!.thread);
+});
+
 test("after a spent relay owner moved a turn to a fresh thread, the next turn starts on that thread instead of the spent one", async () => {
   const refusal = { error: { type: "invalid_request_error", code: "previous_response_not_found",
     message: "The previous response owner is out of usage. Resend the full conversation without previous_response_id." } };

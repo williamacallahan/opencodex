@@ -102,7 +102,10 @@ export function bindSharedCodexWireIdentity(
         if (isCodexRelaySend(provider)) {
           if (parsed._claudeRelayRetryThread) adoptRelayThread(pair["thread-id"], parsed._claudeRelayRetryThread);
           const adopted = relayThreadReplacements.get(pair["thread-id"]);
-          if (adopted) headers.set("thread-id", adopted);
+          if (adopted) {
+            adoptRelayThread(pair["thread-id"], adopted); // a thread still in use stays newest
+            headers.set("thread-id", adopted);
+          }
         }
       }
       if (claudeWire.cacheKey === undefined) return build({ ...parsed, _sessionScopedCacheKey: undefined }, { ...incoming, headers });
@@ -155,7 +158,7 @@ export function bindSharedCodexWireIdentity(
  * thread to the seat that served it and injects that seat's last response as an anchor; the hub
  * sends full histories and never sends the anchor. After `relay-owner-spent` moves a turn to a fresh
  * thread, later turns keep that thread so they stay on the seat that accepted the resend instead of
- * meeting the spent owner again (one 400 per turn). Process-local, bounded, oldest evicted.
+ * meeting the spent owner again (one 400 per turn). Process-local and bounded; the least recently used entry is evicted.
  */
 const RELAY_THREAD_REPLACEMENT_LIMIT = 1024;
 const relayThreadReplacements = new Map<string, string>();
