@@ -97,8 +97,13 @@ export function bindSharedCodexWireIdentity(
       const headers = withoutCallerContinuity(incoming.headers);
       if (session !== null) {
         const thread = safeCallerSessionId(incoming.headers.get("thread-id"));
-        for (const [name, id] of Object.entries(claudeWirePair(session, thread, parsed._claudeAgentId))) headers.set(name, id);
-        if (parsed._claudeRelayRetryThread && isCodexRelaySend(provider)) headers.set("thread-id", parsed._claudeRelayRetryThread);
+        const pair = claudeWirePair(session, thread, parsed._claudeAgentId);
+        for (const [name, id] of Object.entries(pair)) headers.set(name, id);
+        if (isCodexRelaySend(provider)) {
+          if (parsed._claudeRelayRetryThread) adoptRelayThread(pair["thread-id"], parsed._claudeRelayRetryThread);
+          const adopted = relayThreadReplacements.get(pair["thread-id"]);
+          if (adopted) headers.set("thread-id", adopted);
+        }
       }
       if (claudeWire.cacheKey === undefined) return build({ ...parsed, _sessionScopedCacheKey: undefined }, { ...incoming, headers });
       // A rejected alias cannot fall back to the generic translator's metadata-derived key.
@@ -143,6 +148,24 @@ export function bindSharedCodexWireIdentity(
     }
     return build(wireParsed, { ...incoming, headers });
   };
+}
+
+/**
+ * Replacement relay thread per Claude thread whose bridge owner ran out of usage. codex-lb pins a
+ * thread to the seat that served it and injects that seat's last response as an anchor; the hub
+ * sends full histories and never sends the anchor. After `relay-owner-spent` moves a turn to a fresh
+ * thread, later turns keep that thread so they stay on the seat that accepted the resend instead of
+ * meeting the spent owner again (one 400 per turn). Process-local, bounded, oldest evicted.
+ */
+const RELAY_THREAD_REPLACEMENT_LIMIT = 1024;
+const relayThreadReplacements = new Map<string, string>();
+
+function adoptRelayThread(stableThread: string, replacement: string): void {
+  relayThreadReplacements.delete(stableThread);
+  relayThreadReplacements.set(stableThread, replacement);
+  if (relayThreadReplacements.size > RELAY_THREAD_REPLACEMENT_LIMIT) {
+    relayThreadReplacements.delete(relayThreadReplacements.keys().next().value as string);
+  }
 }
 
 function claudeWirePair(session: string, thread: string | undefined, agent: string | undefined) {

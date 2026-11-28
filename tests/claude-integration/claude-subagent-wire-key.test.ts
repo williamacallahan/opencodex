@@ -109,3 +109,32 @@ test("a spent relay thread accepts the complete Claude turn on a fresh thread", 
       tools: [{ name: "example", input_schema: { type: "object", properties: {} } }] }) }), config, { model: "", provider: "" });
   const text = await response.text(); expect(response.status).toBe(200); expect(text).toContain("continued"); expect(text).toContain("event: message_stop");
 });
+
+test("after a spent relay owner moved a turn to a fresh thread, the next turn starts on that thread instead of the spent one", async () => {
+  const refusal = { error: { type: "invalid_request_error", code: "previous_response_not_found",
+    message: "The previous response owner is out of usage. Resend the full conversation without previous_response_id." } };
+  const spentThread = new Set<string>();
+  const sent: Array<{ thread: string | null; status: number }> = [];
+  globalThis.fetch = Object.assign(async (_url: RequestInfo | URL, init?: RequestInit) => {
+    const thread = new Headers(init?.headers).get("thread-id");
+    // codex-lb answers the first thread it sees for this session with the spent-owner refusal, then accepts any other.
+    if (spentThread.size === 0 && thread) spentThread.add(thread);
+    const refused = thread !== null && spentThread.has(thread);
+    sent.push({ thread, status: refused ? 400 : 200 });
+    if (refused) return Response.json(refusal, { status: 400 });
+    return new Response('event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_good","status":"completed","usage":{"input_tokens":20,"output_tokens":1}}}\n\n',
+      { headers: { "Content-Type": "text/event-stream" } });
+  }, originalFetch);
+  const config = { port: 0, defaultProvider: "relay", providers: { relay: { adapter: "openai-responses", baseUrl: "https://relay.example/backend-api/codex", responsesPath: "/responses", apiKey: "fixture-key", upstreamWebsocket: false } } } satisfies OcxConfig;
+  const sessionUser = "user_def456_account__session_66666666-7777-8888-9999-000000000000";
+  for (const text of ["first turn", "second turn", "third turn"]) {
+    const response = await handleClaudeMessages(new Request("http://localhost/v1/messages", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "relay/gpt-6.2-sol", stream: true, max_tokens: 128, metadata: { user_id: sessionUser }, messages: [{ role: "user", content: text }] }) }), config, { model: "", provider: "" });
+    await response.text();
+    expect(response.status).toBe(200);
+  }
+  // Turn one: refused on the session thread, resent once on a fresh thread. Turns two and three go straight to that fresh thread.
+  expect(sent.map(row => row.status)).toEqual([400, 200, 200, 200]);
+  expect(new Set(sent.slice(1).map(row => row.thread)).size).toBe(1);
+  expect(sent[1]!.thread).not.toBe(sent[0]!.thread);
+});
